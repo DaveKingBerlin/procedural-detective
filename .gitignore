@@ -235,3 +235,23 @@ PACKAGE_CONTENTS.md
 POC_REPORT.md
 Phase*.md
 PhaseRisks.md
+
+# Node / frontend
+node_modules/
+frontend/dist/
+e2e/artifacts/
+screenshots/generated/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/node_modules/
+
+# Generated QA artifacts (transient output; see evidence policy)
+e2e/artifacts/
+screenshots/generated/
+
+# Backend runtime SQLite files
+*.db
+*.sqlite
+*.sqlite3

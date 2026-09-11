@@ -1,0 +1,12 @@
+{
+  "name": "procedural-detective-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QA-owned Playwright Chromium boot smoke tests for Procedural Detective (Phase 2). Independent of the frontend/ toolchain by design.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

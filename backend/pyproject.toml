@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "procedural-detective-backend"
+version = "0.1.0"
+description = "Backend API for the Procedural Detective hackathon application (Phase 2: contracts and runnable skeleton)."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "alembic>=1.13.0,<2.0.0",
+    "fastapi>=0.115.0,<1.0.0",
+    "pydantic>=2.7.0,<3.0.0",
+    "pydantic-settings>=2.3.0,<3.0.0",
+    "sqlalchemy>=2.0.30,<3.0.0",
+    "uvicorn[standard]>=0.30.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.27.0,<1.0.0",
+    "pytest>=8.0.0,<10.0.0",
+]
+
+[tool.setuptools]
+packages = [
+    "app",
+    "app.api",
+    "app.api.v1",
+    "app.core",
+    "app.db",
+    "app.schemas",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

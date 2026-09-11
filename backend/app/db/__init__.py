@@ -1,0 +1,1 @@
+"""Persistence layer: engine, session helpers and readiness primitives."""

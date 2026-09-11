@@ -1,0 +1,1 @@
+"""Response DTOs (schemas) for the API layer."""
