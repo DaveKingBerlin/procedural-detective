@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local AI/RAD tooling
+.claude/
+.codex/
+.cursor/
+.opencode/
+.rad/
+
+# Local development/audit documents
+ADVERSARIAL_REVIEW.md
+AGENTS.md
+BENCHMARKS.md
+CLAUDE.md
+DECISIONS.md
+DEFECTS.md
+PACKAGE_CONTENTS.md
+POC_REPORT.md
+Phase*.md
+PhaseRisks.md
