@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "procedural-detective-backend"
 version = "0.1.0"
-description = "Backend API for the Procedural Detective hackathon application (Phase 2: contracts and runnable skeleton)."
+description = "Backend API and deterministic deduction domain for the Procedural Detective hackathon application."
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
@@ -31,6 +31,9 @@ packages = [
     "app.core",
     "app.db",
     "app.schemas",
+    "app.domain",
+    "app.domain.solvers",
+    "app.validation",
 ]
 
 [tool.pytest.ini_options]
