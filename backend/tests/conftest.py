@@ -37,6 +37,16 @@ def downgrade_db(database_url: str) -> None:
     command.downgrade(make_alembic_config(database_url), "base")
 
 
+def _dispose_store(application) -> None:
+    """Close the Phase 5 store engine when the fixture created one."""
+    store = getattr(application.state, "store", None)
+    if store is not None:
+        try:
+            store.dispose()
+        except Exception:  # noqa: BLE001 - teardown must never mask a failure
+            pass
+
+
 @pytest.fixture
 def db_path(tmp_path):
     return tmp_path / "test.db"
@@ -65,6 +75,7 @@ def app(database_url):
     )
     yield application
     application.state.engine.dispose()
+    _dispose_store(application)
 
 
 @pytest.fixture
@@ -79,6 +90,7 @@ def migrated_app(database_url):
     )
     yield application
     application.state.engine.dispose()
+    _dispose_store(application)
 
 
 @pytest.fixture
@@ -111,6 +123,72 @@ def scratch_app():
     application = FastAPI(title="scratch")
     register_exception_handlers(application)
     return application
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 shared fixtures: migrated app + store/service pair over a real
+# SQLite FILE (never :memory:), so cross-connection locking and restart
+# semantics are real (Phase5 A/D/H).
+# ---------------------------------------------------------------------------
+
+
+def make_phase5_settings(database_url: str, **overrides):
+    """Settings for Phase 5 tests (higher concurrency defaults for threads)."""
+    from app.core.config import Settings
+
+    kwargs = dict(
+        database_url=database_url,
+        cors_allowed_origins=DEFAULT_CORS,
+        max_concurrent_generations=4,
+        max_generations_per_session_per_window=8,
+        max_concurrent_generations_global=8,
+        max_generations_global_per_window=50,
+    )
+    kwargs.update(overrides)
+    return Settings(**kwargs)
+
+
+@pytest.fixture
+def phase5_app(database_url):
+    """Migrated application with Phase 5 services attached.
+
+    Teardown disposes BOTH engines (readiness + store) so a subsequent
+    "restart" fixture can re-open the same file.
+    """
+    upgrade_db(database_url)
+    from app.main import create_app
+
+    application = create_app(make_phase5_settings(database_url))
+    yield application
+    application.state.engine.dispose()
+    _dispose_store(application)
+
+
+@pytest.fixture
+def phase5_migrated_client(phase5_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(phase5_app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def store(database_url):
+    """A bare migrated Store over the per-test file."""
+    upgrade_db(database_url)
+    from app.persistence.store import Store
+
+    instance = Store(database_url)
+    yield instance
+    instance.dispose()
+
+
+@pytest.fixture
+def generation_service(store, database_url):
+    """Migrated service over ``store`` using the builtin dev-mode provider."""
+    from app.services.generation import GenerationService
+
+    return GenerationService(settings=make_phase5_settings(database_url), store=store)
 
 
 # ---------------------------------------------------------------------------

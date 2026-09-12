@@ -28,13 +28,17 @@ packages = [
     "app",
     "app.api",
     "app.api.v1",
+    "app.auth",
     "app.core",
     "app.db",
-    "app.schemas",
     "app.domain",
     "app.domain.solvers",
-    "app.validation",
     "app.generation",
+    "app.models",
+    "app.persistence",
+    "app.schemas",
+    "app.services",
+    "app.validation",
 ]
 
 [tool.pytest.ini_options]

@@ -109,6 +109,14 @@ class Settings(BaseSettings):
     anonymous_quota_session_ttl_seconds: int = Field(
         default=86400, gt=0, description="ANONYMOUS_QUOTA_SESSION_TTL_SECONDS."
     )
+    # -- Phase 5 auth token TTLs (REQUIREMENTS 40.1 / 45 canonical names) ----
+
+    creator_token_ttl_seconds: int = Field(
+        default=86400, gt=0, description="CREATOR_TOKEN_TTL_SECONDS."
+    )
+    playthrough_token_ttl_seconds: int = Field(
+        default=14400, gt=0, description="PLAYTHROUGH_TOKEN_TTL_SECONDS."
+    )
     generation_provider: Literal["fake", "live"] = Field(
         default="fake", description="GENERATION_PROVIDER (fake|live)."
     )

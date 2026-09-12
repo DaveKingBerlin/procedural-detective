@@ -1,6 +1,12 @@
 """Migration tests: upgrade->head sets alembic_version, downgrade->base empties
 it, re-running upgrade is idempotent, and the documented CLI path works from
-the repo root (REQUIREMENTS 42/47)."""
+the repo root (REQUIREMENTS 42/47).
+
+The migration chain head is 0002 as of Phase 5 (0001 baseline + 0002 cases /
+auth / playthroughs). ``migration_head()`` is read dynamically everywhere
+possible; the two explicit head literals below assert the exact current head
+so a regression cannot silently shift it.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +18,9 @@ from sqlalchemy import create_engine, text
 
 from app.db.session import migration_head
 from conftest import downgrade_db, upgrade_db, REPO_ROOT
+
+# The exact chain head this phase delivers (0001 baseline -> 0002 Phase 5).
+EXPECTED_HEAD = "0002"
 
 
 def _engine(database_url):
@@ -32,7 +41,7 @@ def test_upgrade_head_records_head_revision(database_url):
         engine.dispose()
 
     head = migration_head()
-    assert head == "0001"
+    assert head == EXPECTED_HEAD
 
     upgrade_db(database_url)
     assert _versions(database_url) == [head]
@@ -40,7 +49,7 @@ def test_upgrade_head_records_head_revision(database_url):
 
 def test_downgrade_base_empties_version(database_url):
     upgrade_db(database_url)
-    assert _versions(database_url) == ["0001"]
+    assert _versions(database_url) == [EXPECTED_HEAD]
 
     downgrade_db(database_url)
     assert _versions(database_url) == []
