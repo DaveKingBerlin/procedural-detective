@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import (
@@ -73,6 +73,91 @@ class Settings(BaseSettings):
         default=None,
         description="Optional explicit path to a .env file (ENV_FILE).",
     )
+
+    # -- Phase 4 generation lifecycle (REQUIREMENTS 32.5-32.11, 45) -----------
+
+    generation_deadline_seconds: int = Field(
+        default=60, gt=0, description="CASE_GENERATION_DEADLINE_SECONDS."
+    )
+    max_llm_calls_per_generation: int = Field(
+        default=8, gt=0, description="MAX_LLM_CALLS_PER_GENERATION."
+    )
+    max_repair_passes: int = Field(
+        default=2, ge=0, description="MAX_REPAIR_PASSES."
+    )
+    max_full_regenerations: int = Field(
+        default=1, ge=0, description="MAX_FULL_REGENERATIONS."
+    )
+    max_concurrent_generations: int = Field(
+        default=1, gt=0, description="MAX_CONCURRENT_GENERATIONS."
+    )
+    max_concurrent_generations_global: int = Field(
+        default=3, gt=0, description="MAX_CONCURRENT_GENERATIONS_GLOBAL."
+    )
+    max_generations_per_session_per_window: int = Field(
+        default=3, gt=0, description="MAX_GENERATIONS_PER_SESSION_PER_WINDOW."
+    )
+    max_generations_global_per_window: int = Field(
+        default=20, gt=0, description="MAX_GENERATIONS_GLOBAL_PER_WINDOW."
+    )
+    max_prompt_chars: int = Field(
+        default=4000, gt=0, description="MAX_PROMPT_CHARS."
+    )
+    max_request_body_size: int = Field(
+        default=65536, gt=0, description="MAX_REQUEST_BODY_SIZE."
+    )
+    anonymous_quota_session_ttl_seconds: int = Field(
+        default=86400, gt=0, description="ANONYMOUS_QUOTA_SESSION_TTL_SECONDS."
+    )
+    generation_provider: Literal["fake", "live"] = Field(
+        default="fake", description="GENERATION_PROVIDER (fake|live)."
+    )
+    llm_api_key: str | None = Field(
+        default=None,
+        description="LLM_API_KEY (optional; absence must not affect fake mode).",
+    )
+    llm_model: str | None = Field(
+        default=None, description="LLM_MODEL (optional)."
+    )
+    live_provider_url: str | None = Field(
+        default=None,
+        description="LIVE_PROVIDER_URL (must start with https:// when set).",
+    )
+    fake_provider_script: Path | None = Field(
+        default=None,
+        description=(
+            "FAKE_PROVIDER_SCRIPT: optional JSON file path "
+            "(generation-stage -> list of directives/strings)."
+        ),
+    )
+
+    @field_validator("live_provider_url")
+    @classmethod
+    def _validate_live_provider_url(cls, value: str | None) -> str | None:
+        """LIVE_PROVIDER_URL must be a non-empty https:// URL when set."""
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("LIVE_PROVIDER_URL must be a non-empty string when set")
+        text = value.strip()
+        if "\x00" in text:
+            raise ValueError("LIVE_PROVIDER_URL must not contain NUL characters")
+        if not text.startswith("https://"):
+            raise ValueError("LIVE_PROVIDER_URL must start with https:// when set")
+        return text
+
+    @field_validator("fake_provider_script", mode="before")
+    @classmethod
+    def _sanitize_fake_provider_script(cls, value: object) -> object:
+        """FAKE_PROVIDER_SCRIPT: tolerate empty strings; reject NUL bytes."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if not value.strip():
+                return None
+            if "\x00" in value:
+                raise ValueError("FAKE_PROVIDER_SCRIPT must not contain NUL characters")
+        return value
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod

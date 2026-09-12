@@ -163,13 +163,25 @@ def test_collect_import_targets_without_package_context_does_not_crash():
     assert "app.domain.truth" in targets
 
 
+# Phase 4 truth-aware lifecycle modules (the ONLY new allowed truth importers,
+# besides the truth-aware validation stage).
+_P4_TRUTH_AWARE = frozenset(
+    {
+        "app.validation.solution",
+        "app.generation.controller",
+        "app.generation.pipeline",
+        "app.generation.publish",
+    }
+)
+
+
 def test_no_solver_or_public_domain_module_imports_truth():
-    allowed = {"app.validation.solution"}
+    allowed = _P4_TRUTH_AWARE
     offenders = _scan()
     for module, targets in sorted(offenders.items()):
         assert module in allowed, (
             f"{module} must not import app.domain.truth (found {sorted(targets)}); "
-            "only the truth-aware validation stage may touch truth."
+            "only the truth-aware validation/lifecycle modules may touch truth."
         )
 
 
@@ -263,4 +275,127 @@ def test_validation_solution_is_the_only_truth_importer(positive_control=True):
     offenders = _scan()
     assert "app.validation.solution" in offenders
     assert "app.domain.truth" in offenders["app.validation.solution"]
-    assert set(offenders.keys()) == {"app.validation.solution"}
+    # The Phase 4 truth-aware lifecycle modules must import truth (positive
+    # control) and NO other module may.
+    assert "app.generation.pipeline" in offenders
+    assert "app.generation.publish" in offenders
+    assert set(offenders.keys()) == {"app.validation.solution", "app.generation.pipeline", "app.generation.publish"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 boundary additions (spec test 29): generation-module separation.
+# ---------------------------------------------------------------------------
+
+
+def _validation_targets(targets: set[str]) -> set[str]:
+    return {
+        t
+        for t in targets
+        if t == "app.validation" or t.startswith("app.validation")
+    }
+
+
+def test_generation_primitives_never_import_truth_or_validation():
+    """The delivered primitives are data/schema layers: no truth, no validation."""
+    primitives = {
+        "app.generation.provider",
+        "app.generation.fake_provider",
+        "app.generation.live_provider",
+        "app.generation.parser",
+        "app.generation.safety",
+        "app.generation.schemas",
+        "app.generation.constraints",
+        "app.generation.prompt",
+    }
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        module = _module_path(path.relative_to(APP_DIR))
+        if module not in primitives:
+            continue
+        package = module.rsplit(".", 1)[0] if "." in module else None
+        targets = _collect_import_targets(path.read_text(encoding="utf-8"), package=package)
+        forbidden = sorted(_truth_targets(targets) | _validation_targets(targets))
+        assert not forbidden, (
+            f"primitive module {module} must not import app.domain.truth or "
+            f"app.validation material (found {forbidden})"
+        )
+
+
+def test_generation_modules_never_import_truth_except_truth_aware_lifecycle():
+    """No app.generation module may import truth except {controller,pipeline,publish}."""
+    allowed = {"app.generation.controller", "app.generation.pipeline", "app.generation.publish"}
+    for module, targets in sorted(_scan().items()):
+        if module.startswith("app.generation") and module not in allowed:
+            raise AssertionError(
+                f"{module} imports {sorted(targets)} — only the truth-aware "
+                "lifecycle modules {controller, pipeline, publish} may touch truth."
+            )
+
+
+def test_generation_recovery_and_reporting_modules_never_import_truth():
+    """admission/budgets/clock/ids/report/state_machine stay truth-free."""
+    forbidden_prefix_modules = {
+        "app.generation.admission",
+        "app.generation.budgets",
+        "app.generation.clock",
+        "app.generation.ids",
+        "app.generation.report",
+        "app.generation.state_machine",
+    }
+    for module in forbidden_prefix_modules:
+        path = APP_DIR / (module.replace("app.", "", 1).replace(".", "/") + ".py")
+        package = module.rsplit(".", 1)[0] if "." in module else None
+        targets = _truth_targets(
+            _collect_import_targets(path.read_text(encoding="utf-8"), package=package)
+        )
+        assert not targets, f"{module} must not import app.domain.truth (found {sorted(targets)})"
+
+
+def test_solver_domain_still_never_imports_truth_or_validation():
+    """Phase 3 solvers/eligibility/evidence/rules/time_interval remain pure."""
+    domain_modules = {
+        "app.domain.solver",
+        "app.domain.eligibility",
+        "app.domain.evidence",
+        "app.domain.rules",
+        "app.domain.time_interval",
+        "app.domain.public",
+        "app.domain.proof",
+        "app.domain.inputs",
+        "app.domain.solvers.who_solver",
+        "app.domain.solvers.why_solver",
+        "app.domain.solvers.weapon_solver",
+        "app.domain.solvers.when_solver",
+    }
+    for module in domain_modules:
+        path = APP_DIR / (module.replace("app.", "", 1).replace(".", "/") + ".py")
+        package = module.rsplit(".", 1)[0] if "." in module else None
+        targets = _collect_import_targets(path.read_text(encoding="utf-8"), package=package)
+        forbidden = sorted(_truth_targets(targets) | _validation_targets(targets))
+        assert not forbidden, (
+            f"{module} must stay free of app.domain.truth and app.validation "
+            f"(found {forbidden})"
+        )
+
+
+def test_api_and_schemas_never_import_domain_validation_or_generation():
+    """app.api / app.schemas must not import domain, validation or generation."""
+    forbidden_bases = ("app.domain", "app.validation", "app.generation")
+    for path in sorted((APP_DIR / "api").rglob("*.py")) + sorted(
+        (APP_DIR / "schemas").rglob("*.py")
+    ):
+        if "__pycache__" in path.parts:
+            continue
+        module = _module_path(path.relative_to(APP_DIR))
+        package = module.rsplit(".", 1)[0] if "." in module else None
+        targets = _collect_import_targets(path.read_text(encoding="utf-8"), package=package)
+        hits = sorted(
+            t
+            for t in targets
+            if any(t == base or t.startswith(base + ".") for base in forbidden_bases)
+        )
+        assert not hits, (
+            f"{module} must not import domain/validation/generation material "
+            f"(found {hits}) — API/DTOs stay schema-only."
+        )

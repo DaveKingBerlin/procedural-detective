@@ -34,6 +34,7 @@ packages = [
     "app.domain",
     "app.domain.solvers",
     "app.validation",
+    "app.generation",
 ]
 
 [tool.pytest.ini_options]
