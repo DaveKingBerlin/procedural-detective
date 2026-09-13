@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   ValidationError,
   parseInvestigationBootstrap,
+  validateAccusationCandidates,
   validatePlayerKnowledge,
   validateWorldGraph,
   validateWorldObject,
 } from "./validation";
-import { makeBootstrap, makeWorldObject } from "./testFixtures";
+import { makeBootstrap, makeCandidates, makeWorldObject } from "./testFixtures";
 
 function expectValidationError(action: () => unknown, fragment: string): void {
   try {
@@ -140,5 +141,81 @@ describe("validatePlayerKnowledge", () => {
       () => validatePlayerKnowledge.validate({ discoveredEvidenceIds: [], readEvidenceIds: [] }),
       "visitedLocationIds",
     );
+  });
+});
+
+describe("accusation candidates block (Phase 7)", () => {
+  it("parses the candidates block from a canned bootstrap with order preserved", () => {
+    const parsed = parseInvestigationBootstrap.validate(makeBootstrap());
+    expect(parsed.candidates.suspects.map((entry) => entry.id)).toEqual([
+      "suspect_alpha",
+      "suspect_beta",
+      "suspect_gamma",
+    ]);
+    expect(parsed.candidates.suspects[0]).toEqual({ id: "suspect_alpha", name: "Ada Marsh" });
+    expect(parsed.candidates.motives[0]).toEqual({ id: "motive_alpha", label: "A dispute over money" });
+    expect(parsed.candidates.weapons[0]).toEqual({ id: "weapon_alpha", assetId: "PROP_GENERIC_01", name: "Kitchen knife" });
+  });
+
+  it("drops unknown candidate fields (a smuggled correct/winner marker never survives)", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    const candidates = raw.candidates as unknown as Record<string, unknown>;
+    candidates.suspects = [
+      { ...makeCandidates().suspects[0], correct: true, winner: true, secretScore: 99 },
+    ];
+    const parsed = parseInvestigationBootstrap.validate(raw);
+    expect(Object.keys(parsed.candidates.suspects[0]).sort()).toEqual(["id", "name"]);
+    expect("correct" in parsed.candidates.suspects[0]).toBe(false);
+    expect("winner" in parsed.candidates.suspects[0]).toBe(false);
+  });
+
+  it("preserves array order even when the server sends a non-sorted order (never re-sorts)", () => {
+    const unordered = makeCandidates({
+      suspects: [
+        { id: "z_last", name: "Zed" },
+        { id: "a_first", name: "Alpha" },
+        { id: "m_mid", name: "Mid" },
+      ],
+    });
+    const parsed = validateAccusationCandidates.validate(unordered);
+    expect(parsed.suspects.map((entry) => entry.id)).toEqual(["z_last", "a_first", "m_mid"]);
+  });
+
+  it("rejects a bootstrap without the candidates block", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    delete raw.candidates;
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "candidates");
+  });
+
+  it("rejects malformed candidates entries", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    const candidates = raw.candidates as unknown as Record<string, unknown>;
+    candidates.suspects = [{ id: "a" }]; // no name
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "candidates.suspects");
+    candidates.suspects = "not-an-array";
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "candidates.suspects must be an array");
+  });
+
+  it("rejects a non-object candidates payload", () => {
+    expectValidationError(() => validateAccusationCandidates.validate(null), "candidates must be an object");
+  });
+});
+
+describe("bootstrap lifecycle state (Phase 7)", () => {
+  it("accepts the frozen lifecycle states PLAYING / ACCUSED / REVEALED", () => {
+    const playing = parseInvestigationBootstrap.validate(makeBootstrap({ state: "PLAYING" }));
+    const accused = parseInvestigationBootstrap.validate(makeBootstrap({ state: "ACCUSED" }));
+    const revealed = parseInvestigationBootstrap.validate(makeBootstrap({ state: "REVEALED" }));
+    expect(playing.state).toBe("PLAYING");
+    expect(accused.state).toBe("ACCUSED");
+    expect(revealed.state).toBe("REVEALED");
+  });
+
+  it("rejects states outside the frozen lifecycle", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    raw.state = "HACKED";
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "PLAYING");
+    raw.state = "CREATED";
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "PLAYING");
   });
 });

@@ -1,7 +1,12 @@
 import type {
+  AccusationCandidatesDTO,
   InvestigationBootstrapResponse,
   InvestigationSceneLocationDTO,
+  MotiveCandidateDTO,
+  PlaythroughLifecycleState,
   PlayerKnowledgeDTO,
+  SuspectCandidateDTO,
+  WeaponCandidateDTO,
   WorldObjectDTO,
 } from "../api/types";
 
@@ -152,6 +157,84 @@ export const validateWorldGraph: Validator<WorldGraphDTO> = {
   },
 };
 
+/** The frozen lifecycle states the bootstrap may honestly publish. */
+const LIFECYCLE_STATES = new Set<PlaythroughLifecycleState>(["PLAYING", "ACCUSED", "REVEALED"]);
+
+/** Validator for one suspect candidate ({id,name}); unknown fields dropped. */
+export const validateSuspectCandidate: Validator<SuspectCandidateDTO> = {
+  validate(raw: unknown): SuspectCandidateDTO {
+    if (!isRecord(raw)) {
+      throw new ValidationError("candidates.suspects entry must be an object.");
+    }
+    return {
+      id: requireString(raw, "id", "candidates.suspects"),
+      name: requireString(raw, "name", "candidates.suspects"),
+    };
+  },
+};
+
+/** Validator for one motive candidate ({id,label}); unknown fields dropped. */
+export const validateMotiveCandidate: Validator<MotiveCandidateDTO> = {
+  validate(raw: unknown): MotiveCandidateDTO {
+    if (!isRecord(raw)) {
+      throw new ValidationError("candidates.motives entry must be an object.");
+    }
+    return {
+      id: requireString(raw, "id", "candidates.motives"),
+      label: requireString(raw, "label", "candidates.motives"),
+    };
+  },
+};
+
+/** Validator for one weapon candidate ({id,assetId,name}); unknown fields dropped. */
+export const validateWeaponCandidate: Validator<WeaponCandidateDTO> = {
+  validate(raw: unknown): WeaponCandidateDTO {
+    if (!isRecord(raw)) {
+      throw new ValidationError("candidates.weapons entry must be an object.");
+    }
+    return {
+      id: requireString(raw, "id", "candidates.weapons"),
+      assetId: requireString(raw, "assetId", "candidates.weapons"),
+      name: requireString(raw, "name", "candidates.weapons"),
+    };
+  },
+};
+
+/**
+ * Validates the player-safe `candidates` block of the bootstrap.
+ *
+ * Player-safe guarantees:
+ *  - only {id,name} / {id,label} / {id,assetId,name} survive; every other
+ *    field (e.g. a malformed/hostile "correct"/"winner" marker) is DROPPED,
+ *    never copied into the typed DTO;
+ *  - the ARRAY ORDER is preserved exactly — the client renders candidates in
+ *    the server's alphabetical order and never re-orders them.
+ */
+export const validateAccusationCandidates: Validator<AccusationCandidatesDTO> = {
+  validate(raw: unknown): AccusationCandidatesDTO {
+    if (!isRecord(raw)) {
+      throw new ValidationError("candidates must be an object.");
+    }
+    const suspectsRaw = raw.suspects;
+    const motivesRaw = raw.motives;
+    const weaponsRaw = raw.weapons;
+    if (!Array.isArray(suspectsRaw)) {
+      throw new ValidationError("candidates.suspects must be an array.");
+    }
+    if (!Array.isArray(motivesRaw)) {
+      throw new ValidationError("candidates.motives must be an array.");
+    }
+    if (!Array.isArray(weaponsRaw)) {
+      throw new ValidationError("candidates.weapons must be an array.");
+    }
+    return {
+      suspects: suspectsRaw.map((entry) => validateSuspectCandidate.validate(entry)),
+      motives: motivesRaw.map((entry) => validateMotiveCandidate.validate(entry)),
+      weapons: weaponsRaw.map((entry) => validateWeaponCandidate.validate(entry)),
+    };
+  },
+};
+
 /** Validates the full 200 bootstrap payload of GET .../investigation. */
 export const parseInvestigationBootstrap: Validator<InvestigationBootstrapResponse> = {
   validate(raw: unknown): InvestigationBootstrapResponse {
@@ -161,18 +244,21 @@ export const parseInvestigationBootstrap: Validator<InvestigationBootstrapRespon
     const playthroughId = requireString(raw, "playthroughId", "bootstrap");
     const caseId = requireString(raw, "caseId", "bootstrap");
     const caseVersion = requireNonNegativeInteger(raw, "caseVersion", "bootstrap");
-    if (raw.state !== "PLAYING") {
-      throw new ValidationError('bootstrap.state must be "PLAYING".');
+    if (typeof raw.state !== "string" || !LIFECYCLE_STATES.has(raw.state as PlaythroughLifecycleState)) {
+      throw new ValidationError('bootstrap.state must be one of "PLAYING", "ACCUSED" or "REVEALED".');
     }
+    const state = raw.state as PlaythroughLifecycleState;
     const playerKnowledge = validatePlayerKnowledge.validate(raw.playerKnowledge);
     const scene = validateWorldGraph.validate(raw.scene);
+    const candidates = validateAccusationCandidates.validate(raw.candidates);
     return {
       playthroughId,
       caseId,
       caseVersion,
-      state: "PLAYING",
+      state,
       playerKnowledge,
       scene,
+      candidates,
     };
   },
 };

@@ -50,6 +50,9 @@ BOOTSTRAP_KEYS = {
     "state",
     "playerKnowledge",
     "scene",
+    # Phase 7 J/K frozen addition: the player-safe accusation candidate
+    # universes of the pinned CaseVersion (alphabetical, never marked).
+    "candidates",
 }
 WORLD_OBJECT_KEYS = {
     "objectId",
@@ -104,15 +107,27 @@ def test_13_bootstrap_contains_no_undiscovered_evidence_content(phase5_app):
     assert res.status_code == 200
     body = res.json()
     assert_no_hidden_leaks(body)
-    # Every string in every evidence presentation is banned from the bootstrap.
+    # Every string in every evidence presentation is banned from the bootstrap
+    # — EXCEPT the published candidate-universe ids (Phase 7 J/K frozen
+    # addition): those ids are PUBLIC universe material announced by the
+    # candidates block (a suspect id may coincidentally equal an evidence
+    # field value such as fromPersonId), NOT undiscovered evidence content.
     store = phase5_app.state.store
     published = store.get_published(case_id, 1)
     payload = json.loads(published.payload_json)
+    universes = payload.get("universes") or {}
+    public_ids = {
+        str(i)
+        for list_key in ("suspect_ids", "motive_ids", "weapon_ids")
+        for i in (universes.get(list_key) or ())
+    }
     forbidden_strings = []
     for fact in payload["draft"]["evidence"]:
         presentation = fact.get("presentation") or {}
         for value in presentation.values():
             if isinstance(value, str) and value:
+                if value in public_ids:
+                    continue  # public candidate-universe id, not content
                 forbidden_strings.append(value)
     body_text = res.text
     for needle in forbidden_strings:

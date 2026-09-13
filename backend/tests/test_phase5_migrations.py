@@ -1,11 +1,11 @@
-"""Phase 5/6 — migration behavior (M28, M29, Phase5 L + Phase6 A).
+"""Phase 5/6/7 — migration behavior (M28, M29, Phase5 L + Phase6 A + Phase7 A).
 
-- empty database -> head (alembic_version == 0003)
+- empty database -> head (alembic_version == 0004)
 - Phase 2 baseline (0001) -> head succeeds
 - constraint/index/trigger inventory exists (PKs, unique constraints,
-  token_verifier indexes, published_versions immutability triggers,
-  player_knowledge FK + (case_id, case_version) index)
-- downgrade drops every Phase 5/6 table (registered downgrade policy)
+  token_verifier indexes, published_versions/accusations immutability
+  triggers, player_knowledge/accusations FK + (case_id, case_version) index)
+- downgrade drops every Phase 5/6/7 table (registered downgrade policy)
 - application readiness confirms the expected migration head
 """
 
@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, inspect, text
 from app.db.session import migration_head
 from conftest import downgrade_db, upgrade_db
 
-EXPECTED_HEAD = "0003"
+EXPECTED_HEAD = "0004"
 
 TABLES = (
     "anonymous_quota_sessions",
@@ -32,6 +32,7 @@ TABLES = (
     "published_versions",
     "playthroughs",
     "player_knowledge",
+    "accusations",
 )
 
 
@@ -138,7 +139,23 @@ def test_constraints_and_indexes_exist(database_url):
     pk_indexes = {tuple(ix["column_names"]) for ix in insp.get_indexes("player_knowledge")}
     assert ("case_id", "case_version") in pk_indexes
 
-    # Immutability triggers on published_versions.
+    # Accusations: playthrough FK + (case_id, case_version) index + one-row
+    # primary key (Phase7 A/H/N4).
+    assert "accusations" in _table_names(engine)
+    acc_pk = insp.get_pk_constraint("accusations")
+    assert set(acc_pk["constrained_columns"]) == {"playthrough_id"}
+    acc_fks = insp.get_foreign_keys("accusations")
+    assert any(
+        fk.get("referred_table") == "playthroughs"
+        and fk.get("constrained_columns") == ["playthrough_id"]
+        and fk.get("referred_columns") == ["playthrough_id"]
+        and fk.get("options", {}).get("ondelete") == "CASCADE"
+        for fk in acc_fks
+    )
+    acc_indexes = {tuple(ix["column_names"]) for ix in insp.get_indexes("accusations")}
+    assert ("case_id", "case_version") in acc_indexes
+
+    # Immutability triggers on published_versions and accusations.
     with engine.connect() as conn:
         triggers = [
             row[0]
@@ -148,6 +165,8 @@ def test_constraints_and_indexes_exist(database_url):
         ]
     assert "published_versions_no_update" in triggers
     assert "published_versions_no_delete" in triggers
+    assert "accusations_no_update" in triggers
+    assert "accusations_no_delete" in triggers
     engine.dispose()
 
 
@@ -175,7 +194,7 @@ def test_downgrade_drops_phase5_tables(database_url):
 
 
 def test_29_readiness_confirms_head_after_upgrade(migrated_client):
-    """M29: readiness reports migrations ok once the DB is at head (0003)."""
+    """M29: readiness reports migrations ok once the DB is at head (0004)."""
     res = migrated_client.get("/api/v1/readiness")
     assert res.status_code == 200
     assert res.json() == {"status": "ready", "database": "ok", "migrations": "ok"}

@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, text
 
+from app.db.session import migration_head
 from app.persistence.store import PlayerKnowledgeError
 from conftest import upgrade_db
 
@@ -203,12 +204,13 @@ def test_1_17_restart_preserves_discovered_and_read_state(phase5_app, database_u
 
 
 # --------------------------------------------------------------------------- #
-# migration 0002 -> 0003 + readiness
+# migration 0002 -> head + readiness
 # --------------------------------------------------------------------------- #
 
 
-def test_migration_0002_to_0003_empty_path(database_url):
-    """The 0002 -> head (0003) path is the additive player_knowledge table."""
+def test_migration_0002_to_head_empty_path(database_url):
+    """The 0002 -> head path adds player_knowledge then accusations (both
+    additive tables; the downgrade-to-0002 path drops them again)."""
     from alembic import command
     from alembic.config import Config as AlembicConfig
 
@@ -221,21 +223,23 @@ def test_migration_0002_to_0003_empty_path(database_url):
             versions = [r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version"))]
         assert versions == ["0002"]
         assert "player_knowledge" not in set(inspect(engine).get_table_names())
+        assert "accusations" not in set(inspect(engine).get_table_names())
     finally:
         engine.dispose()
 
-    upgrade_db(database_url)  # -> head 0003
+    upgrade_db(database_url)  # -> head (0004 as of Phase 7)
     engine = create_engine(database_url, connect_args={"check_same_thread": False})
     try:
         with engine.connect() as conn:
             versions = [r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version"))]
-        assert versions == ["0003"]
+        assert versions == [migration_head()]
         assert "player_knowledge" in set(inspect(engine).get_table_names())
+        assert "accusations" in set(inspect(engine).get_table_names())
     finally:
         engine.dispose()
 
-    # Downgrade to 0002 specifically: player_knowledge is dropped, the schema
-    # returns to the Phase 5 shape.
+    # Downgrade to 0002 specifically: player_knowledge AND accusations are
+    # dropped, the schema returns to the Phase 5 shape.
     command.downgrade(make_alembic_config(database_url), "0002")
     engine = create_engine(database_url, connect_args={"check_same_thread": False})
     try:
@@ -243,6 +247,7 @@ def test_migration_0002_to_0003_empty_path(database_url):
             versions = [r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version"))]
         assert versions == ["0002"]
         assert "player_knowledge" not in set(inspect(engine).get_table_names())
+        assert "accusations" not in set(inspect(engine).get_table_names())
     finally:
         engine.dispose()
 

@@ -1,4 +1,6 @@
 import type {
+  AccusationRequest,
+  AccusationResponse,
   DiscoveryResultDTO,
   ErrorEnvelope,
   EvidenceReadResultDTO,
@@ -6,6 +8,7 @@ import type {
   InteractionResultDTO,
   InvestigationBootstrapResponse,
   ReadinessResponse,
+  RevealResponse,
 } from "./types";
 
 /** Backend base URL. Overridable via VITE_API_BASE_URL; defaults to the local FastAPI dev server. */
@@ -191,6 +194,45 @@ export function discoverEvidence(
 export function readRecord(playthroughId: string, recordId: string, token: string): Promise<EvidenceReadResultDTO> {
   return authedRequest<EvidenceReadResultDTO>(
     `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/records/${encodeURIComponent(recordId)}`,
+    token,
+  );
+}
+
+/*
+ * ======================================================================
+ * Phase 7 accusation & reveal endpoints (frozen contract).
+ *
+ * POST accusation is the irreversible transition to ACCUSED; its response
+ * never contains truth. GET reveal is only available once the playthrough is
+ * ACCUSED (403 REVEAL_NOT_AVAILABLE before that) and is idempotent, so any
+ * reload may re-fetch it.
+ * ==================================================================== */
+
+/**
+ * POST {base}/api/v1/playthroughs/{playthrough_id}/accusation
+ * body {"murdererId","motiveId","weaponId","crimeTime"} -> AccusationResponse.
+ * 409 -> CASE_ALREADY_SUBMITTED; 422 -> validation error; both as ApiError.
+ */
+export function submitAccusation(
+  playthroughId: string,
+  body: AccusationRequest,
+  token: string,
+): Promise<AccusationResponse> {
+  return authedRequest<AccusationResponse>(
+    `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/accusation`,
+    token,
+    { method: "POST", body },
+  );
+}
+
+/**
+ * GET {base}/api/v1/playthroughs/{playthrough_id}/reveal -> RevealResponse.
+ * 403 {"error":{"code":"REVEAL_NOT_AVAILABLE",..}} until the playthrough is
+ * ACCUSED; idempotent afterwards (safe to re-fetch on reload/restart).
+ */
+export function getReveal(playthroughId: string, token: string): Promise<RevealResponse> {
+  return authedRequest<RevealResponse>(
+    `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/reveal`,
     token,
   );
 }

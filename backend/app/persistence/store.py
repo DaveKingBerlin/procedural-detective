@@ -42,6 +42,7 @@ from sqlalchemy.engine import Engine, create_engine
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from app.models.accusations import Accusation
 from app.models.cases import Case, CaseVersion
 from app.models.credentials import CreatorCredential
 from app.models.generation import GenerationAttempt
@@ -89,6 +90,16 @@ class DuplicateCredential(StoreError):
 
 class DuplicatePlaythrough(StoreError):
     """A playthrough_id already exists."""
+
+
+class DuplicateAccusation(StoreError):
+    """The playthrough already has an authoritative accusation.
+
+    Raised by ``insert_accusation_if_unaccused`` after a FULL rollback of the
+    compare-and-set transaction when the playthrough is no longer a
+    pre-accusation (CREATED/PLAYING) state — a later/concurrent accusation
+    attempt loses and nothing is persisted (Phase7 C/I, REQUIREMENTS 40.11).
+    """
 
 
 class VersionAllocationError(StoreError):
@@ -937,6 +948,132 @@ class Store:
                 else None
             )
 
+    def get_playthrough_state(self, playthrough_id: str) -> str | None:
+        """The playthrough's persisted lifecycle state (Phase7 A; None when the
+        playthrough does not exist)."""
+        with self._read_session() as session:
+            row = session.get(Playthrough, playthrough_id)
+            return row.state if row is not None else None
+
+    # ------------------------------------------------------------------ #
+    # accusations (Phase 7) — the FIRST authoritative accusation of one PT
+    # ------------------------------------------------------------------ #
+
+    def insert_accusation_if_unaccused(
+        self,
+        *,
+        playthrough_id: str,
+        case_id: str,
+        case_version: int,
+        murderer_id: str,
+        motive_id: str,
+        weapon_id: str,
+        crime_time: str,
+        created_at: float,
+    ) -> Accusation:
+        """Persist the first authoritative accusation ATOMICALLY (Phase7 C/I).
+
+        ONE transaction performs:
+        (1) ``UPDATE playthroughs SET state = 'ACCUSED' WHERE playthrough_id
+            = :pid AND state IN ('CREATED','PLAYING')`` — the compare-and-set
+            guard (REQUIREMENTS 40.11; only pre-accusation playthroughs may
+            transition to ACCUSED);
+        (2) the INSERT of the immutable ``accusations`` row.
+
+        When the UPDATE affects 0 rows the concurrent/duplicate accusation
+        attempt LOST (the playthrough already moved to ACCUSED/REVEALED): the
+        WHOLE transaction rolls back — no row, no state change — and
+        ``DuplicateAccusation`` propagates (the API answers the frozen
+        ``409 CASE_ALREADY_SUBMITTED``). A failure of any kind inside the
+        transaction leaves no half-ACCUSED state (Phase7 I/N27).
+        """
+        with self.transaction() as session:
+            result = session.execute(
+                text(
+                    "UPDATE playthroughs SET state = 'ACCUSED' "
+                    "WHERE playthrough_id = :pid "
+                    "AND state IN ('CREATED', 'PLAYING')"
+                ),
+                {"pid": playthrough_id},
+            )
+            if result.rowcount == 0:
+                raise DuplicateAccusation(
+                    f"playthrough {playthrough_id!r} already has an accusation"
+                )
+            row = Accusation(
+                playthrough_id=playthrough_id,
+                case_id=case_id,
+                case_version=int(case_version),
+                murderer_id=murderer_id,
+                motive_id=motive_id,
+                weapon_id=weapon_id,
+                crime_time=crime_time,
+                created_at=float(created_at),
+            )
+            session.add(row)
+            try:
+                session.flush()
+            except IntegrityError:  # pragma: no cover - CAS guards this first
+                raise DuplicateAccusation(
+                    f"playthrough {playthrough_id!r} already has an accusation"
+                ) from None
+            return _copy_accusation(row)
+
+    def get_accusation(self, playthrough_id: str) -> Accusation | None:
+        """The immutable accusation row of one playthrough (or None).
+
+        The row is INSERT-only by construction: this store exposes no update
+        path, and the migration's BEFORE UPDATE/DELETE triggers abort raw SQL
+        mutations at the database level (Phase7 H/N4)."""
+        with self._read_session() as session:
+            row = session.get(Accusation, playthrough_id)
+            return _copy_accusation(row) if row is not None else None
+
+    def mark_playthrough_revealed(self, playthrough_id: str) -> bool:
+        """CAS reveal transition: ``ACCUSED -> REVEALED`` (Phase7 E).
+
+        Idempotent from REVEALED (the WHERE set is ``('ACCUSED','REVEALED')``:
+        a repeat reveal on an already-REVEALED playthrough still matches and
+        stays REVEALED). Returns False when the playthrough is NOT reveal-
+        eligible (missing/CREATED/PLAYING -> the API answers
+        ``403 REVEAL_NOT_AVAILABLE``)."""
+        with self.transaction() as session:
+            result = session.execute(
+                text(
+                    "UPDATE playthroughs SET state = 'REVEALED' "
+                    "WHERE playthrough_id = :pid "
+                    "AND state IN ('ACCUSED', 'REVEALED')"
+                ),
+                {"pid": playthrough_id},
+            )
+            return result.rowcount > 0
+
+    def get_accusation_and_mark_revealed(self, playthrough_id: str) -> Accusation | None:
+        """Reveal's atomic unit of work (Phase7 E): read the accusation row AND
+        persist the ACCUSED -> REVEALED transition in ONE transaction.
+
+        Returns the immutable accusation row, or None when the playthrough is
+        not reveal-eligible (missing row or non-revealable state -> the API
+        answers ``403 REVEAL_NOT_AVAILABLE``). Concurrent reveal calls are
+        idempotent: each transaction reads the SAME immutable accusation and
+        the CAS leaves the state REVEALED.
+        """
+        with self.transaction() as session:
+            row = session.get(Accusation, playthrough_id)
+            if row is None:
+                return None
+            result = session.execute(
+                text(
+                    "UPDATE playthroughs SET state = 'REVEALED' "
+                    "WHERE playthrough_id = :pid "
+                    "AND state IN ('ACCUSED', 'REVEALED')"
+                ),
+                {"pid": playthrough_id},
+            )
+            if result.rowcount == 0:
+                return None
+            return _copy_accusation(row)
+
     # ------------------------------------------------------------------ #
     # PlayerKnowledge (Phase 6 A) — the ONLY state of one playthrough
     # ------------------------------------------------------------------ #
@@ -1139,6 +1276,23 @@ def _copy_player_knowledge(row: PlayerKnowledge) -> PlayerKnowledge:
         visited_json=row.visited_json,
         notes_json=row.notes_json,
         updated_at=row.updated_at,
+    )
+
+
+def _copy_accusation(row: Accusation) -> Accusation:
+    """Detached plain copy of an ORM accusation row (never the ORM instance).
+
+    The copy is the immutable value the service/API may read; mutating it can
+    never affect the persisted row (Phase7 H/N4: no update path exists)."""
+    return Accusation(
+        playthrough_id=row.playthrough_id,
+        case_id=row.case_id,
+        case_version=row.case_version,
+        murderer_id=row.murderer_id,
+        motive_id=row.motive_id,
+        weapon_id=row.weapon_id,
+        crime_time=row.crime_time,
+        created_at=row.created_at,
     )
 
 

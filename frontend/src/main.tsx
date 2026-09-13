@@ -4,6 +4,8 @@ import { BrowserRouter, Route, Routes } from "react-router";
 import App from "./app";
 import Home from "./routes/home";
 import NotFound from "./routes/not-found";
+import AccusationPage from "./routes/accuse";
+import RevealPage from "./routes/reveal";
 import ScenePage from "./routes/scene";
 import "./index.css";
 
@@ -19,6 +21,8 @@ createRoot(rootElement).render(
         <Route element={<App />}>
           <Route index element={<Home />} />
           <Route path="scene" element={<ScenePage />} />
+          <Route path="accuse" element={<AccusationPage />} />
+          <Route path="reveal" element={<RevealPage />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

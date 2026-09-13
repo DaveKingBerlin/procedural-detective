@@ -84,10 +84,13 @@ def _translate(exc: Exception) -> HTTPException:
     summary="Investigation bootstrap (pinned scene + PlayerKnowledge)",
     description=(
         "Requires the playthrough's own playthroughAccessToken. Returns the "
-        "starting location and every player-safe world object of the PINNED "
-        "(caseId, caseVersion) plus the current PlayerKnowledge. Contains no "
-        "coordinates, no evidence content, no propositions and no hidden "
-        "truth/proof material."
+        "starting location, every player-safe world object of the PINNED "
+        "(caseId, caseVersion), the current PlayerKnowledge and the player-"
+        "safe accusation candidates. DEF-051: READABLE from every lifecycle "
+        "state (PLAYING / ACCUSED / REVEALED) — after an accusation this is "
+        "the only player-safe source of the candidates block the reveal view "
+        "needs for name resolution and reload state. Contains no coordinates, "
+        "no evidence content, no propositions, no hidden truth/proof material."
     ),
 )
 def get_investigation(

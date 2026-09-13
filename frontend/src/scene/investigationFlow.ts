@@ -4,6 +4,7 @@ import type {
   EvidenceReadResultDTO,
   InteractionResultDTO,
   InvestigationBootstrapResponse,
+  PlaythroughLifecycleState,
   PlayerKnowledgeDTO,
 } from "../api/types";
 import { buildInvestigationScene, type InvestigationSceneModel } from "./buildInvestigationScene";
@@ -72,6 +73,7 @@ export function isAuthorisationFailure(error: unknown): boolean {
 export class InvestigationSession {
   private knowledge: PlayerKnowledgeDTO | null = null;
   private model: InvestigationSceneModel | null = null;
+  private lifecycleStateValue: PlaythroughLifecycleState | null = null;
   private readonly records = new Map<string, EvidenceReadResultDTO>();
   private toast: SessionToast | null = null;
   private toastSeq = 0;
@@ -89,6 +91,11 @@ export class InvestigationSession {
 
   get hasStarted(): boolean {
     return this.model !== null;
+  }
+
+  /** Server-authoritative lifecycle state from the bootstrap (PLAYING/ACCUSED/REVEALED). */
+  get bootstrapState(): PlaythroughLifecycleState | null {
+    return this.lifecycleStateValue;
   }
 
   /** Cached player-safe scene model, available after a successful start. */
@@ -159,6 +166,7 @@ export class InvestigationSession {
       readEvidenceIds: [...bootstrap.playerKnowledge.readEvidenceIds],
       visitedLocationIds: [...bootstrap.playerKnowledge.visitedLocationIds],
     };
+    this.lifecycleStateValue = bootstrap.state;
     this.model = model;
     return { ok: true, model };
   }

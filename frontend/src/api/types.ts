@@ -76,17 +76,144 @@ export interface InvestigationSceneLocationDTO {
  *
  * NOTE: the payload carries NO coordinates — geometry is derived client-side
  * from (locationId, anchor, assetId) via the anchor/asset registries.
+ *
+ * Phase 7 amendment (frozen): the bootstrap GAINS a player-safe `candidates`
+ * block used ONLY by the accusation UI. Candidates carry no correctness
+ * markers and MUST be rendered in the exact order the server returns them
+ * (the server sorts suspects by id; the client never re-orders or marks a
+ * winner). `state` reflects the frozen playthrough lifecycle — the scene is
+ * still playable while ACCUSED/REVEALED, so only CREATED/unknown values are
+ * rejected.
  */
 export interface InvestigationBootstrapResponse {
   playthroughId: string;
   caseId: string;
   caseVersion: number;
-  state: "PLAYING";
+  state: PlaythroughLifecycleState;
   playerKnowledge: PlayerKnowledgeDTO;
   scene: {
     location: InvestigationSceneLocationDTO;
     worldObjects: WorldObjectDTO[];
   };
+  candidates: AccusationCandidatesDTO;
+}
+
+/* ======================================================================
+ * Phase 7 — accusation & reveal contract (frozen, implemented in parallel
+ * by the backend agent).
+ * ==================================================================== */
+
+/** Frozen playthrough lifecycle: CREATED -> PLAYING -> ACCUSED -> REVEALED. */
+export type PlaythroughLifecycleState = "PLAYING" | "ACCUSED" | "REVEALED";
+
+/** One WHO candidate (SUSPECT_ELIGIBLE universe). The server never marks a winner. */
+export interface SuspectCandidateDTO {
+  id: string;
+  name: string;
+}
+
+/** One WHY candidate (MOTIVE_CANDIDATE universe). */
+export interface MotiveCandidateDTO {
+  id: string;
+  label: string;
+}
+
+/** One WEAPON candidate (POTENTIAL_WEAPON universe). */
+export interface WeaponCandidateDTO {
+  id: string;
+  assetId: string;
+  name: string;
+}
+
+/**
+ * Player-safe candidate universes published in the investigation bootstrap.
+ * `suspects` arrive SORTED ALPHABETICALLY by id; the client preserves that
+ * order exactly and never derives/renders any correctness/winnership marker.
+ */
+export interface AccusationCandidatesDTO {
+  suspects: SuspectCandidateDTO[];
+  motives: MotiveCandidateDTO[];
+  weapons: WeaponCandidateDTO[];
+}
+
+/** POST .../accusation request body. crimeTime is a bare 24h time "HH:MM:SS". */
+export interface AccusationRequest {
+  murdererId: string;
+  motiveId: string;
+  weaponId: string;
+  crimeTime: string;
+}
+
+/** The immutable accepted accusation echoed by 200/409/reveal responses. */
+export interface SubmittedAccusationDTO {
+  murdererId: string;
+  motiveId: string;
+  weaponId: string;
+  crimeTime: string;
+}
+
+/** 200 body of POST .../accusation — ACCEPTED, but reveals NO truth. */
+export interface AccusationResponse {
+  playthroughId: string;
+  caseId: string;
+  caseVersion: number;
+  status: "ACCUSED";
+  accusation: SubmittedAccusationDTO;
+}
+
+/** Canonical truth block of the reveal DTO (explicit server allowlist). */
+export interface RevealTruthDTO {
+  murdererId: string;
+  murdererName: string;
+  motiveId: string;
+  motiveLabel: string;
+  weaponId: string;
+  weaponName: string;
+  /** Full ISO timestamp carrying the authoritative local time-of-day. */
+  crimeTime: string;
+}
+
+/** Per-dimension deterministic evaluation produced by the server. */
+export interface RevealResultDTO {
+  murdererCorrect: boolean;
+  motiveCorrect: boolean;
+  weaponCorrect: boolean;
+  timeCorrect: boolean;
+  overall: "solved" | "incorrect";
+}
+
+export interface RevealScoreDTO {
+  correctDimensions: number;
+  totalDimensions: number;
+}
+
+export interface TimelineEntryDTO {
+  time: string; // ISO
+  description: string;
+}
+
+export interface ExplanationEvidenceDTO {
+  evidenceId: string;
+  title: string;
+  point: string;
+}
+
+/**
+ * 200 body of GET .../reveal — the explicit allowlist the reveal screen
+ * renders. Every field crossing the trust boundary is re-parsed by
+ * src/reveal/revealValidation.ts (unknown fields dropped).
+ */
+export interface RevealResponse {
+  playthroughId: string;
+  caseId: string;
+  caseVersion: number;
+  status: "REVEALED";
+  truth: RevealTruthDTO;
+  player: { accusation: SubmittedAccusationDTO };
+  result: RevealResultDTO;
+  score: RevealScoreDTO;
+  timeline: TimelineEntryDTO[];
+  explanation: { evidence: ExplanationEvidenceDTO[] };
 }
 
 /** Discovery half of an interaction/discover response. */

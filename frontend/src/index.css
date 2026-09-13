@@ -432,6 +432,264 @@ a {
   font-size: 0.85rem;
 }
 
+/* ======================================================================
+ * Phase 7 — accusation panel (WHO/WHY/WEAPON/WHEN pickers) & reveal screen
+ * ==================================================================== */
+
+.accusation-actions {
+  margin: 0.75rem 0;
+}
+
+.accusation-actions button,
+.accusation-submit,
+.accusation-edit,
+.accusation-panel button,
+.reveal-error button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+
+.accusation-actions button:hover:not(:disabled),
+.accusation-panel button:hover:not(:disabled),
+.reveal-error button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.accusation-actions button:focus-visible,
+.accusation-panel button:focus-visible,
+.accusation-choice:focus-within,
+.accusation-when input:focus-visible,
+.reveal-error button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.accusation-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  max-width: 46rem;
+}
+
+.accusation-form h3 {
+  margin-top: 0;
+}
+
+.accusation-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.9rem 0.8rem;
+  margin: 0 0 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.accusation-fieldset legend {
+  padding: 0 0.4rem;
+}
+
+.accusation-choice {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  cursor: pointer;
+}
+
+.accusation-when {
+  margin: 0 0 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.accusation-when input {
+  max-width: 11rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0d1016;
+  color: var(--text);
+  font: inherit;
+}
+
+.accusation-field-error {
+  color: var(--err);
+  margin: 0.3rem 0 0;
+  font-size: 0.9rem;
+}
+
+.accusation-server-error {
+  border: 1px solid var(--err);
+  border-radius: 8px;
+  padding: 0.5rem 0.8rem;
+  margin: 0.5rem 0;
+  color: var(--err);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.accusation-server-error p {
+  margin: 0;
+}
+
+.accusation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.accusation-submit {
+  background: var(--accent);
+  color: #1a1608;
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.accusation-submit:disabled,
+.accusation-edit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.accusation-confirmation {
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.accusation-warning {
+  margin: 0 0 0.6rem;
+  color: var(--warn);
+}
+
+.accusation-summary {
+  margin: 0;
+}
+
+.accusation-summary-row {
+  display: flex;
+  gap: 0.75rem;
+  margin: 0.25rem 0;
+}
+
+.accusation-summary-row dt {
+  min-width: 5.5rem;
+  font-weight: 700;
+}
+
+.accusation-summary-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.accusation-accepted,
+.accusation-already-submitted,
+.accusation-revealed {
+  border: 1px solid var(--ok);
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  max-width: 46rem;
+}
+
+.reveal-screen {
+  max-width: 52rem;
+}
+
+.reveal-heading {
+  letter-spacing: 0.14em;
+  margin-bottom: 0.4rem;
+}
+
+.reveal-overall {
+  font-weight: 700;
+}
+
+.reveal-overall--solved {
+  color: var(--ok);
+}
+
+.reveal-overall--incorrect {
+  color: var(--warn);
+}
+
+.reveal-truth,
+.reveal-accusation,
+.reveal-explanation,
+.reveal-timeline {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  margin: 1rem 0;
+}
+
+.reveal-truth-list {
+  margin: 0;
+}
+
+.reveal-truth-row {
+  display: flex;
+  gap: 0.75rem;
+  margin: 0.25rem 0;
+}
+
+.reveal-truth-row dt {
+  min-width: 7rem;
+  font-weight: 700;
+}
+
+.reveal-truth-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.reveal-dimension {
+  border-top: 1px solid var(--border);
+  padding: 0.6rem 0 0.2rem;
+  margin-top: 0.6rem;
+}
+
+.reveal-dimension h4 {
+  margin: 0 0 0.2rem;
+}
+
+.reveal-dimension p {
+  margin: 0.15rem 0;
+  overflow-wrap: anywhere;
+}
+
+.reveal-result-correct {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+.reveal-result-incorrect {
+  color: var(--err);
+  font-weight: 700;
+}
+
+.reveal-explanation-list,
+.reveal-timeline-list {
+  margin: 0.4rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.reveal-explanation-item,
+.reveal-timeline-entry {
+  margin: 0.35rem 0;
+  overflow-wrap: anywhere;
+}
+
 button {
   font: inherit;
 }

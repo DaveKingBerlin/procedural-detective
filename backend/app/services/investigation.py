@@ -1,9 +1,14 @@
-"""Investigation service (Phase6 B/C/I, REQUIREMENTS 40.7-40.9).
+"""Investigation service (Phase6 B/C/I, REQUIREMENTS 40.7-40.9, Phase7 A).
 
 The service owns the PLAYER-SAFE investigation mechanics:
 
 - ``get_investigation_bootstrap`` — pinned bootstrap + PlayerKnowledge +
-  projected world objects;
+  projected world objects + player-safe accusation candidates. DEF-051: this
+  READ is available from EVERY Milestone-1 lifecycle state
+  ({CREATED, PLAYING, ACCUSED, REVEALED}) — after accusation it is the ONLY
+  player-safe endpoint that still carries the candidates block the reveal
+  flow needs for candidate-NAME resolution and for UI state restoration on
+  reload. It never writes knowledge and never reveals truth.
 - ``discover_evidence``      — server-authoritative evidence discovery
   (membership in the pinned CaseVersion + reachability via a world-graph
   placement; idempotent; marks the placement's location visited);
@@ -11,6 +16,11 @@ The service owns the PLAYER-SAFE investigation mechanics:
   membership + exact interaction match; 409 on mismatch, NO state change);
 - ``read_record``            — read of a DISCOVERED record (403 when not
   discovered; idempotent; never opens undiscovered content).
+
+Every GAMEPLAY MUTATION action (discover / interact / read-record) remains
+PLAYING-only (``_require_playing``): once a playthrough is ACCUSED the
+investigation "gameplay" is over and those endpoints keep answering the
+existing 409 NOT_PLAYING envelope (REQUIREMENTS 40.7 / Phase7 A, DEF-051).
 
 All read paths reconstruct the pinned published payload EXCLUSIVELY from the
 immutable ``published_versions`` row for the playthrough's exact
@@ -32,6 +42,7 @@ from typing import Any, Mapping
 from app.persistence.store import PlayerKnowledgeError, Store
 from app.persistence.timebase import EpochClock
 from app.services import publication as pub
+from app.services import reveal as reveal_projection
 
 
 class InvestigationError(Exception):
@@ -58,6 +69,16 @@ class EvidenceNotDiscoveredError(InvestigationError):
 class InteractionNotAllowedError(InvestigationError):
     """The requested interaction does not match the placement's published
     interaction (-> 409 INTERACTION_NOT_ALLOWED; NO state change)."""
+
+
+# Bootstrap READ availability (DEF-051): the player-safe investigation
+# bootstrap is readable from EVERY Milestone-1 lifecycle state so the reveal
+# flow can resolve candidate names and reloads can restore UI state AFTER the
+# accusation. Gameplay MUTATION endpoints keep the PLAYING-only gate
+# (``_require_playing``). Mirrors REQUIREMENTS 40.6 / Phase7 A vocabulary.
+_BOOTSTRAP_READ_STATES = frozenset(
+    {"CREATED", "PLAYING", "ACCUSED", "REVEALED"}
+)
 
 
 def _iso_utc(epoch: float) -> str:
@@ -100,10 +121,25 @@ class InvestigationService:
         return dict(payload)
 
     def _require_playing(self, playthrough: Any) -> None:
-        """Action-validity guard (REQUIREMENTS 40.7): only a PLAYING
-        playthrough may run investigation actions."""
+        """Action-validity guard (REQUIREMENTS 40.7 / DEF-051): only a PLAYING
+        playthrough may run GAMEPLAY investigation actions (discover /
+        interact / read-record). After accusation (ACCUSED/REVEALED) these
+        answer the existing 409 NOT_PLAYING envelope — gameplay ends at
+        accusation."""
         if playthrough.state != "PLAYING":
             raise InvestigationStateError("playthrough is not currently playable")
+
+    def _require_bootstrap_readable(self, playthrough: Any) -> None:
+        """Bootstrap-READ guard (REQUIREMENTS 40.6 / Phase7 A / DEF-051).
+
+        The investigation bootstrap carries NO truth and no correctness
+        marker, and after accusation it is REQUIRED by the reveal flow
+        (candidate-NAME resolution) and by UI state restoration on reload —
+        so it stays readable from EVERY Milestone-1 lifecycle state. Only a
+        state outside the frozen vocabulary is refused (defensive; the
+        persisted playthrough row is the authority)."""
+        if playthrough.state not in _BOOTSTRAP_READ_STATES:
+            raise InvestigationStateError("playthrough is not in a readable state")
 
     def _now(self) -> float:
         return float(self._clock.now())
@@ -115,12 +151,20 @@ class InvestigationService:
     def get_investigation_bootstrap(self, playthrough: Any) -> dict[str, Any]:
         """200 InvestigationBootstrapResponse for one validated playthrough.
 
+        DEF-051: readable from EVERY lifecycle state ({CREATED, PLAYING,
+        ACCUSED, REVEALED}) — after an accusation the candidate block and the
+        player's own knowledge are the ONLY player-safe sources the reveal
+        view may restore from (name resolution + reload state). The read
+        never mutates PlayerKnowledge (the row is created empty on first
+        access if and only if it does not exist yet) and never touches truth.
+
         Contains ONLY player-observable material: the pin + state, the
         PlayerKnowledge snapshot, the scene (starting location + projected
-        world objects). No coordinates, no evidence content, no hidden fields.
+        world objects) and the phase-7 candidates. No coordinates, no
+        evidence content, no hidden fields.
         """
         payload = self._pinned_payload(playthrough)
-        self._require_playing(playthrough)
+        self._require_bootstrap_readable(playthrough)
         now = self._now()
         self._store.get_or_create_player_knowledge(
             playthrough.playthrough_id,
@@ -147,6 +191,11 @@ class InvestigationService:
                     read=set(snapshot.read),
                 ),
             },
+            # Phase 7 J/K: player-safe accusation candidate universes of the
+            # pinned CaseVersion (alphabetical by id; the winning candidate is
+            # never marked). Projected by the reveal module so the candidate
+            # contract lives in ONE place.
+            "candidates": reveal_projection.candidate_block_of(payload),
         }
 
     # ------------------------------------------------------------------ #

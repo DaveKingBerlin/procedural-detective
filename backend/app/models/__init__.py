@@ -1,4 +1,4 @@
-"""Phase 5/6 persistence model exports.
+"""Phase 5/6/7 persistence model exports.
 
 Importing this package loads every ORM entity onto the shared
 ``app.models.base.Base`` metadata. ``import app.models`` is the documented
@@ -7,6 +7,7 @@ entry point (tests and callers).
 
 from __future__ import annotations
 
+from app.models.accusations import Accusation
 from app.models.base import Base
 from app.models.cases import Case, CaseVersion
 from app.models.credentials import CreatorCredential
@@ -17,6 +18,7 @@ from app.models.published import PublishedVersion
 from app.models.quota import AnonymousQuotaSession
 
 __all__ = [
+    "Accusation",
     "AnonymousQuotaSession",
     "Base",
     "Case",

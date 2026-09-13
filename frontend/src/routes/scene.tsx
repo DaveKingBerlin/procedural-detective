@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { discoverEvidence, getInvestigation, interactObject, readRecord } from "../api/client";
 import { clearPlaythroughCredentials, getPlaythroughId, getPlaythroughToken } from "../api/playthroughToken";
 import type { EvidenceReadResultDTO } from "../api/types";
@@ -37,6 +37,7 @@ type PageStatus =
  * object, cached player-safe DTOs and loading/error state (Phase 6 N).
  */
 export default function ScenePage() {
+  const navigate = useNavigate();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sessionRef = useRef<InvestigationSession | null>(null);
   const [status, setStatus] = useState<PageStatus>(() =>
@@ -222,6 +223,16 @@ export default function ScenePage() {
             {knowledge ? knowledge.readEvidenceIds.length : 0}
           </p>
 
+          <div className="accusation-actions">
+            <button
+              type="button"
+              data-testid="accusation-open"
+              onClick={() => void navigate("/accuse")}
+            >
+              {accusationActionLabel(sessionRef.current?.bootstrapState)}
+            </button>
+          </div>
+
           <div className="scene-objects" data-testid="scene-objects">
             <h3>Objects in this room</h3>
             <ul>
@@ -308,4 +319,11 @@ function hasStoredCredential(): boolean {
   const token = getPlaythroughToken();
   const playthroughId = getPlaythroughId();
   return token !== null && token !== "" && playthroughId !== null && playthroughId !== "";
+}
+
+/** Player-safe label for the accusation entry action (no truth values involved). */
+function accusationActionLabel(state: string | null | undefined): string {
+  if (state === "ACCUSED") return "Your accusation is on file — reveal it";
+  if (state === "REVEALED") return "View the case reveal";
+  return "Make accusation";
 }

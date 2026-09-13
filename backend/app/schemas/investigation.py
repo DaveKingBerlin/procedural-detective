@@ -65,6 +65,44 @@ class InvestigationSceneDTO(BaseModel):
     worldObjects: list[WorldObjectDTO] = Field(default_factory=list)
 
 
+class CandidateSuspectDTO(BaseModel):
+    """One SUSPECT_ELIGIBLE candidate (Phase7 J/K; player-safe: id + PUBLIC
+    name from the pinned published payload — NO canonical designation)."""
+
+    id: str
+    name: str
+
+
+class CandidateMotiveDTO(BaseModel):
+    """One MOTIVE_CANDIDATE candidate (id + public label)."""
+
+    id: str
+    label: str
+
+
+class CandidateWeaponDTO(BaseModel):
+    """One POTENTIAL_WEAPON candidate (id + public assetId + display label)."""
+
+    id: str
+    assetId: str
+    name: str
+
+
+class AccusationCandidatesDTO(BaseModel):
+    """Player-safe accusation candidate universes of the pinned CaseVersion
+    (Phase7 J/K, REQUIREMENTS 31.1 / 41.2 addition).
+
+    Built ONLY from the PUBLISHED universe snapshot + public persons/motives/
+    objects; every list is sorted alphabetically by id. The winning candidate
+    may appear but is NEVER marked or ranked (no positional marking — the
+    frontend must treat all candidates equally).
+    """
+
+    suspects: list[CandidateSuspectDTO] = Field(default_factory=list)
+    motives: list[CandidateMotiveDTO] = Field(default_factory=list)
+    weapons: list[CandidateWeaponDTO] = Field(default_factory=list)
+
+
 class InvestigationBootstrapResponse(BaseModel):
     """GET /api/v1/playthroughs/{playthrough_id}/investigation -> 200."""
 
@@ -74,6 +112,13 @@ class InvestigationBootstrapResponse(BaseModel):
     state: str
     playerKnowledge: PlayerKnowledgeDTO
     scene: InvestigationSceneDTO
+    candidates: AccusationCandidatesDTO = Field(
+        default_factory=AccusationCandidatesDTO,
+        description=(
+            "Phase 7 addition: player-safe accusation candidate universes of "
+            "the pinned CaseVersion (alphabetical, never winner-marked)."
+        ),
+    )
 
 
 class DiscoveryResultDTO(BaseModel):
