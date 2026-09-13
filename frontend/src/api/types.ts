@@ -33,3 +33,90 @@ export interface ErrorEnvelope {
     details: object | null;
   };
 }
+
+/* ======================================================================
+ * Phase 6 — browser investigation contract (frozen, implemented in
+ * parallel by the backend agent). These DTO shapes are the ONLY thing the
+ * client may trust from the investigation endpoints; everything crossing
+ * the trust boundary is re-validated by src/scene/validation.ts.
+ * ==================================================================== */
+
+/** Server-authoritative discovery disposition returned by interact/discover. */
+export type DiscoveryState = "discovered" | "already-discovered";
+
+/** Player-observable knowledge scoped to exactly one playthrough (REQUIREMENTS 36). */
+export interface PlayerKnowledgeDTO {
+  discoveredEvidenceIds: string[];
+  readEvidenceIds: string[];
+  visitedLocationIds: string[];
+}
+
+/** A single interactable world object in the player-safe WorldGraph DTO (REQUIREMENTS 26/27). */
+export interface WorldObjectDTO {
+  objectId: string;
+  assetId: string;
+  assetType: string;
+  subtype: string | null;
+  locationId: string;
+  anchor: string;
+  interaction: string;
+  evidenceId: string | null;
+  discovered: boolean;
+  read: boolean;
+}
+
+/** Current investigation location, as published in the player-safe scene. */
+export interface InvestigationSceneLocationDTO {
+  locationId: string;
+  name: string;
+}
+
+/**
+ * 200 body of GET /api/v1/playthroughs/{playthrough_id}/investigation.
+ *
+ * NOTE: the payload carries NO coordinates — geometry is derived client-side
+ * from (locationId, anchor, assetId) via the anchor/asset registries.
+ */
+export interface InvestigationBootstrapResponse {
+  playthroughId: string;
+  caseId: string;
+  caseVersion: number;
+  state: "PLAYING";
+  playerKnowledge: PlayerKnowledgeDTO;
+  scene: {
+    location: InvestigationSceneLocationDTO;
+    worldObjects: WorldObjectDTO[];
+  };
+}
+
+/** Discovery half of an interaction/discover response. */
+export interface DiscoveryResultDTO {
+  evidenceId: string;
+  kind: string;
+  title: string;
+  interaction: string;
+  state: DiscoveryState;
+}
+
+/** 200 body of POST .../objects/{object_id}/interact. */
+export interface InteractionResultDTO {
+  objectId: string;
+  interaction: string;
+  evidenceId: string | null;
+  discovery: DiscoveryResultDTO | null;
+  result: "interacted";
+}
+
+/**
+ * 200 body of GET .../records/{record_id} — the fully readable,
+ * allowlisted player payload for one discovered evidence record.
+ */
+export interface EvidenceReadResultDTO {
+  evidenceId: string;
+  kind: string;
+  title: string;
+  description: string | null;
+  openedAt: string;
+  readByPlayer: true;
+  content: Record<string, unknown>;
+}

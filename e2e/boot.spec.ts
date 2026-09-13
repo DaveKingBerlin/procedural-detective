@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createPlaythroughViaApi, seedPlaythroughCredentials } from "./helpers";
 
 /**
  * Phase 2 boot smoke — runs with BOTH servers up (backend :8000 migrated,
@@ -8,8 +9,14 @@ import { expect, test } from "@playwright/test";
  *   c) the /scene Babylon scene boots (canvas visible + ready message)
  *   d) an unknown route renders the 404 fallback
  *   e) screenshots are captured as transient evidence
+ *
+ * Phase 6 contract change (authorization): /scene now requires an authorized
+ * playthrough (REQUIREMENTS 40.7 — the page may only receive what the current
+ * player is allowed to know), so the /scene segment seeds a REAL playthrough
+ * credential through the public API first, exactly as the HOME "Start an
+ * investigation" panel would.
  */
-test("boot smoke: title, backend connected, Babylon scene, 404", async ({ page }) => {
+test("boot smoke: title, backend connected, Babylon scene, 404", async ({ page, request }) => {
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   page.on("pageerror", (err) => pageErrors.push(String(err)));
@@ -28,7 +35,9 @@ test("boot smoke: title, backend connected, Babylon scene, 404", async ({ page }
   await expect(message).toHaveText("ok");
   await page.screenshot({ path: "artifacts/screenshots/boot-home.png", fullPage: true });
 
-  // --- (c) Babylon scene boots on /scene ----------------------------------
+  // --- (c) Babylon scene boots on /scene (Phase 6: authorized only) --------
+  const cred = await createPlaythroughViaApi(request);
+  await seedPlaythroughCredentials(page, cred);
   await page.goto("/scene", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("scene-canvas")).toBeVisible();
   await expect(page.getByTestId("scene-ready")).toBeVisible({ timeout: 30_000 });

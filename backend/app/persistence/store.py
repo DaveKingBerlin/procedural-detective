@@ -29,10 +29,13 @@ Design notes:
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import threading
+import time
 from contextlib import contextmanager
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from sqlalchemy import event, select, text
 from sqlalchemy.engine import Engine, create_engine
@@ -42,6 +45,7 @@ from sqlalchemy.orm import Session
 from app.models.cases import Case, CaseVersion
 from app.models.credentials import CreatorCredential
 from app.models.generation import GenerationAttempt
+from app.models.knowledge import PlayerKnowledge
 from app.models.playthroughs import Playthrough
 from app.models.published import PublishedVersion
 from app.models.quota import AnonymousQuotaSession
@@ -97,6 +101,61 @@ class VersionNotFoundError(StoreError):
 
 class VersionNotPublishedError(StoreError):
     """The exact version exists but is not PUBLISHED (-> 409)."""
+
+
+class PlayerKnowledgeError(StoreError):
+    """PlayerKnowledge constraint/integrity failure (never SQLAlchemy errors).
+
+    Raised after a rollback when the knowledge row cannot be created or
+    mutated: unknown playthrough, a (case_id, case_version) mismatch against
+    the pinned playthrough row, or any database constraint failure. Callers
+    translate it into a clean sanitized API error.
+    """
+
+
+def _knowledge_json_load_set(raw: str | None) -> set[str]:
+    """Parse a JSON-array text column into a set of strings (never raises)."""
+    try:
+        items = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        items = []
+    if not isinstance(items, list):
+        items = []
+    return {str(item) for item in items}
+
+
+def _knowledge_json_dump_set(values: Any) -> str:
+    """Canonical deterministic JSON array (sorted) for a set of strings."""
+    return json.dumps(sorted(str(v) for v in values), separators=(",", ":"))
+
+
+def _knowledge_json_load_map(raw: str | None) -> dict[str, Any]:
+    """Parse a JSON-object text column into a plain dict (never raises)."""
+    try:
+        obj = json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        obj = {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _knowledge_json_dump_map(obj: Mapping[str, Any]) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
+@dataclasses.dataclass(frozen=True)
+class PlayerKnowledgeSnapshot:
+    """Frozen sorted snapshot of ONE playthrough's knowledge row.
+
+    ``opened_at`` maps evidence_id -> epoch float of the FIRST read (stable
+    across repeat reads; drives ``openedAt`` in the read DTO). ``updated_at``
+    is the row's last structural change epoch.
+    """
+
+    discovered: tuple[str, ...] = ()
+    read: tuple[str, ...] = ()
+    visited: tuple[str, ...] = ()
+    opened_at: Mapping[str, float] = dataclasses.field(default_factory=dict)
+    updated_at: float = 0.0
 
 
 def create_store_engine(url: str) -> Engine:
@@ -877,6 +936,210 @@ class Store:
                 if row is not None
                 else None
             )
+
+    # ------------------------------------------------------------------ #
+    # PlayerKnowledge (Phase 6 A) — the ONLY state of one playthrough
+    # ------------------------------------------------------------------ #
+
+    def get_or_create_player_knowledge(
+        self,
+        playthrough_id: str,
+        case_id: str,
+        case_version: int,
+        *,
+        at: float | None = None,
+    ) -> PlayerKnowledge:
+        """Return the playthrough's knowledge row, creating it on first access
+        with EMPTY sets.
+
+        The ``(case_id, case_version)`` values are taken from the PINNED
+        ``playthroughs`` row ONLY: when the caller's tuple does not match the
+        row, or the playthrough row does not exist, the transaction rolls back
+        and ``PlayerKnowledgeError`` is raised (a knowledge row can never be
+        bound to a different case/version than its playthrough).
+        """
+        now = float(at) if at is not None else time.time()
+        with self.transaction() as session:
+            row = session.get(PlayerKnowledge, playthrough_id)
+            if row is None:
+                pt_row = session.get(Playthrough, playthrough_id)
+                if pt_row is None:
+                    raise PlayerKnowledgeError(
+                        "unknown playthrough for player knowledge"
+                    )
+                if pt_row.case_id != case_id or pt_row.case_version != int(
+                    case_version
+                ):
+                    raise PlayerKnowledgeError(
+                        "player knowledge case/version does not match the "
+                        "pinned playthrough"
+                    )
+                row = PlayerKnowledge(
+                    playthrough_id=playthrough_id,
+                    case_id=pt_row.case_id,
+                    case_version=pt_row.case_version,
+                    discovered_json="[]",
+                    read_json="[]",
+                    visited_json="[]",
+                    notes_json="{}",
+                    updated_at=now,
+                )
+                session.add(row)
+                try:
+                    session.flush()
+                except IntegrityError:
+                    raise PlayerKnowledgeError(
+                        "could not create player knowledge row"
+                    ) from None
+            else:
+                # Defense: an existing row must stay bound to its playthrough.
+                pt_row = session.get(Playthrough, playthrough_id)
+                if pt_row is None or (
+                    pt_row.case_id != row.case_id
+                    or pt_row.case_version != row.case_version
+                ):
+                    raise PlayerKnowledgeError(
+                        "player knowledge row is inconsistent with its playthrough"
+                    )
+            return _copy_player_knowledge(row)
+
+    def mark_discovered(
+        self,
+        playthrough_id: str,
+        evidence_id: str,
+        location_id: str | None = None,
+        *,
+        at: float | None = None,
+    ) -> None:
+        """Idempotent set-semantics marker: add ``evidence_id`` to the
+        discovered set and (when given) ``location_id`` to the visited set.
+
+        A missing knowledge row raises ``PlayerKnowledgeError`` (callers use
+        ``get_or_create_player_knowledge`` first). Membership is a SET: a
+        duplicate marker changes nothing and never creates a duplicate entry.
+        """
+        now = float(at) if at is not None else time.time()
+        with self.transaction() as session:
+            row = session.get(PlayerKnowledge, playthrough_id)
+            if row is None:
+                raise PlayerKnowledgeError(
+                    "cannot mark discovery without a player knowledge row"
+                )
+            discovered = _knowledge_json_load_set(row.discovered_json)
+            visited = _knowledge_json_load_set(row.visited_json)
+            changed = False
+            if evidence_id not in discovered:
+                discovered.add(evidence_id)
+                row.discovered_json = _knowledge_json_dump_set(discovered)
+                changed = True
+            if location_id is not None and location_id not in visited:
+                visited.add(location_id)
+                row.visited_json = _knowledge_json_dump_set(visited)
+                changed = True
+            if changed:
+                row.updated_at = now
+
+    def mark_visited(
+        self,
+        playthrough_id: str,
+        location_id: str,
+        *,
+        at: float | None = None,
+    ) -> None:
+        """Idempotent marker: add ``location_id`` to the visited set."""
+        now = float(at) if at is not None else time.time()
+        with self.transaction() as session:
+            row = session.get(PlayerKnowledge, playthrough_id)
+            if row is None:
+                raise PlayerKnowledgeError(
+                    "cannot mark a visit without a player knowledge row"
+                )
+            visited = _knowledge_json_load_set(row.visited_json)
+            if location_id not in visited:
+                visited.add(location_id)
+                row.visited_json = _knowledge_json_dump_set(visited)
+                row.updated_at = now
+
+    def mark_read(
+        self,
+        playthrough_id: str,
+        evidence_id: str,
+        *,
+        at: float | None = None,
+        opened_at: float | None = None,
+    ) -> None:
+        """Idempotent marker: add ``evidence_id`` to the read set.
+
+        The FIRST read records ``opened_at`` (an epoch float defaulting to the
+        current wall time when not given) in the row's ``notes_json`` under
+        ``opened_at[evidence_id]``; repeat reads never change it, so repeat
+        reads return byte-identical read DTOs.
+        """
+        now = float(at) if at is not None else time.time()
+        opened = now if opened_at is None else float(opened_at)
+        with self.transaction() as session:
+            row = session.get(PlayerKnowledge, playthrough_id)
+            if row is None:
+                raise PlayerKnowledgeError(
+                    "cannot mark a read without a player knowledge row"
+                )
+            read_set = _knowledge_json_load_set(row.read_json)
+            changed = False
+            if evidence_id not in read_set:
+                read_set.add(evidence_id)
+                row.read_json = _knowledge_json_dump_set(read_set)
+                changed = True
+                # Record the STABLE first-open time before persisting.
+                notes = _knowledge_json_load_map(row.notes_json)
+                opened_map = notes.get("opened_at")
+                if not isinstance(opened_map, dict):
+                    opened_map = {}
+                    notes["opened_at"] = opened_map
+                if evidence_id not in opened_map:
+                    opened_map[evidence_id] = float(opened)
+                    changed = True
+                row.notes_json = _knowledge_json_dump_map(notes)
+            if changed:
+                row.updated_at = now
+
+    def snapshot_player_knowledge(self, playthrough_id: str) -> PlayerKnowledgeSnapshot:
+        """Frozen sorted snapshot of the playthrough's knowledge row.
+
+        Returns an empty snapshot when no row exists yet (a fresh playthrough
+        has empty PlayerKnowledge by definition).
+        """
+        with self._read_session() as session:
+            row = session.get(PlayerKnowledge, playthrough_id)
+            if row is None:
+                return PlayerKnowledgeSnapshot()
+            notes = _knowledge_json_load_map(row.notes_json)
+            opened_map = notes.get("opened_at")
+            opened: dict[str, float] = {}
+            if isinstance(opened_map, dict):
+                for key, value in opened_map.items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        opened[str(key)] = float(value)
+            return PlayerKnowledgeSnapshot(
+                discovered=tuple(sorted(_knowledge_json_load_set(row.discovered_json))),
+                read=tuple(sorted(_knowledge_json_load_set(row.read_json))),
+                visited=tuple(sorted(_knowledge_json_load_set(row.visited_json))),
+                opened_at=opened,
+                updated_at=row.updated_at,
+            )
+
+
+def _copy_player_knowledge(row: PlayerKnowledge) -> PlayerKnowledge:
+    """Detached plain copy of an ORM knowledge row (never the ORM instance)."""
+    return PlayerKnowledge(
+        playthrough_id=row.playthrough_id,
+        case_id=row.case_id,
+        case_version=row.case_version,
+        discovered_json=row.discovered_json,
+        read_json=row.read_json,
+        visited_json=row.visited_json,
+        notes_json=row.notes_json,
+        updated_at=row.updated_at,
+    )
 
 
 # Convenience aliases used by the auth layer and services.

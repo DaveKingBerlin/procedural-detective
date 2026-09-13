@@ -131,3 +131,26 @@ def test_solver_survivors_match_golden_truth():
     assert proof.who.winner == truth.crime.murderer_id
     assert proof.why.winner == truth.crime.motive_id
     assert proof.weapon.winner == truth.crime.weapon_id
+
+
+def test_phase6_golden_scene_present_in_roundtrip_draft():
+    """The Milestone-1 investigation scene survives the round trip: >= 6
+    placements with the knife + laptop + victim body, the laptop links the
+    email record, and the email typed presentation survives strict parsing."""
+    draft = parse_full_draft(GOLDEN_FULL_DRAFT)
+    assert draft is not None
+    placements = draft.world_graph.placements
+    assert len(placements) >= 6
+    by_object = {p.object_id: p for p in placements}
+    assert by_object["kitchen_knife"].evidence_id == "forensic_knife_match_01"
+    assert by_object["apartment_laptop"].evidence_id == "email_thomas_01"
+    assert by_object["apartment_laptop"].interaction == "read"
+    assert by_object["victim_body_placeholder"].evidence_id is None
+    email = next(f for f in draft.evidence if f.id == "email_thomas_01")
+    assert email.kind == "email"
+    presentation = dict(email.presentation)
+    assert presentation["fromPersonId"] == "thomas_reed"
+    assert presentation["toPersonIds"] == ["sarah_miller"]
+    assert presentation["subject"]
+    assert presentation["body"]
+    assert presentation["timestamp"] == "2026-09-11T21:04:00+02:00"

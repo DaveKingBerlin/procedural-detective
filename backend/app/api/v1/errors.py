@@ -35,6 +35,13 @@ from app.services.generation import (
     PromptValidationError,
     UnknownCaseError,
 )
+from app.services.investigation import (
+    EvidenceNotDiscoveredError,
+    InteractionNotAllowedError,
+    InvestigationError,
+    InvestigationNotFoundError,
+    InvestigationStateError,
+)
 
 
 def http_error(status_code: int, code: str, message: str) -> HTTPException:
@@ -66,6 +73,24 @@ def map_service_error(exc: Exception) -> HTTPException:
         return http_error(404, "NOT_FOUND", "Not found")
     if isinstance(exc, (VersionAllocationError, UnknownCaseError)):
         return http_error(404, "NOT_FOUND", "Not found")
+    if isinstance(exc, InvestigationNotFoundError):
+        return http_error(404, "NOT_FOUND", "Not found")
+    if isinstance(exc, EvidenceNotDiscoveredError):
+        return http_error(
+            403,
+            "EVIDENCE_NOT_DISCOVERED",
+            "This record has not been discovered yet",
+        )
+    if isinstance(exc, InteractionNotAllowedError):
+        return http_error(
+            409,
+            "INTERACTION_NOT_ALLOWED",
+            "That interaction is not allowed for this object",
+        )
+    if isinstance(exc, InvestigationStateError):
+        return http_error(409, "NOT_PLAYING", "Playthrough is not currently playable")
+    if isinstance(exc, InvestigationError):
+        return http_error(500, "INTERNAL_ERROR", "Internal server error")
     if isinstance(exc, (StoreError, GenerationServiceError)):
         # Sanitized generic 500: never leaks the underlying message.
         return http_error(500, "INTERNAL_ERROR", "Internal server error")

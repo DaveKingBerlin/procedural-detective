@@ -180,6 +180,262 @@ a {
   color: var(--accent);
 }
 
+/* ---------------- Phase 6 investigation UI ---------------- */
+
+.token-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  background: var(--panel);
+  margin: 1rem 0;
+}
+
+.token-panel h3 {
+  margin-top: 0;
+}
+
+.token-panel-intro {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.token-form {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+}
+
+.token-form label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.token-form input {
+  background: #0d1016;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+.token-form button {
+  justify-self: start;
+}
+
+.token-hint {
+  color: var(--warn);
+  font-size: 0.9rem;
+}
+
+.token-hint--ok {
+  color: var(--ok);
+}
+
+.investigation-loading {
+  color: var(--muted);
+}
+
+.investigation-error {
+  border: 1px solid var(--err);
+  border-radius: 10px;
+  background: rgba(248, 113, 113, 0.08);
+  padding: 1rem 1.25rem;
+}
+
+.investigation-error-message {
+  color: var(--err);
+  font-weight: 600;
+}
+
+.investigation-error button {
+  margin-top: 0.6rem;
+}
+
+.investigation-no-token {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 1rem 1.25rem;
+}
+
+.controls-hint {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.knowledge-summary {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.scene-objects {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.9rem 1.1rem;
+  margin: 0.6rem 0;
+}
+
+.scene-objects h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+}
+
+.scene-objects ul {
+  list-style: none;
+  padding-left: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.scene-objects li button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.35rem 0.65rem;
+  cursor: pointer;
+}
+
+.scene-objects li button:hover,
+.scene-objects li button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.scene-objects li:has(button) {
+  display: inline-block;
+}
+
+.object-discovered {
+  color: var(--ok);
+  font-size: 0.85rem;
+}
+
+.assets-notice {
+  color: var(--warn);
+  font-size: 0.9rem;
+}
+
+.interaction-error {
+  color: var(--err);
+  font-weight: 600;
+}
+
+.evidence-panel {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 40;
+  width: min(24rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  padding: 1rem 1.25rem;
+}
+
+.evidence-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.evidence-panel-title {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.evidence-description {
+  color: var(--muted);
+  margin-top: 0.4rem;
+}
+
+.evidence-content {
+  overflow: auto;
+}
+
+.evidence-row {
+  margin: 0.45rem 0;
+  overflow-wrap: anywhere;
+}
+
+.evidence-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+  background: #0d1016;
+}
+
+.evidence-table th,
+.evidence-table td {
+  border: 1px solid var(--border);
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.evidence-list {
+  margin: 0.45rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.evidence-panel-footer {
+  margin-top: 0.9rem;
+}
+
+.evidence-close {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.35rem 0.85rem;
+  cursor: pointer;
+}
+
+.evidence-close:focus-visible,
+.discovery-toast-dismiss:focus-visible,
+.token-form button:focus-visible,
+.investigation-error button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.discovery-toast {
+  position: fixed;
+  bottom: 1.25rem;
+  left: 1.25rem;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--ok);
+  border-radius: 10px;
+  padding: 0.6rem 1rem;
+  color: var(--text);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+.discovery-toast-dismiss {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+button {
+  font: inherit;
+}
+
 @media (max-width: 640px) {
   .app-header {
     gap: 0.6rem;

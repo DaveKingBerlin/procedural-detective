@@ -72,7 +72,7 @@ export function createBabylonScene(canvas: HTMLCanvasElement, manifest: ScenePri
   }
 }
 
-function instantiatePrimitive(scene: Scene, primitive: ScenePrimitive): void {
+export function instantiatePrimitive(scene: Scene, primitive: ScenePrimitive): void {
   const position = new Vector3(primitive.position.x, primitive.position.y, primitive.position.z);
   const color = primitive.color ?? DEFAULT_COLORS[primitive.kind];
 

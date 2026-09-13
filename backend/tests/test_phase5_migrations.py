@@ -1,10 +1,11 @@
-"""Phase 5 — migration behavior (M28, M29, Phase5 L).
+"""Phase 5/6 — migration behavior (M28, M29, Phase5 L + Phase6 A).
 
-- empty database -> head (alembic_version == 0002)
+- empty database -> head (alembic_version == 0003)
 - Phase 2 baseline (0001) -> head succeeds
 - constraint/index/trigger inventory exists (PKs, unique constraints,
-  token_verifier indexes, published_versions immutability triggers)
-- downgrade drops every Phase 5 table (registered downgrade policy)
+  token_verifier indexes, published_versions immutability triggers,
+  player_knowledge FK + (case_id, case_version) index)
+- downgrade drops every Phase 5/6 table (registered downgrade policy)
 - application readiness confirms the expected migration head
 """
 
@@ -20,7 +21,7 @@ from sqlalchemy import create_engine, inspect, text
 from app.db.session import migration_head
 from conftest import downgrade_db, upgrade_db
 
-EXPECTED_HEAD = "0002"
+EXPECTED_HEAD = "0003"
 
 TABLES = (
     "anonymous_quota_sessions",
@@ -30,6 +31,7 @@ TABLES = (
     "generation_attempts",
     "published_versions",
     "playthroughs",
+    "player_knowledge",
 )
 
 
@@ -121,6 +123,21 @@ def test_constraints_and_indexes_exist(database_url):
     pt_uk = {tuple(u.get("column_names", [])) for u in insp.get_unique_constraints("playthroughs")}
     assert ("case_id", "case_version") not in pt_uk
 
+    # PlayerKnowledge: playthrough FK + (case_id, case_version) index.
+    pk_names = _table_names(engine)
+    assert "player_knowledge" in pk_names
+    pk_pk = insp.get_pk_constraint("player_knowledge")
+    assert set(pk_pk["constrained_columns"]) == {"playthrough_id"}
+    pk_fks = insp.get_foreign_keys("player_knowledge")
+    assert any(
+        fk.get("referred_table") == "playthroughs"
+        and fk.get("constrained_columns") == ["playthrough_id"]
+        and fk.get("referred_columns") == ["playthrough_id"]
+        for fk in pk_fks
+    )
+    pk_indexes = {tuple(ix["column_names"]) for ix in insp.get_indexes("player_knowledge")}
+    assert ("case_id", "case_version") in pk_indexes
+
     # Immutability triggers on published_versions.
     with engine.connect() as conn:
         triggers = [
@@ -158,7 +175,7 @@ def test_downgrade_drops_phase5_tables(database_url):
 
 
 def test_29_readiness_confirms_head_after_upgrade(migrated_client):
-    """M29: readiness reports migrations ok once the DB is at head (0002)."""
+    """M29: readiness reports migrations ok once the DB is at head (0003)."""
     res = migrated_client.get("/api/v1/readiness")
     assert res.status_code == 200
     assert res.json() == {"status": "ready", "database": "ok", "migrations": "ok"}

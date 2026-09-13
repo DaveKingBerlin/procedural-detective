@@ -1,4 +1,4 @@
-"""Phase 5 persistence model exports.
+"""Phase 5/6 persistence model exports.
 
 Importing this package loads every ORM entity onto the shared
 ``app.models.base.Base`` metadata. ``import app.models`` is the documented
@@ -11,6 +11,7 @@ from app.models.base import Base
 from app.models.cases import Case, CaseVersion
 from app.models.credentials import CreatorCredential
 from app.models.generation import GenerationAttempt
+from app.models.knowledge import PlayerKnowledge
 from app.models.playthroughs import Playthrough
 from app.models.published import PublishedVersion
 from app.models.quota import AnonymousQuotaSession
@@ -22,6 +23,7 @@ __all__ = [
     "CaseVersion",
     "CreatorCredential",
     "GenerationAttempt",
+    "PlayerKnowledge",
     "Playthrough",
     "PublishedVersion",
 ]

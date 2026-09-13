@@ -1,0 +1,15 @@
+﻿{
+  "finding": "Duplicate world-graph placements for one objectId are all projected into the investigation bootstrap as SEPARATE WorldObjectDTOs with identical objectId.",
+  "session": "phase-6 gate",
+  "probe": "temp harness (Temp/opencode/phase6_adv) — API probes only, no product changes",
+  "repro": {
+    "step1": "Publish a CaseVersion whose draft.world_graph.placements contains TWO entries with the same object_id (e.g. apartment_lamp), e.g. anchors shelf_01/inspect (original) + kitchen_counter/read (injected).",
+    "step2": "GET /api/v1/playthroughs/{pt}/investigation with the playthrough token.",
+    "observed": "bootstrap scene.worldObjects contains BOTH entries with objectId=apartment_lamp: [{anchor:shelf_01, interaction:inspect}, {anchor:kitchen_counter, interaction:read}].",
+    "server_dispatch": "POST .../objects/apartment_lamp/interact resolves placement_for_object sorting by (object_id, anchor): kitchen_counter wins (k<s). interact=read -> 200, interact=inspect -> 409 INTERACTION_NOT_ALLOWED.",
+    "frontend_conflict": "scene route model.worldObjects.find(objectId) picks the FIRST (shelf_01/inspect) and the client sends interaction=inspect, which the server answers 409 for the duplicated lamp -> the object appears interactable but every click errors.",
+    "generation_guard_gap": "backend/app/generation/safety.py validate_world_graph (lines 359-392) has NO uniqueness check across placements for object_id; backend/app/services/publication.py project_world_objects (lines 571-623) emits one DTO per placement with no per-objectId deduplication."
+  },
+  "impact": "Confusing/broken scene in the degenerate malformed-worldgraph case (Phase6 K); no truth leak; no state bypass (server dispatch stays deterministic). Reachable only via a published payload that violates placement uniqueness.",
+  "suggested_severity": "LOW"
+}

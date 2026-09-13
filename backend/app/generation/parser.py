@@ -113,7 +113,37 @@ _PROPOSITION_KEYS = frozenset(
     }
 )
 _SOURCE_REF_KEYS = frozenset({"kind", "sourceId"})
-_PRESENTATION_KEYS = frozenset({"title", "description"})
+# Evidence presentation allowlist. The base contract is {title, description};
+# Phase 6 adds the documented TYPED PUBLIC presentation fields of the
+# player-read contract (REQUIREMENTS 40.9 / Phase6 H): the read DTO content
+# allowlist per kind (object/email/financial/cctv/testimonial) is derived ONLY
+# from these fields, so they must survive strict parsing. Every value is still
+# bounded (MAX_SINGLE_TEXT_FIELD_CHARS) and content-safety scanned; nested
+# rows/events maps are bounded per-string by the same length rule.
+_PRESENTATION_KEYS = frozenset(
+    {
+        "title",
+        "description",
+        # "object" kind
+        "subtype",
+        "locationId",
+        # "email" kind
+        "fromPersonId",
+        "toPersonIds",
+        "subject",
+        "body",
+        "timestamp",
+        # "financial" kind
+        "rows",
+        "suspicious",
+        # "cctv"/"cctv_observation"/"view_record" kind
+        "events",
+        "cameraId",
+        # "testimonial"/"witness_statement"/"statement" kind
+        "speakerName",
+        "statement",
+    }
+)
 _WORLD_GRAPH_TOP = frozenset({"worldGraph"})
 _WORLD_GRAPH_KEYS = frozenset({"locations", "placements"})
 _WG_LOCATION_KEYS = frozenset({"locationId", "template", "rooms"})
@@ -718,6 +748,10 @@ def _validate_evidence(item: Any, where: str) -> tuple[EvidenceSpec | None, list
     else:
         presentation = item["presentation"]
         issues += _check_keys(presentation, _PRESENTATION_KEYS, f"{where}.presentation")
+        # Every top-level presentation string (incl. the Phase 6 typed public
+        # fields such as body/statement/subject) is length-bounded per
+        # REQUIREMENTS 32.8 (MAX_SINGLE_TEXT_FIELD_CHARS).
+        issues += _walk_mapping_string_lengths(presentation, f"{where}.presentation")
         title, more = _str_field(presentation, "title", f"{where}.presentation")
         issues += more
         description, more = _str_field(

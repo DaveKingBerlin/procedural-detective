@@ -228,6 +228,10 @@ class AssetRegistry:
             "PROP_BOTTLE_01",
             "CAMERA_HALL_01",
             "DOOR_APARTMENT_01",
+            # Phase 6 Milestone-1 scene assets (additive; REQUIREMENTS 25 / 26,
+            # Phase6 E): apartment lamp + victim/body placeholder.
+            "PROP_LAMP_01",
+            "PROP_BODY_PLACEHOLDER_01",
         }
     )
 
@@ -362,11 +366,25 @@ def validate_world_graph(
     ANCHOR_ALLOWLIST, an interaction from INTERACTION_ALLOWLIST and (when
     present) a known evidenceId. Arbitrary URLs/paths/data-loading anywhere are
     rejected by the content-safety scan over the whole graph.
+
+    DEF-050: an objectId may be placed AT MOST ONCE — a duplicate placement
+    would make the same world object render twice (and let a player's valid
+    interaction on one placement answer 409 against the other). Every
+    duplicate is reported deterministically in placement order, naming the
+    FIRST occurrence it duplicates.
     """
     issues: list[str] = []
     wg_locations = {loc.location_id for loc in wg.locations}
+    seen_object_ids: dict[str, int] = {}
     for index, placement in enumerate(wg.placements):
         where = f"placements[{index}]"
+        if placement.object_id in seen_object_ids:
+            issues.append(
+                f"{where}: duplicate objectId {placement.object_id!r} "
+                f"(first seen at placements[{seen_object_ids[placement.object_id]}])"
+            )
+        else:
+            seen_object_ids[placement.object_id] = index
         if placement.object_id not in object_ids:
             issues.append(f"{where}: unknown objectId {placement.object_id!r}")
         issues.extend(validate_asset_reference(placement.asset_id))

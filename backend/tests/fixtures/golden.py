@@ -23,7 +23,9 @@ from app.domain.evidence import (
     MOTIVE_LINKED_TO_PERSON,
     NOISE_HEARD_AT,
     OBJECT_CONTAINS_FINGERPRINT,
+    OTHER,
     PERSON_OBSERVED_AT_LOCATION,
+    WITNESS_CLAIMS,
     EvidenceFact,
     Reliability,
     SourceRef,
@@ -144,6 +146,39 @@ OBJECTS: tuple[PublicObject, ...] = (
         asset_id="PROP_VASE_01",
         public_affordances=frozenset({"INSPECTABLE"}),
         subtype=None,
+    ),
+    # -- Phase 6 investigation scene (Milestone-1 golden scene assets) --------
+    # Shell objects + evidence-laden objects. Only INSPECTABLE: they NEVER
+    # enter the weapon universe, so the solver result is unchanged.
+    PublicObject(
+        object_id="apartment_laptop",
+        asset_id="PROP_LAPTOP_01",
+        public_affordances=frozenset({"INSPECTABLE"}),
+        subtype="electronics",
+    ),
+    PublicObject(
+        object_id="apartment_table",
+        asset_id="PROP_TABLE_01",
+        public_affordances=frozenset({"INSPECTABLE"}),
+        subtype="furniture",
+    ),
+    PublicObject(
+        object_id="apartment_door",
+        asset_id="DOOR_APARTMENT_01",
+        public_affordances=frozenset({"INSPECTABLE"}),
+        subtype="door",
+    ),
+    PublicObject(
+        object_id="apartment_lamp",
+        asset_id="PROP_LAMP_01",
+        public_affordances=frozenset({"INSPECTABLE"}),
+        subtype="light",
+    ),
+    PublicObject(
+        object_id="victim_body_placeholder",
+        asset_id="PROP_BODY_PLACEHOLDER_01",
+        public_affordances=frozenset({"INSPECTABLE"}),
+        subtype="victim_body",
     ),
 )
 
@@ -386,7 +421,75 @@ def golden_evidence() -> list[EvidenceFact]:
             reliability=Reliability.HIGH,
             title="Scissors do not match the wound",
         ),
+        # -- Phase 6 scene evidence facts --------------------------------------
+        # Solver-neutral by construction: the propositions below (OTHER /
+        # WITNESS_CLAIMS) are NOT consumed by any Phase 3 deduction rule, so
+        # the golden solver proof and all_true result are unchanged. The
+        # presentation carries ONLY public typed fields (the player-read
+        # allowlist contract).
+        golden_email_fact(),
+        golden_witness_statement_fact(),
     ]
+
+
+def _email_presentation() -> dict[str, Any]:
+    """Public typed presentation of the golden email (read contract keys)."""
+    return {
+        "title": "Re: the missing funds",
+        "description": "A short email Thomas sent the evening before the murder.",
+        "fromPersonId": "thomas_reed",
+        "toPersonIds": ["sarah_miller"],
+        "subject": "We need to talk tonight",
+        "body": (
+            "Sarah, I reviewed the accounts again. I think we need to talk "
+            "tonight before the board meeting, in person. Please do not "
+            "involve the auditors until then. -Thomas"
+        ),
+        "timestamp": "2026-09-11T21:04:00+02:00",
+    }
+
+
+def _witness_statement_presentation() -> dict[str, Any]:
+    """Public typed presentation of the golden witness statement."""
+    return {
+        "title": "Emily Reed's statement",
+        "description": "Neighbour Emily Reed's account of the evening.",
+        "speakerName": "Emily Reed",
+        "statement": (
+            "I heard shouting from the apartment around 22:10 and saw Thomas "
+            "leave the kitchen around 22:20."
+        ),
+    }
+
+
+def golden_email_fact() -> EvidenceFact:
+    """The golden email evidence fact (with its full typed presentation)."""
+    return EvidenceFact(
+        id="email_thomas_01",
+        kind="email",
+        propositions=(TypedProposition(type=OTHER),),
+        source_ref=SourceRef(kind="record", source_id="record_email_thomas_01"),
+        reliability=Reliability.HIGH,
+        presentation=_email_presentation(),
+        discoverable=True,
+    )
+
+
+def golden_witness_statement_fact() -> EvidenceFact:
+    """The golden witness-statement evidence fact (typed presentation)."""
+    return EvidenceFact(
+        id="witness_statement_emily_01",
+        kind="witness_statement",
+        propositions=(
+            TypedProposition(type=WITNESS_CLAIMS, person_id="emily_reed"),
+        ),
+        source_ref=SourceRef(
+            kind="record", source_id="record_witness_statement_emily_01"
+        ),
+        reliability=Reliability.MEDIUM,
+        presentation=_witness_statement_presentation(),
+        discoverable=True,
+    )
 
 
 # -- CaseTruth variants (hidden; used ONLY by truth-aware validation/tests) --
@@ -461,6 +564,8 @@ __all__: list[str] = [
     "SCENE",
     "golden_public",
     "golden_evidence",
+    "golden_email_fact",
+    "golden_witness_statement_fact",
     "truth_variant_a",
     "truth_variant_b",
 ]
