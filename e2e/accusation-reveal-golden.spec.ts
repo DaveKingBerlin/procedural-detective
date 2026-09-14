@@ -188,7 +188,8 @@ test("golden accusation→reveal: full Phase 7 M flow (knife→laptop→email→
   await page.goto("/scene", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("scene-canvas")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("scene-ready")).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId("knowledge-summary")).toContainText("Evidence discovered: 0");
+  // Phase 8 F scene: objective text replaces the removed knowledge-summary.
+  await expect(page.getByTestId("objective-text")).toContainText("Find evidence, then accuse someone.");
 
   // Step 5: discover the knife.
   const knife = page.getByTestId("object-kitchen_knife");

@@ -41,6 +41,12 @@ packages = [
     "app.validation",
 ]
 
+# The deterministic dev-mode case drives GENERATION_PROVIDER=fake (demo mode).
+# It must ship IN the installed wheel so the container (pip install ./backend)
+# can run offline without the source tree.
+[tool.setuptools.package-data]
+"app.services" = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

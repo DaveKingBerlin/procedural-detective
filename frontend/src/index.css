@@ -262,6 +262,20 @@ a {
 .controls-hint {
   color: var(--muted);
   font-size: 0.92rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.controls-hint-dismiss {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.15rem 0.5rem;
 }
 
 .knowledge-summary {
@@ -701,5 +715,450 @@ button {
 
   .backend-status {
     margin-left: 0;
+  }
+}
+
+/* ======================================================================
+ * Phase 8 — landing, prompt-to-case, generation progress, gameplay
+ * clarity and reveal presentation (browser demo polish).
+ * ==================================================================== */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ------------------------------ landing ------------------------------ */
+
+.landing-title {
+  font-size: 2rem;
+  letter-spacing: 0.02em;
+  margin: 0 0 0.25rem;
+}
+
+.landing-tagline {
+  font-size: 1.15rem;
+  color: var(--text);
+  margin: 0.25rem 0 1.25rem;
+  max-width: 38rem;
+}
+
+.landing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin: 0.25rem 0 1.5rem;
+}
+
+.landing-button {
+  border: 1px solid var(--accent);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.7rem 1.4rem;
+  font-size: 1.02rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.landing-button--primary {
+  background: var(--accent);
+  color: #1a1608;
+  border-color: transparent;
+}
+
+.landing-button:hover:not(:active),
+.landing-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+
+.landing-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem 1.1rem;
+  margin: 0.9rem 0;
+}
+
+.landing-panel h3 {
+  margin: 0 0 0.55rem;
+  font-size: 1.02rem;
+}
+
+.landing-bullets {
+  margin: 0;
+  padding-left: 1.15rem;
+}
+
+.landing-bullets li {
+  margin: 0.3rem 0;
+}
+
+.landing-github {
+  margin: 1.1rem 0 0.4rem;
+}
+
+.landing-status {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  margin: 0.9rem 0;
+}
+
+.landing-status h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+/* --------------------------- prompt screen --------------------------- */
+
+.new-case-intro {
+  color: var(--muted);
+  margin: 0.4rem 0 1rem;
+}
+
+.new-case-form {
+  display: grid;
+  gap: 0.7rem;
+  max-width: 46rem;
+}
+
+.new-case-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.prompt-input {
+  background: #0d1016;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.7rem 0.85rem;
+  font: inherit;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.prompt-char-count {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.new-case-form select {
+  background: #0d1016;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  max-width: 14rem;
+}
+
+.new-case-error {
+  color: var(--err);
+  margin: 0;
+}
+
+.new-case-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: center;
+}
+
+.new-case-submit {
+  background: var(--accent);
+  color: #1a1608;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 0.65rem 1.3rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.new-case-secondary {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.65rem 1.3rem;
+  cursor: pointer;
+}
+
+.new-case-submit:focus-visible,
+.new-case-secondary:focus-visible,
+.new-case-demo a:focus-visible,
+.prompt-input:focus-visible,
+.new-case-form select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.new-case-demo {
+  margin: 1.1rem 0 0;
+}
+
+/* ------------------------ generation progress ------------------------ */
+
+.generation-state {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.1rem 1.3rem;
+  max-width: 46rem;
+}
+
+.generation-stage-label {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin: 0 0 0.9rem;
+  color: var(--text);
+}
+
+.generation-progress-track {
+  height: 0.9rem;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+  margin: 0 0 0.7rem;
+}
+
+.generation-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #f3d38b);
+  transition: width 240ms ease-out;
+}
+
+.generation-progress-note {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.generation-state--done {
+  border-color: var(--ok);
+}
+
+.generation-done {
+  font-size: 1.05rem;
+  margin: 0 0 0.9rem;
+}
+
+.generation-enter {
+  background: var(--accent);
+  color: #1a1608;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 0.7rem 1.4rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.generation-state--error {
+  border-color: var(--err);
+}
+
+.generation-error-message {
+  color: var(--err);
+  font-weight: 600;
+  margin: 0 0 0.9rem;
+}
+
+.generation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: center;
+}
+
+.generation-actions button,
+.generation-actions a {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.55rem 1.15rem;
+  cursor: pointer;
+  text-decoration: none;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.generation-enter:focus-visible,
+.generation-actions button:focus-visible,
+.generation-actions a:focus-visible,
+.generation-state a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ------------------------ gameplay clarity (scene) -------------------- */
+
+.objective-text {
+  color: var(--text);
+  font-weight: 600;
+  margin: 0.3rem 0 0.6rem;
+}
+
+.accusation-callout-text {
+  color: var(--ok);
+  font-weight: 600;
+  margin: 0 0 0.4rem;
+}
+
+.accusation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.discovered-summary {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.8rem 1.05rem;
+  margin: 0.6rem 0;
+}
+
+.discovered-summary h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.discovered-summary ul {
+  list-style: disc;
+  padding-left: 1.2rem;
+  margin: 0;
+}
+
+.discovered-summary li {
+  margin: 0.2rem 0;
+  overflow-wrap: anywhere;
+}
+
+.discovered-summary-empty {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+/* ------------------------------ reveal -------------------------------- */
+
+.reveal-banner {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1rem 1.3rem;
+  margin: 0.4rem 0 1rem;
+}
+
+.reveal-banner--solved {
+  border-color: var(--ok);
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.reveal-banner--incorrect {
+  border-color: var(--err);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.reveal-overall {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  margin: 0 0 0.5rem;
+}
+
+.reveal-overall--solved {
+  color: var(--ok);
+}
+
+.reveal-overall--incorrect {
+  color: var(--err);
+}
+
+.reveal-correct-count {
+  color: var(--text);
+  margin: 0.15rem 0 0;
+  font-size: 0.95rem;
+}
+
+.reveal-truth-row dt {
+  flex: 0 0 7rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.reveal-truth-row dd {
+  overflow-wrap: anywhere;
+  font-size: 1.05rem;
+}
+
+.reveal-dimension-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem 1rem;
+}
+
+.reveal-dimension-caption {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.reveal-dimension-value {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.reveal-badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.12rem 0.7rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.reveal-badge--correct {
+  background: rgba(74, 222, 128, 0.16);
+  color: var(--ok);
+  border: 1px solid var(--ok);
+}
+
+.reveal-badge--incorrect {
+  background: rgba(248, 113, 113, 0.16);
+  color: var(--err);
+  border: 1px solid var(--err);
+}
+
+@media (max-width: 640px) {
+  .landing-actions {
+    gap: 0.5rem;
+  }
+
+  .landing-button {
+    flex: 1 1 100%;
+  }
+
+  .reveal-dimension-grid {
+    grid-template-columns: 1fr;
   }
 }

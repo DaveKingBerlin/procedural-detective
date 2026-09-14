@@ -112,6 +112,25 @@ export class InvestigationSession {
     return this.toast;
   }
 
+  /** Sorted snapshot of the server-derived discovered evidence ids. */
+  discoveredEvidenceIdsSnapshot(): string[] {
+    return this.knowledge ? [...this.knowledge.discoveredEvidenceIds] : [];
+  }
+
+  /** Sorted snapshot of the server-derived read evidence ids. */
+  readEvidenceIdsSnapshot(): string[] {
+    return this.knowledge ? [...this.knowledge.readEvidenceIds] : [];
+  }
+
+  /** Titles of the read records cached by this session (id -> title). */
+  discoveredRecordTitles(): Map<string, string> {
+    const titles = new Map<string, string>();
+    for (const [id, record] of this.records) {
+      titles.set(id, record.title);
+    }
+    return titles;
+  }
+
   /**
    * Load the bootstrap, derive the scene model and (when a scene factory is
    * wired) build the 3D scene. Returns a StartOutcome — this method never

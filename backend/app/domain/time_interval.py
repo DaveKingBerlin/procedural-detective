@@ -323,3 +323,130 @@ def accepted_scoring_time_set(canonical_tick: int, tolerance_seconds: int) -> In
             )
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# Tolerant "locked constraint" crime-time parsing (DEF-054 rule 3).
+#
+# A locked crime time coming from a user prompt may be a full
+# ISO-8601-with-offset timestamp (the existing strict grammar) OR a bare 24h
+# wall-clock ``H:MM[:SS]`` / ``HH:MM[:SS]`` optionally prefixed by a
+# ``YYYY-MM-DD`` date and/or suffixed by a ``Z``/``±HH:MM`` offset. A bare
+# wall-clock is deterministically anchored to the draft's canonical crime DATE
+# and timezone offset (the same DEC-003 arithmetic the accusation path uses),
+# so the locked value and the draft canonical are compared as the SAME UTC
+# epoch tick: ``"22:17"`` == ``"22:17:00"`` == ``"2026-09-11T22:17:00+02:00"``
+# == ``"2026-09-11T20:17:00Z"``.
+# ---------------------------------------------------------------------------
+
+_BARE_CLOCK_RE = re.compile(
+    r"^(?P<h>[0-9]{1,2}):(?P<mi>[0-9]{2})(?::(?P<s>[0-9]{2}))?$"
+)
+_DATE_PREFIX_RE = re.compile(r"^(?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})[ T](?P<body>.+)$")
+_ZONE_SUFFIX_RE = re.compile(r"^(?P<body>.+?)(?P<zone>[Zz]|[+-][0-9]{2}:?[0-9]{2})$")
+_ANCHOR_DATE_RE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})")
+
+
+def _zone_to_offset_minutes(zone: str) -> int:
+    """``Z``/``z``/``+02:00``/``-0130`` -> signed offset minutes (DEF-054)."""
+    zone = zone.strip().upper()
+    if zone in ("Z", "+00:00", "+0000", "-00:00", "-0000"):
+        return 0
+    sign = -1 if zone[0] == "-" else 1
+    digits = zone[1:].replace(":", "")
+    if len(digits) != 4:
+        raise ValueError(f"invalid timezone offset: {zone!r}")
+    hours = int(digits[:2])
+    minutes = int(digits[2:])
+    if hours > 23 or minutes > 59:
+        raise ValueError(f"invalid timezone offset: {zone!r}")
+    return sign * (hours * 60 + minutes)
+
+
+def _parse_bare_clock(raw: str) -> Tuple[int, int, int] | None:
+    """24h wall-clock ``H:MM[:SS]``/``HH:MM[:SS]`` -> (h, m, s) or None."""
+    match = _BARE_CLOCK_RE.match(raw.strip())
+    if match is None:
+        return None
+    hour = int(match.group("h"))
+    minute = int(match.group("mi"))
+    second = int(match.group("s") or "0")
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59 or not 0 <= second <= 59:
+        return None
+    return (hour, minute, second)
+
+
+def _anchor_tick_parts(anchor: str) -> Tuple[Tuple[int, int, int], int]:
+    """``anchor`` (a full ISO timestamp) -> ((y, mo, d), offset_minutes)."""
+    _epoch, offset_minutes = parse_iso8601(anchor)
+    match = _ANCHOR_DATE_RE.match(anchor)
+    if match is None:
+        raise ValueError(f"invalid anchor timestamp: {anchor!r}")
+    dates = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    if not 1 <= dates[1] <= 12 or not 1 <= dates[2] <= 31:
+        raise ValueError(f"invalid anchor timestamp: {anchor!r}")
+    return dates, offset_minutes
+
+
+def parse_locked_time_to_epoch(raw: str, anchor: str) -> int:
+    """Deterministically parse a locked crime time into a UTC epoch tick.
+
+    Accepted forms (checked in order):
+
+    1. a full ISO-8601-with-offset timestamp (the ``parse_iso8601`` grammar);
+    2. a bare 24h wall-clock ``H:MM[:SS]`` / ``HH:MM[:SS]``, optionally
+       prefixed by an explicit ``YYYY-MM-DD`` date (``2026-09-11 22:17`` or
+       ``2026-09-11T22:17``) and/or suffixed by an explicit ``Z`` / ``±HH:MM``
+       offset (``22:17+02:00``, ``20:17Z``). Missing date/offset default to the
+       ``anchor`` timestamp's date and timezone offset, so a bare wall-clock is
+       anchored to the SAME local day/tz the draft uses and the comparison
+       stays an exact UTC tick comparison.
+
+    Raises ``ValueError`` (or ``TypeError`` for non-str input) when the value
+    matches none of these forms. The caller treats that as a locked-constraint
+    violation (an unparseable user time can never be silently rewritten).
+    """
+    if not isinstance(raw, str):
+        raise TypeError(f"locked time must be a str, got {type(raw).__name__}")
+    stripped = raw.strip()
+    if not stripped:
+        raise ValueError("locked time is empty")
+    try:
+        return parse_iso8601_to_epoch(stripped)
+    except ValueError:
+        pass
+
+    body = stripped
+    date_str: str | None = None
+    date_match = _DATE_PREFIX_RE.match(body)
+    if date_match is not None:
+        date_str = date_match.group("date")
+        body = date_match.group("body").strip()
+
+    zone_str: str | None = None
+    zone_match = _ZONE_SUFFIX_RE.match(body)
+    if zone_match is not None and zone_match.group("body").strip():
+        zone_str = zone_match.group("zone")
+        body = zone_match.group("body").strip()
+
+    clock = _parse_bare_clock(body)
+    if clock is None:
+        raise ValueError(f"invalid locked crime time: {raw!r}")
+
+    anchor_date, anchor_offset = _anchor_tick_parts(anchor)
+    if date_str is not None:
+        dm = re.match(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})$", date_str)
+        assert dm is not None  # guaranteed by _DATE_PREFIX_RE
+        date = (int(dm.group(1)), int(dm.group(2)), int(dm.group(3)))
+    else:
+        date = anchor_date
+    offset_minutes = (
+        _zone_to_offset_minutes(zone_str) if zone_str is not None else anchor_offset
+    )
+    year, month, day = date
+    if not 1 <= month <= 12 or not 1 <= day <= 31:
+        raise ValueError(f"invalid locked crime time: {raw!r}")
+    hour, minute, second = clock
+    # ``datetime`` validates impossible calendar days (e.g. 2026-02-30).
+    wall = datetime(year, month, day, hour, minute, second)
+    return calendar.timegm(wall.utctimetuple()) - offset_minutes * 60

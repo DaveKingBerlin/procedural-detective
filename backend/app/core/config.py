@@ -138,6 +138,32 @@ class Settings(BaseSettings):
             "(generation-stage -> list of directives/strings)."
         ),
     )
+    # -- Phase 8 production static serving (REQUIREMENTS 46 / Phase8 J/I) ----
+    # When STATIC_DIR is set the app ALSO serves the built frontend at "/" with
+    # SPA fallback. Unset (local dev) keeps the API-only surface unchanged so
+    # every existing dev-mode test and workflow is untouched.
+    static_dir: Path | None = Field(
+        default=None,
+        description=(
+            "STATIC_DIR: absolute path of the production frontend build "
+            "(index.html + assets). When set, the backend serves the SPA at "
+            "/ with an index.html fallback for /scene /accuse /reveal; "
+            "assets under /assets are served with immutable caching."
+        ),
+    )
+
+    @field_validator("static_dir", mode="before")
+    @classmethod
+    def _sanitize_static_dir(cls, value: object) -> object:
+        """STATIC_DIR: tolerate empty strings; reject NUL bytes."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if not value.strip():
+                return None
+            if "\x00" in value:
+                raise ValueError("STATIC_DIR must not contain NUL characters")
+        return value
 
     @field_validator("live_provider_url")
     @classmethod

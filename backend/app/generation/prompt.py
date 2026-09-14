@@ -10,6 +10,13 @@ Rules (deterministic):
 - Values are trimmed and used VERBATIM otherwise — identity strings, never
   normalized through smarts (canonicalization to case ids is the fixture /
   pipeline product decision, not the parsers job).
+- Locked values are later COMPARED through the generic, deterministic
+  equivalence layer in ``app.generation.constraints`` (DEF-054): identity
+  fields by normalized exact equality ("Sarah Miller" == ``sarah_miller``),
+  motive by normalized contiguous-substring ("€240,000 embezzlement" matches
+  "Cover up the €240,000 embezzlement"), time by the same parsed UTC epoch
+  tick ("22:17" == "2026-09-11T22:17:00+02:00"). The parser itself keeps the
+  raw human values.
 - Missing/unknown keys are ignored; the returned ``note`` records what was
   recognized.
 - A duplicate key (after normalization, e.g. ``Time:`` + ``Crime time:``) is a

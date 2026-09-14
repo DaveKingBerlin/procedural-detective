@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# Procedural Detective — single-service production deployment (Phase8 J3/K).
+#
+#   docker compose up --build
+#
+# One container serves the React SPA + FastAPI from the same origin on :8000
+# (production single-origin: CORS is moot for same-origin requests; for a
+# separately-hosted UI set CORS_ALLOWED_ORIGINS to the deployed UI origin).
+# SQLite persists in the `pd-data` named volume at /data.
+#
+# GENERATION_PROVIDER=fake is the default demo mode (deterministic, offline,
+# zero credentials). Live mode is opt-in: set GENERATION_PROVIDER=live plus
+# LLM_API_KEY / LLM_MODEL / LIVE_PROVIDER_URL in your .env / environment.
+# NEVER commit real credentials — .env is git-ignored.
+# ---------------------------------------------------------------------------
+
+services:
+  procedural-detective:
+    build: .
+    image: procedural-detective:latest
+    container_name: procedural-detective
+    ports:
+      - "8000:8000"
+    volumes:
+      - pd-data:/data
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/procedural_detective.db}
+      GENERATION_PROVIDER: ${GENERATION_PROVIDER:-fake}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LIVE_PROVIDER_URL: ${LIVE_PROVIDER_URL:-}
+      STATIC_DIR: ${STATIC_DIR:-/app/static}
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 5
+
+volumes:
+  pd-data:

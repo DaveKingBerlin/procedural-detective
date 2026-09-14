@@ -1,0 +1,55 @@
+# Build context hygiene for `docker build` (Phase8 J). The frontend is built
+# inside the image; local build artifacts/caches must never enter the context.
+
+# VCS / governance
+.git
+.gitignore
+.rad
+
+# Local dev environments / tooling
+.venv
+venv
+env
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+opencode.json
+.opencode
+.claude
+.codex
+.cursor
+
+# Node (built inside the image; local copies are dev-only)
+node_modules
+frontend/node_modules
+e2e/node_modules
+frontend/dist
+
+# Runtime databases — persisted in the /data volume, never baked in
+*.db
+*.sqlite
+*.sqlite3
+procedural_detective.db
+
+# QA / audit artifacts
+e2e/artifacts
+screenshots/generated
+tests/__pycache__
+
+# Local documents that are not part of the runtime image
+ADVERSARIAL_REVIEW.md
+BENCHMARKS.md
+DECISIONS.md
+DEFECTS.md
+PACKAGE_CONTENTS.md
+POC_REPORT.md
+Phase*.md
+PhaseRisks.md
+REQUIREMENTS.md
+
+# Packaging leftovers
+*.egg-info
+build
+dist

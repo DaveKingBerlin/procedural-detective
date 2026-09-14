@@ -5,7 +5,15 @@
  * every call, which keeps it unit-testable and safe to render from primitives.
  */
 
-export type PrimitiveKind = "floor" | "wall" | "door" | "table" | "light";
+export type PrimitiveKind =
+  | "floor"
+  | "wall"
+  | "door"
+  | "table"
+  | "light"
+  | "rug"
+  | "chair"
+  | "art";
 
 export interface Vec3 {
   x: number;
@@ -125,6 +133,32 @@ export function buildApartmentManifest(): ScenePrimitive[] {
       kind: "light",
       position: { x: 0, y: 2.7, z: 0 },
       color: "#fff4e0",
+    },
+    // --- environmental dressing (application-owned primitives only) ---
+    // A warm rug under the dining table, an extra side chair and a piece of
+    // wall art. Purely visual: none of these carry interaction or affect the
+    // world-object registry or picking (they never receive the pd_obj_ mesh
+    // prefix).
+    {
+      id: "rug_01",
+      kind: "rug",
+      position: { x: 1.25, y: 0.03, z: -1.0 },
+      scale: { x: 3.0, y: 0.06, z: 2.0 },
+      color: "#4f3d2e",
+    },
+    {
+      id: "chair_01",
+      kind: "chair",
+      position: { x: 0.2, y: 0.475, z: 0.55 },
+      scale: { x: 0.65, y: 0.95, z: 0.65 },
+      color: "#5f4b36",
+    },
+    {
+      id: "art_01",
+      kind: "art",
+      position: { x: -2.6, y: 1.85, z: -3.86 },
+      scale: { x: 1.5, y: 1.05, z: 0.08 },
+      color: "#4a5a7a",
     },
   ];
 }

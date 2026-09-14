@@ -29,7 +29,8 @@ test("shell shows degraded (not ok) when health is ok but readiness is 503 NOT_R
   await expect(message).toHaveText(/backend not ready/);
 
   // Home page text agrees and the shell stays fully navigable (no crash).
-  await expect(page.getByRole("heading", { name: "Welcome" })).toBeVisible();
+  // Phase 8 D: the landing page replaces the old "Welcome" home copy.
+  await expect(page.getByRole("heading", { name: "Procedural Detective" })).toBeVisible();
   await expect(page.getByTestId("home-backend-status")).toHaveText(/degraded/);
 
   await page.screenshot({ path: "artifacts/screenshots/qa3-degraded.png", fullPage: true });

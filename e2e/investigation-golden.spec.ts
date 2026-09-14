@@ -19,6 +19,9 @@ import type { PlaythroughCredential } from "./helpers";
  *   5 close the panel (Escape)
  *   6 interact with the laptop -> email discovered + read (subject/body text)
  *   7 reload -> bootstrap persistence (discovered/read flags) + scene flags
+ *     (Phase 8 F: the old "knowledge-summary" strip was replaced by the
+ *      discovered-summary strip + objective text, so the persistence
+ *      assertions read the new hooks)
  *   8 network-leak proof: every API response is scanned; none may contain
  *     murdererId/weaponId/crimeTime/solutionProof/token/verifier key paths
  *   9 no truth/reveal UI appears
@@ -69,11 +72,15 @@ test("golden investigation: knife discovery, panel, persistence, leak scan, no t
   // (7) RELOAD -> bootstrap persistence: discovered + read survive.
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("scene-ready")).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId("knowledge-summary")).toContainText("Evidence discovered: 1");
-  await expect(page.getByTestId("knowledge-summary")).toContainText("Read: 1");
+  // Phase 8 F scene: the discovered-summary strip + objective text carry the
+  // server-restored counts; the discovered knife entry keeps its read marker.
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 /");
+  await expect(
+    page.locator(`[data-testid="discovered-entry-${KNIFE_EVIDENCE}"]`),
+  ).toContainText("· read");
   // The scene's object list flags the knife as discovered.
   await expect(
-    page.locator(`[data-testid="object-${KNIFE_OBJECT}"] + .object-discovered`),
+    page.locator(`li:has([data-testid="object-${KNIFE_OBJECT}"]) .object-discovered`),
   ).toBeVisible();
 
   // (8) network-leak proof across the whole session.

@@ -118,3 +118,26 @@ describe("createInvestigationScene", () => {
     result.dispose();
   });
 });
+
+describe("Phase 8 hover affordance rings", () => {
+  it("creates hidden highlight rings only for interactable world objects", () => {
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      buildInvestigationScene(makeBootstrap()),
+      nullEngineOptions(),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+
+    // Interactable objects get a hidden ring under the object.
+    for (const objectId of ["kitchen_knife", "apartment_laptop", "vase_01"]) {
+      const ring = result.scene.getNodeByName(`pd_ring_${objectId}`);
+      expect(ring, `expected a ring for ${objectId}`).not.toBeNull();
+      expect(ring!.isVisible).toBe(false);
+    }
+
+    // The non-interactable victim body gets NO ring.
+    expect(result.scene.getNodeByName("pd_ring_victim_body_placeholder")).toBeNull();
+    result.dispose();
+  });
+});

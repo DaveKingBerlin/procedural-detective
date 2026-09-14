@@ -1,15 +1,28 @@
 import type {
   AccusationRequest,
   AccusationResponse,
+  AnonymousSessionResponse,
+  CreateCaseResponse,
+  CreatePlaythroughResponse,
   DiscoveryResultDTO,
   ErrorEnvelope,
   EvidenceReadResultDTO,
+  GenerationStatusResponse,
   HealthResponse,
   InteractionResultDTO,
   InvestigationBootstrapResponse,
   ReadinessResponse,
   RevealResponse,
 } from "./types";
+
+/**
+ * Minimal request body for POST /api/v1/cases. The difficulty label is
+ * optional (the pipeline is deterministic and stores it).
+ */
+interface CreateCaseRequest {
+  prompt: string;
+  difficulty?: string;
+}
 
 /** Backend base URL. Overridable via VITE_API_BASE_URL; defaults to the local FastAPI dev server. */
 export const API_BASE_URL: string =
@@ -234,5 +247,83 @@ export function getReveal(playthroughId: string, token: string): Promise<RevealR
   return authedRequest<RevealResponse>(
     `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/reveal`,
     token,
+  );
+}
+
+/* ======================================================================
+ * Phase 8 — prompt-to-case journey endpoints (frozen contract).
+ *
+ * POST /sessions/anonymous creates the anonymous quota identity (no auth).
+ * POST /cases then generates a case under that quota identity and returns
+ * the one-time creatorAccessToken; GET /generations/{id} exposes only the
+ * sanitized progress snapshot; POST .../playthroughs finally pins a
+ * PLAYING playthrough and returns the one-time playthroughAccessToken.
+ * Every token is a Bearer credential in transit, never persisted by the
+ * client beyond the contract-mandated localStorage key.
+ * ==================================================================== */
+
+/** JSON POST without credentials (anonymous session creation). */
+async function unauthPost<T>(path: string): Promise<T> {
+  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, REQUEST_TIMEOUT_MS, {
+    method: "POST",
+  });
+  if (response.ok) {
+    return await parseJsonBody<T>(response);
+  }
+  throw await toApiError(response);
+}
+
+/** POST {base}/api/v1/sessions/anonymous -> 201 AnonymousSessionResponse. */
+export function createAnonymousSession(): Promise<AnonymousSessionResponse> {
+  return unauthPost<AnonymousSessionResponse>("/api/v1/sessions/anonymous");
+}
+
+/**
+ * POST {base}/api/v1/cases (Bearer anonymousSessionToken)
+ * body {"prompt","difficulty"?} -> 201 CreateCaseResponse.
+ * 429 {"error":{"code":"ADMISSION_DENIED",..}} surfaces quota exhaustion.
+ */
+export function createCase(
+  anonymousSessionToken: string,
+  prompt: string,
+  difficulty?: string,
+): Promise<CreateCaseResponse> {
+  const body: CreateCaseRequest = { prompt };
+  if (typeof difficulty === "string" && difficulty !== "") {
+    body.difficulty = difficulty;
+  }
+  return authedRequest<CreateCaseResponse>("/api/v1/cases", anonymousSessionToken, {
+    method: "POST",
+    body,
+  });
+}
+
+/**
+ * GET {base}/api/v1/generations/{generation_id} (Bearer creatorAccessToken)
+ * -> 200 GenerationStatusResponse (sanitized status/progress/stage only).
+ */
+export function getGenerationProgress(
+  generationId: string,
+  creatorAccessToken: string,
+): Promise<GenerationStatusResponse> {
+  return authedRequest<GenerationStatusResponse>(
+    `/api/v1/generations/${encodeURIComponent(generationId)}`,
+    creatorAccessToken,
+  );
+}
+
+/**
+ * POST {base}/api/v1/cases/{case_id}/versions/{case_version}/playthroughs
+ * (Bearer creatorAccessToken) -> 201 CreatePlaythroughResponse.
+ */
+export function createPlaythrough(
+  creatorAccessToken: string,
+  caseId: string,
+  caseVersion: number,
+): Promise<CreatePlaythroughResponse> {
+  return authedRequest<CreatePlaythroughResponse>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/versions/${encodeURIComponent(String(caseVersion))}/playthroughs`,
+    creatorAccessToken,
+    { method: "POST", body: {} },
   );
 }

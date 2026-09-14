@@ -46,7 +46,10 @@ export const ANCHOR_REGISTRY: AnchorRegistry = new Map<string, AnchorTransform>(
   ["bedside_table", anchor(-4.0, 0.55, -2.6)],
   ["floor_body_position", anchor(-1.5, 0.09, 2.4)],
   ["shelf_01", anchor(3.9, 1.45, 3.2)],
-  ["hall_wall_01", anchor(4.5, 1.35, 0.0)],
+  // Phase 8: the door is a 1.6-wide slab — sitting flush against the right
+  // wall (interior face at x = 4.9) reads as a real doorway instead of a
+  // floating board half a meter away from the wall.
+  ["hall_wall_01", anchor(4.85, 1.35, 0.0)],
 ]);
 
 /**

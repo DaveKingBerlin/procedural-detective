@@ -247,3 +247,47 @@ export interface EvidenceReadResultDTO {
   readByPlayer: true;
   content: Record<string, unknown>;
 }
+
+/* ======================================================================
+ * Phase 8 — prompt-to-case journey contract (anonymous session -> case
+ * -> generation progress -> playthrough). Mirrors the backend schemas
+ * exactly (sessions.py / cases.py / generations.py / playthroughs.py).
+ * ==================================================================== */
+
+/** POST /api/v1/sessions/anonymous -> 201 (no auth). */
+export interface AnonymousSessionResponse {
+  anonymousSessionToken: string;
+  quotaWindowEndsAt: number;
+}
+
+/** POST /api/v1/cases -> 201 (Bearer anonymousSessionToken). */
+export interface CreateCaseResponse {
+  caseId: string;
+  generationId: string;
+  generationAttemptId: string;
+  /** Appears exactly once, at creation — never stored by the client. */
+  creatorAccessToken: string;
+  status: string;
+}
+
+/** GET /api/v1/generations/{generationId} -> 200 (Bearer creatorAccessToken). */
+export interface GenerationStatusResponse {
+  caseId: string;
+  generationId: string;
+  /** Sanitized lifecycle status (PUBLISHED / FAILED / RUNNING / ...). */
+  status: string;
+  /** 0..100 — derived by the backend from the durable generation snapshot. */
+  progress: number;
+  /** Internal-safe stage text (mapped client-side to friendly labels). */
+  stage: string | null;
+}
+
+/** POST /api/v1/cases/{caseId}/versions/{caseVersion}/playthroughs -> 201. */
+export interface CreatePlaythroughResponse {
+  playthroughId: string;
+  caseId: string;
+  caseVersion: number;
+  /** Appears exactly once, at creation — the only place this token is seen. */
+  playthroughAccessToken: string;
+  status: string;
+}

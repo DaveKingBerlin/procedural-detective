@@ -1,141 +1,111 @@
-import { useState } from "react";
-import type { FormEvent } from "react";
 import { Link, useNavigate, useOutletContext } from "react-router";
 import type { BackendStatus } from "../hooks/useBackendStatus";
-import {
-  getPlaythroughToken,
-  setPlaythroughId,
-  setPlaythroughToken,
-  validatePlaythroughToken,
-} from "../api/playthroughToken";
+import { setJourneyParams } from "../journey/context";
+import { EXAMPLE_PROMPT } from "../journey/demoPrompt";
 
-/** "/" — welcome text, backend status, and the demo entry to an investigation. */
-export default function Home() {
-  const { state, message, readiness } = useOutletContext<BackendStatus>();
+/**
+ * "/" — the public landing page (Phase 8 D, REQUIREMENTS 3.1).
+ *
+ * A first-time visitor needs ZERO developer knowledge: two primary actions
+ * start the whole journey from the browser UI. "New Investigation" opens the
+ * prompt screen; "Try Demo Case" runs the deterministic demo journey
+ * immediately and lands (through /generating) inside a real 3D
+ * investigation. The backend status indicator stays visible (data-testid
+ * "backend-status" lives in the shell header; a compact copy is shown here
+ * for demo troubleshooting).
+ */
+export interface HomeProps {
+  /** Backend status override (unit tests inject a value; the route reads the shell context). */
+  status?: BackendStatus;
+}
+
+export default function Home(overrides: HomeProps = {}) {
+  const navigate = useNavigate();
+  const outletStatus = overrides.status ?? useOutletContext<BackendStatus>();
+  const { state, message, readiness } = outletStatus;
+
+  const startDemo = () => {
+    setJourneyParams({ prompt: EXAMPLE_PROMPT, difficulty: "medium" });
+    navigate("/generating");
+  };
 
   return (
-    <section className="page home">
-      <h2>Welcome</h2>
-      <p>
-        Procedural Detective turns a short natural-language prompt into a complete, logically
-        consistent 3D investigation. This app hosts the application routes and the 3D scene
-        bootstrap.
+    <section className="page home landing">
+      <h2 className="landing-title">Procedural Detective</h2>
+      <p className="landing-tagline">
+        Describe a crime. AI builds a logically solvable 3D investigation.
       </p>
 
-      <h3>Backend status</h3>
-      <p>
-        State:{" "}
-        <span className={`status-text status-text--${state}`} data-testid="home-backend-status">
-          {state}
-        </span>
-        <br />
-        Message: <code data-testid="home-backend-message">{message}</code>
-        {readiness && (
-          <>
-            <br />
-            <span data-testid="home-readiness">
-              Readiness: database {readiness.database} · migrations {readiness.migrations}
-            </span>
-          </>
-        )}
+      <div className="landing-actions">
+        <Link className="landing-button landing-button--primary" to="/new" data-testid="new-investigation">
+          New Investigation
+        </Link>
+        <button
+          type="button"
+          className="landing-button"
+          data-testid="try-demo"
+          onClick={startDemo}
+        >
+          Try Demo Case
+        </button>
+      </div>
+
+      <div className="landing-panel">
+        <h3>How it works</h3>
+        <ul className="landing-bullets">
+          <li>
+            <strong>Describe a crime</strong> — your plain-language prompt
+            becomes a full case with one hidden truth.
+          </li>
+          <li>
+            <strong>Deterministic validation</strong> — the truth is checked by
+            rules, so every case is solvable from the evidence, not a coin flip.
+          </li>
+          <li>
+            <strong>Explore in 3D</strong> — investigate the scene, collect
+            evidence, accuse a suspect, and reveal the truth.
+          </li>
+        </ul>
+      </div>
+
+      <div className="landing-panel">
+        <h3>Controls</h3>
+        <p>
+          Drag to look around · scroll to zoom · click an object to interact ·
+          use the object list as an alternative · Esc closes panels.
+        </p>
+      </div>
+
+      <p className="landing-github">
+        <a data-testid="github-link" href="https://github.com/">
+          View on GitHub
+        </a>
       </p>
 
-      <StartInvestigationPanel />
-
-      <p>
-        Try the <Link to="/scene">Scene</Link> route to walk through the placeholder apartment
-        built from local 3D shapes.
-      </p>
+      <BackendStatusPanel state={state} message={message} readiness={readiness} />
     </section>
   );
 }
 
-/**
- * Demo entry point for the Phase 6 investigation: the player pastes the
- * playthrough access token (issued when their playthrough was created) along
- * with its playthrough id. Both are persisted to localStorage — the token
- * under the contract-mandated key "pd_playthrough_token" — then the app
- * navigates to /scene. QA/E2E harnesses may seed localStorage directly
- * instead of using this form.
- */
-function StartInvestigationPanel() {
-  const navigate = useNavigate();
-  const [idInput, setIdInput] = useState("");
-  const [tokenInput, setTokenInput] = useState("");
-  const [hint, setHint] = useState<string | null>(null);
-
-  const savedToken = getPlaythroughToken();
-
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const playthroughId = idInput.trim();
-    if (playthroughId === "") {
-      setHint("Enter the playthrough id for this investigation.");
-      return;
-    }
-    if (/\s/.test(playthroughId)) {
-      setHint("Playthrough id cannot contain spaces.");
-      return;
-    }
-    const validation = validatePlaythroughToken(tokenInput);
-    if (!validation.ok) {
-      setHint(validation.hint);
-      return;
-    }
-    const normalized = validation.normalized;
-    if (normalized === null) {
-      setHint("Enter a playthrough access token.");
-      return;
-    }
-    setPlaythroughId(playthroughId);
-    setPlaythroughToken(normalized);
-    setHint(null);
-    navigate("/scene");
-  };
-
+function BackendStatusPanel(status: BackendStatus) {
   return (
-    <div className="token-panel" data-testid="start-investigation-panel">
-      <h3>Start an investigation</h3>
-      <p className="token-panel-intro">
-        Paste the playthrough id and the playthrough access token you were given when the
-        playthrough was created. The token is only ever sent to the backend as a bearer
-        credential and stays in your browser.
+    <div className="landing-status" data-testid="home-backend-status">
+      <h3>Backend status</h3>
+      <p>
+        State:{" "}
+        <span className={`status-text status-text--${status.state}`}>{status.state}</span>
+        <br />
+        Message: <code data-testid="home-backend-message">{status.message}</code>
+        {status.readiness && (
+          <>
+            <br />
+            <span data-testid="home-readiness">
+              Readiness: database {status.readiness.database} · migrations{" "}
+              {status.readiness.migrations}
+            </span>
+          </>
+        )}
       </p>
-      <form className="token-form" onSubmit={handleSubmit}>
-        <label htmlFor="playthrough-id">Playthrough id</label>
-        <input
-          id="playthrough-id"
-          data-testid="playthrough-id-input"
-          value={idInput}
-          onChange={(event) => setIdInput(event.target.value)}
-          autoComplete="off"
-          spellCheck={false}
-        />
-        <label htmlFor="playthrough-token">Playthrough access token</label>
-        <input
-          id="playthrough-token"
-          data-testid="playthrough-token-input"
-          value={tokenInput}
-          onChange={(event) => setTokenInput(event.target.value)}
-          autoComplete="off"
-          spellCheck={false}
-          type="password"
-        />
-        {hint && (
-          <p className="token-hint" data-testid="token-hint" role="status">
-            {hint}
-          </p>
-        )}
-        {!hint && savedToken && savedToken !== "" && (
-          <p className="token-hint token-hint--ok" data-testid="token-saved-hint" role="status">
-            A playthrough access token is already saved on this device. Entering a new one
-            replaces it.
-          </p>
-        )}
-        <button type="submit" data-testid="start-investigation">
-          Start investigation
-        </button>
-      </form>
     </div>
   );
 }

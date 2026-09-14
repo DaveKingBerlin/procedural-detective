@@ -7,6 +7,11 @@ import { handleEvidencePanelKey } from "../evidence/evidenceContent";
 import EvidencePanel from "../evidence/evidencePanel";
 import type { InvestigationSceneModel } from "../scene/buildInvestigationScene";
 import {
+  objectiveText,
+  summarizeDiscovery,
+  summaryFromSession,
+} from "../scene/discoverySummary";
+import {
   InvestigationSession,
   type InteractionFeedback,
   type InvestigationErrorKind,
@@ -48,6 +53,8 @@ export default function ScenePage() {
   const [recordPanel, setRecordPanel] = useState<EvidenceReadResultDTO | null>(null);
   const [interactionError, setInteractionError] = useState<string | null>(null);
   const [sceneStatus, setSceneStatus] = useState<"idle" | "ready" | "failed">("idle");
+  const [hintsHidden, setHintsHidden] = useState(false);
+  const [hasInteracted, setHasInteracted] = useState(false);
 
   const retry = () => {
     setRunId((n) => n + 1);
@@ -59,10 +66,14 @@ export default function ScenePage() {
     setToast(null);
     setRecordPanel(null);
     setInteractionError(null);
+    setHasInteracted(false);
     setStatus({ status: "no-token" });
   };
 
   const applyFeedback = (feedback: InteractionFeedback) => {
+    if (feedback.toast !== null && feedback.error === null) {
+      setHasInteracted(true);
+    }
     setToast(feedback.toast);
     setRecordPanel(feedback.record);
     setInteractionError(feedback.error?.message ?? null);
@@ -167,6 +178,10 @@ export default function ScenePage() {
   };
 
   const knowledge = sessionRef.current?.knowledgeSnapshot;
+  const summary = status.status === "ready" ? summaryFromSession(sessionRef.current, status.model) : null;
+  const interacted =
+    hasInteracted || (knowledge != null && knowledge.discoveredEvidenceIds.length > 0);
+  const lifecycle = sessionRef.current?.bootstrapState;
 
   return (
     <section className="page scene">
@@ -214,24 +229,79 @@ export default function ScenePage() {
 
       {status.status === "ready" && (
         <div className="investigation-ready">
-          <p className="controls-hint" data-testid="controls-hint">
-            Click or press Enter on an object to interact with it. Escape closes panels.
+          <p className="objective-text" data-testid="objective-text">
+            {objectiveText(summary ?? emptySummary(), interacted)}
           </p>
 
-          <p data-testid="knowledge-summary">
-            Evidence discovered: {knowledge ? knowledge.discoveredEvidenceIds.length : 0} · Read:{" "}
-            {knowledge ? knowledge.readEvidenceIds.length : 0}
-          </p>
+          {!hintsHidden && (
+            <div className="controls-hint" data-testid="controls-hint">
+              <span>
+                Click an object or use the list; Enter to interact; Esc closes panels.
+              </span>
+              <button
+                type="button"
+                className="controls-hint-dismiss"
+                data-testid="controls-hint-dismiss"
+                onClick={() => setHintsHidden(true)}
+                aria-label="Dismiss controls hint"
+              >
+                Hide
+              </button>
+            </div>
+          )}
 
-          <div className="accusation-actions">
+          <div className="accusation-actions" data-testid="accusation-callout">
+            {lifecycle === "ACCUSED" && (
+              <p className="accusation-callout-text" data-testid="accusation-callout-text">
+                Your accusation is on file for this case.
+              </p>
+            )}
             <button
               type="button"
               data-testid="accusation-open"
               onClick={() => void navigate("/accuse")}
             >
-              {accusationActionLabel(sessionRef.current?.bootstrapState)}
+              {accusationActionLabel(lifecycle)}
             </button>
+            {lifecycle === "REVEALED" && (
+              <button
+                type="button"
+                data-testid="reveal-view-truth"
+                onClick={() => void navigate("/reveal")}
+              >
+                View the truth
+              </button>
+            )}
+            {lifecycle === "ACCUSED" && (
+              <button
+                type="button"
+                data-testid="reveal-case"
+                onClick={() => void navigate("/reveal")}
+              >
+                Reveal the case
+              </button>
+            )}
           </div>
+
+          {summary !== null && (
+            <div className="discovered-summary" data-testid="discovered-summary">
+              <h3>Discovered evidence</h3>
+              {summary.entries.length === 0 ? (
+                <p className="discovered-summary-empty">
+                  Nothing discovered yet — look around and click objects to inspect them.
+                </p>
+              ) : (
+                <ul>
+                  {summary.entries.map((entry) => (
+                    <li key={entry.evidenceId} data-testid={`discovered-entry-${entry.evidenceId}`}>
+                      <span data-testid={`discovered-title-${entry.evidenceId}`}>{entry.title}</span>
+                      {entry.read && <span className="object-discovered"> · read</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
 
           <div className="scene-objects" data-testid="scene-objects">
             <h3>Objects in this room</h3>
@@ -246,6 +316,12 @@ export default function ScenePage() {
                     >
                       {obj.label ?? obj.objectId}
                     </button>
+                    <span
+                      className="object-label visually-hidden"
+                      data-testid={`object-label-${obj.objectId}`}
+                    >
+                      {obj.label ?? obj.objectId}
+                    </span>
                     {obj.discovered && <span className="object-discovered"> · discovered</span>}
                   </li>
                 ) : (
@@ -308,11 +384,16 @@ function NoTokenState() {
     <div className="investigation-no-token" data-testid="investigation-no-token">
       <p>No playthrough access is configured on this device.</p>
       <p>
-        Add your playthrough id and access token on the{" "}
-        <Link to="/">Home</Link> page to start investigating.
+        Start a new investigation from the <Link to="/">landing page</Link> — the demo
+        flow configures everything for you.
       </p>
     </div>
   );
+}
+
+/** Empty summary fallback used before the session starts (never rendered). */
+function emptySummary() {
+  return summarizeDiscovery([], [], [], new Map());
 }
 
 function hasStoredCredential(): boolean {

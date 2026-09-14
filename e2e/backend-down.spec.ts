@@ -18,7 +18,8 @@ test("shell stays usable when backend is down (unavailable state, no crash)", as
   });
 
   // The shell itself must still be fully navigable.
-  await expect(page.getByRole("heading", { name: "Welcome" })).toBeVisible();
+  // Phase 8 D: the landing page replaces the old "Welcome" home copy.
+  await expect(page.getByRole("heading", { name: "Procedural Detective" })).toBeVisible();
   await expect(page.getByTestId("home-backend-status")).toHaveText(/unavailable/);
 
   await page.screenshot({ path: "artifacts/screenshots/backend-down.png", fullPage: true });

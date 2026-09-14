@@ -1,22 +1,20 @@
-import {
-  ArcRotateCamera,
-  Color3,
-  Color4,
-  Engine,
-  HemisphericLight,
-  MeshBuilder,
-  Scene,
-  StandardMaterial,
-  Vector3,
-} from "@babylonjs/core";
-import type { Mesh } from "@babylonjs/core";
+import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
+import { Engine } from "@babylonjs/core/Engines/engine";
+import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
+import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
+import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
+import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
+import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
+import type { Mesh } from "@babylonjs/core/Meshes/mesh";
+import { Scene } from "@babylonjs/core/scene";
 import type { ScenePrimitive } from "./apartment";
 import { buildApartmentManifest } from "./apartment";
 import type { InvestigationSceneModel, SceneWorldObject } from "./buildInvestigationScene";
 import { instantiatePrimitive } from "./render";
 
 /**
- * Babylon.js glue for the investigation scene (Phase 6 F/G).
+ * Babylon.js glue for the investigation scene (Phase 6 F/G + Phase 8 E).
  *
  * Separation of concerns:
  *  - geometry, colors, labels and interactability arrive in the PURE scene
@@ -32,12 +30,29 @@ import { instantiatePrimitive } from "./render";
  *    deterministic mesh-name encoding (see meshNameFor/objectIdFromMeshName);
  *  - any engine/init throw is captured and returned as {ok:false, error},
  *    so a Babylon failure becomes a visible degrade state, never a crash.
+ *
+ * Phase 8 visual polish (all deterministic, all primitives, no remote
+ * assets, no executable scene code):
+ *  - warmer key + ambient lighting (a directional key light and a warm
+ *    hemisphere fill),
+ *  - cast materials (dim specular -> matte, subtle warm emissive on
+ *    interactables),
+ *  - a slightly wider default camera framing the whole apartment,
+ *  - pointer hover: a subtle highlight ring + brighter emissive + pointer
+ *    cursor on interactable objects only.
  */
 
-/** Emissive accent applied to interactable world objects (subtle affordance). */
-const INTERACTABLE_EMISSIVE = new Color3(0.12, 0.2, 0.05);
+/** Subtle warm emissive accent applied to interactable world objects. */
+const INTERACTABLE_EMISSIVE = new Color3(0.16, 0.13, 0.05);
+
+/** Brighter emissive used while the pointer hovers an interactable object. */
+const HOVER_EMISSIVE = new Color3(0.34, 0.3, 0.2);
+
+/** Dim specular color — keeps every material looking cast/matte, not glossy. */
+const MATTE_SPECULAR = new Color3(0.1, 0.1, 0.1);
 
 const MESH_NAME_PREFIX = "pd_obj_";
+const RING_NAME_PREFIX = "pd_ring_";
 
 /**
  * Deterministic mapping between a backend world object id and the Babylon
@@ -87,22 +102,36 @@ export function createInvestigationScene(
 ): CreateInvestigationSceneResult {
   let resizeListener: (() => void) | null = null;
   const highlights = new Set<string>();
-  const objectMeshes = new Map<string, Mesh>();
+  const interactables = new Map<string, { mesh: Mesh; ring: Mesh | null }>();
+  let hoveredId: string | null = null;
 
   try {
     const engine = options.createEngine
       ? options.createEngine(canvas)
       : new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
     const scene = new Scene(engine);
-    scene.clearColor = new Color4(0.07, 0.08, 0.11, 1);
+    scene.clearColor = new Color4(0.075, 0.085, 0.12, 1);
 
-    const camera = new ArcRotateCamera("investigation_camera", 1.05, 1.18, 13, new Vector3(0, 1, 0), scene);
+    const camera = new ArcRotateCamera(
+      "investigation_camera",
+      1.1,
+      1.16,
+      14.5,
+      new Vector3(0, 1.05, 0),
+      scene,
+    );
     if (options.cameraControl !== false && typeof canvas.addEventListener === "function") {
       camera.attachControl(canvas, true);
     }
 
-    const hemi = new HemisphericLight("investigation_hemi", new Vector3(0.4, 1, -0.3), scene);
-    hemi.intensity = 0.55;
+    // Warm key light from above-right, plus a soft hemisphere ambient fill.
+    const key = new DirectionalLight("investigation_key", new Vector3(-0.7, -1, -0.35), scene);
+    key.diffuse = new Color3(1, 0.86, 0.7);
+    key.intensity = 0.85;
+
+    const hemi = new HemisphericLight("investigation_hemi", new Vector3(0.35, 1, -0.25), scene);
+    hemi.diffuse = new Color3(1, 0.93, 0.84);
+    hemi.intensity = 0.5;
 
     // Apartment shell from the Phase 2 manifest, then one mesh per world object.
     const manifest = options.manifest ?? buildApartmentManifest();
@@ -110,8 +139,36 @@ export function createInvestigationScene(
       instantiatePrimitive(scene, primitive);
     }
     for (const worldObject of model.worldObjects) {
-      objectMeshes.set(worldObject.objectId, instantiateWorldObject(scene, worldObject));
+      const mesh = instantiateWorldObject(scene, worldObject);
+      if (worldObject.interactionWorks) {
+        const ring = makeHighlightRing(scene, worldObject);
+        interactables.set(worldObject.objectId, { mesh, ring });
+      }
     }
+
+    const clearHover = () => {
+      if (hoveredId !== null) {
+        const entry = interactables.get(hoveredId);
+        if (entry) {
+          setMeshEmissive(entry.mesh, INTERACTABLE_EMISSIVE);
+          if (entry.ring) entry.ring.isVisible = false;
+        }
+        trySetCursor(canvas, "");
+        hoveredId = null;
+      }
+    };
+
+    const applyHover = (objectId: string | null) => {
+      if (objectId === hoveredId) return;
+      clearHover();
+      if (objectId === null) return;
+      const entry = interactables.get(objectId);
+      if (!entry) return;
+      hoveredId = objectId;
+      setMeshEmissive(entry.mesh, HOVER_EMISSIVE);
+      if (entry.ring) entry.ring.isVisible = true;
+      trySetCursor(canvas, "pointer");
+    };
 
     // Picking: resolve the picked mesh back to a deterministic object id.
     scene.onPointerDown = (_evt, pickInfo) => {
@@ -119,6 +176,17 @@ export function createInvestigationScene(
       const objectId = mesh ? objectIdFromMeshName(mesh.name) : null;
       if (objectId && options.onPick) {
         options.onPick(objectId);
+      }
+    };
+
+    // Hover affordability: only interactable objects ring + brighten + cursor.
+    scene.onPointerMove = (_evt, pickInfo) => {
+      const mesh = pickInfo.pickedMesh;
+      const objectId = mesh ? objectIdFromMeshName(mesh.name) : null;
+      if (objectId !== null) {
+        applyHover(interactables.has(objectId) ? objectId : null);
+      } else {
+        applyHover(null);
       }
     };
 
@@ -147,9 +215,9 @@ export function createInvestigationScene(
         } else {
           highlights.delete(objectId);
         }
-        const mesh = objectMeshes.get(objectId);
-        if (mesh && mesh.material instanceof StandardMaterial) {
-          mesh.material.emissiveColor = on ? INTERACTABLE_EMISSIVE : new Color3(0, 0, 0);
+        const entry = interactables.get(objectId);
+        if (entry && entry.mesh.material instanceof StandardMaterial) {
+          entry.mesh.material.emissiveColor = on ? INTERACTABLE_EMISSIVE : new Color3(0, 0, 0);
         }
       },
       isObjectHighlighted: (objectId: string) => highlights.has(objectId),
@@ -168,11 +236,51 @@ function instantiateWorldObject(scene: Scene, obj: SceneWorldObject): Mesh {
   mesh.rotation = new Vector3(obj.rotation.x, obj.rotation.y, obj.rotation.z);
   const material = new StandardMaterial(`${name}_material`, scene);
   material.diffuseColor = Color3.FromHexString(obj.color);
+  material.specularColor = MATTE_SPECULAR;
   if (obj.interactionWorks) {
     material.emissiveColor = INTERACTABLE_EMISSIVE;
   }
   mesh.material = material;
   return mesh;
+}
+
+function setMeshEmissive(mesh: Mesh, color: Color3): void {
+  if (mesh.material instanceof StandardMaterial) {
+    mesh.material.emissiveColor = color;
+  }
+}
+
+/** A flat ring under an interactable object, hidden until the pointer hovers it. */
+function makeHighlightRing(scene: Scene, obj: SceneWorldObject): Mesh | null {
+  try {
+    const ring = MeshBuilder.CreateTorus(
+      `${RING_NAME_PREFIX}${obj.objectId}`,
+      {
+        diameter: Math.max(obj.scale.x, obj.scale.z) + 0.35,
+        thickness: 0.05,
+        tessellation: 24,
+      },
+      scene,
+    );
+    ring.position = new Vector3(obj.position.x, obj.position.y - obj.scale.y / 2 - 0.03, obj.position.z);
+    const material = new StandardMaterial(`${RING_NAME_PREFIX}${obj.objectId}_material`, scene);
+    material.diffuseColor = new Color3(0.9, 0.75, 0.35);
+    material.specularColor = MATTE_SPECULAR;
+    ring.material = material;
+    ring.isVisible = false;
+    return ring;
+  } catch {
+    // A ring failure must never break the scene — hover degrades to emissive only.
+    return null;
+  }
+}
+
+function trySetCursor(canvas: HTMLCanvasElement, cursor: string): void {
+  try {
+    canvas.style.cursor = cursor;
+  } catch {
+    // Best-effort only: styling must never throw out of picking.
+  }
 }
 
 function createObjectMesh(scene: Scene, name: string, obj: SceneWorldObject): Mesh {

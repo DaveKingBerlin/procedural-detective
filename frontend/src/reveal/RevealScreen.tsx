@@ -2,12 +2,17 @@ import type { AccusationCandidatesDTO, RevealResponse } from "../api/types";
 import { revealPresentation } from "./revealFormat";
 
 /**
- * End-of-case reveal screen (Phase 7 L).
+ * End-of-case reveal screen (Phase 7 L + Phase 8 G).
  *
  * PURE DTO-driven: this component renders ONLY `revealPresentation`, which is
  * derived from a validated RevealResponse (parsed by revealValidation, unknown
  * wire fields dropped). Nothing is hardcoded — the murderer/motive/weapon/time
  * shown are whatever the reveal DTO's allowlist carries.
+ *
+ * Phase 8 presentation: a big CASE SOLVED / CASE NOT SOLVED verdict banner, a
+ * "correct X of 4" score line, strong WHO/WHY/WEAPON/WHEN truth cards with
+ * player-vs-truth rows and correct/incorrect badges, the evidence explanation
+ * list and the timeline. Visually unmistakable from the 3D scene.
  *
  * Security posture:
  *   - every value is rendered with React's default string rendering (inert;
@@ -33,12 +38,21 @@ export default function RevealScreen({ reveal, candidates = null }: RevealScreen
       <h2 className="reveal-heading" data-testid="reveal-heading">
         THE TRUTH
       </h2>
-      <p className={`reveal-overall reveal-overall--${solved ? "solved" : "incorrect"}`} data-testid="reveal-overall">
-        {solved ? "CASE SOLVED — every dimension of your accusation was correct." : "CASE NOT SOLVED — here is the immutable truth of the case."}
-      </p>
-      <p className="reveal-score" data-testid="reveal-score">
-        Score: <strong>{score}</strong> correct dimensions
-      </p>
+
+      <div
+        className={`reveal-banner reveal-banner--${solved ? "solved" : "incorrect"}`}
+        data-testid="reveal-banner"
+      >
+        <p className={`reveal-overall reveal-overall--${solved ? "solved" : "incorrect"}`} data-testid="reveal-overall">
+          {solved ? "CASE SOLVED — every dimension of your accusation was correct." : "CASE NOT SOLVED — here is the immutable truth of the case."}
+        </p>
+        <p className="reveal-score" data-testid="reveal-score">
+          Score: <strong>{score}</strong> correct dimensions
+        </p>
+        <p className="reveal-correct-count" data-testid="reveal-correct-count">
+          correct {model.score.correctDimensions} of {model.score.totalDimensions}
+        </p>
+      </div>
 
       <div className="reveal-truth" data-testid="reveal-truth">
         <h3>The truth</h3>
@@ -62,17 +76,27 @@ export default function RevealScreen({ reveal, candidates = null }: RevealScreen
             key={row.dimension}
           >
             <h4>{row.label}</h4>
-            <p>
-              Truth: <span data-testid="reveal-dimension-truth">{row.truth}</span>
-            </p>
-            <p>
-              Your accusation: <span data-testid="reveal-dimension-submitted">{row.submitted}</span>
-            </p>
+            <div className="reveal-dimension-grid">
+              <p>
+                <span className="reveal-dimension-caption">Truth:</span>{" "}
+                <span className="reveal-dimension-value" data-testid="reveal-dimension-truth">
+                  {row.truth}
+                </span>
+              </p>
+              <p>
+                <span className="reveal-dimension-caption">Your accusation:</span>{" "}
+                <span className="reveal-dimension-value" data-testid="reveal-dimension-submitted">
+                  {row.submitted}
+                </span>
+              </p>
+            </div>
             <p
               className={row.correct ? "reveal-result-correct" : "reveal-result-incorrect"}
               data-testid="reveal-dimension-result"
             >
-              {row.correct ? "Correct" : "Incorrect"}
+              <span className={`reveal-badge reveal-badge--${row.correct ? "correct" : "incorrect"}`}>
+                {row.correct ? "Correct" : "Incorrect"}
+              </span>
             </p>
           </div>
         ))}
@@ -117,8 +141,10 @@ export default function RevealScreen({ reveal, candidates = null }: RevealScreen
 function TruthRow({ label, value, dataTestId }: { label: string; value: string; dataTestId: string }) {
   return (
     <div className="reveal-truth-row">
-      <dt>{label}</dt>
-      <dd data-testid={dataTestId}>{value}</dd>
+      <dt className="reveal-truth-term">{label}</dt>
+      <dd className="reveal-truth-value" data-testid={dataTestId}>
+        {value}
+      </dd>
     </div>
   );
 }

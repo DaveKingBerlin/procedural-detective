@@ -1,15 +1,12 @@
-import {
-  ArcRotateCamera,
-  Color3,
-  Color4,
-  Engine,
-  HemisphericLight,
-  MeshBuilder,
-  PointLight,
-  Scene,
-  StandardMaterial,
-  Vector3,
-} from "@babylonjs/core";
+import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
+import { Engine } from "@babylonjs/core/Engines/engine";
+import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
+import { PointLight } from "@babylonjs/core/Lights/pointLight";
+import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
+import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
+import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
+import { Scene } from "@babylonjs/core/scene";
 import type { ScenePrimitive } from "./apartment";
 
 export interface BabylonSceneHandle {
@@ -28,7 +25,13 @@ const DEFAULT_COLORS: Record<ScenePrimitive["kind"], string> = {
   door: "#7c4a21",
   table: "#8a5a2b",
   light: "#fff4e0",
+  rug: "#4f3d2e",
+  chair: "#5f4b36",
+  art: "#4a5a7a",
 };
+
+/** Dim specular color: shell primitives read as flat/cast (Phase 8 E). */
+const MATTE_SPECULAR = new Color3(0.08, 0.08, 0.08);
 
 /**
  * Thin Babylon.js glue: engine + arc-rotate camera + hemisphere light, then one
@@ -81,6 +84,9 @@ export function instantiatePrimitive(scene: Scene, primitive: ScenePrimitive): v
     case "wall":
     case "door":
     case "table":
+    case "rug":
+    case "chair":
+    case "art":
       createBox(scene, primitive.id, primitive, color);
       return;
     case "light": {
@@ -108,6 +114,7 @@ function createBox(scene: Scene, id: string, primitive: ScenePrimitive, colorHex
   }
   const material = new StandardMaterial(`${id}_material`, scene);
   material.diffuseColor = Color3.FromHexString(colorHex);
+  material.specularColor = MATTE_SPECULAR;
   mesh.material = material;
   return mesh;
 }

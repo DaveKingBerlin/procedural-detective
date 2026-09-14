@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router";
 import App from "./app";
 import Home from "./routes/home";
+import NewCasePage from "./routes/new";
+import GeneratingPage from "./routes/generating";
 import NotFound from "./routes/not-found";
 import AccusationPage from "./routes/accuse";
 import RevealPage from "./routes/reveal";
@@ -20,6 +22,8 @@ createRoot(rootElement).render(
       <Routes>
         <Route element={<App />}>
           <Route index element={<Home />} />
+          <Route path="new" element={<NewCasePage />} />
+          <Route path="generating" element={<GeneratingPage />} />
           <Route path="scene" element={<ScenePage />} />
           <Route path="accuse" element={<AccusationPage />} />
           <Route path="reveal" element={<RevealPage />} />

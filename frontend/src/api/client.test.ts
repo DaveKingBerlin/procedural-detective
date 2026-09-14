@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   API_BASE_URL,
   ApiError,
+  createAnonymousSession,
+  createCase,
+  createPlaythrough,
   discoverEvidence,
+  getGenerationProgress,
   getHealth,
   getInvestigation,
   getReadiness,
@@ -277,5 +281,69 @@ describe("readRecord", () => {
     );
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${TEST_TOKEN}`);
+  });
+});
+
+describe("Phase 8 journey endpoints", () => {
+  it("createAnonymousSession POSTs /sessions/anonymous without auth", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ anonymousSessionToken: "anon-token", quotaWindowEndsAt: 1e12 }, 201),
+    );
+    const session = await createAnonymousSession();
+    expect(session.anonymousSessionToken).toBe("anon-token");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/sessions/anonymous`);
+    expect((init as RequestInit).method).toBe("POST");
+    expect((init as RequestInit).headers).toBeUndefined(); // no auth on the quota session
+  });
+
+  it("createCase POSTs /cases with the anonymous bearer and the body", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { caseId: "C1", generationId: "G1", generationAttemptId: "A1", creatorAccessToken: "creator", status: "PUBLISHED" },
+        201,
+      ),
+    );
+    const created = await createCase("anon-token", "A mystery", "hard");
+    expect(created.caseId).toBe("C1");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/cases`);
+    const requestInit = init as RequestInit;
+    expect(requestInit.method).toBe("POST");
+    const headers = requestInit.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer anon-token");
+    expect(JSON.parse(requestInit.body as string)).toEqual({ prompt: "A mystery", difficulty: "hard" });
+  });
+
+  it("createCase omits the difficulty when not provided", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ prompt: "A mystery" });
+  });
+
+  it("getGenerationProgress GETs /generations/{id} with the creator bearer", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ caseId: "C1", generationId: "G1", status: "RUNNING", progress: 45, stage: "world" }, 200),
+    );
+    const progress = await getGenerationProgress("G1", "creator");
+    expect(progress.progress).toBe(45);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/generations/G1`);
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer creator");
+  });
+
+  it("createPlaythrough POSTs the versioned playthrough URL with the creator bearer", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ playthroughId: "PT1", caseId: "C1", caseVersion: 1, playthroughAccessToken: "pt-token", status: "PLAYING" }, 201),
+    );
+    const playthrough = await createPlaythrough("creator", "C1", 1);
+    expect(playthrough.playthroughAccessToken).toBe("pt-token");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/cases/C1/versions/1/playthroughs`);
+    expect((init as RequestInit).method).toBe("POST");
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer creator");
   });
 });

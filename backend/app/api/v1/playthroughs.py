@@ -16,6 +16,16 @@ Phase 7 additions:
   (Phase7 E/F, REQUIREMENTS 40.12): only from ``{ACCUSED, REVEALED}`` (else
   ``403 REVEAL_NOT_AVAILABLE``), idempotent, sets ACCUSED -> REVEALED in the
   same transaction as the first reveal read.
+
+Phase 8 H (frozen reveal contract — DOCUMENTED, NOT CHANGED): REQUIREMENTS
+40.12 pins ``GET /playthroughs/{playthrough_id}/reveal`` as the reveal
+endpoint, and Phase 7 QA locked its idempotent ACCUSED->REVEALED transition
+(Phase7 E/F) plus the frontend reveal flow against it. Phase 8 H explicitly
+allows keeping the frozen behavior instead of expanding scope: a
+state-changing POST would violate the pinned contract for zero product value,
+so the documented behavior stands — a side-effect-bearing GET that performs
+the ACCUSED->REVEALED transition idempotently, with the very first read
+persisting the transition in the same store transaction. NO ENDPOINT CHANGE.
 """
 
 from __future__ import annotations
