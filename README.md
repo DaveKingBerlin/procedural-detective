@@ -21,14 +21,14 @@ and time. If the generated world has no provable truth, it is never published.
 
 ## Screenshots
 
-*Screenshots land here as they are captured during the demo run.*
+Captured evidence from the Phase 8 demo build (`screenshots/evidence/`):
 
-- Landing / prompt screen — `screenshots/generated/landing.png`
-- Generation progress — `screenshots/generated/generating.png`
-- 3D apartment scene — `screenshots/generated/scene.png`
-- Evidence inspection — `screenshots/generated/evidence.png`
-- Accusation screen — `screenshots/generated/accuse.png`
-- Reveal screen — `screenshots/generated/reveal.png`
+- Landing / prompt screen — `screenshots/evidence/phase8-landing.png`
+- Generation progress — `screenshots/evidence/phase8-generation-progress.png`
+- 3D apartment scene — `screenshots/evidence/phase8-apartment-scene.png`
+- Evidence inspection — `screenshots/evidence/phase8-evidence-inspection.png`
+- Accusation screen — `screenshots/evidence/phase8-accusation-screen.png`
+- Reveal screen — `screenshots/evidence/phase8-reveal-screen.png`
 
 ## Architecture overview
 
@@ -68,14 +68,18 @@ Prompt
 
 Requirements: Python 3.12+, Node 20+.
 
+Run every backend command below from the **repo root** (paths like
+`backend/...` are root-relative). A bare `cd backend` would make them fail
+(`./backend[dev]`, `backend/alembic.ini` and the frontend path all resolve
+differently from that directory).
+
 ```bash
-# Backend
-cd backend
-pip install -e "./backend[dev]"
+# Backend (all from the REPO ROOT)
+python -m pip install -e "./backend[dev]"
 python -m alembic -c backend/alembic.ini upgrade head
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
-# Frontend (second terminal)
+# Frontend (second terminal, also from the REPO ROOT)
 cd frontend
 npm install
 npm run dev        # http://localhost:5173
@@ -90,6 +94,56 @@ make an accusation (WHO / WHY / WEAPON / WHEN) and reveal the truth.
 provider answers every prompt with the shipped, fully validated golden case —
 zero credentials, zero cost (`LLM_API_KEY` etc. are placeholders in
 `.env.example`, never real values).
+
+### Troubleshooting — "Demo errors" / "Try Demo Case fails"
+
+1. **Generation dashboard shows a failure** — check the backend is up and its
+   database is migrated:
+   `http://127.0.0.1:8000/api/v1/readiness` should return
+   `{"status":"ready","database":"ok","migrations":"ok"}`. If migrations are
+   wrong or missing, run `python -m alembic -c backend/alembic.ini upgrade head`
+   from the repo root, then restart uvicorn.
+2. **Open the frontend at `http://localhost:5173`** — not `127.0.0.1:5173`.
+   The default CORS allowlist is `http://localhost:5173`; requests from any
+   other origin are rejected by the backend.
+3. **Repeated quick demo re-runs can hit the in-memory global generation quota**
+   (HTTP `429 ADMISSION_DENIED`) until the backend restarts. Restart uvicorn
+   for a fresh demo window.
+
+## One-shot demo launcher
+
+The fastest way to play the demo is **one command** (Windows):
+
+```bash
+.\scripts\start-demo.cmd
+```
+
+or, from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-demo.ps1
+```
+
+The launcher installs backend/frontend dependencies and builds the SPA only
+when needed, applies database migrations, starts **ONE server** on
+`http://localhost:8000` serving the built app **and** the API (single origin —
+no CORS, no second terminal), and opens your browser. Press **Enter** (or
+Ctrl+C) to stop it cleanly. The default `GENERATION_PROVIDER=fake` demo
+provider needs no credentials (zero network, zero cost).
+
+Options:
+
+- `-NoBrowser` — do not open the browser automatically (for headless runs)
+- `-Port <n>` — serve on a different port (default `8000`)
+- `-Rebuild` — force a fresh `npm run build` of the frontend
+- `-Stop` — stop the demo recorded in `<repo>\.pd-demo-meta`, then exit
+
+If the port is already in use, the launcher prints a clear message and exits
+`1` (run `.\scripts\stop-demo.ps1` first or pass `-Port <other>`). Stop a
+running demo from another terminal with `.\scripts\stop-demo.ps1` (a safe
+no-op when nothing is running). All launches/stops go through the repository's
+identity-verified lifecycle guard (`tools/process_guard`), so no stray
+listeners are left behind.
 
 ## Docker setup
 
@@ -120,8 +174,8 @@ Copy `.env.example` to `.env` — it documents every canonical variable
 ## Testing
 
 ```bash
-# Backend (574 tests): domain solvers, generation lifecycle, API contracts,
-# authorization/isolation, leak scanners, cache-safety & deployment polish
+# Backend suite (~600 tests): domain solvers, generation lifecycle, API
+# contracts, authorization/isolation, leak scanners, cache-safety & deployment polish
 cd backend && python -m pytest -q
 
 # Root tooling suite (50 tests + adapter-drift check)
@@ -150,9 +204,11 @@ cd frontend && npm test && npm run typecheck && npm run build
   discoverable evidence — never the hidden answer. The generated case is
   published only when exactly one survivor remains for every accusation
   dimension.
-- The project ran a **53-closed-defect** engineering process across seven
-  validation phases (adversarial review included); deployment specifics and
-  the full security posture are in `docs/DEPLOYMENT.md`.
+- The project runs an **adversarial, QA-gated engineering process with a
+  closed-defect ledger at every gate** (independent adversarial review, QA-only
+  defect closure, cumulative regression — no fix ships without a passing
+  gate); deployment specifics and the full security posture are in
+  `docs/DEPLOYMENT.md`.
 
 ## Tech stack
 
