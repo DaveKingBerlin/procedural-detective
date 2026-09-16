@@ -5,6 +5,7 @@ import { clearPlaythroughCredentials, getPlaythroughId, getPlaythroughToken } fr
 import type { EvidenceReadResultDTO } from "../api/types";
 import { handleEvidencePanelKey } from "../evidence/evidenceContent";
 import EvidencePanel from "../evidence/evidencePanel";
+import { evidencePreviewFor, type EvidencePreviewModel } from "../evidence/evidencePreview";
 import type { InvestigationSceneModel } from "../scene/buildInvestigationScene";
 import {
   objectiveText,
@@ -17,6 +18,7 @@ import {
   type InvestigationErrorKind,
   type SessionToast,
 } from "../scene/investigationFlow";
+import { tooltipForHover, type ObjectTooltipModel } from "../scene/objectTooltip";
 import { createInvestigationScene } from "../scene/renderInvestigation";
 
 type PageStatus =
@@ -51,6 +53,8 @@ export default function ScenePage() {
   const [runId, setRunId] = useState(0);
   const [toast, setToast] = useState<SessionToast | null>(null);
   const [recordPanel, setRecordPanel] = useState<EvidenceReadResultDTO | null>(null);
+  const [panelContext, setPanelContext] = useState<EvidencePreviewModel | null>(null);
+  const [tooltip, setTooltip] = useState<(ObjectTooltipModel & { x: number; y: number }) | null>(null);
   const [interactionError, setInteractionError] = useState<string | null>(null);
   const [sceneStatus, setSceneStatus] = useState<"idle" | "ready" | "failed">("idle");
   const [hintsHidden, setHintsHidden] = useState(false);
@@ -65,6 +69,8 @@ export default function ScenePage() {
     sessionRef.current = null;
     setToast(null);
     setRecordPanel(null);
+    setPanelContext(null);
+    setTooltip(null);
     setInteractionError(null);
     setHasInteracted(false);
     setStatus({ status: "no-token" });
@@ -77,6 +83,12 @@ export default function ScenePage() {
     setToast(feedback.toast);
     setRecordPanel(feedback.record);
     setInteractionError(feedback.error?.message ?? null);
+    // When the panel opens from an object interaction, carry the PUBLIC
+    // object context (registry label + color) so the panel can identify the
+    // selected object and show its small-evidence preview (Phase 8_1 D).
+    if (feedback.record !== null) {
+      setPanelContext(evidencePreviewFor(sessionRef.current?.sceneModel ?? null, feedback.objectId) ?? null);
+    }
   };
 
   useEffect(() => {
@@ -102,6 +114,8 @@ export default function ScenePage() {
     setStatus({ status: "loading" });
     setToast(null);
     setRecordPanel(null);
+    setPanelContext(null);
+    setTooltip(null);
     setInteractionError(null);
     setSceneStatus("idle");
 
@@ -116,6 +130,11 @@ export default function ScenePage() {
               if (!cancelled) applyFeedback(feedback);
             });
           },
+          onHoverStart: (objectId, origin) => {
+            const next = tooltipForHover(model, objectId);
+            setTooltip(next ? { ...next, x: origin?.x ?? 0, y: origin?.y ?? 0 } : null);
+          },
+          onHoverEnd: () => setTooltip(null),
         }),
       { playthroughId },
     );
@@ -196,8 +215,18 @@ export default function ScenePage() {
             width={800}
             height={480}
             className="scene-canvas"
-            aria-label="3D investigation scene: the location from the current playthrough"
+            aria-label="3D investigation scene: the location from the current playthrough. Click interactive objects in the scene to inspect them."
           />
+          {tooltip && (
+            <div
+              className="object-tooltip"
+              data-testid="object-tooltip"
+              role="tooltip"
+              style={{ left: tooltip.x, top: tooltip.y }}
+            >
+              {tooltip.label}
+            </div>
+          )}
         </div>
       )}
 
@@ -236,7 +265,8 @@ export default function ScenePage() {
           {!hintsHidden && (
             <div className="controls-hint" data-testid="controls-hint">
               <span>
-                Click an object or use the list; Enter to interact; Esc closes panels.
+                Click objects in the 3D scene to inspect them — the list below is an
+                accessibility fallback. Drag to orbit, scroll to zoom; Enter activates.
               </span>
               <button
                 type="button"
@@ -305,6 +335,10 @@ export default function ScenePage() {
 
           <div className="scene-objects" data-testid="scene-objects">
             <h3>Objects in this room</h3>
+            <p className="scene-objects-fallback-note">
+              Accessibility fallback — the 3D scene above is the primary way to inspect
+              objects: click them directly.
+            </p>
             <ul>
               {status.model.worldObjects.map((obj) =>
                 obj.interactionWorks ? (
@@ -342,7 +376,7 @@ export default function ScenePage() {
 
           {sceneStatus === "ready" && (
             <p className="scene-ready" data-testid="scene-ready">
-              Scene ready — drag to orbit, scroll to zoom.
+              Scene ready — click objects in the scene to inspect them; drag to orbit, scroll to zoom.
             </p>
           )}
           {sceneStatus === "failed" && (
@@ -359,7 +393,14 @@ export default function ScenePage() {
         </div>
       )}
 
-      {recordPanel && <EvidencePanel record={recordPanel} onClose={() => setRecordPanel(null)} />}
+      {recordPanel && (
+        <EvidencePanel
+          record={recordPanel}
+          onClose={() => setRecordPanel(null)}
+          objectLabel={panelContext?.label ?? null}
+          preview={panelContext}
+        />
+      )}
 
       {toast && (
         <div className="discovery-toast" data-testid="discovery-toast" role="status">

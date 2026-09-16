@@ -39,7 +39,14 @@ describe("buildInvestigationScene — scene creation from a deterministic fixtur
     expect(byId.get("vase_01")!.primitiveKind).toBe("cylinder");
     expect(byId.get("apartment_lamp")!.primitiveKind).toBe("cylinder");
     expect(byId.get("victim_body_placeholder")!.primitiveKind).toBe("flat");
-    expect(byId.get("kitchen_knife")!.color).toBe("#cfd3d9");
+    // Phase 8_1: the knife's registry color is now the pale-metallic blade tone.
+    expect(byId.get("kitchen_knife")!.color).toBe("#c8ccd4");
+    // Phase 8_1: composites are carried on the world object for the renderer.
+    expect(byId.get("kitchen_knife")!.compositeKind).toBe("knife");
+    expect(byId.get("apartment_laptop")!.compositeKind).toBe("laptop");
+    expect(byId.get("victim_body_placeholder")!.compositeKind).toBe("victim");
+    expect(byId.get("apartment_table")!.compositeKind).toBe("table");
+    expect(byId.get("vase_01")!.compositeKind).toBeNull();
   });
 
   it("is deterministic: the same fixture builds a deep-equal model every time", () => {
@@ -184,5 +191,24 @@ describe("buildInvestigationScene — malformed payload safety", () => {
     const broken = makeBootstrap();
     broken.scene.worldObjects = [{} as never];
     expect(() => buildInvestigationScene(broken as never)).toThrow(ValidationError);
+  });
+});
+
+describe("phase 8_1 — accessibility fallback regression (the DOM list stays usable)", () => {
+  it("important evidence (knife, laptop) stays interactable with a public label for the list path", () => {
+    // The below-scene object-list path renders a button for every object with
+    // interactionWorks === true and a visible label. Both must survive the
+    // composite change so the keyboard/accessibility flow stays intact.
+    const model = buildInvestigationScene(makeBootstrap());
+    const byId = new Map(model.worldObjects.map((o) => [o.objectId, o]));
+
+    for (const id of ["kitchen_knife", "apartment_laptop"]) {
+      const obj = byId.get(id);
+      expect(obj?.interactionWorks, `${id} must remain interactable`).toBe(true);
+      expect(obj?.label, `${id} needs a public label for the list button`).not.toBeNull();
+    }
+    // The list still exposes discovered state through the server flags.
+    expect(byId.get("kitchen_knife")?.discovered).toBe(false);
+    expect(byId.get("kitchen_knife")?.evidenceId).toBe("forensic_knife_match_01");
   });
 });

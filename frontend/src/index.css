@@ -1149,6 +1149,65 @@ button {
   border: 1px solid var(--err);
 }
 
+/* ======================================================================
+ * Phase 8_1 — direct 3D interaction UX (object tooltip, evidence preview,
+ * scene-list fallback note).
+ * ==================================================================== */
+
+/* Floating object label while hovering an interactable in the 3D scene.
+ * Follows the pointer via clientX/clientY (see scene.tsx) and never
+ * intercepts pointer events, so clicking the canvas underneath keeps working. */
+.object-tooltip {
+  position: fixed;
+  z-index: 60;
+  transform: translate(-50%, calc(-100% - 0.6rem));
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.25rem 0.7rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* Scene-list accessibility fallback note (demoted role copy). */
+.scene-objects-fallback-note {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0 0 0.6rem;
+}
+
+/* Small-evidence preview block in the evidence panel: a large colored swatch
+ * (public registry color) + the object's public registry label. Purely
+ * visual — no images, no remote content, nothing but registry data. */
+.evidence-preview {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #0d1016;
+  padding: 0.6rem 0.85rem;
+  margin: 0.2rem 0 0.8rem;
+}
+
+.evidence-preview-swatch {
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 8px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.evidence-preview-label {
+  font-weight: 700;
+  font-size: 1.02rem;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 640px) {
   .landing-actions {
     gap: 0.5rem;

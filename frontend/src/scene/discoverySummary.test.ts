@@ -54,19 +54,25 @@ describe("objectiveText", () => {
   const empty = summarizeDiscovery([], [], OBJECTS, new Map());
   const partial = summarizeDiscovery(["forensic_knife_match_01"], [], OBJECTS, new Map());
 
-  it("starts with the find-evidence objective before any interaction", () => {
-    expect(objectiveText(empty, false)).toBe("Find evidence, then accuse someone.");
+  it("starts with the find-evidence objective and the scene-first hint", () => {
+    const text = objectiveText(empty, false);
+    // The leading phrase is pinned by QA e2e specs — keep it intact.
+    expect(text).toContain("Find evidence, then accuse someone.");
+    // Phase 8_1: clicking objects in the scene is the PRIMARY method.
+    expect(text).toContain("Click objects in the 3D scene to inspect them");
+    expect(text).toContain("accessibility fallback");
   });
 
   it("updates to a discovered count once the player has interacted", () => {
     expect(objectiveText(partial, true)).toContain("Discovered 1 / 2 evidence items");
+    expect(objectiveText(partial, true)).toContain("clicking objects in the scene");
     expect(objectiveText(partial, true)).toContain("make your accusation");
   });
 
   it("falls back to a bare count when no discoverable count is known", () => {
     const orphan = summarizeDiscovery(["x"], [], [], new Map());
     expect(objectiveText(orphan, true)).toBe(
-      "Discovered 1 evidence items — when you are ready, make your accusation.",
+      "Discovered 1 evidence items — keep clicking objects in the scene, then make your accusation when you are ready.",
     );
   });
 });

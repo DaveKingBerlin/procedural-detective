@@ -1,6 +1,6 @@
 import type { InvestigationBootstrapResponse, WorldObjectDTO } from "../api/types";
 import type { Vec3 } from "./apartment";
-import type { AssetEntry, AssetPrimitiveKind, AssetRegistry } from "./assetRegistry";
+import type { AssetEntry, AssetPrimitiveKind, AssetRegistry, CompositeKind } from "./assetRegistry";
 import { ASSET_REGISTRY, FALLBACK_ASSET } from "./assetRegistry";
 import type { AnchorRegistry, AnchorTransform } from "./anchorRegistry";
 import { ANCHOR_REGISTRY, resolveAnchor } from "./anchorRegistry";
@@ -31,6 +31,10 @@ export interface SceneWorldObject {
   assetType: string;
   subtype: string | null;
   primitiveKind: AssetPrimitiveKind;
+  /** Named composite builder (Phase 8_1); null renders the simple primitive. */
+  compositeKind: CompositeKind | null;
+  /** Invisible pick-hitbox multiplier (see MIN_PICKABLE_EXTENT / pickHitboxExtent). */
+  hitboxScale: number;
   color: string;
   scale: Vec3;
   label: string | null;
@@ -159,6 +163,8 @@ function buildSceneWorldObject(
     assetType: dto.assetType,
     subtype: dto.subtype,
     primitiveKind: entry.primitiveKind,
+    compositeKind: entry.compositeKind ?? null,
+    hitboxScale: entry.hitboxScale ?? 1,
     color: entry.color,
     scale: { x: entry.scale.x, y: entry.scale.y, z: entry.scale.z },
     // Unknown assets get no label: a neutral placeholder must never claim a name.

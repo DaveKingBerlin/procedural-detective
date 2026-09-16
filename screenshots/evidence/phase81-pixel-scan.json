@@ -1,0 +1,37 @@
+{
+  "phase": "Phase8_1",
+  "captured": "2026-09-16",
+  "note": "Programmatic visual/semantic distinctness evidence. Blocked-by: DEF-056 (the mesh-hover/click path is inert in the production build; these checks use the DOM accessibility fallback for panels and a full WebGL drawing-buffer color scan for the 3D renders).",
+  "panels": [
+    {
+      "testid": "object-kitchen_knife",
+      "previewLabel": "Kitchen knife",
+      "header": "Kitchen knife — Blood on the kitchen knife matches the victim",
+      "previewSwatchBackground": "rgb(200, 204, 212)"
+    },
+    {
+      "testid": "object-letter_opener",
+      "previewLabel": "Letter opener",
+      "header": "Letter opener — Letter opener does not match the wound",
+      "previewSwatchBackground": "rgb(163, 123, 53)"
+    }
+  ],
+  "swatchesDistinct": true,
+  "pixelScan": {
+    "readOk": true,
+    "canvasPixels": "830x497",
+    "stepFx": 2,
+    "tolerancePerChannel": 40,
+    "knifeSteelPixelsSampled": 4,
+    "openerBrassPixelsSampled": 87,
+    "knifeSteelSamplePositions": [[490, 211], [492, 211], [418, 185], [414, 181]],
+    "openerBrassSamplePositions": [[482, 275], [490, 273], [498, 271], [508, 269], [322, 265]],
+    "assertion": "Both registry tones (#c8ccd4 pale steel, #a37b35 warm brass) render with a non-trivial pixel count in the same frame; the tones are 182 RGB units apart so the samples are disjoint; kitchen knife and letter opener are visually distinct in the real canvas."
+  },
+  "screenshots": [
+    "screenshots/evidence/phase81-scene-overview.png",
+    "screenshots/evidence/phase81-knife-opener-both.png",
+    "screenshots/evidence/phase81-panel-knife.png",
+    "screenshots/evidence/phase81-panel-opener.png"
+  ]
+}

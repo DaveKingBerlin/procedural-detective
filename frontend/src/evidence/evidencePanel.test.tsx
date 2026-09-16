@@ -177,4 +177,49 @@ describe("EvidencePanel markup", () => {
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-label="Evidence: Weekend plans"');
   });
+
+  it("shows the object label + evidence title together when opened from an object (Phase 8_1 D1)", () => {
+    const html = renderToStaticMarkup(
+      <EvidencePanel
+        record={makeEmailRecord()}
+        onClose={() => {}}
+        objectLabel="Kitchen knife"
+      />,
+    );
+    expect(html).toContain("Kitchen knife — Weekend plans");
+    expect(html).toContain('<h3 class="evidence-panel-title">Kitchen knife — Weekend plans</h3>');
+  });
+
+  it("renders the small-evidence preview swatch with the PUBLIC registry color + label (Phase 8_1 D2)", () => {
+    const html = renderToStaticMarkup(
+      <EvidencePanel
+        record={makeEmailRecord()}
+        onClose={() => {}}
+        objectLabel="Kitchen knife"
+        preview={{ objectId: "kitchen_knife", label: "Kitchen knife", color: "#c8ccd4" }}
+      />,
+    );
+    expect(html).toContain('data-testid="evidence-preview"');
+    expect(html).toContain('data-testid="evidence-preview-swatch"');
+    expect(html).toContain('style="background-color:#c8ccd4"');
+    expect(html).toContain("Kitchen knife");
+    // No image loading, no remote content anywhere in the preview.
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("http");
+  });
+
+  it("keeps hostile object labels and preview labels INERT (escaped, no truth)", () => {
+    const html = renderToStaticMarkup(
+      <EvidencePanel
+        record={makeHostileRecord()}
+        onClose={() => {}}
+        objectLabel="<script>alert(1)</script>"
+        preview={{ objectId: "hostile", label: "<img src=x onerror=alert(1)>", color: "#8d8d93" }}
+      />,
+    );
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("murderer");
+  });
 });
