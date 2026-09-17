@@ -310,6 +310,8 @@ def public_case_dict_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "name": scene_spec.get("name"),
                 # Phase 11 additive kit identity (player-safe metadata).
                 "environmentId": scene_spec.get("environment_id"),
+                # Phase 14 additive: the pinned environment kit version.
+                "environmentVersion": scene_spec.get("environment_version"),
             }
         ),
         "persons": _persons(),
@@ -640,7 +642,14 @@ def project_world_objects(
                 continue
             generated = definition
         elif not AssetRegistry.is_allowed(asset_id):
-            continue  # unregistered asset -> skip the placement
+            # Phase 10+ authority: the Asset Oracle catalog owns asset
+            # identity. A catalog asset referenced by a placement is projected
+            # (the Phase 4 registry is the MVP-era static set predating it).
+            from app.assets.catalog import load_catalog_from_repo
+
+            catalog = load_catalog_from_repo()
+            if asset_id not in catalog.by_id:
+                continue  # unregistered asset -> skip the placement
         evidence_id = placement.get("evidence_id")
         if evidence_id is not None and str(evidence_id) not in evidence:
             continue  # dangling evidence reference -> skip the placement

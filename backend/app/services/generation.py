@@ -274,53 +274,6 @@ def _resolve_environment_for_generation(
         )
 
 
-def _apply_kit_composition(record: Any, environment_id: str) -> bool:
-    """Compose the PUBLISHED draft of ``record`` for the resolved kit.
-
-    The default kit (apartment) keeps the golden world graph BYTE-IDENTICAL —
-    only the scene gains its additive ``environment_id``. Non-default kits
-    re-anchor the golden object set onto the kit's anchors/zones (evidence
-    links + interactions unchanged; decorations ``""``). The composition is
-    validated defensively with the same world-graph rules as the pipeline and
-    NEVER raises: on any unforeseen failure the scene-only environment
-    injection (guaranteed to succeed) is applied instead and ``False`` is
-    returned so the caller records the degradation diagnostic. Publication
-    and CaseTruth are never affected by this path.
-    """
-    import dataclasses
-
-    from app.environments.compose import (
-        compose_world_graph_for_kit,
-        scene_for_kit,
-    )
-    from app.environments.manifests import load_environment
-    from app.generation.safety import validate_world_graph
-
-    published = getattr(record, "published", None)
-    if published is None or getattr(published, "draft", None) is None:
-        return True
-    draft = published.draft
-    try:
-        kit = load_environment(environment_id)
-        scene = scene_for_kit(kit, draft.scene)
-        new_draft = dataclasses.replace(draft, scene=scene)
-        if environment_id != "apartment":
-            world_graph = compose_world_graph_for_kit(
-                kit, draft.world_graph.placements
-            )
-            object_ids = {o.object_id for o in draft.objects}
-            evidence_ids = {e.id for e in draft.evidence}
-            issues = validate_world_graph(world_graph, object_ids, evidence_ids)
-            if issues:
-                raise ValueError("; ".join(issues))
-            new_draft = dataclasses.replace(
-                new_draft, world_graph=world_graph, scene=scene
-            )
-        record.published = dataclasses.replace(published, draft=new_draft)
-        return True
-    except Exception:  # noqa: BLE001 - degradation must never break publication
-        return False
-
 
 @dataclass(frozen=True)
 class CreatedAnonymousSession:
@@ -469,6 +422,7 @@ class GenerationService:
         spec_provider: Any = None,
         generate_unknown_assets: bool = False,
         generated_cache: Any = None,
+        world_repair_provider: Any = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -506,6 +460,9 @@ class GenerationService:
         # (environmentId, provenance, ambiguous, candidates, matchedAlias,
         # compositionFailed). Never serialized, never served.
         self._last_environment_resolution: dict[str, Any] | None = None
+        # Phase 14 INTERNAL diagnostic: the last extracted WorldRequirements
+        # (never serialized, never served; used by tests/QA).
+        self._last_world_requirements: Any = None
         # Phase 13 — OPT-IN declarative procedural assets for unknown-object
         # requests (default OFF: without a configured AssetSpecProvider the
         # generation path is unavailable and every request resolves exactly as
@@ -513,6 +470,17 @@ class GenerationService:
         self._spec_provider = spec_provider
         self._generate_unknown_assets = bool(generate_unknown_assets)
         self._generated_cache = generated_cache
+        # Phase 14 — deterministic world repair hook: a callable
+        # ``Callable[[tuple[str, ...]], WorldRequirements | None]`` receiving
+        # the sanitized world diagnostics and returning a REVISED
+        # ``WorldRequirements`` (None = no revision). When configured, an
+        # invalid world composition routes through this bounded repair loop;
+        # the repaired composition runs the COMPLETE validation pipeline again
+        # (locked constraints are NEVER passed to the provider and cannot be
+        # mutated by it). Default None: world issues degrade the composition.
+        self._world_repair_provider = world_repair_provider
+        # Bounded world-repair budget (mirrors max_repair_passes semantics).
+        self._max_world_repair_passes = 2
         # Phase 13 INTERNAL diagnostic: whether the last generated-asset
         # composition degraded (never serialized, never served).
         self._last_generated_composition_failed: bool | None = None
@@ -588,16 +556,30 @@ class GenerationService:
                 raise EnvironmentHintError(
                     "environment hint is invalid or exceeds the configured limit"
                 )
-        environment_id, environment_diagnostics = _resolve_environment_for_generation(
-            environment
-        )
-        self._last_environment_resolution = environment_diagnostics
+        # Phase 14 — deterministic prompt -> WorldRequirements. The explicit
+        # Phase 11 ``environment`` body field takes precedence over the prompt
+        # derived hint; unknown values fall back to the documented default kit.
         try:
-            normalize_prompt(prompt_text, max_chars=settings.max_prompt_chars)
+            locked, _prompt_note = normalize_prompt(
+                prompt_text, max_chars=settings.max_prompt_chars
+            )
         except PromptError:
             raise PromptValidationError(
                 "prompt is invalid or exceeds the configured limit"
             ) from None
+        from app.world.extract import extract_world_requirements
+
+        world_reqs = extract_world_requirements(prompt_text, locked)
+        hint = (
+            environment
+            if environment is not None
+            else world_reqs.environment_hint
+        )
+        environment_id, environment_diagnostics = _resolve_environment_for_generation(
+            hint
+        )
+        self._last_environment_resolution = environment_diagnostics
+        self._last_world_requirements = world_reqs
         session_row = self._store.get_session(anonymous_quota_session_id)
         if session_row is None:
             raise AdmissionDeniedError("unknown anonymous quota session")
@@ -636,11 +618,14 @@ class GenerationService:
             created_at=now,
         )
         if record.state is GenerationState.PUBLISHED:
-            # Phase 11: compose the published draft for the resolved kit
-            # (default apartment = golden world graph + scene environment_id).
+            # Phase 14: compose the published draft from the prompt-derived
+            # WorldRequirements (default apartment prompt with no new object
+            # tokens = golden world graph + scene environment_id, byte-identical).
             if self._last_environment_resolution is not None:
                 self._last_environment_resolution["compositionFailed"] = not (
-                    _apply_kit_composition(record, environment_id)
+                    self._apply_kit_composition(
+                        record, environment_id, world_reqs, environment
+                    )
                 )
             # Phase 13: OPT-IN declarative procedural assets for the explicit
             # unknown-object request list (after the kit composition, so the
@@ -791,6 +776,173 @@ class GenerationService:
         except Exception:  # noqa: BLE001 - degradation must never break publication
             return False
 
+    def _apply_kit_composition(
+        self,
+        record: Any,
+        environment_id: str,
+        world_reqs: Any,
+        explicit_environment: str | None = None,
+    ) -> bool:
+        """Phase 14 — compose the PUBLISHED draft for the resolved kit + prompt.
+
+        Two deterministic paths:
+
+        - **Legacy byte-identity (apartment)**: when the resolved kit is the
+          default apartment AND the prompt produces no NEW object tokens and no
+          placement relations, the provider-golden world graph is kept VERBATIM
+          and only the scene gains its additive ``environment_id`` +
+          ``environment_version`` — the DEFAULT GOLDEN APARTMENT stays
+          byte-identical (the explicit Phase 11 ``environment`` body field
+          selecting apartment behaves identically to the default).
+        - **Prompt-to-world composer**: otherwise ``app.world.composer`` composes
+          the kit base + prompt objects (through the Asset Oracle with the
+          app-owned deterministic procedural fallback), the world graph is
+          rebuilt on the kit zones and the COMPLETE validation pipeline
+          (``pipeline.validate_draft``) runs again on the composed draft.
+
+        WORld validation: a non-empty world issue bucket routes through the
+        configured ``world_repair_provider`` (bounded, deterministic; sanitized
+        diagnostics; locked constraints are NEVER passed to the provider). The
+        repaired composition runs the FULL validation again. A locked-constraint
+        violation is TERMINAL — the attempt FAILS and is never published. Any
+        other failure degrades exactly like Phase 11: the scene keeps its pin
+        and the previous (golden) world composition stays. Returns True when
+        the payload was composed (or there was nothing to add); False records
+        ``compositionFailed`` in the environment diagnostics.
+        """
+        import dataclasses
+
+        from app.assets.catalog import load_catalog_from_repo
+        from app.environments.compose import scene_for_kit
+        from app.environments.manifests import load_environment
+        from app.generation import pipeline as pipeline_mod
+        from app.generation.publish import build_published_case_version
+        from app.generation.schemas import (
+            WorldGraphLocationSpec,
+            WorldGraphSpec,
+        )
+        from app.generation.state_machine import (
+            GenerationState,
+            ValidationOutcome,
+        )
+        from app.world.composer import KnownObjectSpecProvider, compose_world
+        from app.world.extract import is_base_object_request
+        from app.world.requirements import WorldRequirements
+
+        published = getattr(record, "published", None)
+        if published is None or getattr(published, "draft", None) is None:
+            return True
+        draft = published.draft
+        try:
+            kit = load_environment(environment_id)
+            scene = scene_for_kit(kit, draft.scene)
+            catalog = load_catalog_from_repo()
+            if not isinstance(world_reqs, WorldRequirements):
+                world_reqs = WorldRequirements()
+
+            has_new_objects = any(
+                not is_base_object_request(request.requested_name)
+                for request in world_reqs.objects
+            )
+            if (
+                environment_id == "apartment"
+                and not has_new_objects
+                and not world_reqs.relations
+            ):
+                # Legacy byte-identity path: scene-only injection.
+                new_draft = dataclasses.replace(draft, scene=scene)
+                record.published = dataclasses.replace(published, draft=new_draft)
+                return True
+
+            spec_provider = (
+                self._spec_provider
+                if self._spec_provider is not None
+                else KnownObjectSpecProvider()
+            )
+
+            def _compose(reqs: WorldRequirements) -> Any:
+                return compose_world(
+                    reqs,
+                    env_resolver=None,
+                    spec_provider=spec_provider,
+                    cache=self._generated_cache,
+                    evidence_placements=draft.world_graph.placements,
+                    catalog=catalog,
+                    kit=kit,
+                )
+
+            composition = _compose(world_reqs)
+            if composition.issues and self._world_repair_provider is not None:
+                for _pass in range(self._max_world_repair_passes):
+                    base_report = (
+                        record.last_validation
+                        if record.last_validation is not None
+                        else pipeline_mod.ValidationReport()
+                    )
+                    repair_report = dataclasses.replace(
+                        base_report, world_issues=composition.issues
+                    )
+                    revised = self._world_repair_provider(
+                        repair_report.repair_diagnostics
+                    )
+                    if revised is None:
+                        break
+                    composition = _compose(revised)
+                    if not composition.issues:
+                        break
+
+            if composition.issues:
+                # Degrade (documented): pin the scene, keep the golden world.
+                record.published = dataclasses.replace(
+                    published, draft=dataclasses.replace(draft, scene=scene)
+                )
+                return False
+
+            new_draft = dataclasses.replace(
+                draft,
+                scene=scene,
+                objects=tuple([*draft.objects, *composition.new_objects]),
+                world_graph=WorldGraphSpec(
+                    locations=tuple(
+                        WorldGraphLocationSpec(
+                            location_id=zone.zone_id,
+                            template=f"{kit.environment_id}_template",
+                            rooms=zone.rooms,
+                        )
+                        for zone in kit.zones
+                    ),
+                    placements=composition.placements,
+                ),
+            )
+            # COMPLETE validation pipeline over the composed draft.
+            record.draft = new_draft
+            record._phase3_cache = None
+            report = pipeline_mod.validate_draft(record)
+            if report.locked_violations:
+                # A locked-constraint violation is TERMINAL (never repaired).
+                record.state = GenerationState.FAILED
+                record.reason = (
+                    "terminal validation failure: "
+                    + "; ".join(report.locked_violations)
+                )
+                return False
+            if report.outcome is not ValidationOutcome.VALID:
+                record.published = dataclasses.replace(
+                    published, draft=dataclasses.replace(draft, scene=scene)
+                )
+                return False
+            record.published = build_published_case_version(record)
+            return True
+        except Exception:  # noqa: BLE001 - degradation must never break publication
+            # Degrade: the scene + previous (golden) world composition stay.
+            try:
+                record.published = dataclasses.replace(
+                    published, draft=dataclasses.replace(draft, scene=scene)
+                )
+            except Exception:  # noqa: BLE001 - never raise on degradation
+                pass
+            return False
+
     def start_case_version(
         self,
         case_id: str,
@@ -810,7 +962,9 @@ class GenerationService:
         """
         settings = self._settings
         try:
-            normalize_prompt(prompt_text, max_chars=settings.max_prompt_chars)
+            locked, _prompt_note = normalize_prompt(
+                prompt_text, max_chars=settings.max_prompt_chars
+            )
         except PromptError:
             raise PromptValidationError(
                 "prompt is invalid or exceeds the configured limit"
@@ -821,6 +975,18 @@ class GenerationService:
         if session_row is None:
             raise AdmissionDeniedError("unknown anonymous quota session")
         self._ensure_admission_ready(session_row)
+
+        # Phase 14 — prompt-to-world for the re-publication (v2+): extract the
+        # WorldRequirements from the NEW prompt and resolve the environment.
+        from app.world.extract import extract_world_requirements
+
+        world_reqs = extract_world_requirements(prompt_text, locked)
+        self._last_world_requirements = world_reqs
+        hint = world_reqs.environment_hint
+        environment_id, environment_diagnostics = _resolve_environment_for_generation(
+            hint
+        )
+        self._last_environment_resolution = environment_diagnostics
 
         version = self._store.allocate_version(case_id)
         generation_id = f"GEN-{version}"
@@ -836,6 +1002,11 @@ class GenerationService:
         pre_state, pre_status, pre_stage, pre_progress, reason = _pre_publish_snapshot(
             record
         )
+        if record.state is GenerationState.PUBLISHED:
+            if self._last_environment_resolution is not None:
+                self._last_environment_resolution["compositionFailed"] = not (
+                    self._apply_kit_composition(record, environment_id, world_reqs)
+                )
         self._persist_creation(
             case_id=case_id,
             quota_session_id=anonymous_quota_session_id,

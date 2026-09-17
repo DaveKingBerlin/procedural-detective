@@ -175,6 +175,10 @@ class SceneSpec:
     # ``warehouse`` / ``mansion``). Optional so the golden dev-mode scene (and
     # pre-Phase-11 provider output) stays parseable unchanged.
     environment_id: str | None = None
+    # Phase 14 (Prompt-to-World): the pinned environment kit VERSION of the
+    # published scene (``kit.version``). Optional so provider output without
+    # the pin stays parseable unchanged; the world composer ALWAYS pins it.
+    environment_version: int | None = None
 
     def __post_init__(self) -> None:
         _require_nonempty_str(self.location_id, "SceneSpec.location_id")
@@ -184,6 +188,14 @@ class SceneSpec:
         ):
             raise ValueError(
                 "SceneSpec.environment_id must be None or a non-empty string"
+            )
+        if self.environment_version is not None and (
+            not isinstance(self.environment_version, int)
+            or isinstance(self.environment_version, bool)
+            or self.environment_version < 1
+        ):
+            raise ValueError(
+                "SceneSpec.environment_version must be None or a positive integer"
             )
 
 

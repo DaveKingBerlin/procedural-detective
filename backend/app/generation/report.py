@@ -12,10 +12,13 @@ Classification (deterministic, in this exact order — §32.2):
    not change locked fields; unfixable inside this attempt)
 2. structural_issues or safety_issues      -> RECOVERABLE_REPAIR
 3. universe_issues non-empty               -> RECOVERABLE_REGENERATE
-4. solver missing/incomplete OR any of the who/why/weapon dimensions not
+4. world_issues non-empty (Phase 14: the WORld validation bucket —
+   unresolved required object / environment mismatch / invalid placement /
+   missing interaction path / unreachable required evidence) -> RECOVERABLE_REPAIR
+5. solver missing/incomplete OR any of the who/why/weapon dimensions not
    unique OR when ambiguous OR when overconstrained -> RECOVERABLE_REGENERATE
-5. truth mismatch (``validation.all_true`` False)   -> RECOVERABLE_REPAIR
-6. else                                    -> VALID
+6. truth mismatch (``validation.all_true`` False)   -> RECOVERABLE_REPAIR
+7. else                                    -> VALID
 """
 
 from __future__ import annotations
@@ -35,6 +38,12 @@ class ValidationReport:
     (``app.domain.proof.SolverProof``); ``validation`` is the truth-aware
     comparison (``app.validation.solution.AccusedSolutionValidation``) — the
     ONLY place hidden truth touches this lifecycle.
+
+    ``world_issues`` is the Phase 14 WORld bucket: sanitized issues produced by
+    the world composer (``app.world.composer``) — unresolved required objects,
+    environment mismatches, invalid placements, missing evidence interaction
+    paths and unreachable required evidence. A non-empty world bucket classifies
+    RECOVERABLE_REPAIR (repair reruns the COMPLETE validation pipeline).
     """
 
     structural_issues: tuple[str, ...] = ()
@@ -43,12 +52,14 @@ class ValidationReport:
     solver_result: SolverProof | None = None
     validation: AccusedSolutionValidation | None = None
     locked_violations: tuple[str, ...] = ()
+    world_issues: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "structural_issues", tuple(self.structural_issues))
         object.__setattr__(self, "safety_issues", tuple(self.safety_issues))
         object.__setattr__(self, "universe_issues", tuple(self.universe_issues))
         object.__setattr__(self, "locked_violations", tuple(self.locked_violations))
+        object.__setattr__(self, "world_issues", tuple(self.world_issues))
         if self.validation is not None and not isinstance(
             self.validation, AccusedSolutionValidation
         ):
@@ -70,6 +81,10 @@ class ValidationReport:
             return ValidationOutcome.RECOVERABLE_REPAIR
         if self.universe_issues:
             return ValidationOutcome.RECOVERABLE_REGENERATE
+        if self.world_issues:
+            # Phase 14: the composed world is unplayable -> world repair reruns
+            # the COMPLETE validation pipeline again (locked fields untouched).
+            return ValidationOutcome.RECOVERABLE_REPAIR
         proof = self.solver_result
         if proof is None:
             return ValidationOutcome.RECOVERABLE_REGENERATE
@@ -89,11 +104,15 @@ class ValidationReport:
         """Sanitized, sorted, machine-readable repair diagnostics (§G).
 
         Never includes hidden internals, tracebacks or provider messages
-        verbatim. Time/dimension ambiguity is summarized in safe form.
+        verbatim. Time/dimension ambiguity is summarized in safe form. The
+        Phase 14 world bucket contributes its structured ``world.*`` issues
+        (unresolved object / invalid placement / evidence path problems) —
+        sanitized by construction, never the raw prompt.
         """
         diagnostics: list[str] = list(self.structural_issues)
         diagnostics += list(self.safety_issues)
         diagnostics += list(self.universe_issues)
+        diagnostics += list(self.world_issues)
         proof = self.solver_result
         if proof is not None:
             if proof.who is not None and not proof.who.unique:

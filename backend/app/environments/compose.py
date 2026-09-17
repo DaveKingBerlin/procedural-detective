@@ -159,6 +159,7 @@ def scene_for_kit(
         location_id=current_location,
         name=name,
         environment_id=kit.environment_id,
+        environment_version=kit.version,
     )
 
 

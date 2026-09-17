@@ -62,6 +62,9 @@ class SceneDTO(BaseModel):
     # Phase 11 additive: the environment kit identity of the published scene
     # (player-safe metadata; the frontend uses it to pick the kit builder).
     environmentId: str | None = None
+    # Phase 14 additive: the pinned environment kit version of the published
+    # scene (player-safe metadata; deterministic kit-version pinning).
+    environmentVersion: int | None = None
 
 
 class PersonDTO(BaseModel):

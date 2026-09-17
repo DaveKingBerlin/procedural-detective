@@ -188,6 +188,8 @@ class InvestigationService:
                 # Phase 11 additive: the environment kit identity of the
                 # pinned version (player-safe metadata; no truth).
                 "environmentId": scene.get("environment_id"),
+                # Phase 14 additive: the pinned environment kit version.
+                "environmentVersion": scene.get("environment_version"),
                 "worldObjects": pub.project_world_objects(
                     payload,
                     discovered=set(snapshot.discovered),

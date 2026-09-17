@@ -460,7 +460,17 @@ def validate_content_safety(any_generated_string_or_tree: Any) -> tuple[str, ...
 
 
 def validate_asset_reference(asset_id: str) -> tuple[str, ...]:
-    """An asset reference must be in the registry AND match the id pattern."""
+    """An asset reference must match the id pattern and be KNOWN.
+
+    The Phase 4 ``AssetRegistry`` is the MVP-era static registry; phases 10-13
+    moved asset identity authority to the Asset Oracle catalog
+    (``assets/catalog/catalog.json``). A reference is ACCEPTED when it is in
+    the legacy registry OR in the Oracle catalog (lazy + cached lookup so this
+    module never creates an import cycle), and rejected otherwise — arbitrary
+    URLs/paths/unknown ids never pass. Existing unknown-id diagnostics keep
+    the documented "not in the AssetRegistry" message when the id is unknown
+    to BOTH authorities.
+    """
     if not isinstance(asset_id, str) or not asset_id:
         return ("asset id must be a non-empty string",)
     issues: list[str] = []
@@ -470,7 +480,11 @@ def validate_asset_reference(asset_id: str) -> tuple[str, ...]:
             r"^[A-Z][A-Z0-9_]+$"
         )
     if not AssetRegistry.is_allowed(asset_id):
-        issues.append(f"asset id {asset_id!r} is not in the AssetRegistry")
+        from app.assets.catalog import load_catalog_from_repo
+
+        catalog = load_catalog_from_repo()
+        if asset_id not in catalog.by_id:
+            issues.append(f"asset id {asset_id!r} is not in the AssetRegistry")
     return tuple(sorted(set(issues)))
 
 

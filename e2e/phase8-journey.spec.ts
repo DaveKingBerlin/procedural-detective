@@ -154,7 +154,7 @@ function installNetworkObservers(page: Page): JourneyNetworkReport {
     if (url.startsWith("http:") || url.startsWith("https:")) {
       const from = new URL(url);
       const port = Number(from.port);
-      if (!(from.hostname === "localhost" && (port === 4173 || port === 8000))) {
+      if (!(from.hostname === "localhost" && (port === 4173 || port === 8000 || port === 8010))) {
         report.external.push({ url, status });
       }
     }

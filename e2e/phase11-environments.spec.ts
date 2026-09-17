@@ -37,7 +37,7 @@ import { installLeakListener, scanJsonBody, seedPlaythroughCredentials } from ".
  * Credentials are seeded through the public API (helpers pattern).
  */
 
-const BACKEND_BASE = "http://localhost:8000";
+const BACKEND_BASE = "http://localhost:8010";
 
 interface KitCase {
   environmentId: string;
@@ -95,7 +95,7 @@ function installSessionObservers(page: Page): SessionReport {
     const method = request.method();
     if (url.startsWith("http:") || url.startsWith("https:")) {
       const from = new URL(url);
-      if (!(from.hostname === "localhost" && (from.port === "4173" || from.port === "8000"))) {
+      if (!(from.hostname === "localhost" && (from.port === "4173" || from.port === "8000" || from.port === "8010"))) {
         report.external.push({ url, status });
       }
     }

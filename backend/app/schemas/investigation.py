@@ -136,12 +136,14 @@ class InvestigationSceneDTO(BaseModel):
     """The investigation scene: the starting location + rendered objects.
 
     ``environmentId`` (Phase 11 additive): the environment kit identity of the
-    pinned published version. Player-safe metadata with NO truth; the frontend
-    uses it to pick the kit builder for the scene.
+    pinned published version. ``environmentVersion`` (Phase 14 additive): the
+    pinned kit version. Player-safe metadata with NO truth; the frontend uses
+    them to pick the kit builder for the scene.
     """
 
     location: SceneLocationDTO
     environmentId: str | None = None
+    environmentVersion: int | None = None
     worldObjects: list[WorldObjectDTO] = Field(default_factory=list)
 
 
