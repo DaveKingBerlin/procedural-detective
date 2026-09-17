@@ -311,6 +311,32 @@ describe("validateKit — deterministic rejection of corrupt manifests", () => {
     expectKitRejected(bad, "forbidden URL scheme");
   });
 
+  it.each([
+    ["U+200B zero-width space", "\u200b"],
+    ["U+200C zero-width non-joiner", "\u200c"],
+    ["U+200D zero-width joiner", "\u200d"],
+    ["U+200E left-to-right mark", "\u200e"],
+    ["U+200F right-to-left mark", "\u200f"],
+    ["U+2028 line separator", "\u2028"],
+    ["U+2029 paragraph separator", "\u2029"],
+    ["U+202A left-to-right embedding", "\u202a"],
+    ["U+202E right-to-left override", "\u202e"],
+    ["U+2060 word joiner", "\u2060"],
+    ["U+2064 invisible plus", "\u2064"],
+    ["U+FEFF BOM / zero-width no-break space", "\ufeff"],
+  ] as ReadonlyArray<readonly [label: string, glyph: string]>)(
+    "rejects the invisible %s glyph in kit strings (DEF-068 parity)",
+    (_label, glyph) => {
+      const bad = cloneKit({ canonicalName: `bad${glyph}manufacturing` });
+      expectKitRejected(bad, "zero-width / bidi / line-separator glyph");
+    },
+  );
+
+  it("the five bundled kits still validate clean under the DEF-068 glyph scan", () => {
+    expect(isKitCatalogHealthy()).toBe(true);
+    expect(getKitCatalogError()).toBeNull();
+  });
+
   it("rejects missing required default-anchor coverage (no BODY anchor)", () => {
     const bad = cloneKit();
     const coverage = bad.defaultAnchorCoverage as Record<string, string[]>;

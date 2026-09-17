@@ -342,6 +342,11 @@ class PlacementSpec:
     anchor: str
     interaction: str
     evidence_id: str | None = None
+    # Phase 13 — the EMBEDDED declarative definition of a procedural
+    # (proc.*) asset. Carried ONLY on the trusted service path (the strict
+    # parser REJECTS a raw provider placement that smuggles this key); the
+    # projection gate re-validates it per the current compiler/schema versions.
+    generated_definition: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         for name in ("object_id", "asset_id", "location_id", "anchor"):
@@ -357,6 +362,14 @@ class PlacementSpec:
         ):
             raise ValueError(
                 "PlacementSpec.evidence_id must be None or a non-empty string"
+            )
+        if self.generated_definition is not None:
+            if not isinstance(self.generated_definition, Mapping):
+                raise ValueError(
+                    "PlacementSpec.generated_definition must be a Mapping or None"
+                )
+            object.__setattr__(
+                self, "generated_definition", _frozen(self.generated_definition)
             )
 
 

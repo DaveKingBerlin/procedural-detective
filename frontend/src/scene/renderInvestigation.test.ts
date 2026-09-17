@@ -19,7 +19,16 @@ import {
   objectIdFromPickedMesh,
   type RenderOptions,
 } from "./renderInvestigation";
-import { makeBootstrap, makeEmailRecord, makeOfficeBootstrap, makeWorldObject, TEST_TOKEN } from "./testFixtures";
+import {
+  makeBootstrap,
+  makeEmailRecord,
+  makeOfficeBootstrap,
+  makeProcWorldObject,
+  makeTrophyDefinition,
+  makeWorldObject,
+  TEST_TOKEN,
+} from "./testFixtures";
+import type { GeneratedAssetDefinition } from "../api/types";
 
 /**
  * Babylon glue tests. All engine work uses the deterministic NullEngine —
@@ -715,3 +724,123 @@ describe("Phase 12 — template-backed composite rendering (generic factory)", (
 function knifeModelOffice(): InvestigationSceneModel {
   return buildInvestigationScene(makeOfficeBootstrap());
 }
+
+/* ======================================================================
+ * Phase 13 Track B — declarative generated assets render on the NullEngine
+ * as ordinary pd_obj_<id> roots with pd_part_<id>_N children. Picking,
+ * hover and hitbox policies are byte-identical to catalog/template objects.
+ * ==================================================================== */
+
+/** Golden nine + one proc.* trophy with a valid generated definition. */
+function trophyModel(): InvestigationSceneModel {
+  const bootstrap = makeBootstrap();
+  bootstrap.scene.worldObjects = [...bootstrap.scene.worldObjects, makeProcWorldObject()];
+  return buildInvestigationScene(bootstrap);
+}
+
+describe("Phase 13 — generated definition rendering (NullEngine)", () => {
+  it("renders the ROOT pd_obj_custom_trophy plus pd_part_* children with finite transforms", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, trophyModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+
+    const root = result.scene.getNodeByName("pd_obj_custom_trophy") as Mesh | null;
+    expect(root, "root mesh").not.toBeNull();
+    expect(root!.position.x).toBe(3.4); // office_desk_01 anchor — placement via anchor registry
+    expect(Number.isFinite(root!.position.y)).toBe(true);
+    expect(Number.isFinite(root!.position.z)).toBe(true);
+    for (let index = 0; index < 3; index++) {
+      const part = result.scene.getNodeByName(`pd_part_custom_trophy_${index}`) as Mesh | null;
+      expect(part, `pd_part_custom_trophy_${index}`).not.toBeNull();
+      expect(part!.material instanceof StandardMaterial).toBe(true);
+      expect(Number.isFinite(part!.position.x)).toBe(true);
+      expect(Number.isFinite(part!.position.y)).toBe(true);
+      expect(Number.isFinite(part!.position.z)).toBe(true);
+    }
+    result.dispose();
+  });
+
+  it("generated parts resolve through the parent chain and get a hidden/real pick catch", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, trophyModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    // A generated child resolves back to the backend objectId like any other part.
+    const child = scene.getNodeByName("pd_part_custom_trophy_1");
+    expect(objectIdFromPickedMesh(child)).toBe("custom_trophy");
+    expect(objectIdFromMeshName("pd_obj_custom_trophy")).toBe("custom_trophy");
+
+    // The small trophy (min extent 0.3 < 0.4) gets the invisible pick hitbox —
+    // the MIN_PICKABLE_EXTENT policy applies to generated assets identically.
+    const hit = scene.getNodeByName("pd_hit_custom_trophy") as Mesh | null;
+    expect(hit, "generated object needs the safe minimum pickable hitbox").not.toBeNull();
+    result.dispose();
+  });
+
+  it("prod-generated meshes are the ONLY picking predicate candidates (walls never shadow)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, trophyModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    for (const name of ["pd_obj_custom_trophy", "pd_part_custom_trophy_0", "pd_hit_custom_trophy"]) {
+      const mesh = scene.getNodeByName(name) as Mesh | null;
+      expect(mesh, `${name} exists`).not.toBeNull();
+      expect(scene.pointerMovePredicate!(mesh!), `${name} move admission`).toBe(true);
+      expect(scene.pointerDownPredicate!(mesh!), `${name} down admission`).toBe(true);
+    }
+    // Shell/wall meshes still never admit picking.
+    const wall = scene.getNodeByName("wall_back") as Mesh | null;
+    expect(wall).not.toBeNull();
+    expect(scene.pointerMovePredicate!(wall!)).toBe(false);
+    expect(scene.pointerDownPredicate!(wall!)).toBe(false);
+    result.dispose();
+  });
+
+  it("interaction remains payload-driven: a silent generated object has no ring and no onPick", () => {
+    const onPick = vi.fn();
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      trophyModel(),
+      nullEngineOptions({ onPick }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    // makeProcWorldObject publishes interaction:"" -> no affordance -> no ring.
+    expect(scene.getNodeByName("pd_ring_custom_trophy")).toBeNull();
+    const root = scene.getNodeByName("pd_obj_custom_trophy");
+    scene.onPointerDown?.(pointerMove(0, 0) as never, pickInfo(root) as never, POINTER_TYPES);
+    expect(onPick).not.toHaveBeenCalled();
+    result.dispose();
+  });
+
+  it("an INVALID generated object renders as the neutral fallback while neighbors still render", () => {
+    const bootstrap = makeBootstrap();
+    const broken = makeProcWorldObject();
+    const tampered: GeneratedAssetDefinition = makeTrophyDefinition();
+    tampered.parts[0].primitive = "capsule" as never;
+    broken.generated = tampered;
+    bootstrap.scene.worldObjects = [...bootstrap.scene.worldObjects, broken];
+    const result = createInvestigationScene(NOOP_CANVAS, buildInvestigationScene(bootstrap), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    // The invalid trophy STILL has its identity root, but renders as the
+    // neutral single-part primitive (no generated child parts 0..2 in order)
+    // while the golden neighbors are untouched.
+    expect(scene.getNodeByName("pd_obj_custom_trophy")).not.toBeNull();
+    expect(scene.getNodeByName("pd_part_custom_trophy_1")).toBeNull();
+    expect(scene.getNodeByName("pd_part_custom_trophy_2")).toBeNull();
+    const fallbackPart = scene.getNodeByName("pd_part_custom_trophy_0") as Mesh | null;
+    expect(fallbackPart).not.toBeNull();
+    expect(objectIdFromPickedMesh(fallbackPart)).toBe("custom_trophy");
+    // Neighbors still render (knife root + children intact).
+    expect(scene.getNodeByName("pd_obj_kitchen_knife")).not.toBeNull();
+    expect(scene.getNodeByName("pd_part_kitchen_knife_0")).not.toBeNull();
+    result.dispose();
+  });
+});

@@ -418,16 +418,24 @@ function instantiateWorldObject(scene: Scene, obj: SceneWorldObject): Mesh {
   root.position = new Vector3(obj.position.x, obj.position.y, obj.position.z);
   root.rotation = new Vector3(obj.rotation.x, obj.rotation.y, obj.rotation.z);
 
-  // Phase 12 Track B: parts come from THREE deterministic sources —
-  //  1) the six legacy composite builders (golden apartment byte-identity);
-  //  2) the generic template factory (template-backed composites — child
+  // Phase 12/13 Track B: parts come from FOUR deterministic sources, applied
+  // in precedence order:
+  //  1) a VALID Phase 13 generated definition (compiled once at model build
+  //     time by buildGeneratedComposite, applied verbatim here);
+  //  2) the six legacy composite builders (golden apartment byte-identity);
+  //  3) the generic template factory (template-backed composites — child
   //     parts were compiled at the DEFAULT variant in the registry/scene
   //     model and are applied VERBATIM here, scaled + hitbox included);
-  //  3) the plain single-part primitive (all other objects).
+  //  4) the plain single-part primitive (all other objects).
+  // A generated object keeps objectId/anchor/locationId/interaction for
+  // placement + affordances and exactly the declarative geometry otherwise.
+  const generatedParts = obj.generatedParts;
+  const isGeneratedBacked = generatedParts !== null && generatedParts.length > 0;
   const templateParts = obj.compositeKind === null ? obj.templateParts : null;
   const isTemplateBacked = templateParts !== null && templateParts.length > 0;
-  const parts =
-    obj.compositeKind !== null
+  const parts = isGeneratedBacked
+    ? generatedParts
+    : obj.compositeKind !== null
       ? buildObjectComposite(obj.compositeKind, { scale: obj.scale, color: obj.color })
       : isTemplateBacked
         ? templateParts
@@ -435,8 +443,12 @@ function instantiateWorldObject(scene: Scene, obj: SceneWorldObject): Mesh {
 
   // Phase 12: a materially-tinted template-backed object adjusts its diffuse
   // colors via the application-owned palette ONLY (no arbitrary strings).
+  // Generated objects are NEVER tinted — their #RRGGBB colors are applied
+  // exactly as the validated definition declares them.
   const tint =
-    isTemplateBacked && obj.templateMaterial !== null ? materialTintFor(obj.templateMaterial) : null;
+    !isGeneratedBacked && isTemplateBacked && obj.templateMaterial !== null
+      ? materialTintFor(obj.templateMaterial)
+      : null;
   parts.forEach((part, index) => {
     instantiateCompositePart(scene, root, obj.objectId, index, part, obj.interactionWorks, tint);
   });
@@ -446,9 +458,13 @@ function instantiateWorldObject(scene: Scene, obj: SceneWorldObject): Mesh {
   // template's DECLARED hitbox is the extent basis when present (the
   // MIN_PICKABLE_EXTENT policy continues to apply); otherwise the world
   // scale (the factory's absolute bounds) is used, exactly as for legacy
-  // composites and primitives.
+  // composites and primitives. Generated objects use their declared picking
+  // extent (def.hitbox.scale) the same way — the MIN_PICKABLE_EXTENT policy
+  // still applies to any small generated part.
   let hitboxEntry = { scale: obj.scale, hitboxScale: obj.hitboxScale };
-  if (isTemplateBacked && obj.templateHitbox !== null) {
+  if (isGeneratedBacked && obj.generatedHitbox !== null) {
+    hitboxEntry = { scale: obj.generatedHitbox, hitboxScale: obj.hitboxScale };
+  } else if (isTemplateBacked && obj.templateHitbox !== null) {
     hitboxEntry = { scale: obj.templateHitbox, hitboxScale: obj.hitboxScale };
   }
   if (needsPickHitbox(hitboxEntry)) {

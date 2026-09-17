@@ -28,7 +28,8 @@ import { MATERIAL_VOCABULARY, STATE_VOCABULARY, TEMPLATE_VOCABULARY } from "../t
  *  - {@link validateCatalog} is a STRICT, deterministic validator (modeled on
  *    the backend catalog checks at backend/app/assets/catalog.py): duplicate
  *    assetIds, unknown keys, malformed dimensions/colors, unsafe strings
- *    (control characters, URL schemes, path separators/traversal, absolute
+ *    (control characters, zero-width/bidi/line-separator glyphs — DEF-068
+ *    parity — URL schemes, path separators/traversal, absolute
  *    paths, oversized strings), out-of-vocabulary render/category kinds and
  *    unknown composite kinds (which would ghost-render an invisible object)
  *    are all REJECTED with a sorted issue list.
@@ -223,6 +224,37 @@ export const SUPPORTED_COMPOSITE_KINDS: readonly string[] = [
 
 const FORBIDDEN_URL_TOKENS: readonly string[] = ["http://", "https://", "data:", "file:", "javascript:"];
 
+/**
+ * DEF-068 parity — the SAME invisible/format glyph class the backend rejects
+ * in generated strings. These codepoints are invisible to the player yet can
+ * reorder/alias a displayed token (Bidi controls), smuggle line breaks into a
+ * "one line" label, or break word-boundary scans — so a manifest string that
+ * contains ANY of them is rejected deterministically at load:
+ *  U+200B-200F zero-width space/non-joiner/joiner + LRM/RLM marks
+ *  U+2028 / U+2029 line separator / paragraph separator
+ *  U+202A-202E bidi embedding controls (LRE/RLE/PDF/LRO/RLO)
+ *  U+2060-2064 word joiner and format controls
+ *  U+FEFF BOM / zero-width no-break space
+ */
+const FORBIDDEN_GLYPH_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x200b, 0x200f],
+  [0x2028, 0x2029],
+  [0x202a, 0x202e],
+  [0x2060, 0x2064],
+  [0xfeff, 0xfeff],
+];
+
+/** True when `value` contains any zero-width / bidi / line-separator glyph. */
+function containsForbiddenGlyph(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    for (const [low, high] of FORBIDDEN_GLYPH_RANGES) {
+      if (code >= low && code <= high) return true;
+    }
+  }
+  return false;
+}
+
 /** Manifests are declarative data; strings longer than this are suspect. */
 const MAX_CATALOG_STRING_LENGTH = 120;
 
@@ -264,6 +296,12 @@ function stringSafetyIssues(value: string, where: string): string[] {
       issues.push(`${where}: contains control characters`);
       break;
     }
+  }
+  // DEF-068 parity: zero-width / bidi / line-separator glyphs are rejected in
+  // catalog strings EXACTLY like the backend rejects them (a label/name with an
+  // invisible reordering or line-breaking glyph is a manifest red flag).
+  if (containsForbiddenGlyph(value)) {
+    issues.push(`${where}: contains a zero-width / bidi / line-separator glyph`);
   }
   const lower = value.toLowerCase();
   for (const token of FORBIDDEN_URL_TOKENS) {

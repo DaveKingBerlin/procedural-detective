@@ -5,8 +5,9 @@ import { buildTemplateComposite } from "../templates/templateRegistry";
 import { ANCHOR_REGISTRY } from "./anchorRegistry";
 import { ASSET_REGISTRY, FALLBACK_ASSET, FALLBACK_COLOR, isKnownAsset, resolveAsset, type AssetEntry, type AssetRegistry } from "./assetRegistry";
 import { buildInvestigationScene, type InvestigationSceneModel } from "./buildInvestigationScene";
-import { EMITTED_ASSET_IDS, makeBootstrap, makeOfficeBootstrap, makeWorldObject } from "./testFixtures";
+import { EMITTED_ASSET_IDS, makeBootstrap, makeOfficeBootstrap, makeProcWorldObject, makeTrophyDefinition, makeWorldObject } from "./testFixtures";
 import { ValidationError } from "./validation";
+import type { GeneratedAssetDefinition } from "../api/types";
 
 describe("buildInvestigationScene — scene creation from a deterministic fixture", () => {
   it("creates one scene object per world object with stable ids", () => {
@@ -432,5 +433,111 @@ describe("Phase 12 — template-backed composites (templateId, no legacy builder
     expect(hammer.primitiveKind).toBe("box");
     // The model stays buildable and deterministic.
     expect(buildInvestigationScene(hammerBootstrap(), registry)).toEqual(model);
+  });
+});
+
+/* ======================================================================
+ * Phase 13 Track B — declarative generated assets in the scene model
+ * ==================================================================== */
+
+/** A bootstrap whose world set is the golden nine PLUS one proc.* trophy. */
+function trophyBootstrap(): ReturnType<typeof makeBootstrap> {
+  const bootstrap = makeBootstrap();
+  bootstrap.scene.worldObjects = [...bootstrap.scene.worldObjects, makeProcWorldObject()];
+  return bootstrap;
+}
+
+describe("Phase 13 — proc.* generated objects in the scene model", () => {
+  it("a valid generated block exposes compiled parts + the declared hitbox on the model", () => {
+    const model = buildInvestigationScene(trophyBootstrap());
+    expect(model.worldObjects).toHaveLength(10);
+    const trophy = model.worldObjects.find((o) => o.objectId === "custom_trophy");
+    expect(trophy).not.toBeUndefined();
+    expect(trophy!.generated).not.toBeNull();
+    expect(trophy!.generatedParts).not.toBeNull();
+    expect(trophy!.generatedParts!.length).toBe(3); // box -> cylinder -> cup
+    // The world-object scale IS the declared picking extent (spacing/ring math
+    // sees the real footprint).
+    expect(trophy!.generatedHitbox).toEqual({ x: 0.3, y: 0.5, z: 0.3 });
+    expect(trophy!.scale).toEqual({ x: 0.3, y: 0.5, z: 0.3 });
+    // The proc.* id is not a catalog id, but the object is NOT "unknown" — it
+    // renders from its own declarative definition, so no neutral notice is due.
+    expect(trophy!.unknownAsset).toBe(false);
+    expect(isKnownAsset(trophy!.assetId)).toBe(false);
+    // Placement still comes from the anchor registry (objectId/anchor kept).
+    const anchor = ANCHOR_REGISTRY.get("office_desk_01")!;
+    expect(trophy!.position).toEqual(anchor.position);
+    // Generated labels stay null (server text never reaches the page).
+    expect(trophy!.label).toBeNull();
+  });
+
+  it("a generated object is interactable ONLY when its DTO interaction is non-empty (payload-driven)", () => {
+    const quiet = buildInvestigationScene(trophyBootstrap());
+    const quietTrophy = quiet.worldObjects.find((o) => o.objectId === "custom_trophy")!;
+    expect(quietTrophy.interaction).toBe("");
+    expect(quietTrophy.interactionWorks).toBe(false);
+
+    const interactive = makeProcWorldObject({ interaction: "inspect" });
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [...bootstrap.scene.worldObjects, interactive];
+    const model = buildInvestigationScene(bootstrap);
+    const loudTrophy = model.worldObjects.find((o) => o.objectId === "custom_trophy")!;
+    expect(loudTrophy.interaction).toBe("inspect");
+    expect(loudTrophy.interactionWorks).toBe(true);
+  });
+
+  it("an INVALID generated block falls back to the neutral primitive while neighbors still render", () => {
+    const broken = makeProcWorldObject();
+    const tampered: GeneratedAssetDefinition = makeTrophyDefinition();
+    tampered.parts[0].primitive = "capsule" as never; // rejected by the client gate
+    broken.generated = tampered;
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [...bootstrap.scene.worldObjects, broken];
+    const model = buildInvestigationScene(bootstrap);
+
+    expect(model.worldObjects).toHaveLength(10);
+    const trophy = model.worldObjects.find((o) => o.objectId === "custom_trophy")!;
+    expect(trophy.generated).toBeNull();
+    expect(trophy.generatedParts).toBeNull();
+    expect(trophy.unknownAsset).toBe(true);
+    expect(trophy.primitiveKind).toBe(FALLBACK_ASSET.primitiveKind);
+    expect(trophy.color).toBe(FALLBACK_COLOR);
+    expect(trophy.scale).toEqual({ x: FALLBACK_ASSET.scale.x, y: FALLBACK_ASSET.scale.y, z: FALLBACK_ASSET.scale.z });
+    // The other nine golden objects are untouched (neighbors still render).
+    expect(new Set(model.worldObjects.map((o) => o.objectId)).size).toBe(10);
+    expect(model.worldObjects.some((o) => o.objectId === "kitchen_knife" && o.interactionWorks)).toBe(true);
+  });
+
+  it("a NON-proc object carrying a generated block IGNORES it (catalog identity wins)", () => {
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [
+      ...bootstrap.scene.worldObjects,
+      makeWorldObject({
+        objectId: "vase_with_block",
+        assetId: "PROP_VASE_01",
+        anchor: "dining_table",
+        interaction: "",
+        evidenceId: null,
+        generated: makeTrophyDefinition(),
+      }),
+    ];
+    const model = buildInvestigationScene(bootstrap);
+    const vase = model.worldObjects.find((o) => o.objectId === "vase_with_block")!;
+    expect(vase.generated).toBeNull();
+    expect(vase.generatedParts).toBeNull();
+    expect(vase.unknownAsset).toBe(false);
+    // Catalog geometry is fully intact (cylinder vase path, not the trophy).
+    expect(vase.compositeKind).toBeNull();
+    expect(vase.color).toBe(resolveAsset("PROP_VASE_01").color);
+    // Deterministic: the same bootstrap builds a deep-equal model again.
+    expect(buildInvestigationScene(bootstrap)).toEqual(model);
+  });
+
+  it("generated parts are deterministic: identical bootstraps build deep-equal parts", () => {
+    expect(buildInvestigationScene(trophyBootstrap())).toEqual(buildInvestigationScene(trophyBootstrap()));
+    const first = buildInvestigationScene(trophyBootstrap()).worldObjects.find((o) => o.objectId === "custom_trophy")!;
+    const second = buildInvestigationScene(trophyBootstrap()).worldObjects.find((o) => o.objectId === "custom_trophy")!;
+    expect(first.generatedParts).toEqual(second.generatedParts);
+    expect(first.generatedParts!.length).toBe(3);
   });
 });

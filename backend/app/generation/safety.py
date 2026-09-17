@@ -30,6 +30,42 @@ from app.generation.schemas import GeneratedDraft, WorldGraphSpec
 
 _ASSET_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]+$")
 
+# Phase 13 — procedural (declarative) asset id grammar. Mirrors
+# ``app.assets.compiler.PROCEDURAL_ASSET_PATTERN`` LOCALLY (like ``_ASSET_ID_PATTERN``
+# mirrors ``app.assets.catalog``) because ``app.assets.catalog`` imports this
+# module — a direct import of ``app.assets.compiler`` here would create an
+# import cycle. A lockstep test pins both patterns to the same grammar.
+_PROCEEDURAL_ASSET_ID_RE = re.compile(r"^proc\.[a-z0-9_]+\.[a-f0-9]{16}$")
+
+
+def is_procedural_asset_id(asset_id: object) -> bool:
+    """True when ``asset_id`` is a procedural (proc.*) generated asset id."""
+    return isinstance(asset_id, str) and bool(_PROCEEDURAL_ASSET_ID_RE.match(asset_id))
+
+
+def validate_procedural_placement(placement: Any, where: str) -> tuple[str, ...]:
+    """Phase 13 world-graph rule: a proc.* placement MUST carry an embedded
+    generatedDefinition whose ``assetId`` matches the placement's assetId.
+
+    A proc.* assetId WITHOUT a matching ``generated_definition`` is a world-graph
+    STRUCTURAL issue (never silently accepted, never projected).
+    """
+    if not is_procedural_asset_id(getattr(placement, "asset_id", None)):
+        return ()
+    definition = getattr(placement, "generated_definition", None)
+    if not isinstance(definition, Mapping) or not definition:
+        return (
+            f"{where}: procedural asset {getattr(placement, 'asset_id', '')!r} "
+            "requires an embedded generatedDefinition",
+        )
+    embedded_id = definition.get("assetId")
+    if embedded_id != getattr(placement, "asset_id", None):
+        return (
+            f"{where}: embedded generatedDefinition.assetId does not match the "
+            "placement assetId",
+        )
+    return ()
+
 # URL-denoting token: `<scheme>://`. Every such token in generated content has
 # a scheme that is checked against SAFE_URL_SCHEMES.
 _URL_SCHEME_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]{1,31}://")
@@ -473,7 +509,13 @@ def validate_world_graph(
             seen_object_ids[placement.object_id] = index
         if placement.object_id not in object_ids:
             issues.append(f"{where}: unknown objectId {placement.object_id!r}")
-        issues.extend(validate_asset_reference(placement.asset_id))
+        if is_procedural_asset_id(placement.asset_id):
+            # Phase 13: a procedural placement must carry a matching embedded
+            # generatedDefinition (structural rule; the projection gate further
+            # re-validates the definition per the current compiler/schema).
+            issues.extend(validate_procedural_placement(placement, where))
+        else:
+            issues.extend(validate_asset_reference(placement.asset_id))
         if placement.location_id not in wg_locations:
             issues.append(f"{where}: unknown locationId {placement.location_id!r}")
         if placement.anchor not in ANCHOR_ALLOWLIST:

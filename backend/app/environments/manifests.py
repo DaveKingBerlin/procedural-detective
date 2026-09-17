@@ -32,7 +32,6 @@ never the process CWD) and NEVER perform network I/O.
 
 from __future__ import annotations
 
-import json
 import math
 import re
 import unicodedata
@@ -46,6 +45,13 @@ from app.assets.catalog import (
     Catalog,
     load_catalog_from_repo,
 )
+from app.assets.depthguard import (
+    MAX_STRUCT_NESTING,
+    BoundedJsonError,
+    bounded_json_loads,
+    bounded_structure_depth,
+)
+from app.assets.glyphs import format_glyph_issues
 
 # --------------------------------------------------------------------------- #
 # documented vocabulary + bounds
@@ -313,6 +319,7 @@ def _string_issues(value: Any, where: str, *, allow_none: bool = False) -> list[
         issues.append(f"{where}: string exceeds {MAX_STRING_LENGTH} characters")
     if any(ord(ch) < 0x20 for ch in value):
         issues.append(f"{where}: contains a control character")
+    issues.extend(format_glyph_issues(value, where))
     lower = unicodedata.normalize("NFKC", value).casefold()
     for scheme in _FORBIDDEN_URL_TOKENS:
         if scheme in lower:
@@ -502,6 +509,16 @@ def validate_environment_data(
     issues: list[str] = []
     if not isinstance(data, Mapping):
         return ("environment document must be a JSON object",)
+
+    # DEF-067: a nesting bomb is reported as a deterministic issue (never a
+    # RecursionError); deep JSON strings are already rejected by
+    # ``bounded_json_loads`` in the loader.
+    depth = bounded_structure_depth(data)
+    if depth > MAX_STRUCT_NESTING:
+        issues.append(
+            f"environment document nesting depth {depth} exceeds the maximum "
+            f"{MAX_STRUCT_NESTING}"
+        )
 
     issues += [
         f"environment document: unknown key {key!r}"
@@ -1200,7 +1217,10 @@ def _load_kits_cached(dir_text: str) -> tuple[EnvironmentKit, ...]:
             issues.append(f"{path.name}: cannot read manifest: {exc}")
             continue
         try:
-            data = json.loads(raw_text)
+            data = bounded_json_loads(raw_text)
+        except BoundedJsonError as exc:
+            issues.append(f"{path.name}: {exc}")
+            continue
         except ValueError as exc:
             issues.append(f"{path.name}: not valid JSON: {exc}")
             continue

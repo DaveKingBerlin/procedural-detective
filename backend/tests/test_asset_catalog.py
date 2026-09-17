@@ -1179,3 +1179,70 @@ def test_phase12_render_kind_vocabulary_unchanged():
             "victim",
             "table",
         )
+
+
+# --------------------------------------------------------------------------- #
+# DEF-067 — deep nesting bombs on the catalog load family (reject cleanly)
+# --------------------------------------------------------------------------- #
+
+
+def test_deeply_nested_catalog_file_rejected_cleanly(tmp_path):
+    """DEF-067: a catalog manifest file nesting far deeper than
+    ``MAX_STRUCT_NESTING`` is rejected with a clean ``CatalogError`` — never an
+    uncaught ``RecursionError`` from ``json.loads``."""
+    from app.assets.catalog import CatalogError
+
+    deep: dict = {}
+    cursor = deep
+    for _ in range(300):
+        cursor["a"] = {}
+        cursor = cursor["a"]
+    path = _write_catalog(tmp_path, deep)
+    with pytest.raises(CatalogError) as excinfo:
+        load_catalog(path)
+    assert "nesting" in str(excinfo.value)
+
+
+def test_deeply_nested_catalog_data_returns_clean_issue():
+    """DEF-067: ``validate_catalog_data`` on a deeply nested PYTHON structure
+    returns a deterministic nesting issue — never a RecursionError."""
+    deep: dict = {}
+    cursor = deep
+    for _ in range(300):
+        cursor["a"] = {}
+        cursor = cursor["a"]
+    issues = validate_catalog_data(deep)
+    assert any("nesting depth" in issue and "exceeds the maximum" in issue for issue in issues)
+    # a normal manifest tree is unaffected by the guard.
+    manifest = _valid_catalog()
+    assert validate_catalog_data(manifest) == ()
+
+
+# --------------------------------------------------------------------------- #
+# DEF-068 — Unicode format/zero-width/Bidi/line-separator glyphs rejected
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "glyph,glyph_name",
+    [
+        ("\u200b", "U+200B"),  # zero-width space
+        ("\u202e", "U+202E"),  # right-to-left override (bidi)
+        ("\u2028", "U+2028"),  # line separator
+        ("\ufeff", "U+FEFF"),  # byte-order mark
+    ],
+)
+def test_unicode_format_control_glyphs_rejected(tmp_path, glyph, glyph_name):
+    """DEF-068: U+200B / U+202E / U+2028 / U+FEFF in a catalog manifest string
+    are deterministic load issues — the catalog string-safety scan rejects the
+    whole glyph class (validator AND loader paths)."""
+    poisoned = f"Name{glyph}Prop"
+    assets = [_asset("PROP_GLYPH_01", canonicalName=poisoned), _asset("PROP_FALLBACK_X")]
+    issues = validate_catalog_data(_catalog(assets))
+    matches = [i for i in issues if "Unicode format/zero-width" in i and glyph_name in i]
+    assert matches, f"expected a {glyph_name} glyph issue; got {issues}"
+    # the loader path surfaces the same clean rejection.
+    path = _write_catalog(tmp_path, _catalog(assets))
+    with pytest.raises(CatalogValidationError) as excinfo:
+        load_catalog(path)
+    assert any("Unicode format/zero-width" in issue for issue in excinfo.value.issues)

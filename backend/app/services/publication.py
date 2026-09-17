@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Mapping
@@ -53,6 +54,8 @@ from app.persistence.store import (
     DuplicatePublication,
     Store,
 )
+
+logger = logging.getLogger("app.services.publication")
 
 PAYLOAD_SCHEMA_VERSION = 1
 
@@ -599,7 +602,7 @@ def project_world_objects(
     discovered_ids = discovered if discovered is not None else frozenset()
     read_ids = read if read is not None else frozenset()
 
-    from app.generation.safety import AssetRegistry
+    from app.generation.safety import AssetRegistry, is_procedural_asset_id
 
     objects = _objects_by_id(payload)
     evidence = _evidence_by_id(payload)
@@ -616,7 +619,27 @@ def project_world_objects(
         if object_id not in objects:
             continue  # unknown object -> skip the placement
         asset_id = placement.get("asset_id")
-        if not isinstance(asset_id, str) or not AssetRegistry.is_allowed(asset_id):
+        if not isinstance(asset_id, str):
+            continue
+        generated: dict[str, Any] | None = None
+        if is_procedural_asset_id(asset_id):
+            # Phase 13: a placement for a procedural asset is projected ONLY
+            # when its payload block carries a validated generatedDefinition
+            # (per the CURRENT compiler/schema versions). Any mismatch (missing
+            # definition, schema-version confusion, tampered geometry) skips
+            # the placement with a sanitized log — never a leak, never a crash.
+            from app.assets.compiler import validate_embedded_definition
+
+            definition = validate_embedded_definition(asset_id, placement.get("generated_definition"))
+            if definition is None:
+                logger.warning(
+                    "skipping procedural placement %r: embedded generatedDefinition "
+                    "failed current-version validation",
+                    object_id,
+                )
+                continue
+            generated = definition
+        elif not AssetRegistry.is_allowed(asset_id):
             continue  # unregistered asset -> skip the placement
         evidence_id = placement.get("evidence_id")
         if evidence_id is not None and str(evidence_id) not in evidence:
@@ -634,6 +657,8 @@ def project_world_objects(
             "discovered": evidence_id is not None and str(evidence_id) in discovered_ids,
             "read": evidence_id is not None and str(evidence_id) in read_ids,
         }
+        if generated is not None:
+            item["generated"] = generated
         emitted_object_ids.add(object_id)
         out.append(item)
     return sorted(out, key=lambda item: item["objectId"])

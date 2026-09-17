@@ -42,6 +42,8 @@ import re
 import unicodedata
 from typing import Any, Mapping
 
+from app.assets.glyphs import format_glyph_issues
+
 MAX_ASSET_STRING_LENGTH = 120
 MAX_TAGS = 16
 MAX_CAPABILITIES = 8
@@ -113,6 +115,7 @@ def _string_issues(value: str, where: str) -> list[str]:
         )
     if any(ord(ch) < 0x20 for ch in value):
         issues.append(f"{where}: contains a control character")
+    issues.extend(format_glyph_issues(value, where))
 
     lowered_forms = [form.casefold() for form in scheme_forms]
     for scheme in FORBIDDEN_URL_TOKENS:

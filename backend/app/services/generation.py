@@ -27,7 +27,7 @@ import threading
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from sqlalchemy.exc import IntegrityError
 
@@ -79,6 +79,19 @@ _PRE_PUBLISH_STATE = GenerationState.VALIDATING.value
 _PRE_PUBLISH_STATUS = GenerationState.VALIDATING.value
 _PRE_PUBLISH_PROGRESS = _STATE_PROGRESS[GenerationState.VALIDATING.value]
 _PRE_PUBLISH_STAGE = "validating"
+
+
+def _bounded_provider_script_load(path: Path) -> Any:
+    """Read + bounded-JSON-decode a fake provider script (DEF-067: a deep
+    nesting bomb raises a clean ``BoundedJsonError`` — a ``ValueError`` — never
+    an uncaught ``RecursionError`` from ``json.loads``)."""
+    from app.assets.depthguard import bounded_json_loads
+
+    return bounded_json_loads(path.read_text(encoding="utf-8"))
+
+
+# Generation-service bound for the Phase 13 unknown-object request list.
+MAX_GENERATED_REQUESTS = 8
 
 
 class GenerationServiceError(Exception):
@@ -453,6 +466,9 @@ class GenerationService:
         provider_factory: Callable[[], Provider] | None = None,
         ids: IdSource | None = None,
         publication: PublicationService | None = None,
+        spec_provider: Any = None,
+        generate_unknown_assets: bool = False,
+        generated_cache: Any = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -490,6 +506,16 @@ class GenerationService:
         # (environmentId, provenance, ambiguous, candidates, matchedAlias,
         # compositionFailed). Never serialized, never served.
         self._last_environment_resolution: dict[str, Any] | None = None
+        # Phase 13 — OPT-IN declarative procedural assets for unknown-object
+        # requests (default OFF: without a configured AssetSpecProvider the
+        # generation path is unavailable and every request resolves exactly as
+        # before; a configured provider + flag is the live/test path).
+        self._spec_provider = spec_provider
+        self._generate_unknown_assets = bool(generate_unknown_assets)
+        self._generated_cache = generated_cache
+        # Phase 13 INTERNAL diagnostic: whether the last generated-asset
+        # composition degraded (never serialized, never served).
+        self._last_generated_composition_failed: bool | None = None
         # NOTE: no startup database scan. Rehydration is LAZY and happens per
         # token use in ``_ensure_admission_ready`` (Phase5 E step 6: "the API
         # layer rehydrates/syncs the in-memory AdmissionController from DB on
@@ -530,6 +556,7 @@ class GenerationService:
         creator_token: str | None = None,
         difficulty: str | None = None,
         environment: str | None = None,
+        unknown_asset_requests: "tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]] | None" = None,
     ) -> CaseStarted:
         """Run one private case generation durably (version 1).
 
@@ -543,6 +570,15 @@ class GenerationService:
         - ``environment`` (Phase 11) is a validated environment hint: unsafe
           values raise ``EnvironmentHintError`` (422) BEFORE any reservation;
           safe unknown values resolve to the documented fallback (apartment).
+        - ``unknown_asset_requests`` (Phase 13, OPT-IN): an explicit bounded
+          list of declarative unknown-object requests (each a mapping with
+          ``requestedName`` + optional ``objectId``/``categoryHint``/``tags``).
+          When generation is enabled (``generate_unknown_assets=True`` and a
+          ``spec_provider`` is configured) each request is resolved through the
+          procedural oracle, compiled into a frozen definition, placed into the
+          resolved kit, and embedded in the published payload (the bootstrap
+          world object then carries ``generated``). Any failure or invalid
+          request degrades: the payload keeps the golden composition.
         """
         settings = self._settings
         # Local input validation: zero reservations, zero provider calls.
@@ -606,6 +642,20 @@ class GenerationService:
                 self._last_environment_resolution["compositionFailed"] = not (
                     _apply_kit_composition(record, environment_id)
                 )
+            # Phase 13: OPT-IN declarative procedural assets for the explicit
+            # unknown-object request list (after the kit composition, so the
+            # golden set is already re-anchored and the generated set is placed
+            # into the SAME kit).
+            if (
+                self._generate_unknown_assets
+                and self._spec_provider is not None
+                and unknown_asset_requests
+            ):
+                self._last_generated_composition_failed = not (
+                    self._apply_generated_composition(
+                        record, environment_id, list(unknown_asset_requests)
+                    )
+                )
         status = self._publish_if_ready(record, title, settings, now, case_id, version) or record.state.value
         self._sync_generations(anonymous_quota_session_id)
         return CaseStarted(
@@ -615,6 +665,131 @@ class GenerationService:
             creator_access_token=creator_token_value,
             status=status,
         )
+
+    # ------------------------------------------------------------------ #
+    # Phase 13 — declarative procedural assets (OPT-IN unknown-object path)
+    # ------------------------------------------------------------------ #
+
+    def generate_and_stage(
+        self,
+        asset_request: Any,
+        spec_provider: Any = None,
+    ) -> str:
+        """SERVICE helper: compile + cache ONE unknown asset; returns its
+        ``proc.*`` assetId (used by tests + Phase 14).
+
+        ``spec_provider`` overrides the service-configured provider when
+        supplied. Raises ``GenerationServiceError``/``AssetGenerationError``
+        when no provider is configured or the provider/parse path fails —
+        staging never degrades silently (callers opt in explicitly).
+        """
+        provider = spec_provider if spec_provider is not None else self._spec_provider
+        if provider is None:
+            raise GenerationServiceError("no asset spec provider configured")
+        from app.assets.oracle import generate_and_stage as oracle_stage
+
+        return oracle_stage(
+            asset_request, provider, cache=self._generated_cache
+        )
+
+    def _apply_generated_composition(
+        self,
+        record: Any,
+        environment_id: str,
+        unknown_requests: list[Any],
+    ) -> bool:
+        """Compose the published draft with declarative generated assets.
+
+        Runs AFTER the Phase 11 kit composition (the golden set is already
+        re-anchored). Each unknown request is resolved through the procedural
+        oracle (bounded), compiled into a frozen definition, placed into the
+        SAME kit via the placer, and embedded in the payload (world-object +
+        world-graph placement carrying the definition). Real failure modes
+        DEGRADE: the payload keeps the golden composition (never a crash, never
+        an invalid publication). Returns True when the payload was composed
+        (or there was nothing to add).
+        """
+        try:
+            import dataclasses
+
+            from app.assets.catalog import load_catalog_from_repo
+            from app.assets.oracle import resolve_or_generate
+            from app.environments.compose import compose_world_graph_for_kit
+            from app.environments.manifests import load_environment
+            from app.generation.safety import validate_world_graph
+            from app.generation.schemas import ObjectSpec
+
+            published = getattr(record, "published", None)
+            if published is None or getattr(published, "draft", None) is None:
+                return True
+            kit = load_environment(environment_id)
+            catalog = load_catalog_from_repo()
+            draft = published.draft
+
+            resolved: list[tuple[Any, Any]] = []
+            for raw in list(unknown_requests)[:MAX_GENERATED_REQUESTS]:
+                if not isinstance(raw, Mapping):
+                    continue
+                outcome = resolve_or_generate(
+                    raw,
+                    spec_provider=self._spec_provider,
+                    cache=self._generated_cache,
+                    catalog=catalog,
+                )
+                if outcome.generated is None or outcome.generated.definition is None:
+                    continue  # provider miss/invalid -> explicitly skipped
+                resolved.append((raw, outcome.generated))
+            if not resolved:
+                return True
+
+            definitions: dict[str, Any] = {
+                gen.asset_id: gen.definition for _raw, gen in resolved
+            }
+            generated_requests: list[dict[str, Any]] = []
+            new_objects = list(draft.objects)
+            for index, (raw, gen) in enumerate(resolved):
+                object_id = str(raw.get("objectId") or f"proc_obj_{index}")
+                generated_requests.append(
+                    {
+                        "objectId": object_id,
+                        "assetId": gen.asset_id,
+                        "interaction": "",
+                        "evidenceId": None,
+                        "categoryHint": gen.definition.category,
+                    }
+                )
+                new_objects.append(
+                    ObjectSpec(
+                        object_id=object_id,
+                        asset_id=gen.asset_id,
+                        affordances=(),
+                        subtype=(
+                            gen.definition.subtype
+                            if isinstance(gen.definition.subtype, str)
+                            else None
+                        ),
+                    )
+                )
+
+            world_graph = compose_world_graph_for_kit(
+                kit,
+                [*draft.world_graph.placements, *generated_requests],
+                catalog=catalog,
+                generated_definitions=definitions,
+            )
+            object_ids = {obj.object_id for obj in new_objects}
+            evidence_ids = {fact.id for fact in draft.evidence}
+            issues = validate_world_graph(world_graph, object_ids, evidence_ids)
+            if issues:
+                # Degrade: keep the payload without the generated assets.
+                return False
+            new_draft = dataclasses.replace(
+                draft, objects=tuple(new_objects), world_graph=world_graph
+            )
+            record.published = dataclasses.replace(published, draft=new_draft)
+            return True
+        except Exception:  # noqa: BLE001 - degradation must never break publication
+            return False
 
     def start_case_version(
         self,
@@ -954,7 +1129,7 @@ class GenerationService:
             if not path.exists():
                 raise ProviderConfigError(f"FAKE_PROVIDER_SCRIPT not found: {path}")
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
+                raw = _bounded_provider_script_load(path)
             except (OSError, ValueError) as exc:
                 raise ProviderConfigError(
                     f"FAKE_PROVIDER_SCRIPT is not valid JSON: {exc}"
@@ -962,7 +1137,7 @@ class GenerationService:
         else:
             builtin = Path(__file__).resolve().parent / "dev_mode_case.json"
             try:
-                raw = json.loads(builtin.read_text(encoding="utf-8"))
+                raw = _bounded_provider_script_load(builtin)
             except (OSError, ValueError) as exc:  # pragma: no cover - shipped file
                 raise ProviderConfigError(
                     f"builtin dev-mode case is unreadable: {exc}"
@@ -992,6 +1167,7 @@ __all__ = [
     "GenerationService",
     "GenerationServiceError",
     "IdentifierConflict",
+    "MAX_GENERATED_REQUESTS",
     "PromptError",
     "PromptValidationError",
     "ProviderConfigError",

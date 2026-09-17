@@ -2,6 +2,8 @@ import type {
   AccusationCandidatesDTO,
   AccusationResponse,
   EvidenceReadResultDTO,
+  GeneratedAssetDefinition,
+  GeneratedPartDTO,
   InvestigationBootstrapResponse,
   RevealResponse,
   WorldObjectDTO,
@@ -64,6 +66,102 @@ export function makeWorldObject(overrides: Partial<WorldObjectDTO> = {}): WorldO
     read: false,
   };
   return { ...base, ...overrides };
+}
+
+/* ======================================================================
+ * Phase 13 — declarative generated asset fixtures.
+ *
+ * These mirror the backend compiler's frozen output shape
+ * (`to_definition_json()`): a CANNED "custom trophy" — a depth-2 parented
+ * composition exactly like the backend golden CUSTOM_TROPHY spec compiled
+ * with the resolved material colors (wood.dark #5b3a29, metal.brass
+ * #c9a227). Purely mechanical fixture data — no truth, no server text.
+ * ==================================================================== */
+
+/** A canned `proc.*` asset id matching the backend grammar (falls through
+ * the client's `startsWith("proc.")` gate). */
+export const PROC_TROPHY_ASSET_ID = "proc.decor.a1b2c3d4e5f60718";
+
+/** One canned generated part (values are bounds-valid by construction). */
+export function makeGeneratedPart(
+  id: string,
+  overrides: Partial<GeneratedPartDTO> = {},
+): GeneratedPartDTO {
+  return {
+    id,
+    role: "body",
+    primitive: "box",
+    transform: {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 0.3, y: 0.3, z: 0.3 },
+    },
+    color: "#c9a227",
+    parentId: null,
+    ...overrides,
+  };
+}
+
+/** Small 3-part factory fixture: box -> cylinder -> cup (DEPTH 2 chains). */
+export function makeTrophyDefinition(overrides: Partial<GeneratedAssetDefinition> = {}): GeneratedAssetDefinition {
+  return {
+    compilerVersion: 1,
+    schemaVersion: 1,
+    assetId: PROC_TROPHY_ASSET_ID,
+    canonicalName: "Custom Trophy",
+    dimensions: { x: 0.3, y: 0.5, z: 0.3 },
+    parts: [
+      makeGeneratedPart("part_00", {
+        role: "base",
+        transform: {
+          position: { x: 0, y: -0.22, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.3, y: 0.08, z: 0.22 },
+        },
+        color: "#5b3a29",
+      }),
+      makeGeneratedPart("part_01", {
+        role: "stem",
+        primitive: "cylinder",
+        transform: {
+          position: { x: 0, y: -0.06, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.08, y: 0.3, z: 0.08 },
+        },
+        color: "#c9a227",
+        parentId: "part_00",
+      }),
+      makeGeneratedPart("part_02", {
+        role: "cup",
+        primitive: "cylinder",
+        transform: {
+          position: { x: 0, y: 0.17, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.18, y: 0.14, z: 0.18 },
+        },
+        color: "#c9a227",
+        parentId: "part_01",
+      }),
+    ],
+    hitbox: { scale: { x: 0.3, y: 0.5, z: 0.3 } },
+    ...overrides,
+  };
+}
+
+/** A canned proc.* world object carrying a valid trophy definition. */
+export function makeProcWorldObject(overrides: Partial<WorldObjectDTO> = {}): WorldObjectDTO {
+  return makeWorldObject({
+    objectId: "custom_trophy",
+    assetId: PROC_TROPHY_ASSET_ID,
+    assetType: "decor",
+    subtype: "trophy",
+    locationId: "miller_consulting_office",
+    anchor: "office_desk_01",
+    interaction: "",
+    evidenceId: null,
+    generated: makeTrophyDefinition(),
+    ...overrides,
+  });
 }
 
 /**

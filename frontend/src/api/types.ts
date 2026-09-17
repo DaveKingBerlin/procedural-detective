@@ -51,6 +51,59 @@ export interface PlayerKnowledgeDTO {
   visitedLocationIds: string[];
 }
 
+/* ======================================================================
+ * Phase 13 — declarative procedural asset render metadata.
+ *
+ * The `generated` block of a WorldObjectDTO: the EXACT camelCase
+ * GeneratedAssetDefinition document the backend compiler emits through
+ * `to_definition_json()` (backend/app/assets/compiler.py). It is the frozen
+ * contract the frontend RENDERS as safe local primitives — fully bounded,
+ * player-safe, declarative render metadata and nothing executable.
+ * ==================================================================== */
+
+/** One {x, y, z} float component (finite and bounded per axis). */
+export interface GeneratedVec3DTO {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** The four renderer-supported composition primitives (nothing else). */
+export type GeneratedPrimitiveKind = "box" | "cylinder" | "sphere" | "plane";
+
+/** One part transform in local space (Euler radians; bounded by validation). */
+export interface GeneratedTransformDTO {
+  position: GeneratedVec3DTO;
+  rotation: GeneratedVec3DTO;
+  scale: GeneratedVec3DTO;
+}
+
+/** One resolved definition part (renderer-facing; color is the resolved #RRGGBB). */
+export interface GeneratedPartDTO {
+  id: string;
+  role: string;
+  primitive: GeneratedPrimitiveKind;
+  transform: GeneratedTransformDTO;
+  color: string; // #RRGGBB — never a material token, never a derived tone
+  parentId: string | null;
+}
+
+/** The derived picking box (scale only), bounded by validation. */
+export interface GeneratedHitboxDTO {
+  scale: GeneratedVec3DTO;
+}
+
+/** The full validated declarative generated asset definition (frozen contract). */
+export interface GeneratedAssetDefinition {
+  compilerVersion: number;
+  schemaVersion: number;
+  assetId: string;
+  canonicalName: string;
+  dimensions: GeneratedVec3DTO;
+  parts: GeneratedPartDTO[];
+  hitbox: GeneratedHitboxDTO;
+}
+
 /** A single interactable world object in the player-safe WorldGraph DTO (REQUIREMENTS 26/27). */
 export interface WorldObjectDTO {
   objectId: string;
@@ -63,6 +116,13 @@ export interface WorldObjectDTO {
   evidenceId: string | null;
   discovered: boolean;
   read: boolean;
+  /**
+   * Phase 13: optional declarative render metadata. Projected by the backend
+   * ONLY for `proc.*` assets with a validated embedded generatedDefinition;
+   * ABSENT for every other asset (the client ignores it for non-proc assets —
+   * the field never overrides catalog identity).
+   */
+  generated?: GeneratedAssetDefinition | null;
 }
 
 /** Current investigation location, as published in the player-safe scene. */

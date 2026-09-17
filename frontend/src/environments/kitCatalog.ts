@@ -29,7 +29,8 @@ import { CATEGORY_VOCABULARY, getAsset, isCatalogHealthy } from "../catalog/asse
  *    backend kit checks (backend/app/environments/manifests.py): the
  *    documented top-level key set, id grammars for environment/zone/anchor
  *    ids, the ANCHOR_TYPE_VOCABULARY, zone/anchor count bounds and array-size
- *    bounds, string safety (control chars, URL schemes, path separators,
+ *    bounds, string safety (control chars, zero-width/bidi/line-separator
+ *    glyphs — DEF-068 parity — URL schemes, path separators,
  *    traversal, absolute paths, oversized strings), finite/bounded local
  *    positions (|x|,|z| <= 20, 0 <= y <= 8 per the Track B contract),
  *    rotations inside [-2*pi, 2*pi], duplicate environmentId/anchorId/zoneId,
@@ -259,6 +260,37 @@ const MIN_STRUCTURAL_ASSETS = 6;
 
 const FORBIDDEN_URL_TOKENS: readonly string[] = ["http://", "https://", "data:", "file:", "javascript:"];
 
+/**
+ * DEF-068 parity — the SAME invisible/format glyph class the backend rejects
+ * in generated strings. These codepoints are invisible to the player yet can
+ * reorder/alias a displayed token (Bidi controls), smuggle line breaks into a
+ * "one line" label, or break word-boundary scans — so a kit string that
+ * contains ANY of them is rejected deterministically at load:
+ *  U+200B-200F zero-width space/non-joiner/joiner + LRM/RLM marks
+ *  U+2028 / U+2029 line separator / paragraph separator
+ *  U+202A-202E bidi embedding controls (LRE/RLE/PDF/LRO/RLO)
+ *  U+2060-2064 word joiner and format controls
+ *  U+FEFF BOM / zero-width no-break space
+ */
+const FORBIDDEN_GLYPH_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x200b, 0x200f],
+  [0x2028, 0x2029],
+  [0x202a, 0x202e],
+  [0x2060, 0x2064],
+  [0xfeff, 0xfeff],
+];
+
+/** True when `value` contains any zero-width / bidi / line-separator glyph. */
+function containsForbiddenGlyph(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    for (const [low, high] of FORBIDDEN_GLYPH_RANGES) {
+      if (code >= low && code <= high) return true;
+    }
+  }
+  return false;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -278,6 +310,11 @@ function stringSafetyIssues(value: string, where: string): string[] {
       issues.push(`${where}: contains a control character`);
       break;
     }
+  }
+  // DEF-068 parity: zero-width / bidi / line-separator glyphs are rejected in
+  // kit strings EXACTLY like the backend rejects them.
+  if (containsForbiddenGlyph(value)) {
+    issues.push(`${where}: contains a zero-width / bidi / line-separator glyph`);
   }
   const lower = value.toLowerCase();
   for (const token of FORBIDDEN_URL_TOKENS) {

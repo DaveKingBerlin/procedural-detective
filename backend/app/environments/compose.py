@@ -25,11 +25,15 @@ graph's own locations list).
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from app.assets.catalog import Catalog, load_catalog_from_repo
 from app.environments.manifests import EnvironmentKit
-from app.environments.placer import PlacementRequest, place_objects
+from app.environments.placer import (
+    PlacementRequest,
+    is_procedural_asset_id,
+    place_objects,
+)
 from app.generation.schemas import (
     PlacementSpec,
     SceneSpec,
@@ -43,6 +47,7 @@ def compose_world_graph_for_kit(
     golden_placements: Iterable[Any],
     *,
     catalog: Catalog | None = None,
+    generated_definitions: dict[str, Any] | None = None,
 ) -> WorldGraphSpec:
     """Build the kit world graph that re-anchors ``golden_placements``.
 
@@ -50,6 +55,11 @@ def compose_world_graph_for_kit(
     golden contract) and receive a kit anchor + the anchor's zone as
     locationId. Raising any placement-contract violation surfaces loudly (a
     kit must always accommodate the golden object set).
+
+    Phase 13: ``generated_definitions`` (``assetId -> GeneratedAssetDefinition``)
+    lets procedural (proc.*) placement requests be placed with the same anchor
+    contract as catalog assets; their embedded definitions are attached to the
+    resulting ``PlacementSpec`` objects so the published payload carries them.
     """
     if catalog is None:
         catalog = load_catalog_from_repo()
@@ -77,7 +87,7 @@ def compose_world_graph_for_kit(
             )
         )
 
-    placed = place_objects(kit, requests, catalog=catalog)
+    placed = place_objects(kit, requests, catalog=catalog, generated_definitions=generated_definitions)
     locations = tuple(
         WorldGraphLocationSpec(
             location_id=zone.zone_id,
@@ -86,6 +96,7 @@ def compose_world_graph_for_kit(
         )
         for zone in kit.zones
     )
+    definitions_by_asset = generated_definitions or {}
     placements = tuple(
         PlacementSpec(
             object_id=item.object_id,
@@ -94,10 +105,27 @@ def compose_world_graph_for_kit(
             anchor=item.anchor,
             interaction=item.interaction,
             evidence_id=item.evidence_id,
+            generated_definition=(
+                _definition_json(definitions_by_asset[item.asset_id])
+                if item.asset_id in definitions_by_asset and is_procedural_asset_id(item.asset_id)
+                else None
+            ),
         )
         for item in placed
     )
     return WorldGraphSpec(locations=locations, placements=placements)
+
+
+def _definition_json(definition: Any) -> dict[str, Any]:
+    """The serialized camelCase definition document of a generated asset
+    (accepts the frozen ``GeneratedAssetDefinition`` or its plain dict form)."""
+    from app.assets.compiler import GeneratedAssetDefinition
+
+    if isinstance(definition, GeneratedAssetDefinition):
+        return definition.to_definition_json()
+    if isinstance(definition, Mapping):
+        return dict(definition)
+    return {}
 
 
 def scene_for_kit(

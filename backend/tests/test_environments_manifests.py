@@ -402,3 +402,72 @@ def test_all_real_manifests_load_with_zero_issues():
     kits = load_all_environments(directory=ENVIRONMENTS_DIR)
     assert len(kits) == 5
     assert {k.environment_id for k in kits} == set(KIT_IDS)
+
+
+# --------------------------------------------------------------------------- #
+# DEF-067 — deep nesting bombs on the environment-manifest load family
+# --------------------------------------------------------------------------- #
+
+
+def test_deeply_nested_environment_file_rejected_cleanly(tmp_path):
+    """DEF-067: a kit manifest nesting far deeper than ``MAX_STRUCT_NESTING``
+    is rejected with a clean ``EnvironmentValidationError`` — never an
+    uncaught ``RecursionError`` from ``json.loads``."""
+    deep: dict = {}
+    cursor = deep
+    for _ in range(300):
+        cursor["a"] = {}
+        cursor = cursor["a"]
+    path = tmp_path / "bomb.json"
+    path.write_text(json.dumps(deep), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError) as excinfo:
+        load_all_environments(directory=tmp_path)
+    assert any("nesting" in issue for issue in excinfo.value.issues)
+
+
+def test_deeply_nested_environment_data_returns_clean_issue():
+    """DEF-067: ``validate_environment_data`` on a deeply nested PYTHON
+    structure returns a deterministic nesting issue — never a RecursionError."""
+    deep: dict = {}
+    cursor = deep
+    for _ in range(300):
+        cursor["a"] = {}
+        cursor = cursor["a"]
+    issues = validate_environment_data(deep)
+    assert any(
+        "nesting depth" in issue and "exceeds the maximum" in issue
+        for issue in issues
+    )
+
+
+# --------------------------------------------------------------------------- #
+# DEF-068 — Unicode format/zero-width/Bidi/line-separator glyphs rejected
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "glyph,glyph_name",
+    [
+        ("\u200b", "U+200B"),  # zero-width space
+        ("\u202e", "U+202E"),  # right-to-left override (bidi)
+        ("\u2028", "U+2028"),  # line separator
+        ("\ufeff", "U+FEFF"),  # byte-order mark
+    ],
+)
+def test_unicode_format_control_glyphs_rejected(tmp_path, glyph, glyph_name):
+    """DEF-068: U+200B / U+202E / U+2028 / U+FEFF in a kit manifest string are
+    deterministic load issues — the environment string-safety scan rejects the
+    whole glyph class (validator AND loader paths)."""
+    from app.environments.manifests import EnvironmentValidationError
+
+    raw = json.loads((ENVIRONMENTS_DIR / "office.json").read_text(encoding="utf-8"))
+    raw["canonicalName"] = f"Office{glyph}Bomb"
+    issues = validate_environment_data(raw, catalog=load_catalog_from_repo())
+    matches = [i for i in issues if "Unicode format/zero-width" in i and glyph_name in i]
+    assert matches, f"expected a {glyph_name} glyph issue; got {issues}"
+    # loader path: the same clean rejection surfaces as a load issue.
+    path = tmp_path / "bomb.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError) as excinfo:
+        load_all_environments(directory=tmp_path)
+    assert any("Unicode format/zero-width" in issue for issue in excinfo.value.issues)

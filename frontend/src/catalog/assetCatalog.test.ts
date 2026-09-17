@@ -429,6 +429,52 @@ describe("strict validator — deterministic rejection of corrupt manifests", ()
     expectIssues(huge, "exceeds 120 characters");
   });
 
+  it.each([
+    ["U+200B zero-width space", "\u200b"],
+    ["U+200C zero-width non-joiner", "\u200c"],
+    ["U+200D zero-width joiner", "\u200d"],
+    ["U+200E left-to-right mark", "\u200e"],
+    ["U+200F right-to-left mark", "\u200f"],
+    ["U+2028 line separator", "\u2028"],
+    ["U+2029 paragraph separator", "\u2029"],
+    ["U+202A left-to-right embedding", "\u202a"],
+    ["U+202B right-to-left embedding", "\u202b"],
+    ["U+202C pop directional formatting", "\u202c"],
+    ["U+202D left-to-right override", "\u202d"],
+    ["U+202E right-to-left override", "\u202e"],
+    ["U+2060 word joiner", "\u2060"],
+    ["U+2061 function application", "\u2061"],
+    ["U+2062 invisible times", "\u2062"],
+    ["U+2063 invisible separator", "\u2063"],
+    ["U+2064 invisible plus", "\u2064"],
+    ["U+FEFF BOM / zero-width no-break space", "\ufeff"],
+  ] as ReadonlyArray<readonly [label: string, glyph: string]>)(
+    "rejects the invisible %s glyph in catalog strings (DEF-068 parity)",
+    (_label, glyph) => {
+      const raw = rawDocument();
+      rawAsset(raw).label = `bad${glyph}label`;
+      const issues = expectIssues(raw, "zero-width / bidi / line-separator glyph");
+      expect(issues.length).toBeGreaterThan(0);
+    },
+  );
+
+  it("the bundled catalog still validates clean under the DEF-068 glyph scan", () => {
+    expect(isCatalogHealthy()).toBe(true);
+    expect(getCatalogError()).toBeNull();
+    for (const assetId of catalogAssetIds()) {
+      const descriptor = getAsset(assetId)!;
+      const label = descriptor.label;
+      expect(
+        [...label].some((char) => {
+          const code = char.charCodeAt(0);
+          return (code >= 0x200b && code <= 0x200f) || code === 0x2028 || code === 0x2029 ||
+            (code >= 0x202a && code <= 0x202e) || (code >= 0x2060 && code <= 0x2064) || code === 0xfeff;
+        }),
+        `${assetId} label must be glyph-clean`,
+      ).toBe(false);
+    }
+  });
+
   it("rejects a fallbackAsset that is not a declared assetId", () => {
     const bad = rawDocument();
     bad.fallbackAsset = "PROP_MISSING_01";

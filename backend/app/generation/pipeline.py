@@ -478,8 +478,15 @@ def _whole_draft_safety_issues(draft: GeneratedDraft) -> tuple[str, ...]:
 def _asset_reference_issues(draft: GeneratedDraft) -> tuple[str, ...]:
     issues: list[str] = []
     for spec in draft.objects:
+        if safety.is_procedural_asset_id(spec.asset_id):
+            # Phase 13: procedural ids are NOT registry assets; their validity
+            # is bound to the world-graph placement's embedded definition
+            # (enforced by ``safety.validate_procedural_placement``).
+            continue
         issues.extend(safety.validate_asset_reference(spec.asset_id))
     for placement in draft.world_graph.placements:
+        if safety.is_procedural_asset_id(placement.asset_id):
+            continue
         issues.extend(safety.validate_asset_reference(placement.asset_id))
     return tuple(sorted(set(issues)))
 

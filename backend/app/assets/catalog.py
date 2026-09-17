@@ -28,7 +28,6 @@ pure validator also used directly by tests.
 
 from __future__ import annotations
 
-import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -39,6 +38,13 @@ from typing import Any, Mapping
 
 from app.generation.constraints import normalize_motive_text
 from app.generation.safety import INTERACTION_ALLOWLIST
+from app.assets.depthguard import (
+    MAX_STRUCT_NESTING,
+    BoundedJsonError,
+    bounded_json_loads,
+    bounded_structure_depth,
+)
+from app.assets.glyphs import format_glyph_issues
 
 # assetId grammar (mirrors app.generation.safety._ASSET_ID_PATTERN).
 _ASSET_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]+$")
@@ -424,6 +430,7 @@ def _string_safety_issues(value: str, where: str) -> list[str]:
         )
     if any(ord(ch) < 0x20 for ch in value):
         issues.append(f"{where}: contains control characters")
+    issues.extend(format_glyph_issues(value, where))
     lower = value.casefold()
     for scheme in _FORBIDDEN_URL_TOKENS:
         if scheme in lower:
@@ -876,6 +883,16 @@ def validate_catalog_data(data: Any) -> tuple[str, ...]:
     issues: list[str] = []
     if not isinstance(data, Mapping):
         return ("catalog document must be a JSON object",)
+
+    # DEF-067: a nesting bomb (deep JSON string already rejected by
+    # ``bounded_json_loads`` in the loader; a deep parsed structure here is
+    # reported as a deterministic issue — never RecursionError).
+    depth = bounded_structure_depth(data)
+    if depth > MAX_STRUCT_NESTING:
+        issues.append(
+            f"catalog document nesting depth {depth} exceeds the maximum "
+            f"{MAX_STRUCT_NESTING}"
+        )
 
     if "catalogVersion" not in data:
         issues.append("catalog document: missing required key 'catalogVersion'")
@@ -1351,7 +1368,9 @@ def load_catalog(path: str | Path) -> Catalog:
             f"cannot read asset catalog {manifest_path}: {exc}"
         ) from exc
     try:
-        data = json.loads(raw_text)
+        data = bounded_json_loads(raw_text)
+    except BoundedJsonError as exc:
+        raise CatalogError(f"asset catalog {manifest_path}: {exc}") from exc
     except ValueError as exc:
         raise CatalogError(
             f"asset catalog {manifest_path} is not valid JSON: {exc}"

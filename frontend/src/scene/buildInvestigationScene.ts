@@ -1,10 +1,11 @@
-import type { InvestigationBootstrapResponse, WorldObjectDTO } from "../api/types";
+import type { GeneratedAssetDefinition, InvestigationBootstrapResponse, WorldObjectDTO } from "../api/types";
 import { transformFor } from "../environments/kitGeometry";
 import type { Vec3 } from "./apartment";
 import type { AssetEntry, AssetPrimitiveKind, AssetRegistry, CompositeKind, CompositePartDescriptor } from "./assetRegistry";
 import { ASSET_REGISTRY, FALLBACK_ASSET } from "./assetRegistry";
 import type { AnchorRegistry } from "./anchorRegistry";
 import { ANCHOR_REGISTRY } from "./anchorRegistry";
+import { buildGeneratedComposite } from "./generatedRenderer";
 import { parseInvestigationBootstrap } from "./validation";
 
 /**
@@ -56,6 +57,21 @@ export interface SceneWorldObject {
   read: boolean;
   /** True when the asset id was NOT in the application-owned registry. */
   unknownAsset: boolean;
+  /**
+   * Phase 13: the validated declarative generated definition of a `proc.*`
+   * world object. Null for non-procedural assets and for proc.* assets whose
+   * block was missing/invalid (those fall back to the neutral primitive).
+   */
+  generated: GeneratedAssetDefinition | null;
+  /**
+   * Phase 13: the compiled generated child parts (built by
+   * {@link buildGeneratedComposite}, deterministic). The renderer uses this
+   * list INSTEAD of catalog/template resolution. Null unless `generated`
+   * is valid and non-null.
+   */
+  generatedParts: readonly CompositePartDescriptor[] | null;
+  /** Phase 13: the declared picking extent basis (def.hitbox.scale). */
+  generatedHitbox: Vec3 | null;
   /**
    * Phase 12: the frozen logical template of a TEMPLATE-ONLY composite
    * (compositeKind === null). Null for legacy composites and primitives.
@@ -182,15 +198,33 @@ function buildSceneWorldObject(
   anchorRegistry: AnchorRegistry,
   environmentId: string,
 ): SceneWorldObject {
-  const knownEntry = assetRegistry.get(dto.assetId);
+  // Phase 13 Track B: a `proc.*` asset with a VALID generated block renders
+  // from the declarative definition — the catalog is BYPASSED entirely (proc.*
+  // ids are never catalog ids). A proc.* asset whose block is missing/invalid
+  // has generated === null (the validator gate) and falls back to the neutral
+  // primitive; a non-proc asset ALWAYS ignores the field.
+  const generated = dto.generated ?? null;
+  const isGenerated = generated !== null;
+  const knownEntry = isGenerated ? undefined : assetRegistry.get(dto.assetId);
   const entry: AssetEntry = knownEntry ?? FALLBACK_ASSET;
-  const unknownAsset = knownEntry === undefined;
+  const unknownAsset = knownEntry === undefined && !isGenerated;
   // Phase 11 Track B: the per-object transform comes from the kit's anchor
   // registry — the apartment kit keeps the Phase 6 table (byte-identical),
   // every other kit resolves strictly from the manifest; unknown anchors use
   // the stable objectId-hash slot (see ../environments/kitGeometry.ts).
   const transform = transformFor(environmentId, dto.anchor, dto.objectId, anchorRegistry);
   const rotation = transform.rotation ?? { x: 0, y: 0, z: 0 };
+
+  // Phase 13: compile the generated definition into child parts + the declared
+  // picking extent ONCE at model build time (pure, deterministic — the same
+  // load always yields the same parts array).
+  let generatedParts: readonly CompositePartDescriptor[] | null = null;
+  let generatedHitbox: Vec3 | null = null;
+  if (generated !== null) {
+    const built = buildGeneratedComposite(generated);
+    generatedParts = built.parts;
+    generatedHitbox = built.hitbox;
+  }
 
   // Phase 12 Track B: TEMPLATE-ONLY composites (a templateId but NO legacy
   // compositeKind) are sized from the factory's absolute bounds (the child
@@ -205,13 +239,19 @@ function buildSceneWorldObject(
   const templateMaterial = entry.templateMaterial ?? null;
   const templateState = entry.templateState ?? null;
   const templateBacked =
+    !isGenerated &&
     entry.compositeKind === null &&
     templateId !== null &&
     templateParts !== null &&
     templateFaceBounds !== null;
-  const scale = templateBacked
-    ? { x: templateFaceBounds.x, y: templateFaceBounds.y, z: templateFaceBounds.z }
-    : { x: entry.scale.x, y: entry.scale.y, z: entry.scale.z };
+  // Phase 13: a generated object's footprint IS its declared picking extent
+  // (already ≥ the visual bounds per axis, clamped pickable by the compiler),
+  // so spacing/ring/hitbox math all see the real rendered footprint.
+  const scale = generatedHitbox !== null
+    ? generatedHitbox
+    : templateBacked
+      ? { x: templateFaceBounds.x, y: templateFaceBounds.y, z: templateFaceBounds.z }
+      : { x: entry.scale.x, y: entry.scale.y, z: entry.scale.z };
 
   return {
     objectId: dto.objectId,
@@ -223,7 +263,9 @@ function buildSceneWorldObject(
     hitboxScale: entry.hitboxScale ?? 1,
     color: entry.color,
     scale,
-    // Unknown assets get no label: a neutral placeholder must never claim a name.
+    // Unknown assets get no label: a neutral placeholder must never claim a
+    // name. Generated objects also keep label null — a server-provided
+    // canonicalName is never echoed onto the page (app-authored text only).
     label: unknownAsset ? null : entry.label,
     position: { x: transform.position.x, y: transform.position.y, z: transform.position.z },
     rotation,
@@ -240,6 +282,9 @@ function buildSceneWorldObject(
     discovered: dto.discovered,
     read: dto.read,
     unknownAsset,
+    generated,
+    generatedParts,
+    generatedHitbox,
     templateId: templateBacked ? templateId : null,
     templateParts: templateBacked ? templateParts : null,
     templateHitbox: templateBacked ? templateHitbox : null,

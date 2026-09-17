@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 
 class PlayerKnowledgeDTO(BaseModel):
@@ -32,6 +32,54 @@ class PlayerKnowledgeDTO(BaseModel):
     visitedLocationIds: list[str] = Field(default_factory=list)
 
 
+class GeneratedVec3DTO(BaseModel):
+    """One bounded {x, y, z} render vector of a generated definition."""
+
+    x: float
+    y: float
+    z: float
+
+
+class GeneratedTransformDTO(BaseModel):
+    """One bounded part transform (position / rotation / scale, local space)."""
+
+    position: GeneratedVec3DTO
+    rotation: GeneratedVec3DTO
+    scale: GeneratedVec3DTO
+
+
+class GeneratedPartDTO(BaseModel):
+    """One resolved part of a generated definition (renderer-facing)."""
+
+    id: str
+    role: str
+    primitive: str
+    transform: GeneratedTransformDTO
+    color: str
+    parentId: str | None = None
+
+
+class GeneratedAssetDefinitionDTO(BaseModel):
+    """The FROZEN Phase 13 GeneratedAssetDefinition document (player-safe).
+
+    Mirror of ``app.assets.compiler.GeneratedAssetDefinition.to_definition_json()``:
+    declarative geometry ONLY (bounded primitives box/cylinder/sphere/plane,
+    bounded transforms, resolved #RRGGBB colors, derived pickable hitbox) — NO
+    executable content of any kind. The frontend track renders exactly this
+    schema.
+    """
+
+    compilerVersion: int
+    schemaVersion: int
+    assetId: str
+    canonicalName: str
+    category: str
+    subtype: str | None = None
+    dimensions: GeneratedVec3DTO
+    parts: list[GeneratedPartDTO] = Field(default_factory=list)
+    hitbox: dict[str, GeneratedVec3DTO] = Field(default_factory=dict)
+
+
 class WorldObjectDTO(BaseModel):
     """One player-safe world object (Phase6 D; WorldGraph rendering contract).
 
@@ -39,6 +87,13 @@ class WorldObjectDTO(BaseModel):
     safe generic type label. ``anchor`` is a semantic anchor identifier (never
     raw coordinates). ``interaction`` comes from the published interaction
     allowlist.
+
+    Phase 13 additive: ``generated`` carries the validated declarative
+    ``GeneratedAssetDefinition`` (render metadata) of a procedural (proc.*)
+    world object — present ONLY when the pinned payload's placement carried a
+    definition that passed the current compiler/schema projection gate (any
+    mismatch skips the placement). Player-safe by construction: bounded
+    declarative geometry + resolved colors, NO executable content.
     """
 
     objectId: str
@@ -51,6 +106,25 @@ class WorldObjectDTO(BaseModel):
     evidenceId: str | None = None
     discovered: bool = False
     read: bool = False
+    generated: GeneratedAssetDefinitionDTO | None = None
+
+    @model_serializer
+    def _serialize(self) -> dict[str, Any]:
+        """Serialize the signal fields, OMITTING ``generated`` when absent.
+
+        Phase 13 contract: ``generated`` is an OPTIONAL additive field — the
+        golden (non-procedural) bootstrap response stays byte-identical
+        (no ``generated`` key), while a procedural placement still carries its
+        validated definition. Every other (nullable) field keeps its value as
+        before (``subtype``/``evidenceId`` remain present-null).
+        """
+        result: dict[str, Any] = {}
+        for field_name in type(self).model_fields:
+            value = getattr(self, field_name)
+            if field_name == "generated" and value is None:
+                continue
+            result[field_name] = value
+        return result
 
 
 class SceneLocationDTO(BaseModel):

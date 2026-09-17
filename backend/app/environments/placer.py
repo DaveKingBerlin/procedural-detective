@@ -46,6 +46,11 @@ from app.environments.manifests import (
     EnvironmentKit,
 )
 
+# Phase 13 — procedural (proc.*) asset id grammar (mirror of
+# ``app.assets.compiler.PROCEDURAL_ASSET_PATTERN``; kept local like the other
+# id grammars in this package). A lockstep test pins the grammars together.
+_PROCEDURAL_ASSET_RE = re.compile(r"^proc\.[a-z0-9_]+\.[a-f0-9]{16}$")
+
 # The documented evidence-capable anchor types (a small evidence item must be
 # reachable/pickable on one of these; DOOR/WINDOW/CCTV/ACCESS_CONTROL/
 # PLAYER_SPAWN are never evidence-bearing slots).
@@ -71,6 +76,37 @@ SPAWN_ANCHOR_CLEARANCE = 0.4
 class PlacementError(ValueError):
     """An object could not be placed (no compatible/free anchor) or a
     placement set violates the placement contract."""
+
+
+def is_procedural_asset_id(asset_id: object) -> bool:
+    """True when ``asset_id`` is a procedural (proc.*) generated asset id."""
+    return isinstance(asset_id, str) and bool(_PROCEDURAL_ASSET_RE.match(asset_id))
+
+
+def generated_asset_anchor_meta(
+    definition: Any, catalog: Catalog
+) -> tuple[str, tuple[str, ...]]:
+    """Deterministic (category, allowed_anchors) of a generated definition.
+
+    The anchor compatibility of a generated asset is derived from the FIRST
+    catalog descriptor (manifest order) of the SAME category — the exact
+    semantic of "a catalog asset of this category would sit here". The same
+    category ALWAYS yields the same anchor set, so ``place_objects`` stays as
+    deterministic for generated assets as for catalog assets (an unknown
+    category yields an empty anchor set, which the placer surfaces as a
+    PlacementError — never a silent placement).
+    """
+    category = _definition_category(definition)
+    for asset in catalog.assets:
+        if asset.category == category:
+            return category, asset.allowed_anchors
+    return category, ()
+
+
+def _definition_category(definition: Any) -> str:
+    if isinstance(definition, Mapping):
+        return str(definition.get("category") or "")
+    return str(getattr(definition, "category", "") or "")
 
 
 @dataclass(frozen=True)
@@ -171,12 +207,21 @@ def _catalog() -> Catalog:
 # --------------------------------------------------------------------------- #
 
 
-def _evidence_bearing(placement: Any, catalog: Catalog) -> bool:
-    """Evidence-bearing = catalog category 'evidence' OR carries an evidenceId."""
+def _evidence_bearing(
+    placement: Any, catalog: Catalog, generated_definitions: Mapping[str, Any] | None = None
+) -> bool:
+    """Evidence-bearing = catalog category 'evidence' OR carries an evidenceId.
+    A procedural (proc.*) asset is evidence-bearing when its definition's
+    category is 'evidence'."""
     asset_id = _placed_value(placement, "asset_id", "assetId")
-    if asset_id is not None and catalog.by_id.get(str(asset_id), None) is not None:
-        if catalog.by_id[str(asset_id)].category == "evidence":
-            return True
+    if asset_id is not None:
+        str_id = str(asset_id)
+        if catalog.by_id.get(str_id, None) is not None:
+            if catalog.by_id[str_id].category == "evidence":
+                return True
+        if generated_definitions and str_id in generated_definitions:
+            if _definition_category(generated_definitions[str_id]) == "evidence":
+                return True
     evidence_id = _placed_value(placement, "evidence_id", "evidenceId")
     return evidence_id is not None and str(evidence_id) != ""
 
@@ -186,11 +231,19 @@ def validate_placement(
     placements: Iterable[Any],
     *,
     catalog: Catalog | None = None,
+    generated_definitions: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
     """Validate a placement set against ``kit``; return sorted issue strings.
 
     Never raises and performs no I/O. See the module docstring for the exact
     documented rules. An empty tuple means the placements are valid.
+
+    Phase 13: ``generated_definitions`` (``assetId -> GeneratedAssetDefinition``
+    object or its serialized dict) lets procedural (proc.*) placements be
+    validated with the same category/anchor/evidence rules as catalog assets —
+    their category and allowed anchor types are derived deterministically from
+    the catalog (``generated_asset_anchor_meta``). A proc.* placement WITHOUT a
+    known definition is an issue (never silently treated as a catalog asset).
     """
     if catalog is None:
         catalog = _catalog()
@@ -209,21 +262,42 @@ def validate_placement(
         if anchor is None:
             issues.append(f"{where}: unknown anchor {anchor_id!r} in kit {kit.environment_id!r}")
             continue
-        if not isinstance(asset_id, str) or asset_id not in catalog.by_id:
-            issues.append(f"{where}: asset {asset_id!r} is not in the asset catalog")
-            continue
-        asset = catalog.by_id[asset_id]
-        if asset.category not in anchor.allowed_categories:
+
+        asset = None
+        category: str | None = None
+        allowed_anchors: tuple[str, ...] = ()
+        if isinstance(asset_id, str) and asset_id in catalog.by_id:
+            asset = catalog.by_id[asset_id]
+            category = asset.category
+            allowed_anchors = asset.allowed_anchors
+        elif (
+            isinstance(asset_id, str)
+            and is_procedural_asset_id(asset_id)
+            and generated_definitions is not None
+            and asset_id in generated_definitions
+        ):
+            category, allowed_anchors = generated_asset_anchor_meta(
+                generated_definitions[asset_id], catalog
+            )
+        else:
             issues.append(
-                f"{where}: asset category {asset.category!r} is not allowed on anchor "
+                f"{where}: asset {asset_id!r} is not in the asset catalog"
+            )
+            continue
+        if category is None:
+            issues.append(f"{where}: asset {asset_id!r} has no resolved category")
+            continue
+        if category not in anchor.allowed_categories:
+            issues.append(
+                f"{where}: asset category {category!r} is not allowed on anchor "
                 f"{anchor_id!r} (allowed {sorted(anchor.allowed_categories)!r})"
             )
-        if anchor.type not in asset.allowed_anchors:
+        if anchor.type not in allowed_anchors:
             issues.append(
                 f"{where}: anchor type {anchor.type!r} cannot host asset {asset_id!r} "
-                f"(asset allows {sorted(asset.allowed_anchors)!r})"
+                f"(asset allows {sorted(allowed_anchors)!r})"
             )
-        if _evidence_bearing(placement, catalog) and anchor.type not in EVIDENCE_CAPABLE_TYPES:
+        if _evidence_bearing(placement, catalog, generated_definitions) and anchor.type not in EVIDENCE_CAPABLE_TYPES:
             issues.append(
                 f"{where}: evidence on anchor {anchor_id!r} (type {anchor.type!r}) is "
                 "inaccessible/unpickable"
@@ -234,7 +308,7 @@ def validate_placement(
                 "object_id": _placed_value(placement, "object_id", "objectId"),
                 "asset_id": asset_id,
                 "anchor_id": anchor_id,
-                "evidence": _evidence_bearing(placement, catalog),
+                "evidence": _evidence_bearing(placement, catalog, generated_definitions),
             }
         )
 
@@ -311,6 +385,7 @@ def place_objects(
     requests: Iterable[Any],
     *,
     catalog: Catalog | None = None,
+    generated_definitions: Mapping[str, Any] | None = None,
 ) -> tuple[PlacedObject, ...]:
     """Deterministically assign catalog-asset requests to free kit anchors.
 
@@ -323,6 +398,12 @@ def place_objects(
       the golden's dining-table stacking);
     - an explicit ``anchor_type_hint`` RESTRICTS the pool to exactly that type
       (no silent fallback: unsatisfiable hints raise ``PlacementError``).
+
+    Phase 13: ``generated_definitions`` (``assetId -> GeneratedAssetDefinition``
+    object or serialized dict) lets procedural (proc.*) asset requests be placed
+    with the SAME anchor contract as catalog assets (category + allowed anchor
+    types derived deterministically from the catalog) — a generated asset can
+    therefore be placed into any kit that hosts its category.
 
     Returns frozen ``PlacedObject`` tuples whose ``location_id`` is the anchor's
     zone id and whose ``object_id`` is the request's id (or a deterministic
@@ -346,14 +427,29 @@ def place_objects(
 
     for request in normalized:
         asset = catalog.by_id.get(request.asset_id)
-        if asset is None:
+        if asset is not None:
+            category = asset.category
+            allowed_anchors = asset.allowed_anchors
+        elif (
+            is_procedural_asset_id(request.asset_id)
+            and generated_definitions is not None
+            and request.asset_id in generated_definitions
+        ):
+            category, allowed_anchors = generated_asset_anchor_meta(
+                generated_definitions[request.asset_id], catalog
+            )
+            if not category:
+                raise PlacementError(
+                    f"generated asset {request.asset_id!r} has no resolvable category"
+                )
+        else:
             raise PlacementError(
                 f"asset {request.asset_id!r} is not in the asset catalog"
             )
         pool = [
             anchor
             for anchor in kit.anchors
-            if anchor.type in asset.allowed_anchors
+            if anchor.type in allowed_anchors
         ]
         if request.anchor_type_hint is not None:
             hinted = [a for a in pool if a.type == request.anchor_type_hint]
@@ -366,17 +462,17 @@ def place_objects(
         if not pool:
             raise PlacementError(
                 f"no anchor in kit {kit.environment_id!r} can host {request.asset_id!r} "
-                f"(asset allows {sorted(asset.allowed_anchors)!r})"
+                f"(asset allows {sorted(allowed_anchors)!r})"
             )
 
         # Category compatibility restrict: an anchor must allow the asset's
         # category (category-capable anchors first, then any compatible).
         compatible = [
-            a for a in pool if asset.category in a.allowed_categories
+            a for a in pool if category in a.allowed_categories
         ]
         if not compatible:
             raise PlacementError(
-                f"no anchor allows category {asset.category!r} for "
+                f"no anchor allows category {category!r} for "
                 f"{request.asset_id!r} in kit {kit.environment_id!r}"
             )
 
@@ -423,7 +519,9 @@ def place_objects(
         )
 
     result = tuple(placed)
-    issues = validate_placement(kit, result, catalog=catalog)
+    issues = validate_placement(
+        kit, result, catalog=catalog, generated_definitions=generated_definitions
+    )
     if issues:
         raise PlacementError("; ".join(issues))
     return result
@@ -438,6 +536,8 @@ __all__ = [
     "PlacementError",
     "PlacementRequest",
     "default_object_id",
+    "generated_asset_anchor_meta",
+    "is_procedural_asset_id",
     "place_objects",
     "validate_placement",
 ]
