@@ -30,6 +30,7 @@ from app.persistence.store import (
 )
 from app.services.generation import (
     AdmissionDeniedError,
+    EnvironmentHintError,
     GenerationServiceError,
     IdentifierConflict,
     PromptValidationError,
@@ -59,6 +60,11 @@ def map_service_error(exc: Exception) -> HTTPException:
     if isinstance(exc, PromptValidationError):
         # Never echo the prompt or the offending value back.
         return http_error(422, "PROMPT_ERROR", "Prompt is invalid or exceeds the limit")
+    if isinstance(exc, EnvironmentHintError):
+        # Never echo the offending environment value back.
+        return http_error(
+            422, "ENVIRONMENT_ERROR", "Environment hint is invalid or exceeds the limit"
+        )
     if isinstance(exc, (DuplicatePublication, DuplicateCaseVersion, DuplicateAttempt)):
         return http_error(409, "CASE_VERSION_CONFLICT", "Case version conflict")
     if isinstance(

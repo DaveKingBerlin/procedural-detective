@@ -174,28 +174,28 @@ def test_11_v1_evidence_still_discoverable_and_readable_after_v2(phase5_app):
 
 def test_12_client_cannot_discover_non_reachable_evidence(phase5_app):
     """O12a: a VALID evidence id that no placement links cannot be discovered
-    (404, no leak). O12b: an interaction on an unrelated object with the wrong
-    interaction answers 409 with no state change."""
+    (404, no leak). O12b: an interaction on a decorative object — the vase's
+    published interaction is "" (not interactable, DEF-062) — answers 409 with
+    NO state change for ANY requested interaction."""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
     # cctv_michael_office_01 exists in the evidence set but NO placement links it.
     res = discover(phase5_app, pt_id, pt_token, UNLINKED_EVIDENCE)
     assert res.status_code == 404
     assert res.json()["error"]["code"] == "NOT_FOUND"
-    # The vase has no evidence; interacting with the WRONG interaction fails.
-    res = interact(phase5_app, pt_id, pt_token, "vase_01", "read")
-    assert res.status_code == 409
-    assert res.json()["error"]["code"] == "INTERACTION_NOT_ALLOWED"
+    # The vase is DECORATIVE (published interaction ""): every interaction
+    # request is refused with the same safe 409 envelope, no state change.
+    for requested in ("read", "inspect"):
+        res = interact(phase5_app, pt_id, pt_token, "vase_01", requested)
+        assert res.status_code == 409
+        assert res.json()["error"]["code"] == "INTERACTION_NOT_ALLOWED"
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.discovered == ()
     assert snap.visited == ()
-    # But the SAME object with the CORRECT interaction works (no evidence id).
-    res = interact(phase5_app, pt_id, pt_token, "vase_01", "inspect")
-    assert res.status_code == 200
-    assert res.json()["evidenceId"] is None
-    assert res.json()["discovery"] is None
+    # Evidence objects remain interactable: the knife's inspect discovers it.
     res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200
+    assert res.json()["evidenceId"] == KNIFE_EVIDENCE
     # No client can claim an arbitrary id as discovered.
     assert res.json()["evidenceId"] != UNLINKED_EVIDENCE
 
@@ -251,18 +251,20 @@ def test_18_concurrent_duplicate_discovery_consistent(phase5_app):
 
 def test_visited_locations_only_via_valid_interactions(phase5_app):
     """visitedLocationIds grow ONLY through valid interactions: failed
-    interactions (409) and failed discoveries (404) add nothing."""
+    interactions (409 — including decorative env objects, DEF-062) and failed
+    discoveries (404) add nothing."""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.visited == ()
-    # Failed attempts add nothing.
+    # Failed attempts add nothing: mismatch 409, decorative object 409, 404.
     interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "read")  # 409
+    interact(phase5_app, pt_id, pt_token, "vase_01", "inspect")  # 409 decorative
     discover(phase5_app, pt_id, pt_token, "EV-FAKE")  # 404
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.visited == ()
-    # A successful interaction (no evidence) marks the location visited.
-    res = interact(phase5_app, pt_id, pt_token, "vase_01", "inspect")
+    # A successful interaction (evidence discovery) marks the location visited.
+    res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.visited == (SCENE_LOCATION,)

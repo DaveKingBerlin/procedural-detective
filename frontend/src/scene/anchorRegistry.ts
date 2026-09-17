@@ -9,6 +9,14 @@ import type { Vec3 } from "./apartment";
  * yields the same transform within the 10x8x3 apartment template from
  * src/scene/apartment.ts (determinism J).
  *
+ * PHASE 11 TRACK B: this table is the "apartment kit" geometry source — for
+ * the apartment environment its values stay byte-identical (the golden
+ * appearance), while the four NEW environment kits resolve their anchor
+ * transforms STRICTLY from the kit manifests (see
+ * src/environments/kitGeometry.ts, {@link transformFor}). This module's
+ * exported surface (ANCHOR_REGISTRY / stableHash / fallbackAnchor /
+ * resolveAnchor) is unchanged.
+ *
  * Anchors not present in the table fall back to {@link fallbackAnchor}, a
  * stable slot derived from a hash of the OBJECT ID — never from array
  * position or render order, so object identity stays stable no matter how

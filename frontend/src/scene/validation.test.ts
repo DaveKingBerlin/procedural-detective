@@ -121,6 +121,23 @@ describe("validateWorldGraph", () => {
     expect(parsed.subtype).toBeNull();
     expect(parsed.evidenceId).toBeNull();
   });
+
+  it("accepts a world object with an EMPTY interaction string (DEF-062 no-affordance DTO)", () => {
+    // DEF-062: published cases encode "no affordance" as interaction:"" (the
+    // manifest-derived DTO). An empty string is valid — only a non-string or a
+    // missing field is malformed.
+    const parsed = validateWorldObject.validate(makeWorldObject({ interaction: "" }));
+    expect(parsed).toMatchObject({ objectId: "kitchen_knife", interaction: "" });
+  });
+
+  it("rejects a world object whose interaction is missing or not a string", () => {
+    const nonString = makeWorldObject() as unknown as Record<string, unknown>;
+    nonString.interaction = 7;
+    expectValidationError(() => validateWorldObject.validate(nonString), "interaction");
+    const missing = makeWorldObject() as unknown as Record<string, unknown>;
+    delete missing.interaction;
+    expectValidationError(() => validateWorldObject.validate(missing), "interaction");
+  });
 });
 
 describe("validatePlayerKnowledge", () => {
@@ -217,5 +234,50 @@ describe("bootstrap lifecycle state (Phase 7)", () => {
     expectValidationError(() => parseInvestigationBootstrap.validate(raw), "PLAYING");
     raw.state = "CREATED";
     expectValidationError(() => parseInvestigationBootstrap.validate(raw), "PLAYING");
+  });
+});
+
+describe("Phase 11 — scene.environmentId (optional-accept-required)", () => {
+  it("parses a scene WITH environmentId 'office'", () => {
+    const bootstrap = makeBootstrap();
+    (bootstrap.scene as unknown as Record<string, unknown>).environmentId = "office";
+    const parsed = parseInvestigationBootstrap.validate(bootstrap);
+    expect(parsed.scene.environmentId).toBe("office");
+  });
+
+  it("defaults a scene WITHOUT environmentId to 'apartment' (backwards compatible)", () => {
+    const legacy = makeBootstrap();
+    delete (legacy.scene as unknown as Record<string, unknown>).environmentId;
+    const parsed = parseInvestigationBootstrap.validate(legacy);
+    expect(parsed.scene.environmentId).toBe("apartment");
+    expect(parsed.scene.worldObjects).toHaveLength(9);
+  });
+
+  it("treats a null environmentId as absent (lenient fallback)", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    (raw.scene as Record<string, unknown>).environmentId = null;
+    expect(parseInvestigationBootstrap.validate(raw).scene.environmentId).toBe("apartment");
+  });
+
+  it("rejects a PRESENT but non-string environmentId (never coerces a hostile value)", () => {
+    const asNumber = makeBootstrap() as unknown as Record<string, unknown>;
+    (asNumber.scene as Record<string, unknown>).environmentId = 7;
+    expectValidationError(() => parseInvestigationBootstrap.validate(asNumber), "environmentId");
+
+    const asObject = makeBootstrap() as unknown as Record<string, unknown>;
+    (asObject.scene as Record<string, unknown>).environmentId = { id: "office" };
+    expectValidationError(() => parseInvestigationBootstrap.validate(asObject), "environmentId");
+  });
+
+  it("rejects an empty-string environmentId", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    (raw.scene as Record<string, unknown>).environmentId = "";
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "environmentId");
+  });
+
+  it("rejects an oversized environmentId (>80 characters)", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    (raw.scene as Record<string, unknown>).environmentId = "x".repeat(81);
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "environmentId");
   });
 });

@@ -151,6 +151,18 @@ class Settings(BaseSettings):
             "assets under /assets are served with immutable caching."
         ),
     )
+    # -- Phase 10 Asset Oracle (Phase10 / Phase_POST_MVP_ROADMAP) ----------
+    # Optional explicit path to the Asset Oracle manifest. None (default)
+    # derives <repo-root>/assets/catalog/catalog.json from the package
+    # location (never from the process CWD).
+    asset_catalog_path: Path | None = Field(
+        default=None,
+        description=(
+            "ASSET_CATALOG_PATH: optional absolute path of the Asset Oracle "
+            "catalog manifest (assets/catalog/catalog.json). None derives the "
+            "repo-root path from the package location."
+        ),
+    )
 
     @field_validator("static_dir", mode="before")
     @classmethod
@@ -191,6 +203,21 @@ class Settings(BaseSettings):
                 return None
             if "\x00" in value:
                 raise ValueError("FAKE_PROVIDER_SCRIPT must not contain NUL characters")
+        return value
+
+    @field_validator("asset_catalog_path", mode="before")
+    @classmethod
+    def _sanitize_asset_catalog_path(cls, value: object) -> object:
+        """ASSET_CATALOG_PATH: tolerate empty strings; reject NUL bytes."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if not value.strip():
+                return None
+            if "\x00" in value:
+                raise ValueError(
+                    "ASSET_CATALOG_PATH must not contain NUL characters"
+                )
         return value
 
     @field_validator("cors_allowed_origins", mode="before")

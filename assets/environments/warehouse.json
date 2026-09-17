@@ -1,0 +1,53 @@
+{
+  "environmentId": "warehouse",
+  "version": 1,
+  "canonicalName": "Warehouse",
+  "aliases": ["depot", "storage hall", "storage unit", "storage"],
+  "tags": ["industrial", "storage", "logistics"],
+  "zones": [
+    {"zoneId": "warehouse_floor_main", "label": "Main Floor", "rooms": ["main_hall"]},
+    {"zoneId": "warehouse_storage_a", "label": "Storage Aisle A", "rooms": ["aisle_a"]},
+    {"zoneId": "warehouse_storage_b", "label": "Storage Aisle B", "rooms": ["aisle_b"]},
+    {"zoneId": "warehouse_loading", "label": "Loading Bay", "rooms": ["loading_bay"]},
+    {"zoneId": "warehouse_office", "label": "Foreman Office", "rooms": ["office"]},
+    {"zoneId": "warehouse_mezzanine", "label": "Mezzanine", "rooms": ["mezzanine"]}
+  ],
+  "anchors": [
+    {"anchorId": "warehouse_desk_01", "type": "DESK_EVIDENCE", "zoneId": "warehouse_office", "position": {"x": 3.0, "y": 0.8, "z": 10.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics", "furniture", "decor"], "exclusive": false, "required": true},
+    {"anchorId": "warehouse_workbench_01", "type": "DESK_EVIDENCE", "zoneId": "warehouse_floor_main", "position": {"x": 9.0, "y": 0.8, "z": 3.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics", "furniture", "decor"], "exclusive": false, "required": true},
+    {"anchorId": "warehouse_floor_01", "type": "FLOOR_EVIDENCE", "zoneId": "warehouse_floor_main", "position": {"x": 3.2, "y": 0.02, "z": 5.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence"], "exclusive": false, "required": true},
+    {"anchorId": "warehouse_floor_02", "type": "FLOOR_EVIDENCE", "zoneId": "warehouse_floor_main", "position": {"x": 6.0, "y": 0.02, "z": 6.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence"], "exclusive": false, "required": false},
+    {"anchorId": "warehouse_body_01", "type": "BODY", "zoneId": "warehouse_floor_main", "position": {"x": 3.0, "y": 0.0, "z": 6.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["character"], "exclusive": true, "required": true},
+    {"anchorId": "warehouse_door_01", "type": "DOOR", "zoneId": "warehouse_loading", "position": {"x": 11.5, "y": 0.0, "z": 1.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": true},
+    {"anchorId": "warehouse_door_02", "type": "DOOR", "zoneId": "warehouse_loading", "position": {"x": 11.5, "y": 0.0, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": false},
+    {"anchorId": "warehouse_window_01", "type": "WINDOW", "zoneId": "warehouse_floor_main", "position": {"x": 0.8, "y": 0.0, "z": 6.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": true},
+    {"anchorId": "warehouse_shelf_01", "type": "STORAGE", "zoneId": "warehouse_storage_a", "position": {"x": 3.0, "y": 0.0, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["furniture", "decor", "utility"], "exclusive": false, "required": true},
+    {"anchorId": "warehouse_shelf_02", "type": "STORAGE", "zoneId": "warehouse_storage_b", "position": {"x": 7.0, "y": 0.0, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["furniture", "decor", "utility"], "exclusive": false, "required": false},
+    {"anchorId": "warehouse_computer_01", "type": "COMPUTER", "zoneId": "warehouse_office", "position": {"x": 3.0, "y": 0.8, "z": 9.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["electronics", "evidence"], "exclusive": true, "required": true},
+    {"anchorId": "warehouse_document_01", "type": "DOCUMENT", "zoneId": "warehouse_office", "position": {"x": 3.2, "y": 0.8, "z": 9.2}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics"], "exclusive": false, "required": true},
+    {"anchorId": "warehouse_cctv_01", "type": "CCTV", "zoneId": "warehouse_floor_main", "position": {"x": 5.0, "y": 2.8, "z": 1.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["utility"], "exclusive": true, "required": false},
+    {"anchorId": "warehouse_access_01", "type": "ACCESS_CONTROL", "zoneId": "warehouse_loading", "position": {"x": 11.0, "y": 1.2, "z": 1.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["utility", "electronics"], "exclusive": true, "required": false},
+    {"anchorId": "warehouse_generic_01", "type": "GENERIC_PROP", "zoneId": "warehouse_mezzanine", "position": {"x": 5.0, "y": 0.0, "z": 10.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "utility"], "exclusive": false, "required": true},
+    {"anchorId": "warehouse_spawn_01", "type": "PLAYER_SPAWN", "zoneId": "warehouse_floor_main", "position": {"x": 1.0, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": [], "exclusive": true, "required": true}
+  ],
+  "spawn": {"anchorId": "warehouse_spawn_01", "position": {"x": 1.0, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}},
+  "lighting": {"profile": "cool_dim", "keyIntensity": 0.55, "hemiIntensity": 0.25, "accentColor": "#c9d4e8"},
+  "structuralAssets": ["DOOR_APARTMENT_01", "PROP_WINDOW_01", "PROP_WALL_01", "PROP_WAREHOUSE_SHELF_01", "PROP_DESK_01", "PROP_LAMP_01"],
+  "styleHint": "industrial",
+  "defaultAnchorCoverage": {
+    "PLAYER_SPAWN": ["warehouse_spawn_01"],
+    "BODY": ["warehouse_body_01"],
+    "FLOOR_EVIDENCE": ["warehouse_floor_01", "warehouse_floor_02"],
+    "DESK_EVIDENCE": ["warehouse_desk_01", "warehouse_workbench_01"],
+    "TABLE_PROP": [],
+    "COMPUTER": ["warehouse_computer_01"],
+    "DOCUMENT": ["warehouse_document_01"],
+    "WALL_EVIDENCE": [],
+    "DOOR": ["warehouse_door_01", "warehouse_door_02"],
+    "WINDOW": ["warehouse_window_01"],
+    "STORAGE": ["warehouse_shelf_01", "warehouse_shelf_02"],
+    "CCTV": ["warehouse_cctv_01"],
+    "ACCESS_CONTROL": ["warehouse_access_01"],
+    "GENERIC_PROP": ["warehouse_generic_01"]
+  }
+}

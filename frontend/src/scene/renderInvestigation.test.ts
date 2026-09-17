@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { NullEngine } from "@babylonjs/core/Engines";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
+import type { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
 import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { Scene } from "@babylonjs/core/scene";
 import { Ray } from "@babylonjs/core/Culling/ray";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import type { DiscoveryResultDTO, InteractionResultDTO } from "../api/types";
+import { cameraProfileFor } from "../environments/kitGeometry";
 import type { InvestigationSceneModel } from "./buildInvestigationScene";
 import { buildInvestigationScene } from "./buildInvestigationScene";
 import { MIN_PICKABLE_EXTENT, needsPickHitbox, pickHitboxExtent, resolveAsset } from "./assetRegistry";
@@ -17,7 +19,7 @@ import {
   objectIdFromPickedMesh,
   type RenderOptions,
 } from "./renderInvestigation";
-import { makeBootstrap, makeEmailRecord, TEST_TOKEN } from "./testFixtures";
+import { makeBootstrap, makeEmailRecord, makeOfficeBootstrap, makeWorldObject, TEST_TOKEN } from "./testFixtures";
 
 /**
  * Babylon glue tests. All engine work uses the deterministic NullEngine —
@@ -27,6 +29,7 @@ import { makeBootstrap, makeEmailRecord, TEST_TOKEN } from "./testFixtures";
 
 const EMPTY_MODEL: InvestigationSceneModel = {
   location: { locationId: "miller_apartment_kitchen", name: "Miller Apartment - Kitchen" },
+  environmentId: "apartment",
   worldObjects: [],
 };
 
@@ -159,15 +162,18 @@ describe("Phase 8 hover affordance rings", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
 
-    // Interactable objects get a hidden ring under the object.
-    for (const objectId of ["kitchen_knife", "apartment_laptop", "vase_01"]) {
+    // Interactable objects (catalog interactable:true) get a hidden ring.
+    for (const objectId of ["kitchen_knife", "apartment_laptop", "letter_opener", "scissors"]) {
       const ring = result.scene.getNodeByName(`pd_ring_${objectId}`);
       expect(ring, `expected a ring for ${objectId}`).not.toBeNull();
       expect(ring!.isVisible).toBe(false);
     }
 
-    // The non-interactable victim body gets NO ring.
-    expect(result.scene.getNodeByName("pd_ring_victim_body_placeholder")).toBeNull();
+    // Phase 10 Track B: the v1 manifest declares table/door/lamp/vase/victim
+    // non-interactable, so they get NO ring (like the victim always did).
+    for (const objectId of ["vase_01", "apartment_table", "apartment_door", "apartment_lamp", "victim_body_placeholder"]) {
+      expect(result.scene.getNodeByName(`pd_ring_${objectId}`), `no ring for ${objectId}`).toBeNull();
+    }
     result.dispose();
   });
 });
@@ -285,9 +291,9 @@ describe("mesh click dispatch (Phase 8_1 A1/A4 + E)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
 
-    const root = result.scene.getNodeByName("pd_obj_vase_01");
+    const root = result.scene.getNodeByName("pd_obj_kitchen_knife");
     result.scene.onPointerDown?.(pointerMove(0, 0) as never, pickInfo(root) as never, POINTER_TYPES);
-    expect(picked).toEqual(["vase_01"]);
+    expect(picked).toEqual(["kitchen_knife"]);
     result.dispose();
   });
 
@@ -536,4 +542,176 @@ function makeTestServices(): InvestigationServices {
     ),
     readRecord: vi.fn(async () => makeEmailRecord()),
   };
+}
+
+/* ======================================================================
+ * Phase 11 Track B — environment kit shell rendering (NullEngine)
+ * ==================================================================== */
+
+/** A warehouse-flavored model: same golden objects, warehouse kit identity. */
+function warehouseModel(): InvestigationSceneModel {
+  const bootstrap = makeOfficeBootstrap();
+  bootstrap.scene.environmentId = "warehouse";
+  bootstrap.scene.location = { locationId: "warehouse_floor_main", name: "Warehouse - Main Floor" };
+  return buildInvestigationScene(bootstrap);
+}
+
+interface LightProbe {
+  intensity?: number;
+}
+
+describe("Phase 11 Track B — kit shell, camera and lighting rendering", () => {
+  it("renders the kit SHELL meshes for a non-apartment model (office room)", () => {
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      buildInvestigationScene(makeOfficeBootstrap()),
+      nullEngineOptions(),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    // kitGeometry shell primitives (never pd_*-prefixed world objects).
+    for (const name of ["floor_01", "wall_north", "wall_south", "wall_east", "wall_west", "door_1", "window_1", "window_2", "lamp_01"]) {
+      expect(result.scene.getNodeByName(name), `${name} shell mesh`).not.toBeNull();
+    }
+    expect(result.scene.getNodeByName("pd_obj_floor_01")).toBeNull();
+    result.dispose();
+  });
+
+  it("keeps the EXACT golden apartment shell for apartment models (byte-identical)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    // Apartment manifest primitives (Phase 2), not the kit shell. The
+    // apartment's "light" primitive renders a PointLight named light_01_point.
+    for (const name of ["floor_01", "wall_back", "wall_left", "wall_right", "table_01", "light_01_point", "rug_01"]) {
+      expect(result.scene.getNodeByName(name), `${name} golden shell mesh`).not.toBeNull();
+    }
+    // Kit-shell-only primitives must NOT exist in the apartment scene.
+    expect(result.scene.getNodeByName("door_1")).toBeNull();
+    expect(result.scene.getNodeByName("window_1")).toBeNull();
+    result.dispose();
+  });
+
+  it("an unknown environment renders the apartment shell (fallback) without errors", () => {
+    const mars = buildInvestigationScene(makeBootstrap());
+    mars.environmentId = "planet_mars";
+    const result = createInvestigationScene(NOOP_CANVAS, mars, nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.scene.getNodeByName("table_01")).not.toBeNull();
+    result.dispose();
+  });
+
+  it("targets the kit camera at the manifest spawn with the derived orbit distance", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModelOffice(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const camera = result.scene.getNodeByName("investigation_camera") as ArcRotateCamera | null;
+    expect(camera).not.toBeNull();
+    const profile = cameraProfileFor("office");
+    expect(profile).not.toBeNull();
+    expect(camera!.radius).toBe(profile!.distance);
+    expect({ x: camera!.target.x, y: camera!.target.y, z: camera!.target.z }).toEqual({
+      x: 0.8,
+      y: 1.0,
+      z: 2.0,
+    });
+    result.dispose();
+  });
+
+  it("applies the kit lighting profile (key/hemi intensities) for non-apartment kits", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, warehouseModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const key = result.scene.getNodeByName("investigation_key") as LightProbe | null;
+    const hemi = result.scene.getNodeByName("investigation_hemi") as LightProbe | null;
+    expect(key, "key light").not.toBeNull();
+    expect(hemi, "hemi light").not.toBeNull();
+    // warehouse manifest lighting: cool_dim, key 0.55 / hemi 0.25.
+    expect(key!.intensity).toBe(0.55);
+    expect(hemi!.intensity).toBe(0.25);
+    result.dispose();
+  });
+
+  it("the apartment kit keeps its golden lighting values (never overridden)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const key = result.scene.getNodeByName("investigation_key") as LightProbe | null;
+    const hemi = result.scene.getNodeByName("investigation_hemi") as LightProbe | null;
+    expect(key!.intensity).toBe(0.85);
+    expect(hemi!.intensity).toBe(0.5);
+    result.dispose();
+  });
+});
+
+/* ======================================================================
+ * Phase 12 Track B — template-backed composites render via the generic
+ * factory (NullEngine): ROOT `pd_obj_<objectId>` + `pd_part_<objectId>_N`
+ * children, catalog colors only.
+ * ==================================================================== */
+
+describe("Phase 12 — template-backed composite rendering (generic factory)", () => {
+  /** A one-object scene: the PROP_HAMMER_01 (tool_hammer) evidence tool. */
+  function hammerModel(): InvestigationSceneModel {
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [
+      makeWorldObject({
+        objectId: "hammer",
+        assetId: "PROP_HAMMER_01",
+        assetType: "tool",
+        subtype: "tool",
+        locationId: "miller_apartment_kitchen",
+        anchor: "kitchen_counter",
+        interaction: "",
+        evidenceId: null,
+      }),
+    ];
+    return buildInvestigationScene(bootstrap);
+  }
+
+  it("renders the ROOT pd_obj_hammer plus pd_part_hammer_* children on the NullEngine", () => {
+    const model = hammerModel();
+    const hammer = model.worldObjects[0];
+    expect(hammer.templateParts).not.toBeNull();
+
+    const result = createInvestigationScene(NOOP_CANVAS, model, nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+
+    expect(result.scene.getNodeByName("pd_obj_hammer")).not.toBeNull();
+    for (let index = 0; index < hammer.templateParts!.length; index++) {
+      const part = result.scene.getNodeByName(`pd_part_hammer_${index}`) as Mesh | null;
+      expect(part, `pd_part_hammer_${index}`).not.toBeNull();
+      expect(part!.material instanceof StandardMaterial).toBe(true);
+    }
+    result.dispose();
+  });
+
+  it("template parts use ONLY catalog-derived colors (hex #RRGGBB, no server strings)", () => {
+    const model = hammerModel();
+    const parts = model.worldObjects[0].templateParts!;
+    expect(parts.length).toBeGreaterThan(0);
+    for (const part of parts) {
+      expect(part.color).toMatch(/^#[0-9a-fA-F]{6}$/);
+    }
+  });
+
+  it("the small template composite still gets the safe MIN_PICKABLE_EXTENT hitbox", () => {
+    const model = hammerModel();
+    const hammer = model.worldObjects[0];
+    // hammer template hitbox min dimension < 0.4 -> the invisible hitbox policy
+    // applies to template-backed composites exactly like legacy evidence.
+    const result = createInvestigationScene(NOOP_CANVAS, model, nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const hit = result.scene.getNodeByName("pd_hit_hammer") as Mesh | null;
+    expect(hit).not.toBeNull();
+    result.dispose();
+    expect(needsPickHitbox({ scale: hammer.templateHitbox! })).toBe(true);
+  });
+});
+
+function knifeModelOffice(): InvestigationSceneModel {
+  return buildInvestigationScene(makeOfficeBootstrap());
 }

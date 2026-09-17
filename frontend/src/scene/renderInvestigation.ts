@@ -20,10 +20,11 @@ import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { Scene } from "@babylonjs/core/scene";
 import type { ScenePrimitive } from "./apartment";
-import { buildApartmentManifest } from "./apartment";
 import type { InvestigationSceneModel, SceneWorldObject } from "./buildInvestigationScene";
 import type { CompositePartDescriptor } from "./assetRegistry";
 import { buildObjectComposite, needsPickHitbox, pickHitboxExtent } from "./assetRegistry";
+import { buildKitShell, cameraProfileFor, lightingFor, APARTMENT_KIT_ID } from "../environments/kitGeometry";
+import { applyMaterialTint, materialTintFor, type MaterialTint } from "../templates/variantParams";
 import { instantiatePrimitive } from "./render";
 
 /**
@@ -167,26 +168,43 @@ export function createInvestigationScene(
     const scene = new Scene(engine);
     scene.clearColor = new Color4(0.075, 0.085, 0.12, 1);
 
+    // Phase 11 Track B: the scene model's environmentId selects the SHELL and
+    // the camera framing/lighting. The apartment kit (and any unknown kit id)
+    // keeps the exact golden camera/shell/lighting; non-apartment kits use
+    // the kit manifest geometry (shell, spawn camera target, lighting profile).
+    const environmentId = model.environmentId ?? APARTMENT_KIT_ID;
+    const cameraProfile = cameraProfileFor(environmentId);
+
     const camera = new ArcRotateCamera(
       "investigation_camera",
       1.1,
       1.16,
-      14.5,
-      new Vector3(0, 1.05, 0),
+      cameraProfile !== null ? cameraProfile.distance : 14.5,
+      cameraProfile !== null
+        ? new Vector3(cameraProfile.target.x, cameraProfile.target.y, cameraProfile.target.z)
+        : new Vector3(0, 1.05, 0),
       scene,
     );
     if (options.cameraControl !== false && typeof canvas.addEventListener === "function") {
       camera.attachControl(canvas, true);
     }
 
+    // Kit lighting profile (key/hemi intensity + normalized accent tint) for
+    // non-apartment kits; the apartment kit keeps its golden warm lights.
+    const kitLighting = lightingFor(environmentId);
+    const keyDiffuse =
+      kitLighting !== null ? accentToneOf(kitLighting.accentColor) : new Color3(1, 0.86, 0.7);
+    const keyIntensity = kitLighting !== null ? kitLighting.keyIntensity : 0.85;
+    const hemiIntensity = kitLighting !== null ? kitLighting.hemiIntensity : 0.5;
+
     // Warm key light from above-right, plus a soft hemisphere ambient fill.
     const key = new DirectionalLight("investigation_key", new Vector3(-0.7, -1, -0.35), scene);
-    key.diffuse = new Color3(1, 0.86, 0.7);
-    key.intensity = 0.85;
+    key.diffuse = keyDiffuse;
+    key.intensity = keyIntensity;
 
     const hemi = new HemisphericLight("investigation_hemi", new Vector3(0.35, 1, -0.25), scene);
     hemi.diffuse = new Color3(1, 0.93, 0.84);
-    hemi.intensity = 0.5;
+    hemi.intensity = hemiIntensity;
 
     // DEF-056 (click path, real-browser proof): Babylon's DEFAULT pointer
     // predicates admit EVERY mesh, so `scene.pick` on a pointer-down (or on a
@@ -215,8 +233,10 @@ export function createInvestigationScene(
     scene.pointerMovePredicate = (mesh) => isWorldObjectMesh(mesh as Mesh);
     scene.pointerDownPredicate = (mesh) => isWorldObjectMesh(mesh as Mesh);
 
-    // Apartment shell from the Phase 2 manifest, then one mesh per world object.
-    const manifest = options.manifest ?? buildApartmentManifest();
+    // Shell from the environment kit (the apartment kit keeps the Phase 2
+    // manifest byte-identical; other kits build their room from kitGeometry),
+    // then one mesh per world object.
+    const manifest = options.manifest ?? buildKitShell(environmentId);
     for (const primitive of manifest) {
       instantiatePrimitive(scene, primitive);
     }
@@ -398,18 +418,41 @@ function instantiateWorldObject(scene: Scene, obj: SceneWorldObject): Mesh {
   root.position = new Vector3(obj.position.x, obj.position.y, obj.position.z);
   root.rotation = new Vector3(obj.rotation.x, obj.rotation.y, obj.rotation.z);
 
+  // Phase 12 Track B: parts come from THREE deterministic sources —
+  //  1) the six legacy composite builders (golden apartment byte-identity);
+  //  2) the generic template factory (template-backed composites — child
+  //     parts were compiled at the DEFAULT variant in the registry/scene
+  //     model and are applied VERBATIM here, scaled + hitbox included);
+  //  3) the plain single-part primitive (all other objects).
+  const templateParts = obj.compositeKind === null ? obj.templateParts : null;
+  const isTemplateBacked = templateParts !== null && templateParts.length > 0;
   const parts =
     obj.compositeKind !== null
       ? buildObjectComposite(obj.compositeKind, { scale: obj.scale, color: obj.color })
-      : [singlePartDescriptor(obj)];
+      : isTemplateBacked
+        ? templateParts
+        : [singlePartDescriptor(obj)];
+
+  // Phase 12: a materially-tinted template-backed object adjusts its diffuse
+  // colors via the application-owned palette ONLY (no arbitrary strings).
+  const tint =
+    isTemplateBacked && obj.templateMaterial !== null ? materialTintFor(obj.templateMaterial) : null;
   parts.forEach((part, index) => {
-    instantiateCompositePart(scene, root, obj.objectId, index, part, obj.interactionWorks);
+    instantiateCompositePart(scene, root, obj.objectId, index, part, obj.interactionWorks, tint);
   });
 
   // Invisible pick hitbox (Phase 8_1 A2): small objects become reliably
-  // clickable through a safe invisible box around the composite root.
-  if (needsPickHitbox({ scale: obj.scale, hitboxScale: obj.hitboxScale })) {
-    attachPickHitbox(scene, root, obj.objectId, { scale: obj.scale, hitboxScale: obj.hitboxScale }, obj.interactionWorks);
+  // clickable through a safe invisible box around the composite root. A
+  // template's DECLARED hitbox is the extent basis when present (the
+  // MIN_PICKABLE_EXTENT policy continues to apply); otherwise the world
+  // scale (the factory's absolute bounds) is used, exactly as for legacy
+  // composites and primitives.
+  let hitboxEntry = { scale: obj.scale, hitboxScale: obj.hitboxScale };
+  if (isTemplateBacked && obj.templateHitbox !== null) {
+    hitboxEntry = { scale: obj.templateHitbox, hitboxScale: obj.hitboxScale };
+  }
+  if (needsPickHitbox(hitboxEntry)) {
+    attachPickHitbox(scene, root, obj.objectId, hitboxEntry, obj.interactionWorks);
   }
   return root;
 }
@@ -429,7 +472,11 @@ function singlePartDescriptor(obj: SceneWorldObject): CompositePartDescriptor {
   };
 }
 
-/** Parent one composite part onto the root with a registry-derived material. */
+/**
+ * Parent one composite part onto the root with a registry-derived material.
+ * `tint` (an application-owned material palette entry) optionally adjusts the
+ * diffuse hue and adds a subtle emissive accent — never arbitrary strings.
+ */
 function instantiateCompositePart(
   scene: Scene,
   root: Mesh,
@@ -437,6 +484,7 @@ function instantiateCompositePart(
   index: number,
   part: CompositePartDescriptor,
   interactable: boolean,
+  tint: MaterialTint | null = null,
 ): Mesh {
   const partName = `${PART_NAME_PREFIX}${objectId}_${index}`;
   let mesh: Mesh;
@@ -477,10 +525,17 @@ function instantiateCompositePart(
     mesh.rotation = new Vector3(part.rotation.x, part.rotation.y, part.rotation.z);
   }
   const material = new StandardMaterial(`${partName}_material`, scene);
-  material.diffuseColor = Color3.FromHexString(part.color);
+  // Phase 12: a material palette tint may adjust the diffuse hue (bounded
+  // per-channel multiply — the output stays a valid #RRGGBB hex).
+  const diffuseHex = tint !== null ? applyMaterialTint(part.color, tint) : part.color;
+  material.diffuseColor = Color3.FromHexString(diffuseHex);
   material.specularColor = MATTE_SPECULAR;
   if (interactable) {
     material.emissiveColor = INTERACTABLE_EMISSIVE;
+  } else if (tint !== null) {
+    // Non-interactable template objects get the material's subtle emissive
+    // accent (deterministic, bounded, palette-owned).
+    material.emissiveColor = new Color3(tint.emissiveTint[0], tint.emissiveTint[1], tint.emissiveTint[2]);
   }
   mesh.material = material;
   if (interactable) {
@@ -567,6 +622,22 @@ function trySetCursor(canvas: HTMLCanvasElement, cursor: string): void {
   } catch {
     // Best-effort only: styling must never throw out of picking.
   }
+}
+
+/**
+ * Deterministic accent-color -> key-light tint conversion (Phase 11 Track B):
+ * the kit manifest's #RRGGBB accent is normalized so its MAX channel maps to
+ * full intensity, giving a stable recognizable tint while keeping every
+ * channel within [0, 1]. The validator guarantees #RRGGBB input; a black or
+ * all-zero accent falls back to the golden warm key tone.
+ */
+function accentToneOf(hex: string): Color3 {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b);
+  if (max <= 0) return new Color3(1, 0.86, 0.7);
+  return new Color3(r / max, g / max, b / max);
 }
 
 /**

@@ -302,7 +302,12 @@ def public_case_dict_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "scene": (
             None
             if not isinstance(scene_spec, Mapping)
-            else {"locationId": scene_spec.get("location_id"), "name": scene_spec.get("name")}
+            else {
+                "locationId": scene_spec.get("location_id"),
+                "name": scene_spec.get("name"),
+                # Phase 11 additive kit identity (player-safe metadata).
+                "environmentId": scene_spec.get("environment_id"),
+            }
         ),
         "persons": _persons(),
         "motives": _motives(),

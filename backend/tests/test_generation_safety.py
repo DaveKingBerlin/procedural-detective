@@ -275,6 +275,72 @@ def test_world_graph_bad_interaction_rejected():
     assert any("interaction" in issue for issue in issues)
 
 
+def _legal_wg(*placements):
+    """World graph with a declared location so only the tested rule can fire."""
+    from app.generation.schemas import WorldGraphLocationSpec
+
+    return WorldGraphSpec(
+        placements=tuple(placements),
+        locations=(
+            WorldGraphLocationSpec(
+                location_id="l1", template="kitchen_template", rooms=("kitchen",)
+            ),
+        ),
+    )
+
+
+def test_world_graph_empty_interaction_is_decorative_legal():
+    """DEF-062: interaction "" = decorative / not interactable — a legal,
+    issue-free placement when no evidence is linked."""
+    placement = PlacementSpec(
+        object_id="o1",
+        asset_id="PROP_KITCHEN_KNIFE_01",
+        location_id="l1",
+        anchor="desk_main",
+        interaction="",
+    )
+    wg = _legal_wg(placement)
+    assert validate_world_graph(wg, {"o1"}, {"ev1"}) == ()
+
+
+def test_world_graph_empty_interaction_with_evidence_rejected():
+    """DEF-062: an evidence-linked placement requires a non-empty interaction
+    (otherwise the linked evidence could never be reached through a player
+    interaction)."""
+    placement = PlacementSpec(
+        object_id="o1",
+        asset_id="PROP_KITCHEN_KNIFE_01",
+        location_id="l1",
+        anchor="desk_main",
+        interaction="",
+        evidence_id="ev1",
+    )
+    wg = _legal_wg(placement)
+    issues = validate_world_graph(wg, {"o1"}, {"ev1"})
+    assert any(
+        "requires a non-empty interaction" in issue for issue in issues
+    )
+
+
+def test_world_graph_unknown_non_empty_interaction_still_rejected():
+    """DEF-062: ONLY "" is additionally legal — unknown NON-empty values are
+    still rejected against INTERACTION_ALLOWLIST."""
+    placement = PlacementSpec(
+        object_id="o1",
+        asset_id="PROP_KITCHEN_KNIFE_01",
+        location_id="l1",
+        anchor="desk_main",
+        interaction="teleport",
+    )
+    wg = _legal_wg(placement)
+    issues = validate_world_graph(wg, {"o1"}, {"ev1"})
+    assert any(
+        "interaction 'teleport' is not in INTERACTION_ALLOWLIST"
+        in issue
+        for issue in issues
+    )
+
+
 def test_world_graph_bad_anchor_rejected():
     placement = PlacementSpec(
         object_id="o1",

@@ -3,6 +3,8 @@ import { Link, useNavigate } from "react-router";
 import { discoverEvidence, getInvestigation, interactObject, readRecord } from "../api/client";
 import { clearPlaythroughCredentials, getPlaythroughId, getPlaythroughToken } from "../api/playthroughToken";
 import type { EvidenceReadResultDTO } from "../api/types";
+import { getCatalogError } from "../catalog/assetCatalog";
+import { getKit, hasKit, isKitCatalogHealthy } from "../environments/kitCatalog";
 import { handleEvidencePanelKey } from "../evidence/evidenceContent";
 import EvidencePanel from "../evidence/evidencePanel";
 import { evidencePreviewFor, type EvidencePreviewModel } from "../evidence/evidencePreview";
@@ -374,6 +376,26 @@ export default function ScenePage() {
             </p>
           )}
 
+          {getCatalogError() !== null && (
+            <p className="assets-notice" data-testid="catalog-error" role="alert">
+              The bundled asset catalog could not be validated — every object is shown as a
+              neutral placeholder.
+            </p>
+          )}
+
+          {/* Phase 11 Track B: environment-kit identity + safe degradation. */}
+          {!isKitCatalogHealthy() && (
+            <p className="assets-notice" data-testid="kit-catalog-error" role="alert">
+              The bundled environment kits could not be validated — the scene is shown in the
+              standard room.
+            </p>
+          )}
+          {status.model.environmentId !== "apartment" && (
+            <p className="environment-notice" data-testid="environment-notice">
+              Environment: {environmentName(status.model.environmentId)}
+            </p>
+          )}
+
           {sceneStatus === "ready" && (
             <p className="scene-ready" data-testid="scene-ready">
               Scene ready — click objects in the scene to inspect them; drag to orbit, scroll to zoom.
@@ -441,6 +463,20 @@ function hasStoredCredential(): boolean {
   const token = getPlaythroughToken();
   const playthroughId = getPlaythroughId();
   return token !== null && token !== "" && playthroughId !== null && playthroughId !== "";
+}
+
+/**
+ * Player-safe environment identity label (Phase 11 Track B). Only the kit's
+ * own canonical name is ever shown; an unknown/legacy id degrades to a fixed
+ * neutral string (the raw id is never echoed — server strings stay off the
+ * page unless the app itself authored them).
+ */
+function environmentName(environmentId: string): string {
+  if (hasKit(environmentId)) {
+    const kit = getKit(environmentId);
+    if (kit !== undefined) return kit.canonicalName;
+  }
+  return "standard room";
 }
 
 /** Player-safe label for the accusation entry action (no truth values involved). */

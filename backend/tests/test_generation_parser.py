@@ -245,6 +245,41 @@ def test_golden_world_graph_parses():
     assert len(spec.placements) == 9
 
 
+def _clean_world_graph_doc(**overrides):
+    """A world graph stage doc that parses with ZERO issues (the shared
+    ``_world_graph_doc`` helper intentionally carries an extra key for other
+    tests; this one is clean so DEF-062 '' parses are unambiguous)."""
+    doc = {
+        "worldGraph": {
+            "locations": [_wg_location(), _wg_location(locationId="l2", template="office_template")],
+            "placements": [_placement()],
+        }
+    }
+    doc["worldGraph"].update(overrides)
+    return doc
+
+
+def test_placement_empty_interaction_parses_as_decorative():
+    """DEF-062: the world-graph parser accepts interaction "" (decorative /
+    NOT interactable) and keeps it verbatim on the typed placement."""
+    doc = _clean_world_graph_doc(placements=[_placement(interaction="")])
+    assert collect_issues(WORLD_GRAPH, _dumps(doc)) == ()
+    spec = parse_stage(WORLD_GRAPH, _dumps(doc))
+    assert spec is not None
+    assert spec.placements[0].interaction == ""
+
+
+def test_placement_empty_interaction_survives_full_draft_parse():
+    """DEF-062: the full-draft (REPAIR) parse path also accepts ""."""
+    doc = _full_draft_doc(worldGraph=_clean_world_graph_doc(
+        placements=[_placement(interaction="")]
+    )["worldGraph"])
+    assert collect_full_draft_issues(_dumps(doc)) == ()
+    draft = parse_full_draft(_dumps(doc))
+    assert draft is not None
+    assert draft.world_graph.placements[0].interaction == ""
+
+
 def test_golden_payload_collect_issues_is_empty():
     for stage, payload in GOLDEN_STAGE_PAYLOADS.items():
         assert collect_issues(stage, payload) == ()

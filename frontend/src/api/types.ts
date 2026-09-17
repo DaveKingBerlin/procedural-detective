@@ -92,6 +92,8 @@ export interface InvestigationBootstrapResponse {
   state: PlaythroughLifecycleState;
   playerKnowledge: PlayerKnowledgeDTO;
   scene: {
+    /** Phase 11: the exact environment kit id chosen by the backend resolver. */
+    environmentId: string;
     location: InvestigationSceneLocationDTO;
     worldObjects: WorldObjectDTO[];
   };

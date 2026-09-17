@@ -14,21 +14,27 @@ import type {
  * The canned bootstrap mirrors the ACTUAL backend dev-mode case
  * (backend/app/services/dev_mode_case.json — world_graph.placements),
  * i.e. the exact 9 WorldObjectDTOs GET /api/v1/playthroughs/{id}/investigation
- * emits for the golden provider (DEF-049). The frontend asset registry is
- * keyed on these exact assetIds, so this fixture doubles as the contract
- * snapshot: if the backend emits a 10th id, this fixture AND the registry
- * contract-sync test in buildInvestigationScene.test.ts will fail loudly.
+ * emits for the golden provider (DEF-049). Phase 10 Track B: the frontend
+ * asset registry now derives from the SAME catalog manifest the backend
+ * resolver uses (assets/catalog/catalog.json), and every emitted assetId
+ * below is an EXACT v1 catalog id. This fixture is the contract snapshot: if
+ * the backend emits a 10th id, this fixture AND the catalog/registry
+ * contract-sync tests will fail loudly.
  *
- * Placements (from dev_mode_case.json, sorted by the backend's objectId):
- *   apartment_door      DOOR_APARTMENT_01   hall_wall_01        inspect  (no evidence)
- *   apartment_lamp      PROP_LAMP_01        shelf_01            inspect  (no evidence)
+ * Placements (from dev_mode_case.json, sorted by the backend's objectId).
+ * Phase 10 DEF-062: the DTO interaction strings are the manifest-derived
+ * values — non-empty ONLY for the evidence-bearing objects. The frontend
+ * affordance (interactionWorks) is payload-driven, so knife/letter_opener/
+ * scissors/laptop are clickable and the env/victim objects carry "":
+ *   apartment_door      DOOR_APARTMENT_01   hall_wall_01        (no interaction)
+ *   apartment_lamp      PROP_LAMP_01        shelf_01            (no interaction)
  *   apartment_laptop    PROP_LAPTOP_01      desk_main           read     -> email_thomas_01
- *   apartment_table     PROP_TABLE_01       dining_table        inspect  (no evidence)
+ *   apartment_table     PROP_TABLE_01       dining_table        (no interaction)
  *   kitchen_knife       PROP_KITCHEN_KNIFE_01 kitchen_counter    inspect  -> forensic_knife_match_01
  *   letter_opener       PROP_LETTER_OPENER_01 office_desk_01     inspect  -> forensic_letter_opener_01
  *   scissors            PROP_SCISSORS_01    bedside_table       inspect  -> forensic_scissors_01
- *   vase_01             PROP_VASE_01        dining_table        inspect  (no evidence)
- *   victim_body_placeholder PROP_BODY_PLACEHOLDER_01 floor_body_position inspect (no evidence)
+ *   vase_01             PROP_VASE_01        dining_table        (no interaction)
+ *   victim_body_placeholder PROP_BODY_PLACEHOLDER_01 floor_body_position (no interaction)
  */
 
 /** The exact assetIds the backend dev-mode case emits (contract snapshot). */
@@ -85,6 +91,7 @@ export function makeBootstrap(
       visitedLocationIds: ["miller_apartment_kitchen"],
     },
     scene: {
+      environmentId: "apartment",
       location: { locationId: "miller_apartment_kitchen", name: "Miller Apartment - Kitchen" },
       worldObjects: [
         makeWorldObject({
@@ -93,7 +100,7 @@ export function makeBootstrap(
           assetType: "door",
           subtype: "door",
           anchor: "hall_wall_01",
-          interaction: "inspect",
+          interaction: "",
           evidenceId: null,
         }),
         makeWorldObject({
@@ -102,7 +109,7 @@ export function makeBootstrap(
           assetType: "light",
           subtype: "light",
           anchor: "shelf_01",
-          interaction: "inspect",
+          interaction: "",
           evidenceId: null,
         }),
         makeWorldObject({
@@ -120,7 +127,7 @@ export function makeBootstrap(
           assetType: "furniture",
           subtype: "furniture",
           anchor: "dining_table",
-          interaction: "inspect",
+          interaction: "",
           evidenceId: null,
         }),
         makeWorldObject(),
@@ -150,7 +157,7 @@ export function makeBootstrap(
           assetType: "vase",
           subtype: null,
           anchor: "dining_table",
-          interaction: "inspect",
+          interaction: "",
           evidenceId: null,
         }),
         makeWorldObject({
@@ -159,7 +166,7 @@ export function makeBootstrap(
           assetType: "victim_body",
           subtype: "victim_body",
           anchor: "floor_body_position",
-          interaction: "inspect",
+          interaction: "",
           evidenceId: null,
         }),
       ],
@@ -167,6 +174,72 @@ export function makeBootstrap(
     candidates: makeCandidates(),
     ...overrides,
   };
+}
+
+/**
+ * Phase 11 Track B caned fixture: the SAME golden asset set re-anchored on
+ * OFFICE manifest anchors (the backend placer re-anchors the golden objects
+ * per kit). Non-apartment world objects resolve through the office kit
+ * manifest, so scene-integration tests can exercise a full non-apartment
+ * scene without a backend.
+ */
+export function makeOfficeBootstrap(): InvestigationBootstrapResponse {
+  const bootstrap = makeBootstrap();
+  bootstrap.scene.environmentId = "office";
+  bootstrap.scene.location = { locationId: "office_mainroom", name: "Office - Open Plan" };
+  bootstrap.scene.worldObjects = [
+    makeWorldObject({
+      objectId: "office_desk_knife",
+      assetId: "PROP_KITCHEN_KNIFE_01",
+      assetType: "sharp_weapon",
+      subtype: "sharp_weapon",
+      locationId: "office_mainroom",
+      anchor: "office_desk_a",
+      interaction: "inspect",
+      evidenceId: "forensic_knife_match_01",
+    }),
+    makeWorldObject({
+      objectId: "office_laptop",
+      assetId: "PROP_LAPTOP_01",
+      assetType: "electronics",
+      subtype: "electronics",
+      locationId: "office_mainroom",
+      anchor: "office_computer_01",
+      interaction: "read",
+      evidenceId: "email_thomas_01",
+    }),
+    makeWorldObject({
+      objectId: "office_table",
+      assetId: "PROP_TABLE_01",
+      assetType: "furniture",
+      subtype: "furniture",
+      locationId: "office_meeting",
+      anchor: "office_meeting_table",
+      interaction: "",
+      evidenceId: null,
+    }),
+    makeWorldObject({
+      objectId: "office_vase",
+      assetId: "PROP_VASE_01",
+      assetType: "vase",
+      subtype: null,
+      locationId: "office_meeting",
+      anchor: "office_meeting_table",
+      interaction: "",
+      evidenceId: null,
+    }),
+    makeWorldObject({
+      objectId: "office_body",
+      assetId: "PROP_BODY_PLACEHOLDER_01",
+      assetType: "victim_body",
+      subtype: "victim_body",
+      locationId: "office_mainroom",
+      anchor: "office_body_01",
+      interaction: "",
+      evidenceId: null,
+    }),
+  ];
+  return bootstrap;
 }
 
 /**

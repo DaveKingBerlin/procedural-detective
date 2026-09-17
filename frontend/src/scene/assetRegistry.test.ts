@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { catalogAssetIds, getAsset } from "../catalog/assetCatalog";
+import { TEMPLATE_FALLBACK, buildTemplateComposite, getTemplate } from "../templates/templateRegistry";
 import {
   buildObjectComposite,
   FALLBACK_ASSET,
@@ -8,32 +10,18 @@ import {
   needsPickHitbox,
   pickHitboxExtent,
   resolveAsset,
+  type AssetEntry,
 } from "./assetRegistry";
 import { EMITTED_ASSET_IDS } from "./testFixtures";
 
-describe("asset registry contents (emitted backend dev-fixture ids + dot-style aliases)", () => {
-  const documentedIds = [
-    // ---- the 9 ids the backend dev-mode case actually emits (source of truth)
-    "PROP_KITCHEN_KNIFE_01",
-    "PROP_LETTER_OPENER_01",
-    "PROP_SCISSORS_01",
-    "PROP_VASE_01",
-    "PROP_LAPTOP_01",
-    "PROP_TABLE_01",
-    "DOOR_APARTMENT_01",
-    "PROP_LAMP_01",
-    "PROP_BODY_PLACEHOLDER_01",
-    // ---- dot-style aliases kept for older fixtures/tooling
-    "apartment.table.basic",
-    "apartment.laptop.basic",
-    "evidence.knife.basic",
-    "prop.body.victim.basic",
-    "apartment.door.basic",
-    "apartment.lamp.basic",
-    "apartment.chair.basic",
-  ];
+describe("asset registry derives from the catalog manifest (Phase 10 Track B)", () => {
+  // The SAME frozen v1 ids the backend Asset Oracle emits/resolves — the
+  // registry carries EXACTLY the catalog's assetIds (incl. the fallback
+  // asset). Dot-style aliases ("apartment.laptop.basic", ...) are NO LONGER
+  // registry ids: the frontend never resolves aliases (backend-only).
+  const documentedIds = catalogAssetIds();
 
-  it("registers every documented id and marks them known", () => {
+  it("registers every catalog assetId and marks them known", () => {
     for (const id of documentedIds) {
       expect(isKnownAsset(id), `expected ${id} to be known`).toBe(true);
       const entry = resolveAsset(id);
@@ -60,22 +48,80 @@ describe("asset registry contents (emitted backend dev-fixture ids + dot-style a
     expect(resolveAsset("PROP_SCISSORS_01").label).toBe("Scissors");
     expect(resolveAsset("PROP_SCISSORS_01").interactable).toBe(true);
     expect(resolveAsset("PROP_VASE_01").label).toBe("Vase");
+    // Interactability is the catalog's value: only evidence-bearing assets
+    // (knife/opener/scissors/laptop) are interactable in the manifest.
+    expect(resolveAsset("PROP_VASE_01").interactable).toBe(false);
     expect(resolveAsset("PROP_LAPTOP_01").label).toBe("Laptop");
     expect(resolveAsset("PROP_LAPTOP_01").interactable).toBe(true); // -> email discovery
     expect(resolveAsset("PROP_TABLE_01").label).toBe("Table");
+    expect(resolveAsset("PROP_TABLE_01").interactable).toBe(false);
     expect(resolveAsset("DOOR_APARTMENT_01").label).toBe("Door");
+    expect(resolveAsset("DOOR_APARTMENT_01").interactable).toBe(false);
     expect(resolveAsset("PROP_LAMP_01").label).toBe("Lamp");
+    expect(resolveAsset("PROP_LAMP_01").interactable).toBe(false);
     expect(resolveAsset("PROP_BODY_PLACEHOLDER_01").label).toBe("Victim");
     expect(resolveAsset("PROP_BODY_PLACEHOLDER_01").interactable).toBe(false); // no evidence placement
   });
 
-  it("keeps both id styles for the kitchen knife identical in shape", () => {
-    const styleA = resolveAsset("PROP_KITCHEN_KNIFE_01");
-    const styleB = resolveAsset("evidence.knife.basic");
-    expect(styleA.primitiveKind).toBe(styleB.primitiveKind);
-    expect(styleA.scale).toEqual(styleB.scale);
-    expect(styleA.label).toBe("Kitchen knife");
-    expect(styleA.interactable).toBe(true);
+  it("derives EVERY entry from its catalog descriptor (label/color/composite)", () => {
+    for (const id of catalogAssetIds()) {
+      const descriptor = getAsset(id);
+      expect(descriptor, `catalog id ${id} exists`).toBeDefined();
+      const entry = resolveAsset(id);
+      expect(entry.label, `${id} label comes from the catalog`).toBe(descriptor!.label);
+      expect(entry.interactable, `${id} interactable comes from the catalog`).toBe(descriptor!.interactable);
+      expect(entry.scale, `${id} scale comes from the catalog dimensions`).toEqual(descriptor!.dimensions);
+      expect(entry.compositeKind === null, `${id} composite presence matches the catalog`).toBe(
+        descriptor!.compositeKind === null,
+      );
+    }
+  });
+
+  it("spot-checks the golden catalog derivation (knife/opener/laptop/victim/table/door/lamp/vase)", () => {
+    expect(resolveAsset("PROP_KITCHEN_KNIFE_01")).toMatchObject({
+      primitiveKind: "box",
+      color: "#c8ccd4",
+      label: "Kitchen knife",
+      compositeKind: "knife",
+    });
+    expect(resolveAsset("PROP_LETTER_OPENER_01")).toMatchObject({
+      color: "#a37b35",
+      label: "Letter opener",
+      compositeKind: "letter-opener",
+    });
+    expect(resolveAsset("PROP_SCISSORS_01")).toMatchObject({
+      primitiveKind: "box",
+      color: "#b8bcc4",
+      label: "Scissors",
+      compositeKind: "scissors",
+    });
+    expect(resolveAsset("PROP_LAPTOP_01")).toMatchObject({
+      primitiveKind: "flat",
+      color: "#30343e",
+      label: "Laptop",
+      compositeKind: "laptop",
+    });
+    expect(resolveAsset("PROP_BODY_PLACEHOLDER_01")).toMatchObject({
+      primitiveKind: "flat",
+      color: "#8f8579",
+      label: "Victim",
+      compositeKind: "victim",
+    });
+    expect(resolveAsset("PROP_TABLE_01")).toMatchObject({
+      primitiveKind: "box",
+      color: "#8a5a2b",
+      label: "Table",
+      compositeKind: "table",
+    });
+    expect(resolveAsset("DOOR_APARTMENT_01")).toEqual(
+      expect.objectContaining({ primitiveKind: "box", color: "#7c4a21", label: "Door", compositeKind: null }),
+    );
+    expect(resolveAsset("PROP_LAMP_01")).toEqual(
+      expect.objectContaining({ primitiveKind: "cylinder", color: "#e8d9a8", label: "Lamp", compositeKind: null }),
+    );
+    expect(resolveAsset("PROP_VASE_01")).toEqual(
+      expect.objectContaining({ primitiveKind: "cylinder", color: "#7d5a4c", label: "Vase", compositeKind: null }),
+    );
   });
 
   it("maps the expected primitives for the golden objects", () => {
@@ -84,6 +130,24 @@ describe("asset registry contents (emitted backend dev-fixture ids + dot-style a
     expect(resolveAsset("PROP_LAMP_01").primitiveKind).toBe("cylinder");
     expect(resolveAsset("PROP_VASE_01").primitiveKind).toBe("cylinder");
     expect(resolveAsset("PROP_BODY_PLACEHOLDER_01").primitiveKind).toBe("flat");
+  });
+});
+
+describe("frontend/backend boundary — exact assetIds only (aliases are backend-resolved)", () => {
+  it("a legacy dot-alias id is NOT a catalog id and resolves to the fallback", () => {
+    // "apartment.laptop.basic" is a declared ALIAS of PROP_LAPTOP_01 in the
+    // manifest — but alias resolution belongs to the backend Asset Oracle.
+    // The frontend only accepts exact catalog assetIds; asserting the fallback
+    // documents that boundary (a backend-published WorldGraph DTO always
+    // carries the exact assetId, so no reachable placement hits this path).
+    expect(getAsset("apartment.laptop.basic")).toBeUndefined();
+    expect(isKnownAsset("apartment.laptop.basic")).toBe(false);
+    expect(resolveAsset("apartment.laptop.basic")).toBe(FALLBACK_ASSET);
+
+    expect(isKnownAsset("evidence.knife.basic")).toBe(false);
+    expect(resolveAsset("evidence.knife.basic")).toBe(FALLBACK_ASSET);
+    expect(isKnownAsset("apartment.chair.basic")).toBe(false);
+    expect(resolveAsset("apartment.chair.basic")).toBe(FALLBACK_ASSET);
   });
 });
 
@@ -168,6 +232,57 @@ describe("buildObjectComposite — knife vs letter opener silhouette differentia
   });
 });
 
+describe("buildObjectComposite — scissors (Phase 10 catalog compositeKind; Phase 9 legibility)", () => {
+  const scissorsParts = buildObjectComposite("scissors", resolveAsset("PROP_SCISSORS_01"));
+  const knifeParts = buildObjectComposite("knife", resolveAsset("PROP_KITCHEN_KNIFE_01"));
+  const openerParts = buildObjectComposite("letter-opener", resolveAsset("PROP_LETTER_OPENER_01"));
+
+  it("scissors is a THREE-part composite: two thin blades + a pivot rivet", () => {
+    expect(scissorsParts).toHaveLength(3);
+    expect(scissorsParts[0].kind).toBe("box");
+    expect(scissorsParts[1].kind).toBe("box");
+    expect(scissorsParts[2].kind).toBe("cylinder");
+    for (const part of scissorsParts) {
+      expect(/^#[0-9a-fA-F]{6}$/.test(part.color)).toBe(true);
+    }
+  });
+
+  it("uses the catalog descriptor colors (blades + pivot)", () => {
+    expect(scissorsParts[0].color).toBe("#b8bcc4");
+    expect(scissorsParts[1].color).toBe("#b8bcc4");
+    expect(scissorsParts[2].color).toBe("#5b6068");
+    // Blade tone is neither the knife's steel nor the opener's brass.
+    expect(scissorsParts[0].color).not.toBe(knifeParts[0].color);
+    expect(scissorsParts[0].color).not.toBe(openerParts[0].color);
+  });
+
+  it("produces a DISTINCT silhouette signature vs knife and opener", () => {
+    // Knife: ONE straight 0.24m blade, no rotation. Opener: short WIDE 0.09m
+    // blade, no rotation. Scissors: TWO short 0.1m blades CROSSED on a pivot.
+    expect(knifeParts).toHaveLength(2);
+    expect(openerParts).toHaveLength(2);
+    expect(knifeParts.some((p) => p.rotation !== undefined)).toBe(false);
+    expect(openerParts.some((p) => p.rotation !== undefined)).toBe(false);
+    expect(scissorsParts.some((p) => p.rotation !== undefined)).toBe(true);
+
+    const longestBlade = (parts: typeof knifeParts) =>
+      Math.max(...parts.map((p) => (p.kind === "box" ? Math.max(p.size.x, p.size.z) : 0)));
+    const bladeWidth = (parts: typeof knifeParts) =>
+      Math.max(...parts.map((p) => (p.kind === "box" ? Math.min(p.size.x, p.size.z) : 0)));
+    // Distinct length ordering: knife 0.24 > opener 0.13 > scissors 0.1.
+    const lengths = [longestBlade(knifeParts), longestBlade(openerParts), longestBlade(scissorsParts)];
+    expect(lengths[0]).toBeGreaterThan(lengths[1]);
+    expect(lengths[1]).toBeGreaterThan(lengths[2]);
+    // Distinct width ordering: opener (spatulate, 0.09) > knife (0.045) > scissors (0.022).
+    expect(bladeWidth(openerParts)).toBeGreaterThan(bladeWidth(knifeParts));
+    expect(bladeWidth(knifeParts)).toBeGreaterThan(bladeWidth(scissorsParts));
+  });
+
+  it("is fully deterministic across calls", () => {
+    expect(buildObjectComposite("scissors", resolveAsset("PROP_SCISSORS_01"))).toEqual(scissorsParts);
+  });
+});
+
 describe("buildObjectComposite — laptop / victim / table / fallback (Phase 8_1 C)", () => {
   it("laptop is a THIN two-part composite (base + lid)", () => {
     const parts = buildObjectComposite("laptop", resolveAsset("PROP_LAPTOP_01"));
@@ -241,5 +356,77 @@ describe("invisible pick hitbox policy (Phase 8_1 A2)", () => {
     expect(Number.isFinite(extent.z)).toBe(true);
     expect(extent.x).toBe(MIN_PICKABLE_EXTENT);
     expect(extent.z).toBe(MIN_PICKABLE_EXTENT);
+  });
+});
+
+/* ======================================================================
+ * Phase 12 Track B — template-backed composite integration.
+ *
+ * Every catalog composite now renders through the generic template factory;
+ * the six LEGACY composite builders keep their byte-identical geometry for
+ * the golden apartment. These tests pin BOTH contracts.
+ * ==================================================================== */
+
+describe("Phase 12 — template-backed composites in the asset registry", () => {
+  it("every TEMPLATE-ONLY composite resolves to factory parts with valid geometry", () => {
+    const templateOnly = catalogAssetIds()
+      .map((id) => getAsset(id))
+      .filter((d) => d !== undefined && d.renderKind === "composite" && d.compositeKind === null);
+    expect(templateOnly.length).toBeGreaterThan(0);
+    for (const descriptor of templateOnly) {
+      const id = descriptor!.assetId;
+      const entry: AssetEntry = resolveAsset(id);
+      expect(entry, `${id} resolves`).not.toBe(FALLBACK_ASSET);
+      expect(entry.templateId, `${id} carries its frozen templateId`).toBe(descriptor!.templateId);
+      expect(entry.templateParts, `${id} has factory-built parts`).not.toBeNull();
+      expect(entry.templateParts!.length, `${id} builds >= 1 part`).toBeGreaterThanOrEqual(1);
+      expect(entry.templateFaceBounds, `${id} has factory bounds`).not.toBeNull();
+      for (const part of entry.templateParts!) {
+        expect(Number.isFinite(part.size.x) && Number.isFinite(part.size.y) && Number.isFinite(part.size.z)).toBe(true);
+        expect(part.color).toMatch(/^#[0-9a-fA-F]{6}$/);
+      }
+      // Rebuilding from the descriptor's own template+colors is deep-equal
+      // (registry prebuild == factory on demand — deterministic single source).
+      const rebuilt = buildTemplateComposite(descriptor!.templateId as string, {
+        colors: descriptor!.colors,
+        scale: 1,
+      });
+      expect(entry.templateHitbox).toEqual(rebuilt.hitbox);
+      expect(entry.templateFaceBounds).toEqual(rebuilt.bounds);
+    }
+  });
+
+  it("every composite templateId in the manifest resolves to a REAL template (no fallback)", () => {
+    for (const id of catalogAssetIds()) {
+      const descriptor = getAsset(id);
+      if (descriptor === undefined || descriptor.renderKind !== "composite" || descriptor.templateId === null) continue;
+      expect(getTemplate(descriptor.templateId), `${descriptor.assetId} uses ${descriptor.templateId}`).not.toBe(
+        TEMPLATE_FALLBACK,
+      );
+    }
+  });
+
+  it("the six LEGACY composites keep their builders (templateParts stay null)", () => {
+    const legacy = ["PROP_KITCHEN_KNIFE_01", "PROP_LETTER_OPENER_01", "PROP_SCISSORS_01", "PROP_LAPTOP_01", "PROP_TABLE_01", "PROP_BODY_PLACEHOLDER_01"];
+    for (const id of legacy) {
+      const entry = resolveAsset(id);
+      expect(entry.compositeKind, `${id} keeps the legacy builder`).not.toBeNull();
+      expect(entry.templateParts, `${id} stays on the legacy builder`).toBeNull();
+    }
+    // Golden geometry is byte-identical (the same builder outputs as Phase 8_1).
+    const knife = resolveAsset("PROP_KITCHEN_KNIFE_01");
+    expect(buildObjectComposite("knife", { scale: knife.scale, color: knife.color })[0].size).toEqual({
+      x: 0.045,
+      y: 0.014,
+      z: 0.24,
+    });
+  });
+
+  it("template-only composite part colors derive from the catalog (never fallback gray)", () => {
+    for (const id of catalogAssetIds()) {
+      const parts = resolveAsset(id).templateParts;
+      if (parts === null || parts === undefined) continue;
+      expect(parts.every((p) => p.color !== FALLBACK_COLOR), `${id} uses catalog tones`).toBe(true);
+    }
   });
 });

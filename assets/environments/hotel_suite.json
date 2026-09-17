@@ -1,0 +1,51 @@
+{
+  "environmentId": "hotel_suite",
+  "version": 1,
+  "canonicalName": "Hotel Suite",
+  "aliases": ["hotel", "suite", "hotel room", "room"],
+  "tags": ["lodging", "suite", "travel"],
+  "zones": [
+    {"zoneId": "hotel_bedroom", "label": "Bedroom", "rooms": ["bedroom", "closet"]},
+    {"zoneId": "hotel_lounge", "label": "Lounge", "rooms": ["lounge"]},
+    {"zoneId": "hotel_entrance", "label": "Entrance", "rooms": ["entrance", "hallway"]},
+    {"zoneId": "hotel_bathroom", "label": "Bathroom", "rooms": ["bathroom"]},
+    {"zoneId": "hotel_study", "label": "Study Nook", "rooms": ["study"]}
+  ],
+  "anchors": [
+    {"anchorId": "hotel_bedside_01", "type": "TABLE_PROP", "zoneId": "hotel_bedroom", "position": {"x": 4.0, "y": 0.8, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "evidence"], "exclusive": false, "required": true},
+    {"anchorId": "hotel_desk_01", "type": "DESK_EVIDENCE", "zoneId": "hotel_study", "position": {"x": 4.0, "y": 0.8, "z": 10.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics", "furniture", "decor"], "exclusive": false, "required": true},
+    {"anchorId": "hotel_desk_02", "type": "DESK_EVIDENCE", "zoneId": "hotel_study", "position": {"x": 6.0, "y": 0.8, "z": 10.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics", "furniture", "decor"], "exclusive": false, "required": false},
+    {"anchorId": "hotel_floor_01", "type": "FLOOR_EVIDENCE", "zoneId": "hotel_study", "position": {"x": 4.2, "y": 0.02, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence"], "exclusive": false, "required": true},
+    {"anchorId": "hotel_body_01", "type": "BODY", "zoneId": "hotel_bedroom", "position": {"x": 4.0, "y": 0.0, "z": 3.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["character"], "exclusive": true, "required": true},
+    {"anchorId": "hotel_door_01", "type": "DOOR", "zoneId": "hotel_entrance", "position": {"x": 0.5, "y": 0.0, "z": 6.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": true},
+    {"anchorId": "hotel_window_01", "type": "WINDOW", "zoneId": "hotel_lounge", "position": {"x": 11.0, "y": 0.0, "z": 6.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": true},
+    {"anchorId": "hotel_minibar_01", "type": "STORAGE", "zoneId": "hotel_lounge", "position": {"x": 9.0, "y": 0.0, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["furniture", "decor", "utility"], "exclusive": false, "required": true},
+    {"anchorId": "hotel_computer_01", "type": "COMPUTER", "zoneId": "hotel_study", "position": {"x": 4.0, "y": 0.8, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["electronics", "evidence"], "exclusive": true, "required": true},
+    {"anchorId": "hotel_document_01", "type": "DOCUMENT", "zoneId": "hotel_study", "position": {"x": 4.2, "y": 0.8, "z": 8.2}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics"], "exclusive": false, "required": true},
+    {"anchorId": "hotel_cctv_01", "type": "CCTV", "zoneId": "hotel_entrance", "position": {"x": 0.5, "y": 2.8, "z": 1.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["utility"], "exclusive": true, "required": false},
+    {"anchorId": "hotel_access_01", "type": "ACCESS_CONTROL", "zoneId": "hotel_entrance", "position": {"x": 0.8, "y": 1.2, "z": 0.9}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["utility", "electronics"], "exclusive": true, "required": false},
+    {"anchorId": "hotel_generic_01", "type": "GENERIC_PROP", "zoneId": "hotel_lounge", "position": {"x": 9.5, "y": 0.0, "z": 9.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "utility"], "exclusive": false, "required": true},
+    {"anchorId": "hotel_bathroom_01", "type": "GENERIC_PROP", "zoneId": "hotel_bathroom", "position": {"x": 2.0, "y": 0.0, "z": 9.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "utility"], "exclusive": false, "required": false},
+    {"anchorId": "hotel_spawn_01", "type": "PLAYER_SPAWN", "zoneId": "hotel_entrance", "position": {"x": 0.8, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": [], "exclusive": true, "required": true}
+  ],
+  "spawn": {"anchorId": "hotel_spawn_01", "position": {"x": 0.8, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}},
+  "lighting": {"profile": "warm_flat", "keyIntensity": 0.8, "hemiIntensity": 0.4, "accentColor": "#e5b07a"},
+  "structuralAssets": ["DOOR_APARTMENT_01", "PROP_WINDOW_01", "PROP_WALL_01", "PROP_HOTEL_BED_01", "PROP_DESK_01", "PROP_LAMP_01", "PROP_TABLE_01", "PROP_VASE_01"],
+  "styleHint": "boutique_hotel",
+  "defaultAnchorCoverage": {
+    "PLAYER_SPAWN": ["hotel_spawn_01"],
+    "BODY": ["hotel_body_01"],
+    "FLOOR_EVIDENCE": ["hotel_floor_01"],
+    "DESK_EVIDENCE": ["hotel_desk_01", "hotel_desk_02"],
+    "TABLE_PROP": ["hotel_bedside_01"],
+    "COMPUTER": ["hotel_computer_01"],
+    "DOCUMENT": ["hotel_document_01"],
+    "WALL_EVIDENCE": [],
+    "DOOR": ["hotel_door_01"],
+    "WINDOW": ["hotel_window_01"],
+    "STORAGE": ["hotel_minibar_01"],
+    "CCTV": ["hotel_cctv_01"],
+    "ACCESS_CONTROL": ["hotel_access_01"],
+    "GENERIC_PROP": ["hotel_generic_01"]
+  }
+}

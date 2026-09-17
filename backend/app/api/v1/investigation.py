@@ -143,11 +143,14 @@ def discover_evidence(
     summary="Interact with one world object (validated by the placement)",
     description=(
         "Requires the playthrough's own playthroughAccessToken. The object "
-        "must exist in the PINNED version's placements (404 otherwise); the "
-        "requested interaction must equal the placement's published "
-        "interaction (mismatch -> 409 INTERACTION_NOT_ALLOWED, no state "
-        "change). An evidence-linked placement runs the same discovery logic "
-        "as the discover endpoint and returns its DTO."
+        "must exist in the PINNED version's placements (404 otherwise); a "
+        "DECORATIVE placement (published interaction \"\") is NOT "
+        "interactable and answers 409 INTERACTION_NOT_ALLOWED with no state "
+        "change (DEF-062); the requested interaction must otherwise equal "
+        "the placement's published interaction (mismatch -> 409 "
+        "INTERACTION_NOT_ALLOWED, no state change). An evidence-linked "
+        "placement runs the same discovery logic as the discover endpoint "
+        "and returns its DTO."
     ),
 )
 def interact_with_object(

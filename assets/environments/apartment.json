@@ -1,0 +1,49 @@
+{
+  "environmentId": "apartment",
+  "version": 1,
+  "canonicalName": "Apartment",
+  "aliases": ["flat", "condo", "apartment flat", "apartment unit"],
+  "tags": ["residential", "interior", "compact"],
+  "zones": [
+    {"zoneId": "apartment_kitchen", "label": "Kitchen", "rooms": ["kitchen", "pantry"]},
+    {"zoneId": "apartment_living", "label": "Living Room", "rooms": ["living_room"]},
+    {"zoneId": "apartment_bedroom", "label": "Bedroom", "rooms": ["bedroom"]},
+    {"zoneId": "apartment_hallway", "label": "Hallway", "rooms": ["hallway", "entrance"]},
+    {"zoneId": "apartment_office", "label": "Home Office", "rooms": ["office"]}
+  ],
+  "anchors": [
+    {"anchorId": "kitchen_counter", "type": "DESK_EVIDENCE", "zoneId": "apartment_kitchen", "position": {"x": 2.0, "y": 0.8, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics", "furniture", "decor"], "exclusive": false, "required": true},
+    {"anchorId": "dining_table", "type": "TABLE_PROP", "zoneId": "apartment_living", "position": {"x": 7.0, "y": 0.8, "z": 7.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "evidence"], "exclusive": false, "required": true},
+    {"anchorId": "desk_main", "type": "COMPUTER", "zoneId": "apartment_office", "position": {"x": 10.0, "y": 0.8, "z": 2.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["electronics", "evidence", "furniture"], "exclusive": true, "required": true},
+    {"anchorId": "shelf_01", "type": "STORAGE", "zoneId": "apartment_living", "position": {"x": 9.5, "y": 0.0, "z": 8.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["furniture", "decor", "utility"], "exclusive": false, "required": true},
+    {"anchorId": "floor_body_position", "type": "BODY", "zoneId": "apartment_kitchen", "position": {"x": 3.0, "y": 0.0, "z": 3.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["character"], "exclusive": true, "required": true},
+    {"anchorId": "hall_wall_01", "type": "DOOR", "zoneId": "apartment_hallway", "position": {"x": 0.5, "y": 0.0, "z": 6.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": true},
+    {"anchorId": "office_desk_01", "type": "DESK_EVIDENCE", "zoneId": "apartment_office", "position": {"x": 10.5, "y": 0.8, "z": 4.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics", "furniture", "decor"], "exclusive": false, "required": true},
+    {"anchorId": "bedside_table", "type": "TABLE_PROP", "zoneId": "apartment_bedroom", "position": {"x": 4.5, "y": 0.8, "z": 10.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "evidence"], "exclusive": false, "required": true},
+    {"anchorId": "spawn", "type": "PLAYER_SPAWN", "zoneId": "apartment_living", "position": {"x": 6.0, "y": 0.0, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": [], "exclusive": true, "required": true},
+    {"anchorId": "window_main", "type": "WINDOW", "zoneId": "apartment_living", "position": {"x": 1.0, "y": 0.0, "z": 7.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": true},
+    {"anchorId": "floor_evidence_01", "type": "FLOOR_EVIDENCE", "zoneId": "apartment_kitchen", "position": {"x": 2.2, "y": 0.02, "z": 4.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence"], "exclusive": false, "required": true},
+    {"anchorId": "document_01", "type": "DOCUMENT", "zoneId": "apartment_office", "position": {"x": 10.2, "y": 0.8, "z": 2.2}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics"], "exclusive": false, "required": true},
+    {"anchorId": "generic_prop_01", "type": "GENERIC_PROP", "zoneId": "apartment_living", "position": {"x": 7.5, "y": 0.0, "z": 9.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "utility"], "exclusive": false, "required": true}
+  ],
+  "spawn": {"anchorId": "spawn", "position": {"x": 6.0, "y": 0.0, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}},
+  "lighting": {"profile": "warm_flat", "keyIntensity": 0.9, "hemiIntensity": 0.5, "accentColor": "#e8b878"},
+  "structuralAssets": ["DOOR_APARTMENT_01", "PROP_WINDOW_01", "PROP_WALL_01", "PROP_LAMP_01", "PROP_TABLE_01", "PROP_VASE_01", "PROP_DESK_01"],
+  "styleHint": "modern_studio",
+  "defaultAnchorCoverage": {
+    "PLAYER_SPAWN": ["spawn"],
+    "BODY": ["floor_body_position"],
+    "FLOOR_EVIDENCE": ["floor_evidence_01"],
+    "DESK_EVIDENCE": ["kitchen_counter", "office_desk_01"],
+    "TABLE_PROP": ["dining_table", "bedside_table"],
+    "COMPUTER": ["desk_main"],
+    "DOCUMENT": ["document_01"],
+    "WALL_EVIDENCE": [],
+    "DOOR": ["hall_wall_01"],
+    "WINDOW": ["window_main"],
+    "STORAGE": ["shelf_01"],
+    "CCTV": [],
+    "ACCESS_CONTROL": [],
+    "GENERIC_PROP": ["generic_prop_01"]
+  }
+}

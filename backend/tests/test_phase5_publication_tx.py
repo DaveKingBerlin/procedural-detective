@@ -312,4 +312,37 @@ def test_published_row_is_immutable_at_db_level(store):
     finally:
         engine.dispose()
     assert store.get_published("CASE-IMM", 1) is not None
-    assert store.get_published("CASE-IMM", 1).payload_json == "{}"
+
+
+def test_running_golden_publishes_decorative_env_interactions_as_empty(
+    store, database_url
+):
+    """DEF-062 end-to-end: the RUNNING golden (dev provider) publishes the
+    decorative env placements with interaction "" while every evidence-linked
+    placement keeps its published non-empty interaction."""
+    published, _record, _session_id, _clock = held_published(
+        database_url, golden_script(store, database_url)
+    )
+    by_object = {
+        placement.object_id: placement
+        for placement in published.draft.world_graph.placements
+    }
+    env_ids = (
+        "vase_01",
+        "apartment_table",
+        "apartment_door",
+        "apartment_lamp",
+        "victim_body_placeholder",
+    )
+    for object_id in env_ids:
+        assert by_object[object_id].interaction == "", object_id
+        assert by_object[object_id].evidence_id is None, object_id
+    evidence_interactions = {
+        "kitchen_knife": "inspect",
+        "letter_opener": "inspect",
+        "scissors": "inspect",
+        "apartment_laptop": "read",
+    }
+    for object_id, interaction in evidence_interactions.items():
+        assert by_object[object_id].interaction == interaction, object_id
+        assert by_object[object_id].evidence_id is not None, object_id

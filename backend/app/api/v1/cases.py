@@ -65,6 +65,7 @@ def create_case(
             body.prompt,
             anonymous_quota_session_id=session_row.session_id,
             difficulty=body.difficulty,
+            environment=body.environment,
         )
     except HTTPException:
         raise

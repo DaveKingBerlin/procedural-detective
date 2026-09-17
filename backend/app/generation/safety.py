@@ -7,8 +7,10 @@ Treat all generated text as inert data:
 - ``AssetRegistry`` is the application-owned logical asset-ID registry
   (REQUIREMENTS 6.3 + 26): providers may reference only these ids; arbitrary
   URLs / filesystem paths / data: URLs are never assets.
-- ``validate_world_graph`` enforces the interaction allowlist (6.4), the
-  semantic-anchor allowlist (26) and referential integrity of placements.
+- ``validate_world_graph`` enforces the interaction allowlist (6.4; the empty
+  string is additionally legal and means "decorative / not interactable",
+  DEF-062), the semantic-anchor allowlist (26) and referential integrity of
+  placements.
 - ``sanitize_for_repair`` produces the stable, safe textual projection handed
   to a repair provider (no hidden internals beyond the crime facts that ARE
   part of the generated draft, and no solver diagnostics except the sanitized
@@ -254,6 +256,12 @@ INTERACTION_ALLOWLIST: tuple[str, ...] = (
 )
 
 # REQUIREMENTS 26 — semantic anchors (never raw coordinates).
+# Phase 11 (Five Environment Kits & Semantic Anchors): the TWO namespace halves
+# are the Milestone-1 anchors and the anchorIds of the five Phase 11 kits
+# (assets/environments/*.json). The union is kept static here (importing the
+# environment manifests would create a load cycle with app.assets.catalog);
+# test_environments_manifests.py asserts the allowlist stays a superset of the
+# shipped kits' anchorIds so the two can never drift apart.
 ANCHOR_ALLOWLIST: tuple[str, ...] = (
     "desk_main",
     "kitchen_counter",
@@ -263,6 +271,80 @@ ANCHOR_ALLOWLIST: tuple[str, ...] = (
     "shelf_01",
     "hall_wall_01",
     "office_desk_01",
+    # Phase 11 apartment kit
+    "spawn",
+    "window_main",
+    "floor_evidence_01",
+    "document_01",
+    "generic_prop_01",
+    # Phase 11 office kit
+    "office_desk_a",
+    "office_desk_b",
+    "office_meeting_table",
+    "office_floor_01",
+    "office_body_01",
+    "office_door_01",
+    "office_window_01",
+    "office_window_02",
+    "office_computer_01",
+    "office_document_01",
+    "office_shelf_01",
+    "office_cctv_01",
+    "office_access_01",
+    "office_generic_01",
+    "office_break_01",
+    "office_spawn_01",
+    # Phase 11 hotel_suite kit
+    "hotel_bedside_01",
+    "hotel_desk_01",
+    "hotel_desk_02",
+    "hotel_floor_01",
+    "hotel_body_01",
+    "hotel_door_01",
+    "hotel_window_01",
+    "hotel_minibar_01",
+    "hotel_computer_01",
+    "hotel_document_01",
+    "hotel_cctv_01",
+    "hotel_access_01",
+    "hotel_generic_01",
+    "hotel_bathroom_01",
+    "hotel_spawn_01",
+    # Phase 11 warehouse kit
+    "warehouse_desk_01",
+    "warehouse_workbench_01",
+    "warehouse_floor_01",
+    "warehouse_floor_02",
+    "warehouse_body_01",
+    "warehouse_door_01",
+    "warehouse_door_02",
+    "warehouse_window_01",
+    "warehouse_shelf_01",
+    "warehouse_shelf_02",
+    "warehouse_computer_01",
+    "warehouse_document_01",
+    "warehouse_cctv_01",
+    "warehouse_access_01",
+    "warehouse_generic_01",
+    "warehouse_spawn_01",
+    # Phase 11 mansion kit
+    "mansion_desk_01",
+    "mansion_desk_02",
+    "mansion_table_01",
+    "mansion_sideboard_01",
+    "mansion_floor_01",
+    "mansion_body_01",
+    "mansion_door_01",
+    "mansion_window_01",
+    "mansion_window_02",
+    "mansion_computer_01",
+    "mansion_document_01",
+    "mansion_shelf_01",
+    "mansion_cctv_01",
+    "mansion_access_01",
+    "mansion_generic_01",
+    "mansion_spawn_01",
+    "mansion_corridor_01",
 )
 
 
@@ -363,9 +445,13 @@ def validate_world_graph(
 
     Every placement must reference a known objectId, a registered assetId, a
     locationId declared by the world graph itself, an anchor from
-    ANCHOR_ALLOWLIST, an interaction from INTERACTION_ALLOWLIST and (when
-    present) a known evidenceId. Arbitrary URLs/paths/data-loading anywhere are
-    rejected by the content-safety scan over the whole graph.
+    ANCHOR_ALLOWLIST, an interaction that is EITHER the empty string
+    (``""`` = decorative / NOT interactable, DEF-062) OR a value from
+    INTERACTION_ALLOWLIST, and (when present) a known evidenceId. An
+    evidence-linked placement MUST carry a non-empty interaction (otherwise
+    the evidence could never be reached through a player interaction).
+    Arbitrary URLs/paths/data-loading anywhere are rejected by the
+    content-safety scan over the whole graph.
 
     DEF-050: an objectId may be placed AT MOST ONCE — a duplicate placement
     would make the same world object render twice (and let a player's valid
@@ -392,10 +478,19 @@ def validate_world_graph(
             issues.append(f"{where}: unknown locationId {placement.location_id!r}")
         if placement.anchor not in ANCHOR_ALLOWLIST:
             issues.append(f"{where}: anchor {placement.anchor!r} is not in ANCHOR_ALLOWLIST")
-        if placement.interaction not in INTERACTION_ALLOWLIST:
+        if placement.interaction:
+            # Non-empty interactions must be a documented identifier.
+            if placement.interaction not in INTERACTION_ALLOWLIST:
+                issues.append(
+                    f"{where}: interaction {placement.interaction!r} is not in "
+                    "INTERACTION_ALLOWLIST"
+                )
+        elif placement.evidence_id is not None:
+            # DEF-062: "" means decorative / not interactable; an evidence
+            # link would then be unreachable through any interaction.
             issues.append(
-                f"{where}: interaction {placement.interaction!r} is not in "
-                "INTERACTION_ALLOWLIST"
+                f"{where}: evidence-linked placement {placement.object_id!r} "
+                "requires a non-empty interaction"
             )
         if placement.evidence_id is not None and placement.evidence_id not in evidence_ids:
             issues.append(

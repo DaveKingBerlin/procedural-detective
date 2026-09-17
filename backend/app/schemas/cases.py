@@ -31,6 +31,14 @@ class CaseCreateRequest(BaseModel):
         description="Optional difficulty label (stored; the pipeline is "
         "deterministic and ignores it).",
     )
+    environment: str | None = Field(
+        default=None,
+        max_length=40,
+        description="Phase 11 optional environment hint (apartment / office / "
+        "hotel_suite / warehouse / mansion or any canonical/alias/semantic "
+        "form; unknown values fall back to 'apartment'; the service enforces "
+        "the same input-safety bounds as the prompt).",
+    )
 
 
 class CaseStartedDTO(BaseModel):
@@ -51,6 +59,9 @@ class CaseStartedDTO(BaseModel):
 class SceneDTO(BaseModel):
     locationId: str
     name: str
+    # Phase 11 additive: the environment kit identity of the published scene
+    # (player-safe metadata; the frontend uses it to pick the kit builder).
+    environmentId: str | None = None
 
 
 class PersonDTO(BaseModel):

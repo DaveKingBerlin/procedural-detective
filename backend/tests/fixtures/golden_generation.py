@@ -212,13 +212,16 @@ _WORLD_GRAPH_DOC: dict[str, Any] = {
                 "assetId": "PROP_VASE_01",
                 "locationId": SCENE_LOCATION,
                 "anchor": "dining_table",
-                "interaction": "inspect",
+                "interaction": "",
                 "evidenceId": None,
             },
             # -- Phase 6 Milestone-1 investigation scene -----------------------
             # laptop (links the golden email), shell objects and the victim
-            # body placeholder. All shell/victim objects are INSPECTABLE-only
-            # so the candidate universes and the solver proof stay identical.
+            # body placeholder. The shell/victim objects are DECORATIVE
+            # (interaction "" = not interactable, DEF-062): they show their
+            # catalog label but are never clickable; evidence objects keep
+            # their published interaction so the candidate universes and the
+            # solver proof stay identical.
             {
                 "objectId": "apartment_laptop",
                 "assetId": "PROP_LAPTOP_01",
@@ -232,7 +235,7 @@ _WORLD_GRAPH_DOC: dict[str, Any] = {
                 "assetId": "PROP_TABLE_01",
                 "locationId": SCENE_LOCATION,
                 "anchor": "dining_table",
-                "interaction": "inspect",
+                "interaction": "",
                 "evidenceId": None,
             },
             {
@@ -240,7 +243,7 @@ _WORLD_GRAPH_DOC: dict[str, Any] = {
                 "assetId": "DOOR_APARTMENT_01",
                 "locationId": SCENE_LOCATION,
                 "anchor": "hall_wall_01",
-                "interaction": "inspect",
+                "interaction": "",
                 "evidenceId": None,
             },
             {
@@ -248,7 +251,7 @@ _WORLD_GRAPH_DOC: dict[str, Any] = {
                 "assetId": "PROP_LAMP_01",
                 "locationId": SCENE_LOCATION,
                 "anchor": "shelf_01",
-                "interaction": "inspect",
+                "interaction": "",
                 "evidenceId": None,
             },
             {
@@ -256,7 +259,7 @@ _WORLD_GRAPH_DOC: dict[str, Any] = {
                 "assetId": "PROP_BODY_PLACEHOLDER_01",
                 "locationId": SCENE_LOCATION,
                 "anchor": "floor_body_position",
-                "interaction": "inspect",
+                "interaction": "",
                 "evidenceId": None,
             },
         ],

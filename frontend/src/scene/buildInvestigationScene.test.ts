@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { getAsset, hasAsset } from "../catalog/assetCatalog";
+import { getKit } from "../environments/kitCatalog";
+import { buildTemplateComposite } from "../templates/templateRegistry";
 import { ANCHOR_REGISTRY } from "./anchorRegistry";
-import { FALLBACK_ASSET, FALLBACK_COLOR, isKnownAsset } from "./assetRegistry";
-import { buildInvestigationScene } from "./buildInvestigationScene";
-import { EMITTED_ASSET_IDS, makeBootstrap, makeWorldObject } from "./testFixtures";
+import { ASSET_REGISTRY, FALLBACK_ASSET, FALLBACK_COLOR, isKnownAsset, resolveAsset, type AssetEntry, type AssetRegistry } from "./assetRegistry";
+import { buildInvestigationScene, type InvestigationSceneModel } from "./buildInvestigationScene";
+import { EMITTED_ASSET_IDS, makeBootstrap, makeOfficeBootstrap, makeWorldObject } from "./testFixtures";
 import { ValidationError } from "./validation";
 
 describe("buildInvestigationScene — scene creation from a deterministic fixture", () => {
@@ -89,17 +92,64 @@ describe("buildInvestigationScene — scene creation from a deterministic fixtur
     ]);
   });
 
-  it("flags interactability from the registry AND the published interaction", () => {
+  it("flags interaction affordances from the DTO interaction string (DEF-062)", () => {
     const model = buildInvestigationScene(makeBootstrap());
     const knife = model.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
     expect(knife.interactionWorks).toBe(true);
 
-    // PROP_BODY_PLACEHOLDER_01 is registered non-interactable (no placement
-    // links it to evidence): even though its DTO publishes an interaction,
-    // interactionWorks must be false.
+    // The victim body publishes NO interaction (""): interactionWorks is off —
+    // the affordance is payload-driven, never inferred from the asset type.
     const body = model.worldObjects.find((o) => o.objectId === "victim_body_placeholder")!;
-    expect(body.interaction).toBe("inspect");
+    expect(body.interaction).toBe("");
     expect(body.interactionWorks).toBe(false);
+  });
+});
+
+describe("DEF-062 — interaction affordances are PAYLOAD-driven, not catalog-driven", () => {
+  /**
+   * Regression for ADV-144 / DEF-062 (MED): `interactionWorks` must NOT be
+   * gated by the bundled catalog's `interactable` flag. A newer catalog
+   * shipped later could otherwise add/remove click affordances on
+   * ALREADY-PUBLISHED cases while the server payload stays byte-identical.
+   * The affordance is a property of the published DTO (non-empty
+   * `interaction`), so a MUTATED catalog must produce the IDENTICAL
+   * interactionWorks map for the same canned payload.
+   */
+  function affordanceMap(model: InvestigationSceneModel): Array<[string, boolean]> {
+    return model.worldObjects.map((o) => [o.objectId, o.interactionWorks]);
+  }
+
+  it("flipping every catalog interactable flag does not change published-case affordances", () => {
+    const flippedRegistry: AssetRegistry = new Map(
+      [...ASSET_REGISTRY].map(([id, entry]) => [
+        id,
+        { ...entry, interactable: !entry.interactable },
+      ]),
+    );
+    // Sanity: the flipped registry is NOT the default one (a no-op test would
+    // prove nothing).
+    expect(flippedRegistry.get("PROP_KITCHEN_KNIFE_01")!.interactable).not.toBe(
+      ASSET_REGISTRY.get("PROP_KITCHEN_KNIFE_01")!.interactable,
+    );
+
+    const model = buildInvestigationScene(makeBootstrap());
+    const flippedModel = buildInvestigationScene(makeBootstrap(), flippedRegistry);
+    expect(affordanceMap(flippedModel)).toEqual(affordanceMap(model));
+  });
+
+  it("golden affordances derive from the DTO interaction strings (manifest-derived DTO)", () => {
+    // The fixture publishes the manifest-derived DTO: non-empty interactions
+    // only for the evidence-bearing objects (knife/opener/scissors/laptop).
+    const model = buildInvestigationScene(makeBootstrap());
+    const byId = new Map(model.worldObjects.map((o) => [o.objectId, o]));
+    for (const id of ["kitchen_knife", "letter_opener", "scissors", "apartment_laptop"]) {
+      expect(byId.get(id)!.interaction, id).not.toBe("");
+      expect(byId.get(id)!.interactionWorks, `${id} affordance on`).toBe(true);
+    }
+    for (const id of ["apartment_door", "apartment_lamp", "apartment_table", "vase_01", "victim_body_placeholder"]) {
+      expect(byId.get(id)!.interaction, id).toBe("");
+      expect(byId.get(id)!.interactionWorks, `${id} affordance off`).toBe(false);
+    }
   });
 });
 
@@ -133,28 +183,47 @@ describe("contract sync with the backend dev fixture (dev_mode_case.json)", () =
     expect(new Set(model.worldObjects.map((o) => o.objectId)).size).toBe(9);
   });
 
+  it("resolves every emitted assetId through the CATALOG with 0 fallbacks (Phase 10)", () => {
+    // The golden scene is fully Asset-Oracle-driven: every assetId the canned
+    // bootstrap emits is an EXACT catalog id, so the model carries the
+    // catalog's label/color and never degrades to a neutral fallback.
+    const model = buildInvestigationScene(makeBootstrap());
+    for (const obj of model.worldObjects) {
+      expect(hasAsset(obj.assetId), `${obj.assetId} must be a catalog id`).toBe(true);
+      expect(obj.unknownAsset, `${obj.assetId} must resolve through the catalog`).toBe(false);
+      const descriptor = getAsset(obj.assetId);
+      expect(obj.label, `${obj.assetId} label comes from the catalog`).toBe(descriptor!.label);
+      expect(obj.scale, `${obj.assetId} scale comes from the catalog dimensions`).toEqual(descriptor!.dimensions);
+      expect(obj.interactionWorks, `${obj.assetId} affordance comes from the DTO interaction`).toBe(
+        obj.interaction !== "",
+      );
+    }
+  });
+
   it("registers evidence-linked objects interactable and the body non-interactable", () => {
     const model = buildInvestigationScene(makeBootstrap());
     const byId = new Map(model.worldObjects.map((o) => [o.objectId, o]));
-    // evidence-linked placements MUST be interactable
+    // evidence-linked placements publish non-empty DTO interactions -> affordance on
     for (const id of ["kitchen_knife", "letter_opener", "scissors", "apartment_laptop"]) {
       expect(byId.get(id)!.interactionWorks, `${id} must be interactable`).toBe(true);
     }
-    // the victim body has no evidence-linked placement -> NOT interactable
-    expect(byId.get("victim_body_placeholder")!.interactionWorks).toBe(false);
-    // env objects without evidence remain interactable (no discovery returned)
-    for (const id of ["apartment_table", "apartment_door", "apartment_lamp", "vase_01"]) {
-      expect(byId.get(id)!.interactionWorks, `${id} should stay interactable`).toBe(true);
+    // DEF-062: affordances are PAYLOAD-driven. The manifest-derived DTO
+    // publishes empty interaction strings for table/door/lamp/vase/victim, so
+    // interactionWorks is off — independent of any catalog interactable flag.
+    for (const id of ["victim_body_placeholder", "apartment_table", "apartment_door", "apartment_lamp", "vase_01"]) {
+      expect(byId.get(id)!.interaction, `${id} publishes no interaction`).toBe("");
+      expect(byId.get(id)!.interactionWorks, `${id} must NOT be interactable`).toBe(false);
     }
   });
 });
 
 describe("buildInvestigationScene — unknown asset id behavior", () => {
-  it("never throws: unknown assets become a neutral, non-interactable fallback", () => {
+  it("never throws: unknown assets become a neutral placeholder (payload affordance intact)", () => {
     const bootstrap = makeBootstrap({
       scene: {
         ...makeBootstrap().scene,
         worldObjects: [
+          // base makeWorldObject publishes interaction:"inspect".
           makeWorldObject({ objectId: "mystery_box", assetId: "ASSET.THAT.DOES.NOT.EXIST" }),
         ],
       },
@@ -165,7 +234,11 @@ describe("buildInvestigationScene — unknown asset id behavior", () => {
     expect(mystery.label).toBeNull();
     expect(mystery.primitiveKind).toBe(FALLBACK_ASSET.primitiveKind);
     expect(mystery.color).toBe(FALLBACK_COLOR);
-    expect(mystery.interactionWorks).toBe(false);
+    // DEF-062: the affordance is PAYLOAD-driven — the DTO publishes
+    // interaction:"inspect", so the neutral fallback stays clickable even for
+    // an assetId the local catalog does not know (cross-version stability).
+    expect(mystery.interaction).toBe("inspect");
+    expect(mystery.interactionWorks).toBe(true);
   });
 
   it("places unknown-anchor objects via the stable objectId hash slot", () => {
@@ -210,5 +283,154 @@ describe("phase 8_1 — accessibility fallback regression (the DOM list stays us
     // The list still exposes discovered state through the server flags.
     expect(byId.get("kitchen_knife")?.discovered).toBe(false);
     expect(byId.get("kitchen_knife")?.evidenceId).toBe("forensic_knife_match_01");
+  });
+});
+
+/* ======================================================================
+ * Phase 11 Track B — environment kits integration
+ * ==================================================================== */
+
+describe("Phase 11 Track B — environment kits in the scene model", () => {
+  it("carries the parsed environmentId on the model", () => {
+    expect(buildInvestigationScene(makeBootstrap()).environmentId).toBe("apartment");
+    expect(buildInvestigationScene(makeOfficeBootstrap()).environmentId).toBe("office");
+  });
+
+  it("office objects resolve transforms STRICTLY from the office manifest anchors", () => {
+    const office = getKit("office")!;
+    const deskAnchor = office.anchors.find((a) => a.anchorId === "office_desk_a")!;
+    const model = buildInvestigationScene(makeOfficeBootstrap());
+    const knife = model.worldObjects.find((o) => o.objectId === "office_desk_knife")!;
+    expect(knife.position).toEqual(deskAnchor.position);
+    expect(knife.rotation).toEqual(deskAnchor.rotation);
+  });
+
+  it("stays deterministic for a non-apartment kit: identical builds deep-equal", () => {
+    expect(buildInvestigationScene(makeOfficeBootstrap())).toEqual(
+      buildInvestigationScene(makeOfficeBootstrap()),
+    );
+  });
+
+  it("keeps objectIds and geometry stable under input shuffle (office kit)", () => {
+    const original = buildInvestigationScene(makeOfficeBootstrap());
+    const shuffled = makeOfficeBootstrap();
+    shuffled.scene.worldObjects = [...shuffled.scene.worldObjects].reverse();
+    expect(buildInvestigationScene(shuffled)).toEqual(original);
+  });
+
+  it("an apartment bootstrap is byte-identical to the legacy payload WITHOUT environmentId", () => {
+    const legacy = makeBootstrap();
+    delete (legacy.scene as unknown as Record<string, unknown>).environmentId;
+    const legacyModel = buildInvestigationScene(legacy);
+    const apartmentModel = buildInvestigationScene(makeBootstrap());
+    expect(legacyModel).toEqual(apartmentModel);
+    expect(legacyModel.environmentId).toBe("apartment");
+  });
+
+  it("an unknown environmentId falls back to apartment geometry without errors", () => {
+    const mars = makeBootstrap();
+    mars.scene.environmentId = "planet_mars";
+    const marsModel = buildInvestigationScene(mars);
+    const apartmentModel = buildInvestigationScene(makeBootstrap());
+    expect(marsModel.environmentId).toBe("planet_mars");
+    expect(marsModel.location).toEqual(apartmentModel.location);
+    expect(marsModel.worldObjects.map((o) => o.objectId)).toEqual(
+      apartmentModel.worldObjects.map((o) => o.objectId),
+    );
+    // Same anchors -> same apartment transforms (fallback rendering).
+    for (let index = 0; index < marsModel.worldObjects.length; index++) {
+      expect(marsModel.worldObjects[index].position).toEqual(
+        apartmentModel.worldObjects[index].position,
+      );
+    }
+  });
+
+  it("keeps interaction affordances payload-driven for kit objects (evidence on, decor off)", () => {
+    const model = buildInvestigationScene(makeOfficeBootstrap());
+    const byId = new Map(model.worldObjects.map((o) => [o.objectId, o]));
+    expect(byId.get("office_desk_knife")!.interaction).toBe("inspect");
+    expect(byId.get("office_desk_knife")!.interactionWorks).toBe(true);
+    expect(byId.get("office_vase")!.interaction).toBe("");
+    expect(byId.get("office_vase")!.interactionWorks).toBe(false);
+    expect(byId.get("office_body")!.interactionWorks).toBe(false);
+  });
+
+  it("office transforms differ from the apartment table (kit manifests are the source)", () => {
+    const model = buildInvestigationScene(makeOfficeBootstrap());
+    const knife = model.worldObjects.find((o) => o.objectId === "office_desk_knife")!;
+    // kitchen_counter's apartment slot vs the office desk anchor must differ.
+    expect(knife.position).not.toEqual(ANCHOR_REGISTRY.get("kitchen_counter")!.position);
+  });
+});
+
+/* ======================================================================
+ * Phase 12 Track B — template-backed composites in the scene model
+ * ==================================================================== */
+
+describe("Phase 12 — template-backed composites (templateId, no legacy builder)", () => {
+  function hammerBootstrap(): ReturnType<typeof makeBootstrap> {
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [
+      makeWorldObject({
+        objectId: "hammer",
+        assetId: "PROP_HAMMER_01",
+        assetType: "tool",
+        subtype: "tool",
+        locationId: "miller_apartment_kitchen",
+        anchor: "kitchen_counter",
+        interaction: "",
+        evidenceId: null,
+      }),
+    ];
+    return bootstrap;
+  }
+
+  it("sizes a template-only composite from the factory bounds at the DEFAULT variant", () => {
+    const model = buildInvestigationScene(hammerBootstrap());
+    expect(model.worldObjects).toHaveLength(1);
+    const hammer = model.worldObjects[0];
+    expect(hammer.unknownAsset).toBe(false);
+    expect(hammer.compositeKind).toBeNull();
+    expect(hammer.templateId).toBe("tool_hammer");
+    expect(hammer.templateParts).not.toBeNull();
+    expect(hammer.templateParts!.length).toBeGreaterThanOrEqual(1);
+    for (const part of hammer.templateParts!) {
+      expect(Number.isFinite(part.size.x)).toBe(true);
+      expect(/^#[0-9a-fA-F]{6}$/.test(part.color)).toBe(true);
+    }
+    // The world-object scale IS the factory's absolute bounds (scale applied).
+    const descriptor = getAsset("PROP_HAMMER_01")!;
+    const built = buildTemplateComposite("tool_hammer", { colors: descriptor.colors, scale: 1 });
+    expect(hammer.scale).toEqual(built.bounds);
+    // The factory hitbox rides along for the pick-hitbox policy.
+    expect(hammer.templateHitbox).toEqual(built.hitbox);
+  });
+
+  it("resolves a default-variant material token + state on the world object", () => {
+    const hammer = buildInvestigationScene(hammerBootstrap()).worldObjects[0];
+    // The manifest hammer default is material metal.steel / state clean.
+    expect(hammer.templateMaterial).toBe("metal.steel");
+    expect(hammer.templateState).toBe("clean");
+  });
+
+  it("an UNKNOWN template degrades to the neutral fallback path (never crashes)", () => {
+    // The validator blocks unknown templateIds in the real manifest, but a
+    // DEFENSIVE check on a MUTATED registry entry must still degrade safely
+    // (template fields null -> ordinary primitive rendering, no crash).
+    const registry = new Map<string, AssetEntry>([...ASSET_REGISTRY]);
+    registry.set("PROP_HAMMER_01", {
+      ...resolveAsset("PROP_HAMMER_01"),
+      templateId: "no_such_template",
+      templateParts: null,
+      templateHitbox: null,
+      templateFaceBounds: null,
+    });
+    const model = buildInvestigationScene(hammerBootstrap(), registry);
+    const hammer = model.worldObjects[0];
+    expect(hammer.templateParts).toBeNull();
+    expect(hammer.unknownAsset).toBe(false);
+    expect(hammer.primitiveKind).toBe("box");
+    // The model stays buildable and deterministic.
+    expect(buildInvestigationScene(hammerBootstrap(), registry)).toEqual(model);
   });
 });

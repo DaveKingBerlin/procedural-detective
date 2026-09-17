@@ -95,7 +95,9 @@ _MOTIVE_KEYS = frozenset({"motiveId", "label", "affordances"})
 _OBJECT_KEYS = frozenset({"objectId", "assetId", "affordances", "subtype"})
 _LOCATION_KEYS = frozenset({"locationId", "name"})
 _TRAVEL_RULE_KEYS = frozenset({"fromLocationId", "toLocationId", "travelTimeSeconds"})
-_SCENE_KEYS = frozenset({"locationId", "name"})
+# ``environmentId`` is the Phase 11 additive player-safe kit identity: OPTIONAL
+# in provider output (the golden scene has none) and parsed when present.
+_SCENE_KEYS = frozenset({"locationId", "name", "environmentId"})
 _EVIDENCE_TOP = frozenset({"evidence"})
 _EVIDENCE_KEYS = frozenset(
     {"id", "kind", "reliability", "discoverable", "sourceRef", "propositions", "presentation"}
@@ -220,6 +222,7 @@ def _str_field(
     *,
     required: bool = True,
     max_len: int = MAX_SINGLE_TEXT_FIELD_CHARS,
+    allow_empty: bool = False,
 ) -> tuple[str | None, list[str]]:
     if not isinstance(node, dict):
         return None, [f"{where} must be a JSON object"]
@@ -231,6 +234,11 @@ def _str_field(
     if not isinstance(value, str):
         return None, [f"{where}.{key} must be a string"]
     if not value:
+        # allow_empty is used for fields where the empty string is a legal
+        # value (e.g. a placement interaction "" = decorative / not
+        # interactable, DEF-062).
+        if allow_empty:
+            return "", []
         if required:
             return None, [f"{where}.{key} must be a non-empty string"]
         return None, [f"{where}.{key} must be a non-empty string when present"]
@@ -569,10 +577,16 @@ def _validate_scene_object(
     issues += more
     name, more = _str_field(item, "name", where)
     issues += more
+    environment_id, more = _optional_str_field(item, "environmentId", where)
+    issues += more
     if issues or location_id is None or name is None:
         return None, issues
     try:
-        spec = SceneSpec(location_id=location_id, name=name)
+        spec = SceneSpec(
+            location_id=location_id,
+            name=name,
+            environment_id=environment_id,
+        )
     except ValueError as exc:
         return None, [f"{where}: invalid scene: {exc}"]
     return spec, issues
@@ -841,7 +855,9 @@ def _validate_placement(
     issues += more
     anchor, more = _str_field(item, "anchor", where)
     issues += more
-    interaction, more = _str_field(item, "interaction", where)
+    interaction, more = _str_field(
+        item, "interaction", where, allow_empty=True
+    )
     issues += more
     evidence_id, more = _optional_str_field(item, "evidenceId", where)
     issues += more

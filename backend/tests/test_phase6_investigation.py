@@ -288,3 +288,181 @@ def test_missing_pinned_version_answers_404(phase5_app):
     assert res.status_code == 404
     assert res.json()["error"]["code"] == "NOT_FOUND"
     assert_sanitized_error(res.text)
+
+
+# --------------------------------------------------------------------------- #
+# DEF-062 — payload-driven interaction affordances (the published interaction
+# is the single source: "" = decorative / NOT interactable, non-empty =
+# clickable, evidence-linked placements keep their interaction).
+# --------------------------------------------------------------------------- #
+
+ENV_OBJECT_IDS = (
+    "apartment_table",
+    "apartment_door",
+    "apartment_lamp",
+    "vase_01",
+    "victim_body_placeholder",
+)
+EVIDENCE_OBJECT_INTERACTIONS = {
+    "kitchen_knife": "inspect",
+    "letter_opener": "inspect",
+    "scissors": "inspect",
+    "apartment_laptop": "read",
+}
+
+
+def _world_objects_by_id(phase5_app, pt_id, pt_token):
+    body = bootstrap(phase5_app, pt_id, pt_token).json()
+    return {w["objectId"]: w for w in body["scene"]["worldObjects"]}
+
+
+def test_bootstrap_carries_empty_interaction_for_env_objects(phase5_app):
+    """The published WorldGraph DTO is the single affordance source: the
+    decorative env objects carry interaction "" while evidence objects keep
+    their published non-empty interaction."""
+    case_id, creator = case_for(phase5_app)
+    pt_id, pt_token = playthrough(phase5_app, case_id, creator)
+    by_id = _world_objects_by_id(phase5_app, pt_id, pt_token)
+    for object_id in ENV_OBJECT_IDS:
+        assert by_id[object_id]["interaction"] == "", object_id
+    for object_id, interaction in EVIDENCE_OBJECT_INTERACTIONS.items():
+        assert by_id[object_id]["interaction"] == interaction, object_id
+
+
+def test_decorative_env_objects_are_not_interactable(phase5_app):
+    """Interacting with a decorative env object answers the safe 409
+    INTERACTION_NOT_ALLOWED envelope for ANY requested interaction, with NO
+    state change (nothing discovered, nothing visited)."""
+    case_id, creator = case_for(phase5_app)
+    pt_id, pt_token = playthrough(phase5_app, case_id, creator)
+    for object_id in ENV_OBJECT_IDS:
+        for requested in ("inspect", "read", "open"):
+            res = interact(phase5_app, pt_id, pt_token, object_id, requested)
+            assert res.status_code == 409, (object_id, requested)
+            assert res.json()["error"]["code"] == "INTERACTION_NOT_ALLOWED"
+    snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
+    assert snap.discovered == ()
+    assert snap.visited == ()
+
+
+def test_evidence_objects_still_interactable(phase5_app):
+    """The evidence-reachable objects keep working: knife+opener+scissors
+    (inspect) and the laptop (read) all interact successfully."""
+    case_id, creator = case_for(phase5_app)
+    pt_id, pt_token = playthrough(phase5_app, case_id, creator)
+    res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
+    assert res.status_code == 200
+    assert res.json()["evidenceId"] == "forensic_knife_match_01"
+    res = interact(phase5_app, pt_id, pt_token, LAPTOP_OBJECT, "read")
+    assert res.status_code == 200
+    assert res.json()["evidenceId"] == "email_thomas_01"
+    res = interact(phase5_app, pt_id, pt_token, "letter_opener", "inspect")
+    assert res.status_code == 200
+    res = interact(phase5_app, pt_id, pt_token, "scissors", "inspect")
+    assert res.status_code == 200
+
+
+def test_interact_decorative_env_object_never_mutates_knowledge(phase5_app):
+    """A decorative-object 409 does not disturb existing knowledge: after a
+    successful discovery the player's discovered/visited sets stay exact when
+    a later env-object interaction is refused."""
+    case_id, creator = case_for(phase5_app)
+    pt_id, pt_token = playthrough(phase5_app, case_id, creator)
+    res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
+    assert res.status_code == 200
+    res = interact(phase5_app, pt_id, pt_token, "apartment_table", "inspect")
+    assert res.status_code == 409
+    snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
+    assert snap.discovered == ("forensic_knife_match_01",)
+    assert snap.visited == (SCENE_LOCATION,)
+
+
+def test_crafted_payload_decorative_vs_nonevidence_interactable(phase5_app):
+    """The payload contract holds for arbitrary crafted payloads too: a
+    placement with interaction '' is 409 not-interactable; a NON-evidence
+    placement with a real interaction stays interactable (result 'interacted',
+    visited marked) — the branch the golden no longer exercises."""
+    store = phase5_app.state.store
+    clock = phase5_app.state.clock
+    from app.auth.tokens import issue_playthrough_access_token, verifier as v
+
+    now = float(clock.now())
+    with client(phase5_app) as c:
+        session_token, _ = create_session(c)
+        res = c.post(
+            "/api/v1/cases",
+            json={"prompt": "Victim: sarah_miller\nMurderer: thomas_reed\n"},
+            headers={"Authorization": f"Bearer {session_token}"},
+        )
+        assert res.status_code == 201
+        case_id = res.json()["caseId"]
+    v1 = store.get_published(case_id, 1)
+    payload = json.loads(v1.payload_json)
+    payload["caseVersion"] = 99
+    payload["publishedAt"] = now
+    payload["draft"]["objects"] = [
+        {
+            "object_id": "btn_thing",
+            "asset_id": "PROP_VASE_01",
+            "affordances": ["INSPECTABLE"],
+            "subtype": None,
+        },
+        {
+            "object_id": "dec_thing",
+            "asset_id": "PROP_LAMP_01",
+            "affordances": ["INSPECTABLE"],
+            "subtype": "light",
+        },
+    ]
+    payload["draft"]["world_graph"]["placements"] = [
+        {
+            "object_id": "btn_thing",
+            "asset_id": "PROP_VASE_01",
+            "location_id": SCENE_LOCATION,
+            "anchor": "desk_main",
+            "interaction": "inspect",
+            "evidence_id": None,
+        },
+        {
+            "object_id": "dec_thing",
+            "asset_id": "PROP_LAMP_01",
+            "location_id": SCENE_LOCATION,
+            "anchor": "shelf_01",
+            "interaction": "",
+            "evidence_id": None,
+        },
+    ]
+    store.create_case_version(
+        case_id=case_id, version=99, state="PUBLISHED",
+        generation_id="GEN-99", created_at=now,
+    )
+    store.insert_published(
+        case_id=case_id,
+        case_version=99,
+        payload_json=json.dumps(
+            payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ),
+        published_at=now,
+    )
+    pt_id = f"PT-DEF062-{int(now)}"
+    pt_token = issue_playthrough_access_token()
+    store.create_playthrough_if_published(
+        playthrough_id=pt_id, case_id=case_id, case_version=99,
+        token_verifier=v(pt_token), state="PLAYING",
+        created_at=now, expires_at=now + 3600,
+    )
+
+    # Decorative placement: NEVER interactable.
+    res = interact(phase5_app, pt_id, pt_token, "dec_thing", "inspect")
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "INTERACTION_NOT_ALLOWED"
+    # Non-evidence interactive placement: still works (no discovery, visited).
+    res = interact(phase5_app, pt_id, pt_token, "btn_thing", "inspect")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["evidenceId"] is None
+    assert body["discovery"] is None
+    assert body["result"] == "interacted"
+    snap = store.snapshot_player_knowledge(pt_id)
+    assert snap.discovered == ()
+    assert snap.visited == (SCENE_LOCATION,)

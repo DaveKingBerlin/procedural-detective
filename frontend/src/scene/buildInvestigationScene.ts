@@ -1,9 +1,10 @@
 import type { InvestigationBootstrapResponse, WorldObjectDTO } from "../api/types";
+import { transformFor } from "../environments/kitGeometry";
 import type { Vec3 } from "./apartment";
-import type { AssetEntry, AssetPrimitiveKind, AssetRegistry, CompositeKind } from "./assetRegistry";
+import type { AssetEntry, AssetPrimitiveKind, AssetRegistry, CompositeKind, CompositePartDescriptor } from "./assetRegistry";
 import { ASSET_REGISTRY, FALLBACK_ASSET } from "./assetRegistry";
-import type { AnchorRegistry, AnchorTransform } from "./anchorRegistry";
-import { ANCHOR_REGISTRY, resolveAnchor } from "./anchorRegistry";
+import type { AnchorRegistry } from "./anchorRegistry";
+import { ANCHOR_REGISTRY } from "./anchorRegistry";
 import { parseInvestigationBootstrap } from "./validation";
 
 /**
@@ -23,6 +24,13 @@ import { parseInvestigationBootstrap } from "./validation";
  *    objectId so any input ordering (or shuffle) yields the same model.
  *  - Unknown asset ids become the neutral fallback primitive, flagged with
  *    `unknownAsset` so the UI can surface a player-visible notice.
+ *
+ * Phase 11 Track B (environment kits): the bootstrap's `scene.environmentId`
+ * selects the kit. The APARTMENT kit keeps the Phase 6 anchor table (its
+ * transforms stay byte-identical — golden appearance); every other kit
+ * resolves per-object transforms STRICTLY from the kit manifest via
+ * {@link transformFor}. Unknown anchors fall back to the stable objectId
+ * hash; an unknown kit id falls back to the apartment geometry.
  */
 
 export interface SceneWorldObject {
@@ -48,10 +56,31 @@ export interface SceneWorldObject {
   read: boolean;
   /** True when the asset id was NOT in the application-owned registry. */
   unknownAsset: boolean;
+  /**
+   * Phase 12: the frozen logical template of a TEMPLATE-ONLY composite
+   * (compositeKind === null). Null for legacy composites and primitives.
+   */
+  templateId: string | null;
+  /**
+   * Phase 12: the DEFAULT-variant factory child parts for template-backed
+   * objects (null for legacy composites and primitives).
+   */
+  templateParts: readonly CompositePartDescriptor[] | null;
+  /**
+   * Phase 12: the template `hitbox` at the default variant scale (null when
+   * the template declares none / not a template-backed object).
+   */
+  templateHitbox: Vec3 | null;
+  /** Phase 12: resolved default-variant material token (null = no tint). */
+  templateMaterial: string | null;
+  /** Phase 12: resolved default-variant state token (pass-through only). */
+  templateState: string | null;
 }
 
 export interface InvestigationSceneModel {
   location: { locationId: string; name: string };
+  /** Phase 11: the exact environment kit id from the bootstrap (fallback "apartment"). */
+  environmentId: string;
   /** Sorted by objectId — stable identity regardless of server ordering. */
   worldObjects: SceneWorldObject[];
 }
@@ -68,11 +97,12 @@ export function buildInvestigationScene(
   const scene = parsed.scene;
 
   const worldObjects = applySharedAnchorSpacing(
-    scene.worldObjects.map((dto) => buildSceneWorldObject(dto, assetRegistry, anchorRegistry)),
+    scene.worldObjects.map((dto) => buildSceneWorldObject(dto, assetRegistry, anchorRegistry, scene.environmentId)),
   ).sort(compareByObjectId);
 
   return {
     location: { locationId: scene.location.locationId, name: scene.location.name },
+    environmentId: scene.environmentId,
     worldObjects,
   };
 }
@@ -150,12 +180,38 @@ function buildSceneWorldObject(
   dto: WorldObjectDTO,
   assetRegistry: AssetRegistry,
   anchorRegistry: AnchorRegistry,
+  environmentId: string,
 ): SceneWorldObject {
   const knownEntry = assetRegistry.get(dto.assetId);
   const entry: AssetEntry = knownEntry ?? FALLBACK_ASSET;
   const unknownAsset = knownEntry === undefined;
-  const transform: AnchorTransform = anchorRegistry.get(dto.anchor) ?? resolveAnchor(dto.anchor, dto.objectId);
+  // Phase 11 Track B: the per-object transform comes from the kit's anchor
+  // registry — the apartment kit keeps the Phase 6 table (byte-identical),
+  // every other kit resolves strictly from the manifest; unknown anchors use
+  // the stable objectId-hash slot (see ../environments/kitGeometry.ts).
+  const transform = transformFor(environmentId, dto.anchor, dto.objectId, anchorRegistry);
   const rotation = transform.rotation ?? { x: 0, y: 0, z: 0 };
+
+  // Phase 12 Track B: TEMPLATE-ONLY composites (a templateId but NO legacy
+  // compositeKind) are sized from the factory's absolute bounds (the child
+  // parts were already compiled at the DEFAULT variant in the registry), so
+  // shared-anchor spacing, the highlight ring and the pick-hitbox policy all
+  // see the REAL rendered footprint. Legacy composites and primitives keep
+  // the catalog `dimensions` scale exactly as before (byte-identical golden).
+  const templateId = entry.templateId ?? null;
+  const templateParts = entry.templateParts ?? null;
+  const templateFaceBounds = entry.templateFaceBounds ?? null;
+  const templateHitbox = entry.templateHitbox ?? null;
+  const templateMaterial = entry.templateMaterial ?? null;
+  const templateState = entry.templateState ?? null;
+  const templateBacked =
+    entry.compositeKind === null &&
+    templateId !== null &&
+    templateParts !== null &&
+    templateFaceBounds !== null;
+  const scale = templateBacked
+    ? { x: templateFaceBounds.x, y: templateFaceBounds.y, z: templateFaceBounds.z }
+    : { x: entry.scale.x, y: entry.scale.y, z: entry.scale.z };
 
   return {
     objectId: dto.objectId,
@@ -166,16 +222,28 @@ function buildSceneWorldObject(
     compositeKind: entry.compositeKind ?? null,
     hitboxScale: entry.hitboxScale ?? 1,
     color: entry.color,
-    scale: { x: entry.scale.x, y: entry.scale.y, z: entry.scale.z },
+    scale,
     // Unknown assets get no label: a neutral placeholder must never claim a name.
     label: unknownAsset ? null : entry.label,
     position: { x: transform.position.x, y: transform.position.y, z: transform.position.z },
     rotation,
     interaction: dto.interaction,
-    interactionWorks: entry.interactable && dto.interaction !== "",
+    // DEF-062 (ADV-144, MED): interactionWorks is PAYLOAD-DRIVEN — the
+    // affordance of an ALREADY-PUBLISHED case must never change when a newer
+    // catalog is bundled later. The published DTO's non-empty `interaction`
+    // string is the ONLY gate: an object is clickable/hoverable exactly when
+    // the backend published an interaction for it. The catalog `interactable`
+    // flag is NOT consulted here — it remains only the DEFAULT affordance for
+    // NEW scene authoring (future), never a per-published-case override.
+    interactionWorks: dto.interaction !== "",
     evidenceId: dto.evidenceId,
     discovered: dto.discovered,
     read: dto.read,
     unknownAsset,
+    templateId: templateBacked ? templateId : null,
+    templateParts: templateBacked ? templateParts : null,
+    templateHitbox: templateBacked ? templateHitbox : null,
+    templateMaterial: templateBacked ? templateMaterial : null,
+    templateState: templateBacked ? templateState : null,
   };
 }

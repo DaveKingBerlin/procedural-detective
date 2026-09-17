@@ -170,10 +170,21 @@ class TravelRuleSpec:
 class SceneSpec:
     location_id: str
     name: str
+    # Phase 11 (Five Environment Kits & Semantic Anchors): additive player-safe
+    # kit identity (``apartment`` / ``office`` / ``hotel_suite`` /
+    # ``warehouse`` / ``mansion``). Optional so the golden dev-mode scene (and
+    # pre-Phase-11 provider output) stays parseable unchanged.
+    environment_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_nonempty_str(self.location_id, "SceneSpec.location_id")
         _require_nonempty_str(self.name, "SceneSpec.name")
+        if self.environment_id is not None and (
+            not isinstance(self.environment_id, str) or not self.environment_id
+        ):
+            raise ValueError(
+                "SceneSpec.environment_id must be None or a non-empty string"
+            )
 
 
 @dataclass(frozen=True)
@@ -333,8 +344,14 @@ class PlacementSpec:
     evidence_id: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("object_id", "asset_id", "location_id", "anchor", "interaction"):
+        for name in ("object_id", "asset_id", "location_id", "anchor"):
             _require_nonempty_str(getattr(self, name), f"PlacementSpec.{name}")
+        # interaction may be the EMPTY string to mean "decorative / not
+        # interactable" (DEF-062: the published payload is the single source of
+        # interaction affordances). It must still be a str; non-empty values
+        # are allowlisted by app.generation.safety.validate_world_graph.
+        if not isinstance(self.interaction, str):
+            raise ValueError("PlacementSpec.interaction must be a string")
         if self.evidence_id is not None and (
             not isinstance(self.evidence_id, str) or not self.evidence_id
         ):

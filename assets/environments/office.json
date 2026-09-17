@@ -1,0 +1,53 @@
+{
+  "environmentId": "office",
+  "version": 1,
+  "canonicalName": "Office",
+  "aliases": ["workplace", "company office", "office space"],
+  "tags": ["workplace", "corporate", "business"],
+  "zones": [
+    {"zoneId": "office_mainroom", "label": "Open Plan", "rooms": ["open_plan", "workstations"]},
+    {"zoneId": "office_meeting", "label": "Meeting Room", "rooms": ["meeting_room"]},
+    {"zoneId": "office_kitchenette", "label": "Kitchenette", "rooms": ["kitchenette"]},
+    {"zoneId": "office_storage", "label": "Storage", "rooms": ["storage_room"]},
+    {"zoneId": "office_reception", "label": "Reception", "rooms": ["reception"]},
+    {"zoneId": "office_manager", "label": "Manager Office", "rooms": ["manager_office"]}
+  ],
+  "anchors": [
+    {"anchorId": "office_desk_a", "type": "DESK_EVIDENCE", "zoneId": "office_mainroom", "position": {"x": 3.0, "y": 0.8, "z": 4.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics", "furniture", "decor"], "exclusive": false, "required": true},
+    {"anchorId": "office_desk_b", "type": "DESK_EVIDENCE", "zoneId": "office_mainroom", "position": {"x": 5.0, "y": 0.8, "z": 4.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics", "furniture", "decor"], "exclusive": false, "required": true},
+    {"anchorId": "office_meeting_table", "type": "TABLE_PROP", "zoneId": "office_meeting", "position": {"x": 8.0, "y": 0.8, "z": 4.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "evidence"], "exclusive": false, "required": true},
+    {"anchorId": "office_floor_01", "type": "FLOOR_EVIDENCE", "zoneId": "office_mainroom", "position": {"x": 3.2, "y": 0.02, "z": 6.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence"], "exclusive": false, "required": true},
+    {"anchorId": "office_body_01", "type": "BODY", "zoneId": "office_mainroom", "position": {"x": 3.0, "y": 0.0, "z": 7.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["character"], "exclusive": true, "required": true},
+    {"anchorId": "office_door_01", "type": "DOOR", "zoneId": "office_reception", "position": {"x": 0.5, "y": 0.0, "z": 6.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": true},
+    {"anchorId": "office_window_01", "type": "WINDOW", "zoneId": "office_mainroom", "position": {"x": 11.5, "y": 0.0, "z": 4.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": true},
+    {"anchorId": "office_window_02", "type": "WINDOW", "zoneId": "office_mainroom", "position": {"x": 8.0, "y": 0.0, "z": 11.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["structural"], "exclusive": true, "required": false},
+    {"anchorId": "office_computer_01", "type": "COMPUTER", "zoneId": "office_mainroom", "position": {"x": 3.0, "y": 0.8, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["electronics", "evidence"], "exclusive": true, "required": true},
+    {"anchorId": "office_document_01", "type": "DOCUMENT", "zoneId": "office_mainroom", "position": {"x": 3.2, "y": 0.8, "z": 2.2}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["evidence", "electronics"], "exclusive": false, "required": true},
+    {"anchorId": "office_shelf_01", "type": "STORAGE", "zoneId": "office_storage", "position": {"x": 10.0, "y": 0.0, "z": 8.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["furniture", "decor", "utility"], "exclusive": false, "required": true},
+    {"anchorId": "office_cctv_01", "type": "CCTV", "zoneId": "office_mainroom", "position": {"x": 6.0, "y": 2.8, "z": 11.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["utility"], "exclusive": true, "required": false},
+    {"anchorId": "office_access_01", "type": "ACCESS_CONTROL", "zoneId": "office_reception", "position": {"x": 0.5, "y": 1.2, "z": 1.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["utility", "electronics"], "exclusive": true, "required": false},
+    {"anchorId": "office_generic_01", "type": "GENERIC_PROP", "zoneId": "office_manager", "position": {"x": 10.0, "y": 0.0, "z": 3.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "utility"], "exclusive": false, "required": true},
+    {"anchorId": "office_break_01", "type": "GENERIC_PROP", "zoneId": "office_kitchenette", "position": {"x": 2.0, "y": 0.0, "z": 9.5}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": ["decor", "furniture", "utility"], "exclusive": false, "required": false},
+    {"anchorId": "office_spawn_01", "type": "PLAYER_SPAWN", "zoneId": "office_reception", "position": {"x": 0.8, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": [], "exclusive": true, "required": true}
+  ],
+  "spawn": {"anchorId": "office_spawn_01", "position": {"x": 0.8, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}},
+  "lighting": {"profile": "neutral", "keyIntensity": 1.0, "hemiIntensity": 0.6, "accentColor": "#c8d0dc"},
+  "structuralAssets": ["DOOR_APARTMENT_01", "PROP_WINDOW_01", "PROP_WALL_01", "PROP_DESK_01", "PROP_OFFICE_CHAIR_01", "PROP_LAMP_01", "PROP_TABLE_01"],
+  "styleHint": "corporate_modern",
+  "defaultAnchorCoverage": {
+    "PLAYER_SPAWN": ["office_spawn_01"],
+    "BODY": ["office_body_01"],
+    "FLOOR_EVIDENCE": ["office_floor_01"],
+    "DESK_EVIDENCE": ["office_desk_a", "office_desk_b"],
+    "TABLE_PROP": ["office_meeting_table"],
+    "COMPUTER": ["office_computer_01"],
+    "DOCUMENT": ["office_document_01"],
+    "WALL_EVIDENCE": [],
+    "DOOR": ["office_door_01"],
+    "WINDOW": ["office_window_01", "office_window_02"],
+    "STORAGE": ["office_shelf_01"],
+    "CCTV": ["office_cctv_01"],
+    "ACCESS_CONTROL": ["office_access_01"],
+    "GENERIC_PROP": ["office_generic_01"]
+  }
+}

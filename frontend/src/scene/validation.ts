@@ -62,6 +62,21 @@ function requireNullableString(owner: Record<string, unknown>, field: string, wh
   return value;
 }
 
+/**
+ * A string that MAY be empty (but must still be a string). Used for the
+ * world-object `interaction` field: DEF-062 — published cases carry an empty
+ * interaction string for objects with NO interaction affordance (the
+ * affordance is payload-driven); an empty string is a VALID DTO value, only a
+ * non-string or a missing field is malformed.
+ */
+function requireStringAllowEmpty(owner: Record<string, unknown>, field: string, where: string): string {
+  const value = owner[field];
+  if (typeof value !== "string") {
+    throw new ValidationError(`${where}.${field} must be a string.`);
+  }
+  return value;
+}
+
 function requireBoolean(owner: Record<string, unknown>, field: string, where: string): boolean {
   const value = owner[field];
   if (typeof value !== "boolean") {
@@ -113,7 +128,9 @@ export const validateWorldObject: Validator<WorldObjectDTO> = {
       subtype: requireNullableString(raw, "subtype", "worldObject"),
       locationId: requireString(raw, "locationId", "worldObject"),
       anchor: requireString(raw, "anchor", "worldObject"),
-      interaction: requireString(raw, "interaction", "worldObject"),
+      // DEF-062: interaction may be "" (NO affordance). Non-string/missing is
+      // still malformed — the field is REQUIRED for the player-safe DTO shape.
+      interaction: requireStringAllowEmpty(raw, "interaction", "worldObject"),
       evidenceId: requireNullableString(raw, "evidenceId", "worldObject"),
       discovered: requireBoolean(raw, "discovered", "worldObject"),
       read: requireBoolean(raw, "read", "worldObject"),
@@ -123,11 +140,37 @@ export const validateWorldObject: Validator<WorldObjectDTO> = {
 
 /**
  * The player-safe WorldGraph: bootstrap's `scene` object
- * ({location:{locationId,name}, worldObjects:[WorldObjectDTO]}).
+ * ({environmentId, location:{locationId,name}, worldObjects:[WorldObjectDTO]}).
  */
 export interface WorldGraphDTO {
+  environmentId: string;
   location: InvestigationSceneLocationDTO;
   worldObjects: WorldObjectDTO[];
+}
+
+/** The environmentId published when a legacy payload omits Phase 11's field. */
+const DEFAULT_ENVIRONMENT_ID = "apartment";
+
+/** Max environmentId length (mirrors the backend kit string bound). */
+const MAX_ENVIRONMENT_ID_LENGTH = 80;
+
+/**
+ * Optional-accept-required Phase 11 field: the backend NOW sends
+ * `scene.environmentId`; legacy payloads without it still parse (lenient
+ * fallback to "apartment" for backward compatibility). A PRESENT but
+ * malformed value (non-string / empty / oversized) is still rejected — the
+ * parser never silently coerces a hostile value.
+ */
+function requireEnvironmentId(owner: Record<string, unknown>, where: string): string {
+  const value = owner.environmentId;
+  if (value === undefined || value === null) return DEFAULT_ENVIRONMENT_ID;
+  if (typeof value !== "string" || value === "") {
+    throw new ValidationError(`${where}.environmentId must be a non-empty string.`);
+  }
+  if (value.length > MAX_ENVIRONMENT_ID_LENGTH) {
+    throw new ValidationError(`${where}.environmentId exceeds ${MAX_ENVIRONMENT_ID_LENGTH} characters.`);
+  }
+  return value;
 }
 
 /**
@@ -148,6 +191,7 @@ export const validateWorldGraph: Validator<WorldGraphDTO> = {
       throw new ValidationError("scene.worldObjects must be an array.");
     }
     return {
+      environmentId: requireEnvironmentId(raw, "scene"),
       location: {
         locationId: requireString(locationRaw, "locationId", "scene.location"),
         name: requireString(locationRaw, "name", "scene.location"),

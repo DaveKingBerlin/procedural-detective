@@ -225,10 +225,13 @@ describe("interaction dispatch", () => {
   });
 
   it("does not read a record when the interaction reveals no evidence", async () => {
+    // Phase 10 Track B: the v1 catalog marks the vase non-interactable, so
+    // this branch is exercised with an INTERACTABLE object whose server
+    // response carries no discovery/evidence (object-agnostic controller logic).
     const services = makeServices({
       interactObject: vi.fn(
         async (): Promise<InteractionResultDTO> => ({
-          objectId: "vase_01",
+          objectId: "kitchen_knife",
           interaction: "inspect",
           evidenceId: null,
           discovery: null,
@@ -239,9 +242,9 @@ describe("interaction dispatch", () => {
     const session = makeSession(services);
     await session.start(null);
 
-    const feedback = await session.interact("vase_01");
+    const feedback = await session.interact("kitchen_knife");
 
-    expect(feedback.toast?.text).toBe("Interacted with Vase");
+    expect(feedback.toast?.text).toBe("Interacted with Kitchen knife");
     expect(feedback.record).toBeNull();
     expect(services.readRecord).not.toHaveBeenCalled();
   });

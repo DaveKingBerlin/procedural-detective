@@ -185,6 +185,9 @@ class InvestigationService:
                     "locationId": scene.get("location_id"),
                     "name": scene.get("name"),
                 },
+                # Phase 11 additive: the environment kit identity of the
+                # pinned version (player-safe metadata; no truth).
+                "environmentId": scene.get("environment_id"),
                 "worldObjects": pub.project_world_objects(
                     payload,
                     discovered=set(snapshot.discovered),
@@ -268,6 +271,8 @@ class InvestigationService:
         """One validated world interaction (REQUIREMENTS 27, Phase6 I).
 
         - the object must exist in the pinned version's placements (404);
+        - a DECORATIVE placement (published interaction ``""``, DEF-062) is
+          NOT interactable -> 409 INTERACTION_NOT_ALLOWED, no state change;
         - the interaction must equal the placement's allowed interaction
           (409 INTERACTION_NOT_ALLOWED, NO state change);
         - a placement that maps to evidence runs the discovery logic;
@@ -279,7 +284,12 @@ class InvestigationService:
         placement = pub.placement_for_object(payload, seen_object_id)
         if placement is None:
             raise InvestigationNotFoundError("unknown object id")
-        if str(interaction) != str(placement.get("interaction")):
+        published_interaction = placement.get("interaction")
+        if not isinstance(published_interaction, str) or not published_interaction:
+            # DEF-062: a decorative placement (published interaction "") is NOT
+            # interactable — the same safe 409 envelope, NO state change.
+            raise InteractionNotAllowedError("object is not interactable")
+        if str(interaction) != published_interaction:
             raise InteractionNotAllowedError(
                 "interaction does not match the placement"
             )

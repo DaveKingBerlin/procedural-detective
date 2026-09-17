@@ -21,8 +21,10 @@ deterministic pipeline and the durable Phase 5 persistence model:
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import threading
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -104,8 +106,207 @@ class PromptValidationError(GenerationServiceError):
     """The prompt violates the generation input bounds (-> 422 PROMPT_ERROR)."""
 
 
+class EnvironmentHintError(GenerationServiceError):
+    """The optional Phase 11 environment hint violates the input-safety bounds
+    (-> 422 ENVIRONMENT_ERROR; an UNSAFE hint is rejected, never resolved)."""
+
+
 class UnknownCaseError(GenerationServiceError):
     """start_case_version on a case that does not exist (-> 404)."""
+
+
+def _record_asset_oracle_provenance(published: Any, settings: Any) -> dict[str, str]:
+    """INTERNAL Phase 10 diagnostic: resolver provenance of a published draft.
+
+    After a placement's assetId has been produced (the frozen published
+    aggregate), run every placement through the Asset Oracle resolver so tests
+    and QA can assert the golden case resolves exclusively through the catalog
+    (provenance CATALOG_EXACT / CATALOG_ALIAS, never the legacy ad-hoc switch).
+
+    The result is DIAGNOSTIC ONLY: it is never serialized into the payload,
+    never stored, and never exposed through any API DTO (the public WorldGraph
+    DTO stays byte-identical — placements keep their original assetId + safe
+    metadata). A catalog problem must never break an otherwise-valid
+    publication, so any failure degrades to an empty map.
+    """
+    try:
+        from app.assets import load_catalog_from_repo, resolve_placements_provenance
+
+        catalog = None
+        configured = getattr(settings, "asset_catalog_path", None)
+        if configured is not None:
+            catalog = load_catalog_from_repo(path=configured)
+        return resolve_placements_provenance(
+            published.draft.world_graph.placements, catalog=catalog
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never alter publication
+        return {}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 11 — environment hint validation + kit composition (backend half)
+# --------------------------------------------------------------------------- #
+
+_ENVIRONMENT_MAX_LENGTH = 40
+
+# Forbidden URL-scheme tokens (substring scan, as in the asset-request gate).
+_ENVIRONMENT_FORBIDDEN_TOKENS: tuple[str, ...] = (
+    "http:",
+    "https:",
+    "data:",
+    "file:",
+    "javascript:",
+)
+# Executable/handler word tokens at word boundaries.
+_ENVIRONMENT_FORBIDDEN_WORD_RE = re.compile(
+    r"\b(?:script|handler|shader|function|eval)\b", re.IGNORECASE
+)
+_ENVIRONMENT_DRIVE_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def environment_hint_safety(environment: object) -> tuple[str, ...]:
+    """Deterministic sorted issues for one RAW environment hint (empty=safe).
+
+    Mirrors the prompt/asset-request robustness: bounded to 40 chars, no
+    control characters, no URL schemes / path separators / traversal /
+    absolute-prefix forms, no executable word tokens — where every categorical
+    check is ALSO run over the NFKC-normalized form so mangled spellings cannot
+    evade the gate. Never raises and performs no I/O.
+    """
+    if environment is None:
+        return ()
+    if not isinstance(environment, str):
+        return ("environment must be a string",)
+    value = environment
+    issues: list[str] = []
+    if len(value) > _ENVIRONMENT_MAX_LENGTH:
+        issues.append(
+            f"environment exceeds {_ENVIRONMENT_MAX_LENGTH} characters"
+        )
+    if any(ord(ch) < 0x20 for ch in value):
+        issues.append("environment contains a control character")
+
+    norm = unicodedata.normalize("NFKC", value)
+    forms = (value, norm)
+    lowered = [form.casefold() for form in forms]
+    for scheme in _ENVIRONMENT_FORBIDDEN_TOKENS:
+        if any(scheme in form for form in lowered):
+            issues.append(f"environment contains a forbidden URL scheme {scheme!r}")
+            break
+    if _ENVIRONMENT_FORBIDDEN_WORD_RE.search(value) or _ENVIRONMENT_FORBIDDEN_WORD_RE.search(norm):
+        issues.append("environment contains a forbidden executable token")
+    if any(("/" in form) or ("\\" in form) for form in forms):
+        issues.append("environment contains a path separator")
+    if any(".." in form for form in forms):
+        issues.append("environment contains path traversal '..'")
+    if any(
+        form.startswith(("/", "\\")) or _ENVIRONMENT_DRIVE_ABSOLUTE_RE.match(form)
+        for form in forms
+    ):
+        issues.append("environment is an absolute path")
+    return tuple(sorted(set(issues)))
+
+
+def _resolve_environment_for_generation(
+    environment: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """Resolve a validated environment hint to a kit id (never raises).
+
+    Returns ``(environment_id, diagnostics)`` where ``diagnostics`` carries
+    ``{environmentId, provenance, ambiguous, candidates, matchedAlias}`` for
+    internal recording. Unknown/ambiguous values resolve to the documented
+    fallback kit (``apartment``) with provenance FALLBACK.
+    """
+    from app.environments import (
+        EnvironmentProvenance,
+        FALLBACK_ENVIRONMENT_ID,
+        resolve_environment,
+    )
+
+    hint = str(environment) if environment else FALLBACK_ENVIRONMENT_ID
+    try:
+        resolution = resolve_environment(hint)
+        if resolution.resolved:
+            return (
+                resolution.environment_id,
+                {
+                    "environmentId": resolution.environment_id,
+                    "provenance": resolution.provenance.value,
+                    "ambiguous": resolution.ambiguous,
+                    "candidates": tuple(resolution.candidates),
+                    "matchedAlias": resolution.matched_alias,
+                },
+            )
+        # Ambiguous semantic match: NO arbitrary winner — fall back explicitly.
+        return (
+            FALLBACK_ENVIRONMENT_ID,
+            {
+                "environmentId": FALLBACK_ENVIRONMENT_ID,
+                "provenance": EnvironmentProvenance.FALLBACK.value,
+                "ambiguous": True,
+                "candidates": tuple(resolution.candidates),
+                "matchedAlias": None,
+            },
+        )
+    except Exception:  # noqa: BLE001 - degradation must never break generation
+        return (
+            FALLBACK_ENVIRONMENT_ID,
+            {
+                "environmentId": FALLBACK_ENVIRONMENT_ID,
+                "provenance": EnvironmentProvenance.FALLBACK.value,
+                "ambiguous": False,
+                "candidates": (),
+                "matchedAlias": None,
+            },
+        )
+
+
+def _apply_kit_composition(record: Any, environment_id: str) -> bool:
+    """Compose the PUBLISHED draft of ``record`` for the resolved kit.
+
+    The default kit (apartment) keeps the golden world graph BYTE-IDENTICAL —
+    only the scene gains its additive ``environment_id``. Non-default kits
+    re-anchor the golden object set onto the kit's anchors/zones (evidence
+    links + interactions unchanged; decorations ``""``). The composition is
+    validated defensively with the same world-graph rules as the pipeline and
+    NEVER raises: on any unforeseen failure the scene-only environment
+    injection (guaranteed to succeed) is applied instead and ``False`` is
+    returned so the caller records the degradation diagnostic. Publication
+    and CaseTruth are never affected by this path.
+    """
+    import dataclasses
+
+    from app.environments.compose import (
+        compose_world_graph_for_kit,
+        scene_for_kit,
+    )
+    from app.environments.manifests import load_environment
+    from app.generation.safety import validate_world_graph
+
+    published = getattr(record, "published", None)
+    if published is None or getattr(published, "draft", None) is None:
+        return True
+    draft = published.draft
+    try:
+        kit = load_environment(environment_id)
+        scene = scene_for_kit(kit, draft.scene)
+        new_draft = dataclasses.replace(draft, scene=scene)
+        if environment_id != "apartment":
+            world_graph = compose_world_graph_for_kit(
+                kit, draft.world_graph.placements
+            )
+            object_ids = {o.object_id for o in draft.objects}
+            evidence_ids = {e.id for e in draft.evidence}
+            issues = validate_world_graph(world_graph, object_ids, evidence_ids)
+            if issues:
+                raise ValueError("; ".join(issues))
+            new_draft = dataclasses.replace(
+                new_draft, world_graph=world_graph, scene=scene
+            )
+        record.published = dataclasses.replace(published, draft=new_draft)
+        return True
+    except Exception:  # noqa: BLE001 - degradation must never break publication
+        return False
 
 
 @dataclass(frozen=True)
@@ -282,6 +483,13 @@ class GenerationService:
         self._publication = (
             publication if publication is not None else PublicationService(store)
         )
+        # Phase 10 INTERNAL diagnostic: last published draft's Asset Oracle
+        # provenance (objectId -> provenance). Never serialized, never served.
+        self._last_publish_provenance: dict[str, str] | None = None
+        # Phase 11 INTERNAL diagnostic: last environment resolution
+        # (environmentId, provenance, ambiguous, candidates, matchedAlias,
+        # compositionFailed). Never serialized, never served.
+        self._last_environment_resolution: dict[str, Any] | None = None
         # NOTE: no startup database scan. Rehydration is LAZY and happens per
         # token use in ``_ensure_admission_ready`` (Phase5 E step 6: "the API
         # layer rehydrates/syncs the in-memory AdmissionController from DB on
@@ -321,6 +529,7 @@ class GenerationService:
         anonymous_quota_session_id: str,
         creator_token: str | None = None,
         difficulty: str | None = None,
+        environment: str | None = None,
     ) -> CaseStarted:
         """Run one private case generation durably (version 1).
 
@@ -330,10 +539,23 @@ class GenerationService:
           persisted atomically AFTER the synchronous run,
         - a PUBLISHED result is persisted by the atomic publication
           transaction (frozen payload + state flips),
-        - the durable session generation counter is synced back.
+        - the durable session generation counter is synced back,
+        - ``environment`` (Phase 11) is a validated environment hint: unsafe
+          values raise ``EnvironmentHintError`` (422) BEFORE any reservation;
+          safe unknown values resolve to the documented fallback (apartment).
         """
         settings = self._settings
-        # Local prompt validation: zero reservations, zero provider calls.
+        # Local input validation: zero reservations, zero provider calls.
+        if environment is not None:
+            issues = environment_hint_safety(environment)
+            if issues:
+                raise EnvironmentHintError(
+                    "environment hint is invalid or exceeds the configured limit"
+                )
+        environment_id, environment_diagnostics = _resolve_environment_for_generation(
+            environment
+        )
+        self._last_environment_resolution = environment_diagnostics
         try:
             normalize_prompt(prompt_text, max_chars=settings.max_prompt_chars)
         except PromptError:
@@ -377,6 +599,13 @@ class GenerationService:
             expires_at=now + settings.creator_token_ttl_seconds,
             created_at=now,
         )
+        if record.state is GenerationState.PUBLISHED:
+            # Phase 11: compose the published draft for the resolved kit
+            # (default apartment = golden world graph + scene environment_id).
+            if self._last_environment_resolution is not None:
+                self._last_environment_resolution["compositionFailed"] = not (
+                    _apply_kit_composition(record, environment_id)
+                )
         status = self._publish_if_ready(record, title, settings, now, case_id, version) or record.state.value
         self._sync_generations(anonymous_quota_session_id)
         return CaseStarted(
@@ -541,6 +770,11 @@ class GenerationService:
                 else None
             ),
             title=title,
+        )
+        # Phase 10 internal diagnostic: how the published placements resolved
+        # through the Asset Oracle (never part of the payload / DTOs).
+        self._last_publish_provenance = _record_asset_oracle_provenance(
+            published, settings
         )
         return GenerationState.PUBLISHED.value
 
@@ -754,6 +988,7 @@ __all__ = [
     "AdmissionDeniedError",
     "CaseStarted",
     "CreatedAnonymousSession",
+    "EnvironmentHintError",
     "GenerationService",
     "GenerationServiceError",
     "IdentifierConflict",
