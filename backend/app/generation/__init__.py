@@ -2,7 +2,8 @@
 
 This package holds the provider abstraction (``provider.py``), the scripted
 deterministic fake provider (``fake_provider.py``), the narrow live HTTP
-adapter (``live_provider.py``), the typed stage-output models (``schemas.py``),
+adapter (``live_provider.py``), the configurable local Ollama adapter
+(``ollama_provider.py``), the typed stage-output models (``schemas.py``),
 the strict provider-output parser (``parser.py``), generated-content safety
 (``safety.py``), and the locked-constraints/prompt-normalization layer
 (``constraints.py`` + ``prompt.py``).

@@ -3,6 +3,7 @@ import type {
   AnonymousSessionResponse,
   CreateCaseResponse,
   CreatePlaythroughResponse,
+  GenerationModeId,
   GenerationStatusResponse,
 } from "../api/types";
 
@@ -90,6 +91,14 @@ export interface DemoProgress {
   progress: number | null;
   /** Poll attempt number (0 outside of polling). */
   attempt: number;
+  /**
+   * Phase 16 Track B — the generation-mode note: the mode id the journey was
+   * invoked with (demo|local|live) or null when none was selected. The backend
+   * does not consume the mode over the wire yet (a followup documents the
+   * header/query contract), so this is how the player's choice reaches the
+   * flow logs without inventing a request body field.
+   */
+  mode: GenerationModeId | null;
 }
 
 /** Player-safe failure messages — the ONLY strings the journey surfaces. */
@@ -117,6 +126,12 @@ export interface RunDemoOptions {
   maxDelayMs?: number;
   /** Observe progress snapshots (used by the generating route's UI). */
   onProgress?: (progress: DemoProgress) => void;
+  /**
+   * Phase 16 Track B — the selected generation mode (demo|local|live). Not
+   * sent over the wire (the backend contract for that is a followup decision):
+   * it travels as a note in every progress snapshot logged by this flow.
+   */
+  mode?: GenerationModeId | null;
 }
 
 /** Map any thrown value to a typed, safe failure (pure, unit-testable). */
@@ -156,9 +171,10 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
   const maxPolls = options.maxPolls ?? MAX_POLLS_DEFAULT;
   const baseDelay = options.baseDelayMs ?? POLL_BASE_DELAY_MS;
   const maxDelay = options.maxDelayMs ?? POLL_MAX_DELAY_MS;
+  const mode = options.mode ?? null;
   const report = (progress: DemoProgress) => options.onProgress?.(progress);
 
-  report({ phase: "session", status: null, stage: null, progress: null, attempt: 0 });
+  report({ phase: "session", status: null, stage: null, progress: null, attempt: 0, mode });
 
   let sessionToken: string;
   try {
@@ -168,7 +184,7 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
     return { ok: false, failure: mapDemoError(error) };
   }
 
-  report({ phase: "create-case", status: null, stage: null, progress: null, attempt: 0 });
+  report({ phase: "create-case", status: null, stage: null, progress: null, attempt: 0, mode });
 
   let created: CreateCaseResponse;
   try {
@@ -198,6 +214,7 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
         stage: polled.stage,
         progress: polled.progress,
         attempt,
+        mode,
       });
       if (polled.status === "PUBLISHED") {
         gainedPublish = true;
@@ -223,6 +240,7 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
     stage: null,
     progress: 100,
     attempt: 0,
+    mode,
   });
 
   try {

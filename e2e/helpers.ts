@@ -129,11 +129,30 @@ export interface LeakScanReport {
  * Attach a response listener scanning EVERY API response body for forbidden
  * key paths. Returns the report object the test asserts against.
  */
+/** The public generation-capabilities DTO is DOCUMENTED to carry the
+ * operator-configured public model display label (Phase 16 J: `model` is an
+ * allowlist field, never a URL/credential/prompt/network detail). The generic
+ * pre-reveal truth scan below exists to prove private responses never leak
+ * hidden truth — so this PUBLIC allowlist endpoint is excluded from the
+ * generic key-path scan, and e2e/phase16-modes.spec.ts exhaustively scans the
+ * capability DTO on its own (allowlist keys + ZERO URL/port/host/key tokens). */
+const PUBLIC_CAPABILITY_PATH = "generation-capabilities";
+
+/** True for the public generation-capabilities URL (QA carve-out predicate). */
+export function isPublicCapabilityUrl(url: string): boolean {
+  return typeof url === "string" && url.includes(PUBLIC_CAPABILITY_PATH);
+}
+
 export function installLeakListener(page: Page): LeakScanReport {
   const report: LeakScanReport = { scanned: 0, matched: [] };
   page.on("response", async (response) => {
     const url = typeof response.url === "function" ? response.url() : response.url;
     if (!url.includes("/api/")) return;
+    if (isPublicCapabilityUrl(url)) {
+      // Documented public DTO — scanned exhaustively by phase16-modes.spec.ts.
+      report.scanned += 1;
+      return;
+    }
     const headers = typeof response.headers === "function" ? response.headers() : response.headers;
     const contentType = headers["content-type"] ?? headers["Content-Type"] ?? "";
     if (!contentType.includes("application/json")) return;

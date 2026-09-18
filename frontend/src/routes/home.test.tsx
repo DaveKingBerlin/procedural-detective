@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
+import type { GenerationCapabilitiesResponse } from "../api/types";
 import { APP_PROVIDER_MODE, providerQualifier } from "../journey/providerMode";
 import Home from "./home";
 
@@ -81,5 +82,50 @@ describe("landing page", () => {
     expect(html).toContain('data-testid="home-backend-status"');
     expect(html).toContain('data-testid="home-backend-message"');
     expect(html).toContain("ok");
+  });
+});
+
+describe("landing page — Phase 16 Track B generation-mode selector", () => {
+  const renderWithCaps = (capabilities: GenerationCapabilitiesResponse | null): string =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/"]}>
+        <Home status={OK_STATUS} capabilities={capabilities} />
+      </MemoryRouter>,
+    );
+
+  it("renders the selector with Local AI (label + model + Ready) and Cloud AI when available", () => {
+    const html = renderWithCaps({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+        { id: "live", available: true, label: "Cloud AI" },
+      ],
+    });
+    expect(html).toContain('data-testid="generation-mode-selector"');
+    expect(html).toContain("Local AI — qwen2.5:7b — Ready");
+    expect(html).toContain("Cloud AI");
+    expect(html).not.toContain('data-testid="generation-mode-demo-notice"');
+  });
+
+  it("shows the static demo notice instead of a selector when only demo is available", () => {
+    const html = renderWithCaps({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: false, label: "Local AI" },
+      ],
+    });
+    expect(html).not.toContain('data-testid="generation-mode-selector"');
+    expect(html).toContain('data-testid="generation-mode-demo-notice"');
+    expect(html).toContain("Demo mode active");
+  });
+
+  it("never renders an unavailable local mode as an option", () => {
+    const html = renderWithCaps({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: false, label: "Local AI", model: "qwen2.5:7b" },
+      ],
+    });
+    expect(html).not.toContain("Local AI — qwen2.5:7b");
   });
 });

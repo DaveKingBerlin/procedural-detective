@@ -266,6 +266,11 @@ async function accuseAndReveal(
   const preReveal: Array<{ url: string; paths: string[] }> = [];
   let scanned = 0;
   for (const entry of captured.bodies) {
+    if (entry.url.includes("generation-capabilities")) {
+      // Public allowlist DTO (Phase 16 J): documented to carry the public
+      // model display label — scanned exhaustively by phase16-modes.spec.ts.
+      continue;
+    }
     scanned += 1;
     const hits: string[] = [];
     walkKeys(entry.body, "$", hits, PRE_REVEAL_FORBIDDEN_KEYS, {

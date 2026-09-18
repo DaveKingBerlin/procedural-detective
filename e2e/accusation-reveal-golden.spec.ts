@@ -112,6 +112,11 @@ export function scanPreReveal(bodies: Array<{ url: string; body: unknown }>): {
 } {
   const matched: Array<{ url: string; paths: string[] }> = [];
   for (const entry of bodies) {
+    if (entry.url.includes("generation-capabilities")) {
+      // Public allowlist DTO (Phase 16 J): documented to carry the public
+      // model display label — scanned exhaustively by phase16-modes.spec.ts.
+      continue;
+    }
     const hits: string[] = [];
     walk(entry.body, "$", hits, PRE_REVEAL_FORBIDDEN_KEYS);
     if (hits.length > 0) matched.push({ url: entry.url, paths: hits });

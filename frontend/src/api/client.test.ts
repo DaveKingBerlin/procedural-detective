@@ -6,6 +6,7 @@ import {
   createCase,
   createPlaythrough,
   discoverEvidence,
+  getGenerationCapabilities,
   getGenerationProgress,
   getHealth,
   getInvestigation,
@@ -281,6 +282,74 @@ describe("readRecord", () => {
     );
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${TEST_TOKEN}`);
+  });
+});
+
+describe("getGenerationCapabilities (Phase 16 Track B)", () => {
+  it("GETs /generation-capabilities without auth and parses the allowlist DTO", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        {
+          modes: [
+            { id: "demo", available: true },
+            { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+          ],
+        },
+        200,
+      ),
+    );
+
+    const capabilities = await getGenerationCapabilities();
+
+    expect(capabilities.modes).toHaveLength(2);
+    expect(capabilities.modes[0]).toEqual({ id: "demo", available: true });
+    expect(capabilities.modes[1]).toEqual({
+      id: "local",
+      available: true,
+      label: "Local AI",
+      model: "qwen2.5:7b",
+    });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/generation-capabilities`);
+    const requestInit = init as RequestInit;
+    expect(requestInit.method ?? "GET").toBe("GET");
+    expect(requestInit.headers).toBeUndefined(); // public endpoint — no auth headers
+  });
+
+  it("maps a 500 error envelope to a structured ApiError", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: "INTERNAL_ERROR", message: "boom", details: null } }, 500),
+    );
+
+    const error = await getGenerationCapabilities().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(500);
+    expect(error.code).toBe("INTERNAL_ERROR");
+  });
+
+  it("maps a non-JSON 2xx body to an ApiError INVALID_RESPONSE (never a raw SyntaxError)", async () => {
+    fetchMock.mockResolvedValue(new Response("<html>oops</html>", { status: 200 }));
+
+    const error = await getGenerationCapabilities().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(200);
+    expect(error.code).toBe("INVALID_RESPONSE");
+  });
+
+  it("maps a rejected fetch to a NETWORK_ERROR ApiError (backend down)", async () => {
+    fetchMock.mockRejectedValue(new TypeError("fetch failed"));
+
+    const error = await getGenerationCapabilities().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(0);
+    expect(error.code).toBe("NETWORK_ERROR");
   });
 });
 

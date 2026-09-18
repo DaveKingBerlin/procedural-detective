@@ -126,6 +126,79 @@ describe("runDemo — success", () => {
   });
 });
 
+describe("runDemo — Phase 16 Track B generation-mode note", () => {
+  it("records the selected mode in every progress snapshot (the flow receives the mode)", async () => {
+    const services = makeServices();
+    const snapshots: DemoProgress[] = [];
+    const result = await runDemo("prompt", {
+      services,
+      mode: "local",
+      wait: NO_WAIT,
+      onProgress: (progress) => snapshots.push(progress),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(snapshots.length).toBeGreaterThan(0);
+    expect(snapshots.every((snapshot) => snapshot.mode === "local")).toBe(true);
+    // The frozen service contract is untouched: createCase keeps its
+    // (anonymousToken, prompt, difficulty) shape — the mode never invents a
+    // request body field.
+    expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined);
+  });
+
+  it("propagates the mode into every phase, including the polling loop", async () => {
+    const poll = vi
+      .fn()
+      .mockResolvedValueOnce({
+        caseId: "CASE-demo-01",
+        generationId: "GEN-demo-01",
+        status: "RUNNING",
+        progress: 40,
+        stage: "world",
+      })
+      .mockResolvedValueOnce({
+        caseId: "CASE-demo-01",
+        generationId: "GEN-demo-01",
+        status: "PUBLISHED",
+        progress: 100,
+        stage: null,
+      });
+    const services = makeServices({
+      createCase: vi.fn(() => runningCase()),
+      pollGeneration: poll,
+    });
+    const snapshots: DemoProgress[] = [];
+    await runDemo("prompt", {
+      services,
+      mode: "live",
+      wait: NO_WAIT,
+      onProgress: (progress) => snapshots.push(progress),
+    });
+
+    expect(snapshots.map((s) => s.phase)).toEqual([
+      "session",
+      "create-case",
+      "polling",
+      "polling",
+      "playthrough",
+    ]);
+    expect(snapshots.every((snapshot) => snapshot.mode === "live")).toBe(true);
+  });
+
+  it("records a null mode note when no mode was selected (default Demo path)", async () => {
+    const services = makeServices();
+    const snapshots: DemoProgress[] = [];
+    await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      onProgress: (progress) => snapshots.push(progress),
+    });
+
+    expect(snapshots.length).toBeGreaterThan(0);
+    expect(snapshots.every((snapshot) => snapshot.mode === null)).toBe(true);
+  });
+});
+
 describe("runDemo — generation FAILED", () => {
   it("fails immediately when POST /cases reports FAILED", async () => {
     const services = makeServices({

@@ -186,6 +186,11 @@ function scanPreReveal(captured: CapturedResponse[]): {
   let scanned = 0;
   for (const entry of captured) {
     if (!entry.hasJsonBody || entry.body === null) continue;
+    if (entry.url.includes("generation-capabilities")) {
+      // Public allowlist DTO (Phase 16 J): documented to carry the public
+      // model display label — scanned exhaustively by phase16-modes.spec.ts.
+      continue;
+    }
     scanned += 1;
     const hits: string[] = [];
     walk(entry.body, "$", hits, PRE_REVEAL_FORBIDDEN_KEYS);

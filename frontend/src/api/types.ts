@@ -353,3 +353,34 @@ export interface CreatePlaythroughResponse {
   playthroughAccessToken: string;
   status: string;
 }
+
+/* ======================================================================
+ * Phase 16 — generation-mode capabilities contract (frozen, implemented in
+ * parallel by the backend agent).
+ *
+ * GET {base}/api/v1/generation-capabilities (public, no auth) -> 200
+ *   {"modes":[{id,available,label?,model?},...]}.
+ *
+ * This is an ALLOWLIST DTO: the client re-parses every reply through
+ * src/journey/generationMode.ts, which keeps ONLY the three frozen mode ids
+ * and drops unknown fields/ids. The response NEVER carries URLs, credentials,
+ * prompts, network details or availability reasons.
+ * ==================================================================== */
+
+/** The only generation modes the client may ever offer (Phase 16 I/J). */
+export type GenerationModeId = "demo" | "local" | "live";
+
+/** One player-safe generation mode entry from the capability DTO. */
+export interface GenerationModeDTO {
+  id: string;
+  available: boolean;
+  /** Public display name (e.g. "Local AI" / "Cloud AI") — shown verbatim. */
+  label?: string;
+  /** Public model display name (local mode only) — shown verbatim. */
+  model?: string;
+}
+
+/** 200 body of GET {base}/api/v1/generation-capabilities. */
+export interface GenerationCapabilitiesResponse {
+  modes: GenerationModeDTO[];
+}

@@ -511,6 +511,11 @@ async function showcaseKit(page: Page, request: APIRequestContext, kit: Kit): Pr
   let scanned = 0;
   for (const entry of net.captured) {
     if (entry.body === null || typeof entry.body !== "object") continue;
+    if (entry.url.includes("generation-capabilities")) {
+      // Public allowlist DTO (Phase 16 J): documented to carry the public
+      // model display label — scanned exhaustively by phase16-modes.spec.ts.
+      continue;
+    }
     scanned += 1;
     const paths = scanJsonBody(entry.body);
     if (paths.length > 0) leakMatched.push({ url: entry.url, paths });
@@ -744,6 +749,11 @@ async function fullLoop(
   const preReveal: Array<{ url: string; paths: string[] }> = [];
   let scanned = 0;
   for (const entry of captured.bodies) {
+    if (entry.url.includes("generation-capabilities")) {
+      // Public allowlist DTO (Phase 16 J): documented to carry the public
+      // model display label — scanned exhaustively by phase16-modes.spec.ts.
+      continue;
+    }
     scanned += 1;
     const hits: string[] = [];
     walkKeys(entry.body, "$", hits, PRE_REVEAL_FORBIDDEN_KEYS, {

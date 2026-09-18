@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
+import type { GenerationCapabilitiesResponse } from "../api/types";
 import { APP_PROVIDER_MODE, providerQualifier } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
 import NewCasePage from "./new";
@@ -115,5 +116,34 @@ describe("/new form rendering", () => {
     expect(markup).toContain(providerQualifier(APP_PROVIDER_MODE));
     // The per-path demo note stays verbatim (additive copy, nothing removed).
     expect(markup).toContain("Deterministic demo — no API keys, no cost.");
+  });
+});
+
+describe("/new — Phase 16 Track B generation-mode selector", () => {
+  const renderWithCaps = (capabilities: GenerationCapabilitiesResponse | null): string =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={capabilities} />
+      </MemoryRouter>,
+    );
+
+  it("renders the selector with the available modes", () => {
+    const markup = renderWithCaps({
+      modes: [
+        { id: "demo", available: true },
+        { id: "live", available: true, label: "Cloud AI" },
+      ],
+    });
+    expect(markup).toContain('data-testid="generation-mode-selector"');
+    expect(markup).toContain("Cloud AI");
+  });
+
+  it("shows the static demo notice instead of a selector when only demo is available", () => {
+    const markup = renderWithCaps({
+      modes: [{ id: "demo", available: true }],
+    });
+    expect(markup).not.toContain('data-testid="generation-mode-selector"');
+    expect(markup).toContain('data-testid="generation-mode-demo-notice"');
+    expect(markup).toContain("Demo mode active");
   });
 });

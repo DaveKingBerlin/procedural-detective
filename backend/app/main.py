@@ -223,12 +223,19 @@ class EnvelopeCORSMiddleware(CORSMiddleware):
 # Phase 8 H1 — cache safety for every private/authenticated response
 # --------------------------------------------------------------------------- #
 
-# Every /api/v1 endpoint EXCEPT the public liveness/readiness probes can
+# Every /api/v1 endpoint EXCEPT the public probes can
 # answer with bearer credentials, private case material, evidence or the
 # canonical truth. None of it may ever be stored by a browser or a shared
-# intermediary cache.
+# intermediary cache. The generation-capabilities endpoint is public
+# (auth-free) capability metadata like health/readiness.
 _PRIVATE_API_PREFIX = "/api/v1/"
-_PUBLIC_PROBE_PATHS = frozenset({"/api/v1/health", "/api/v1/readiness"})
+_PUBLIC_PROBE_PATHS = frozenset(
+    {
+        "/api/v1/health",
+        "/api/v1/readiness",
+        "/api/v1/generation-capabilities",
+    }
+)
 
 _NO_STORE_HEADERS = (("cache-control", "no-store"), ("pragma", "no-cache"))
 
@@ -236,11 +243,12 @@ _NO_STORE_HEADERS = (("cache-control", "no-store"), ("pragma", "no-cache"))
 def is_private_api_path(path: str) -> bool:
     """True for private/authenticated API paths that must never be cached.
 
-    Every path under ``/api/v1/`` other than the two public probes
-    (health/readiness) carries bearer-accessed or token-bearing content:
-    sessions, cases, generations, playthroughs, investigation, accusation and
-    reveal. ``/openapi.json``, ``/docs`` and ``/redoc`` are outside ``/api/v1``
-    and are intentionally NOT treated as private.
+    Every path under ``/api/v1/`` other than the public probes (health /
+    readiness / generation-capabilities) carries bearer-accessed or
+    token-bearing content: sessions, cases, generations, playthroughs,
+    investigation, accusation and reveal. ``/openapi.json``, ``/docs`` and
+    ``/redoc`` are outside ``/api/v1`` and are intentionally NOT treated as
+    private.
     """
     if not isinstance(path, str) or not path.startswith(_PRIVATE_API_PREFIX):
         return False

@@ -1,7 +1,12 @@
+import { useState } from "react";
 import { Link, useNavigate, useOutletContext } from "react-router";
 import type { BackendStatus } from "../hooks/useBackendStatus";
+import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
+import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { setJourneyParams } from "../journey/context";
 import { EXAMPLE_PROMPT } from "../journey/demoPrompt";
+import { getGenerationMode, setGenerationMode } from "../journey/generationMode";
+import { GenerationModeSelector } from "../journey/generationModeSelector";
 import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journey/providerMode";
 
 /**
@@ -29,12 +34,26 @@ import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journ
 export interface HomeProps {
   /** Backend status override (unit tests inject a value; the route reads the shell context). */
   status?: BackendStatus;
+  /**
+   * Phase 16 Track B — generation-capabilities override (unit tests inject a
+   * fixture; the route fetches + parses the public DTO at runtime).
+   */
+  capabilities?: GenerationCapabilitiesResponse | null;
 }
 
 export default function Home(overrides: HomeProps = {}) {
   const navigate = useNavigate();
   const outletStatus = overrides.status ?? useOutletContext<BackendStatus>();
+  const fetchedCapabilities = useGenerationCapabilities();
+  const capabilities =
+    overrides.capabilities !== undefined ? overrides.capabilities : fetchedCapabilities;
   const { state, message, readiness } = outletStatus;
+  const [mode, setMode] = useState<GenerationModeId>(() => getGenerationMode() ?? "demo");
+
+  const selectMode = (next: GenerationModeId) => {
+    setMode(next);
+    setGenerationMode(next);
+  };
 
   const startDemo = () => {
     setJourneyParams({ prompt: EXAMPLE_PROMPT, difficulty: "medium" });
@@ -84,6 +103,13 @@ export default function Home(overrides: HomeProps = {}) {
       <p className="landing-path-note landing-path-note--generate" data-testid="generate-provider-note">
         {providerPathNote(APP_PROVIDER_MODE)}
       </p>
+
+      {/* Phase 16 Track B — generation-mode selector: always offers Demo and
+          additionally Local AI / Cloud AI only when the backend reports them
+          available; a demo-only backend is shown as the static
+          "Demo mode active" notice instead. No host/IP, credentials, prompts
+          or diagnostics are ever rendered — only frozen public labels. */}
+      <GenerationModeSelector capabilities={capabilities} value={mode} onSelect={selectMode} />
 
       <div className="landing-panel">
         <h3>How it works</h3>

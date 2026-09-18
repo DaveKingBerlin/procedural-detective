@@ -1275,6 +1275,8 @@ class GenerationService:
             model=(
                 settings.llm_model
                 if settings.generation_provider == "live"
+                else settings.ollama_model
+                if settings.generation_provider == "ollama"
                 else None
             ),
             title=title,
@@ -1441,6 +1443,22 @@ class GenerationService:
                 return LiveHttpProvider(endpoint_url=url, api_key=key, model=model)
 
             return _live
+        if settings.generation_provider == "ollama":
+            from app.core.config import DEFAULT_OLLAMA_BASE_URL
+            from app.generation.ollama_provider import OllamaProvider
+
+            base_url = settings.ollama_base_url or DEFAULT_OLLAMA_BASE_URL
+
+            def _ollama() -> Provider:
+                return OllamaProvider(
+                    base_url=base_url,
+                    model=settings.ollama_model,
+                    timeout_seconds=settings.ollama_timeout_seconds,
+                    temperature=settings.ollama_temperature,
+                    num_ctx=settings.ollama_num_ctx,
+                )
+
+            return _ollama
         script = self._load_fake_script()
         if not script:
             raise ProviderConfigError("fake provider script is empty")

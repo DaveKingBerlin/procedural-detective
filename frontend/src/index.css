@@ -1359,6 +1359,46 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* ======================================================================
+ * Phase 16 Track B — generation-mode selector (landing + /new). A compact
+ * mode picker that only offers what the backend reported available; a
+ * demo-only backend renders the static "Demo mode active" notice instead.
+ * ==================================================================== */
+
+.generation-mode-selector {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0.25rem 0 1rem;
+}
+
+.generation-mode-selector label {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.generation-mode-selector select {
+  background: #0d1016;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  max-width: 32rem;
+}
+
+.generation-mode-selector select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.generation-mode-demo-notice {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0.25rem 0 1rem;
+}
+
 @media (max-width: 640px) {
   .landing-actions {
     gap: 0.5rem;

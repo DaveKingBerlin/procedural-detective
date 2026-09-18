@@ -15,9 +15,12 @@ No ``.env`` file is ever required.
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import (
@@ -46,6 +49,62 @@ def _default_database_url() -> str:
     database file. Only the URL string is defined here — no file is created.
     """
     return f"sqlite:///{(REPO_ROOT / 'procedural_detective.db').as_posix()}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 16 — local Ollama provider configuration surface (safe defaults).
+# ---------------------------------------------------------------------------
+
+# Documented default base URL used when GENERATION_PROVIDER == "ollama" and
+# OLLAMA_BASE_URL is unset (H. local development). Docker Desktop uses
+# http://host.docker.internal:11434; a private/LAN host may be configured as
+# http://<private-host>:11434 (validated private-only below). No
+# developer-specific IP is hardcoded anywhere.
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+
+# OLLAMA_MODEL: 1..80 chars from the safe token set only.
+_OLLAMA_MODEL_RE = re.compile(r"[A-Za-z0-9._:\-]+")
+
+# OLLAMA_BASE_URL host allowlist: exactly these hostnames (plus literal
+# loopback/private IPs) may be configured. .local / .lan hostnames are never
+# accepted unless they are exactly one of the allowlisted names.
+_OLLAMA_ALLOWED_HOSTNAMES = frozenset({"localhost", "host.docker.internal"})
+
+# The RFC1918 private IPv4 ranges (10/8, 172.16/12, 192.168/16). Explicit
+# range checks keep the allowlist documented and deterministic (IPv4
+# link-local 169.254/16 and TEST-NET ranges are NOT included).
+_OLLAMA_PRIVATE_V4_NETWORKS: tuple[ipaddress.IPv4Network, ...] = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def is_allowed_ollama_host(host: str) -> bool:
+    """True when ``host`` is an allowed Ollama endpoint host.
+
+    Allowed: literal loopback (127.0.0.0/8, ::1), the private/LAN IPv4 ranges
+    (10/8, 172.16/12, 192.168/16), IPv6 ULA (fc00::/7) and the exact hostnames
+    ``localhost`` / ``host.docker.internal``. IPv6 link-local (fe80::/10) and
+    every public host is rejected — a local Ollama server may never be
+    configured to a public internet endpoint by default (a clearly-flagged
+    opt-in for a public host is intentionally NOT implemented).
+    """
+    lowered = host.lower()
+    if lowered in _OLLAMA_ALLOWED_HOSTNAMES:
+        return True
+    try:
+        address = ipaddress.ip_address(lowered)
+    except ValueError:
+        # Any other hostname (including .local / .lan spellings) is rejected.
+        return False
+    if address.version == 4:
+        return address.is_loopback or any(
+            address in network for network in _OLLAMA_PRIVATE_V4_NETWORKS
+        )
+    if address.is_link_local:
+        return False
+    return address == ipaddress.ip_address("::1") or address.is_private
 
 
 class Settings(BaseSettings):
@@ -117,8 +176,8 @@ class Settings(BaseSettings):
     playthrough_token_ttl_seconds: int = Field(
         default=14400, gt=0, description="PLAYTHROUGH_TOKEN_TTL_SECONDS."
     )
-    generation_provider: Literal["fake", "live"] = Field(
-        default="fake", description="GENERATION_PROVIDER (fake|live)."
+    generation_provider: Literal["fake", "live", "ollama"] = Field(
+        default="fake", description="GENERATION_PROVIDER (fake|live|ollama)."
     )
     llm_api_key: str | None = Field(
         default=None,
@@ -136,6 +195,49 @@ class Settings(BaseSettings):
         description=(
             "FAKE_PROVIDER_SCRIPT: optional JSON file path "
             "(generation-stage -> list of directives/strings)."
+        ),
+    )
+    # -- Phase 16 local Ollama provider (configurable local generation) -------
+    # OPERATOR-ONLY configuration: OLLAMA_BASE_URL can never come from a prompt
+    # or generated data and is never emitted to player DTOs/logs. Documented
+    # configurations (H): local ``http://127.0.0.1:11434`` (also the default
+    # when unset), Docker Desktop ``http://host.docker.internal:11434``, LAN
+    # ``http://<private-host>:11434`` (private-only hosts are validated below).
+    ollama_base_url: str | None = Field(
+        default=None,
+        description=(
+            "OLLAMA_BASE_URL: operator-only base URL of the local Ollama "
+            "server. None (default) uses the documented "
+            "http://127.0.0.1:11434 when GENERATION_PROVIDER=ollama. Only "
+            "loopback, private/LAN and host.docker.internal are accepted."
+        ),
+    )
+    ollama_model: str = Field(
+        default="llama3.2:3b",
+        description=(
+            "OLLAMA_MODEL: Ollama model name/tag (e.g. llama3.2:3b). 1..80 "
+            "chars from [A-Za-z0-9._:-] only."
+        ),
+    )
+    ollama_timeout_seconds: float = Field(
+        default=60.0,
+        ge=5,
+        le=300,
+        description="OLLAMA_TIMEOUT_SECONDS (bounded 5..300).",
+    )
+    ollama_temperature: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=2.0,
+        description="OLLAMA_TEMPERATURE (bounded 0.0..2.0).",
+    )
+    ollama_num_ctx: int = Field(
+        default=4096,
+        ge=512,
+        le=32768,
+        description=(
+            "OLLAMA_NUM_CTX: optional bounded context/token setting "
+            "(512..32768)."
         ),
     )
     # -- Phase 8 production static serving (REQUIREMENTS 46 / Phase8 J/I) ----
@@ -191,6 +293,75 @@ class Settings(BaseSettings):
         if not text.startswith("https://"):
             raise ValueError("LIVE_PROVIDER_URL must start with https:// when set")
         return text
+
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _validate_ollama_base_url(cls, value: str | None) -> str | None:
+        """OLLAMA_BASE_URL: operator-only local/LAN endpoint (validated).
+
+        Allowed schemes: http/https. The host must be loopback, private/LAN or
+        ``host.docker.internal`` (``is_allowed_ollama_host``). Rejected:
+        javascript:/file:/data: schemes, embedded credentials (user:pass@),
+        malformed URLs (no netloc), query strings, fragments and any path
+        other than ``/`` (the adapter appends the /api endpoints). Empty
+        strings are tolerated and treated as None (default).
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("OLLAMA_BASE_URL must be a string when set")
+        text = value.strip()
+        if not text:
+            return None
+        if "\x00" in text:
+            raise ValueError("OLLAMA_BASE_URL must not contain NUL characters")
+        try:
+            parsed = urlparse(text)
+        except (TypeError, ValueError):
+            raise ValueError("OLLAMA_BASE_URL is not a valid URL") from None
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(
+                "OLLAMA_BASE_URL must use the http or https scheme "
+                "(operator-configured local Ollama only)"
+            )
+        if not parsed.netloc:
+            raise ValueError("OLLAMA_BASE_URL must include a host")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("OLLAMA_BASE_URL must not embed credentials")
+        if parsed.query:
+            raise ValueError("OLLAMA_BASE_URL must not contain a query string")
+        if parsed.fragment:
+            raise ValueError("OLLAMA_BASE_URL must not contain a fragment")
+        path = parsed.path or ""
+        if path.strip("/"):
+            raise ValueError(
+                "OLLAMA_BASE_URL must be a base URL without a path "
+                "(the /api/chat endpoints are appended by the adapter)"
+            )
+        host = parsed.hostname
+        if host is None:
+            raise ValueError("OLLAMA_BASE_URL must include a host")
+        if not is_allowed_ollama_host(host):
+            raise ValueError(
+                "OLLAMA_BASE_URL host must be loopback, private/LAN, or "
+                "host.docker.internal (public internet hosts are not allowed)"
+            )
+        return text
+
+    @field_validator("ollama_model")
+    @classmethod
+    def _validate_ollama_model(cls, value: str) -> str:
+        """OLLAMA_MODEL: 1..80 chars from [A-Za-z0-9._:-] only (no injection
+        surface — the model name is operator configuration, never prompt data)."""
+        if not isinstance(value, str) or not value:
+            raise ValueError("OLLAMA_MODEL must be a non-empty string")
+        if len(value) > 80:
+            raise ValueError("OLLAMA_MODEL must be at most 80 characters")
+        if not _OLLAMA_MODEL_RE.fullmatch(value):
+            raise ValueError(
+                "OLLAMA_MODEL may contain only [A-Za-z0-9._:-] characters"
+            )
+        return value
 
     @field_validator("fake_provider_script", mode="before")
     @classmethod

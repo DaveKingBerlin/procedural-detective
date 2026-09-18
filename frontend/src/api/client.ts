@@ -7,6 +7,7 @@ import type {
   DiscoveryResultDTO,
   ErrorEnvelope,
   EvidenceReadResultDTO,
+  GenerationCapabilitiesResponse,
   GenerationStatusResponse,
   HealthResponse,
   InteractionResultDTO,
@@ -126,6 +127,20 @@ export function getHealth(): Promise<HealthResponse> {
 /** GET {base}/api/v1/readiness */
 export function getReadiness(): Promise<ReadinessResponse> {
   return request<ReadinessResponse>("/api/v1/readiness");
+}
+
+/**
+ * GET {base}/api/v1/generation-capabilities (public, no auth)
+ * -> 200 GenerationCapabilitiesResponse (Phase 16 J).
+ *
+ * The endpoint is an allowlist DTO: which generation modes are configured AND
+ * available. Every failure (transport, non-2xx, non-JSON/empty 2xx body)
+ * surfaces as a structured ApiError exactly like every other endpoint here —
+ * the caller decides how to degrade (the selector falls back to the
+ * always-available Demo offer, never claiming Local/Cloud AI).
+ */
+export function getGenerationCapabilities(): Promise<GenerationCapabilitiesResponse> {
+  return request<GenerationCapabilitiesResponse>("/api/v1/generation-capabilities");
 }
 
 /* ======================================================================

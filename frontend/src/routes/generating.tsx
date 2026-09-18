@@ -8,6 +8,7 @@ import {
 } from "../api/client";
 import { setPlaythroughId, setPlaythroughToken } from "../api/playthroughToken";
 import { clearJourneyParams, getJourneyParams, type JourneyParams } from "../journey/context";
+import { getGenerationMode } from "../journey/generationMode";
 import {
   runDemo,
   type DemoFlowResult,
@@ -49,7 +50,15 @@ function runJourney(
   difficulty: string,
   onProgress: (progress: DemoProgress) => void,
 ): Promise<DemoFlowResult> {
-  return runDemo(prompt, { services: DEMO_SERVICES, difficulty, onProgress });
+  // Phase 16 Track B — the player-selected generation mode (stored under
+  // `pd_generation_mode` by the landing//new selector) travels into the flow
+  // as a note; the request-body contract is a backend-owned followup.
+  return runDemo(prompt, {
+    services: DEMO_SERVICES,
+    difficulty,
+    mode: getGenerationMode(),
+    onProgress,
+  });
 }
 
 type RunFn = (

@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router";
+import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
+import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import { setJourneyParams, type JourneyDifficulty } from "../journey/context";
 import { PROMPT_MAX_CHARS } from "../journey/demoPrompt";
+import { getGenerationMode, setGenerationMode } from "../journey/generationMode";
+import { GenerationModeSelector } from "../journey/generationModeSelector";
 import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
 
@@ -22,11 +26,28 @@ import { examplePromptText, validatePrompt } from "../journey/promptValidation";
  * "Live AI provider" only when VITE_APP_PROVIDER=live), while the demo link
  * carries its own zero-cost/deterministic sub-note.
  */
-export default function NewCasePage() {
+export interface NewCasePageProps {
+  /**
+   * Phase 16 Track B — generation-capabilities override (unit tests inject a
+   * fixture; the route fetches + parses the public DTO at runtime).
+   */
+  capabilities?: GenerationCapabilitiesResponse | null;
+}
+
+export default function NewCasePage(overrides: NewCasePageProps = {}) {
   const navigate = useNavigate();
+  const fetchedCapabilities = useGenerationCapabilities();
+  const capabilities =
+    overrides.capabilities !== undefined ? overrides.capabilities : fetchedCapabilities;
   const [prompt, setPrompt] = useState("");
   const [difficulty, setDifficulty] = useState<JourneyDifficulty>("medium");
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<GenerationModeId>(() => getGenerationMode() ?? "demo");
+
+  const selectMode = (next: GenerationModeId) => {
+    setMode(next);
+    setGenerationMode(next);
+  };
 
   const useExample = () => {
     setPrompt(examplePromptText());
@@ -110,6 +131,13 @@ export default function NewCasePage() {
           <option value="medium">Medium</option>
           <option value="hard">Hard</option>
         </select>
+
+        {/* Phase 16 Track B — generation-mode selector: always offers Demo and
+            additionally Local AI / Cloud AI only when the backend reports them
+            available; a demo-only backend is shown as the static
+            "Demo mode active" notice instead. No host/IP, credentials, prompts
+            or diagnostics are ever rendered — only frozen public labels. */}
+        <GenerationModeSelector capabilities={capabilities} value={mode} onSelect={selectMode} />
 
         {error && (
           <p className="new-case-error" data-testid="prompt-error" role="alert">
