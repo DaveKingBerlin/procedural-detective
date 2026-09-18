@@ -1173,6 +1173,157 @@ button {
   white-space: nowrap;
 }
 
+/* ======================================================================
+ * Phase 15 — judging polish: demo-mode path notes, selected-object focus,
+ * discovered-evidence floating captions, environment identity & transitions.
+ * ==================================================================== */
+
+/* One-line sub-notes under the landing demo/generate path cards. */
+.landing-path-note {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0.1rem 0 0.9rem;
+}
+
+.landing-path-note--demo {
+  margin-bottom: 0.35rem;
+}
+
+/* The generate path is the emphasized primary route on the landing. */
+.landing-actions--generate {
+  margin-top: 0.35rem;
+}
+
+.generate-path {
+  width: min(26rem, 100%);
+}
+
+/* /new — provider-honest note below the intro copy. */
+.new-case-provider-note {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: -0.6rem 0 1rem;
+  max-width: 46rem;
+}
+
+.new-case-demo-note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.2rem 0 0;
+}
+
+/* ADV-152 — honest app-level provider qualifier near the primary CTA (landing
+   + /new): a compact determinism/live-provider disclosure, styled like the
+   other muted path notes so it reads as factual, not promotional. */
+.provider-qualifier {
+  color: var(--muted);
+  font-size: 0.82rem;
+  max-width: 46rem;
+  margin: 0.15rem 0 0.85rem;
+}
+
+/* Selected-object focus in the object list (mirrors the 3D selection). */
+.scene-object-button--selected {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: rgba(230, 180, 85, 0.12) !important;
+  box-shadow: 0 0 0 2px rgba(230, 180, 85, 0.35);
+}
+
+/* Discovered object label (evidence title) shown in the object list. */
+.object-label-discovered {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+/* Floating caption over DISCOVERED evidence in the 3D scene (Phase 15). The
+ * caption is positioned by the projection of the object's top (percentages
+ * of the canvas shell), never intercepts pointer events, and only exists for
+ * objects the server marked discovered — app-authored plain text only. */
+.object-caption {
+  position: absolute;
+  z-index: 30;
+  transform: translate(-50%, calc(-100% - 0.55rem));
+  background: rgba(15, 17, 23, 0.92);
+  color: var(--text);
+  border: 1px solid var(--ok);
+  border-radius: 999px;
+  padding: 0.18rem 0.7rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  max-width: 46%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+/* Environment identity — a clear badge instead of a plain paragraph. */
+.environment-notice {
+  display: inline-block;
+  border: 1px solid var(--accent);
+  background: rgba(230, 180, 85, 0.1);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.2rem 0.85rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin: 0.4rem 0 0.2rem;
+}
+
+/* Accusation call-to-action visual hierarchy (Phase 15 transition polish):
+ * the primary action reads as a solid accent button, the lifecycle states
+ * keep their clear badges. */
+.accusation-actions button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.55rem 1.15rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 120ms ease-out, transform 120ms ease-out;
+}
+
+.accusation-actions button:hover:not(:active) {
+  border-color: var(--accent);
+}
+
+.accusation-actions button[data-testid="accusation-open"] {
+  background: var(--accent);
+  color: #1a1608;
+  border-color: transparent;
+}
+
+.accusation-actions button[data-testid="accusation-open"]:hover:not(:active) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+/* Reveal screen entrance (subtle, non-blocking). */
+.reveal-screen {
+  animation: reveal-screen-in 320ms ease-out;
+}
+
+@keyframes reveal-screen-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.accusation-panel {
+  animation: reveal-screen-in 260ms ease-out;
+}
+
 /* Scene-list accessibility fallback note (demoted role copy). */
 .scene-objects-fallback-note {
   color: var(--muted);

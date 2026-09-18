@@ -175,6 +175,34 @@ def showcase_requirements(prompt: str):
     return extract_world_requirements(prompt)
 
 
+# Phase 14_5 — the unseen-weapon E2E prompt (QA-owned browser scenario). The
+# weapon "bronze ceremonial ice pick" is GENUINELY unseen: it exists in NO
+# production lookup table (KNOWN_OBJECT_TABLE / aliases / assets/catalog /
+# Phase 13 fixtures / test-only production branches — the defensive test
+# asserts its absence). The extractor classifies it REQUIRED (used-adjacent)
+# and the dev-provider pipeline (scripted with
+# fixtures/asset_specs_unseen.UNSEEN_SPEC_CONTENT) converts it to a proc.*
+# asset carrying a discoverable forensic fingerprint fact — WITHOUT widening
+# the solver's weapon universe or breaking golden all_true.
+UNSEEN_WEAPON_PROMPT = (
+    "A murder in an office. The killer used a bronze ceremonial ice pick "
+    "to stab the victim near the body."
+)
+
+UNSEEN_WEAPON_EXPECTED = ShowcaseExpectation(
+    environment_hint="office",
+    environment_id="office",
+    expected_object_names=("bronze ceremonial ice pick",),
+    required_in_world=(
+        "PROP_KITCHEN_KNIFE_01",
+        "PROP_LAPTOP_01",
+    ),
+    proc_assets_expected=True,
+    relation_targets={"near_victim": ("bronze ceremonial ice pick",)},
+    bootstrap_assert_ids=("bronze_ceremonial_ice_pick",),
+)
+
+
 __all__ = [
     "APARTMENT_PROMPT",
     "GOLDEN_DEFAULT_PROMPT",
@@ -184,6 +212,8 @@ __all__ = [
     "SHOWCASE_EXPECTED",
     "SHOWCASE_PROMPTS",
     "ShowcaseExpectation",
+    "UNSEEN_WEAPON_EXPECTED",
+    "UNSEEN_WEAPON_PROMPT",
     "WAREHOUSE_PROMPT",
     "showcase_requirements",
 ]

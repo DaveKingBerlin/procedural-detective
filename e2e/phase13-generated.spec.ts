@@ -41,7 +41,7 @@ import * as path from "node:path";
  *
  * Durable evidence promoted to screenshots/evidence/phase13-generated-object.png.
  */
-const BACKEND_BASE = "http://localhost:8010";
+const BACKEND_BASE = "http://localhost:8000";
 const CREDENTIALS_PATH = path.join(__dirname, "artifacts", "phase13-scene-credentials.json");
 
 /** Documented generated part-color families (backend material table). */

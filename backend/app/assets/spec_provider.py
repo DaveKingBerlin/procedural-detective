@@ -147,13 +147,51 @@ class CountingSpecProvider:
         return self.inner.generate(request)
 
 
+# Documented per-generation spec-provider call budget (Phase 14_5): an unseen
+# prompt object may consult the provider at most once per name plus limited
+# retries — the composer/service wrap the provider in ``BoundedSpecProvider``
+# so a single generation attempt can never burn unlimited provider calls.
+MAX_SPEC_PROVIDER_CALLS_PER_GENERATION = 6
+
+
+class BoundedSpecProvider:
+    """Deterministic per-generation provider-call budget wrapper.
+
+    After ``call_limit`` invocations the wrapper answers with an explicit
+    ``error`` response (never a crash, never a fabricated spec), so a broken
+    or adversarial provider cannot exceed the documented budget. Cache hits
+    resolve inside the Oracle and never reach this wrapper (zero calls).
+    """
+
+    def __init__(
+        self,
+        inner: AssetSpecProvider,
+        call_limit: int = MAX_SPEC_PROVIDER_CALLS_PER_GENERATION,
+    ) -> None:
+        if not isinstance(call_limit, int) or isinstance(call_limit, bool) or call_limit < 1:
+            raise ValueError("BoundedSpecProvider.call_limit must be a positive integer")
+        self.inner = inner
+        self.call_limit = int(call_limit)
+        self.calls = 0
+
+    def generate(self, request: AssetSpecRequest) -> AssetSpecResponse:
+        if self.calls >= self.call_limit:
+            return AssetSpecResponse(
+                error="spec provider call budget exhausted for this generation"
+            )
+        self.calls += 1
+        return self.inner.generate(request)
+
+
 __all__ = [
     "AssetSpecProvider",
     "AssetSpecProviderError",
     "AssetSpecRequest",
     "AssetSpecResponse",
+    "BoundedSpecProvider",
     "CountingSpecProvider",
     "FakeAssetSpecProvider",
+    "MAX_SPEC_PROVIDER_CALLS_PER_GENERATION",
     "MAX_SPEC_REQUEST_NAME_LENGTH",
     "MAX_SPEC_REQUEST_TAGS",
     "MAX_SPEC_RESPONSE_CHARS",

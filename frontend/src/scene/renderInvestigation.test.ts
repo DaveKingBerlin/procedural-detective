@@ -367,6 +367,109 @@ describe("mesh click dispatch (Phase 8_1 A1/A4 + E)", () => {
   });
 });
 
+/* ======================================================================
+ * Phase 15 Track B — judging polish: persistent selection focus, evidence
+ * legibility scaling and the projected caption hook (NullEngine).
+ * ==================================================================== */
+
+describe("Phase 15 — persistent selected-object focus", () => {
+  it("setObjectSelected / getSelectedObjectId track the singleton selection", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+
+    expect(result.getSelectedObjectId()).toBeNull();
+    result.setObjectSelected("kitchen_knife");
+    expect(result.getSelectedObjectId()).toBe("kitchen_knife");
+    // Move selection to another interactable, then clear.
+    result.setObjectSelected("apartment_laptop");
+    expect(result.getSelectedObjectId()).toBe("apartment_laptop");
+    result.setObjectSelected(null);
+    expect(result.getSelectedObjectId()).toBeNull();
+    result.dispose();
+  });
+
+  it("the selection keeps the object's ring visible after hover ends", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+
+    result.setObjectSelected("kitchen_knife");
+    const ring = result.scene.getNodeByName("pd_ring_kitchen_knife");
+    expect(ring).not.toBeNull();
+    expect(ring!.isVisible, "selection ring visible immediately").toBe(true);
+    result.dispose();
+  });
+
+  it("selection never touches non-interactable objects (no ring)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    result.setObjectSelected("vase_01");
+    expect(result.getSelectedObjectId()).toBe("vase_01");
+    expect(result.scene.getNodeByName("pd_ring_vase_01")).toBeNull();
+    result.dispose();
+  });
+});
+
+describe("Phase 15 — evidence legibility scaling (renderer)", () => {
+  it("apartment golden objects render at scaling 1 (byte-identical)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    for (const objectId of ["kitchen_knife", "apartment_laptop", "apartment_table"]) {
+      const root = result.scene.getNodeByName(meshNameFor(objectId)) as Mesh | null;
+      expect(root, objectId).not.toBeNull();
+      expect({ x: root!.scaling.x, y: root!.scaling.y, z: root!.scaling.z }).toEqual({ x: 1, y: 1, z: 1 });
+    }
+    result.dispose();
+  });
+
+  it("office evidence roots carry the deterministic legibility scaling", () => {
+    const model = buildInvestigationScene(makeOfficeBootstrap());
+    const knife = model.worldObjects.find((o) => o.objectId === "office_desk_knife");
+    expect(knife!.renderScale).toBeGreaterThan(1);
+    const result = createInvestigationScene(NOOP_CANVAS, model, nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const root = result.scene.getNodeByName("pd_obj_office_desk_knife") as Mesh | null;
+    expect(root).not.toBeNull();
+    expect(root!.scaling.x).toBe(knife!.renderScale);
+    expect(root!.scaling.y).toBe(knife!.renderScale);
+    expect(root!.scaling.z).toBe(knife!.renderScale);
+    result.dispose();
+  });
+});
+
+describe("Phase 15 — projected caption points (fractions of the viewport)", () => {
+  it("returns null for unknown / non-existent objects", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.projectObjectPoint("no_such_object", { x: 0, y: 0, z: 0 })).toBeNull();
+    result.dispose();
+  });
+
+  it("projects a known object's top into finite 0..1 fractions (or null in a headless view)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const point = result.projectObjectPoint("kitchen_knife", { x: 0, y: 0.2, z: 0 });
+    if (point === null) {
+      // A headless scene may legitimately fail to produce a view matrix —
+      // the caption then simply stays hidden (safe degrade, never a crash).
+      return;
+    }
+    expect(Number.isFinite(point.x)).toBe(true);
+    expect(Number.isFinite(point.y)).toBe(true);
+    expect(point.x).toBeGreaterThanOrEqual(0);
+    expect(point.x).toBeLessThanOrEqual(1);
+    expect(point.y).toBeGreaterThanOrEqual(0);
+    expect(point.y).toBeLessThanOrEqual(1);
+    result.dispose();
+  });
+});
+
 describe("hover callbacks + tooltip data flow (Phase 8_1 A3/B1 + E)", () => {
   it("hover only fires for interactables and carries the pointer origin", () => {
     const onHoverStart = vi.fn();

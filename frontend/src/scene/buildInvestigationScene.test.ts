@@ -4,7 +4,7 @@ import { getKit } from "../environments/kitCatalog";
 import { buildTemplateComposite } from "../templates/templateRegistry";
 import { ANCHOR_REGISTRY } from "./anchorRegistry";
 import { ASSET_REGISTRY, FALLBACK_ASSET, FALLBACK_COLOR, isKnownAsset, resolveAsset, type AssetEntry, type AssetRegistry } from "./assetRegistry";
-import { buildInvestigationScene, type InvestigationSceneModel } from "./buildInvestigationScene";
+import { applyKnowledgeToSceneModel, buildInvestigationScene, type InvestigationSceneModel } from "./buildInvestigationScene";
 import { EMITTED_ASSET_IDS, makeBootstrap, makeOfficeBootstrap, makeProcWorldObject, makeTrophyDefinition, makeWorldObject } from "./testFixtures";
 import { ValidationError } from "./validation";
 import type { GeneratedAssetDefinition } from "../api/types";
@@ -539,5 +539,73 @@ describe("Phase 13 — proc.* generated objects in the scene model", () => {
     const second = buildInvestigationScene(trophyBootstrap()).worldObjects.find((o) => o.objectId === "custom_trophy")!;
     expect(first.generatedParts).toEqual(second.generatedParts);
     expect(first.generatedParts!.length).toBe(3);
+  });
+});
+
+describe("applyKnowledgeToSceneModel — DEF-072 live knowledge merge", () => {
+  function byId(model: InvestigationSceneModel) {
+    return new Map(model.worldObjects.map((o) => [o.objectId, o]));
+  }
+
+  it("flips the knife's discovered/read flags from the server knowledge set", () => {
+    const model = buildInvestigationScene(makeBootstrap()); // all flags false
+    const knife = byId(model).get("kitchen_knife")!;
+    expect(knife.discovered).toBe(false);
+    expect(knife.read).toBe(false);
+
+    const merged = applyKnowledgeToSceneModel(model, {
+      discoveredEvidenceIds: ["forensic_knife_match_01"],
+      readEvidenceIds: ["forensic_knife_match_01"],
+    });
+
+    const mergedKnife = byId(merged).get("kitchen_knife")!;
+    expect(mergedKnife.discovered).toBe(true);
+    expect(mergedKnife.read).toBe(true);
+    // Only the knife's flags changed — the laptop digest stays as built.
+    expect(byId(merged).get("apartment_laptop")!.discovered).toBe(false);
+    expect(byId(merged).get("apartment_laptop")!.read).toBe(false);
+  });
+
+  it("leaves decorative / no-evidence objects completely untouched", () => {
+    const model = buildInvestigationScene(makeBootstrap());
+    const before = byId(model).get("vase_01")!;
+    const merged = applyKnowledgeToSceneModel(model, {
+      discoveredEvidenceIds: ["forensic_knife_match_01"],
+      readEvidenceIds: ["forensic_knife_match_01"],
+    });
+    // No-evidence objects keep their exact object identity (reference-stable).
+    expect(byId(merged).get("vase_01")).toBe(before);
+    expect(byId(merged).get("apartment_table")).toBe(byId(model).get("apartment_table"));
+  });
+
+  it("is identity-preserving and idempotent when the flags already match", () => {
+    const model = buildInvestigationScene(makeBootstrap());
+    const knowledge = { discoveredEvidenceIds: [], readEvidenceIds: [] };
+    // A no-change merge returns THE SAME model reference (callers skip re-renders).
+    expect(applyKnowledgeToSceneModel(model, knowledge)).toBe(model);
+    // Applying the merge twice never duplicates or drops objects.
+    const once = applyKnowledgeToSceneModel(model, {
+      discoveredEvidenceIds: ["forensic_knife_match_01"],
+      readEvidenceIds: ["forensic_knife_match_01"],
+    });
+    const twice = applyKnowledgeToSceneModel(once, {
+      discoveredEvidenceIds: ["forensic_knife_match_01"],
+      readEvidenceIds: ["forensic_knife_match_01"],
+    });
+    expect(once).toEqual(twice);
+    expect(once.worldObjects.map((o) => o.objectId)).toEqual(model.worldObjects.map((o) => o.objectId));
+    expect(new Set(once.worldObjects.map((o) => o.objectId)).size).toBe(once.worldObjects.length);
+  });
+
+  it("keeps unchanged objects by reference and replaces only the flipped one", () => {
+    const model = buildInvestigationScene(makeBootstrap());
+    const merged = applyKnowledgeToSceneModel(model, {
+      discoveredEvidenceIds: ["forensic_knife_match_01"],
+      readEvidenceIds: [],
+    });
+    // Unchanged evidence objects keep their identity; the knife is replaced.
+    expect(byId(merged).get("letter_opener")).toBe(byId(model).get("letter_opener"));
+    expect(byId(merged).get("scissors")).toBe(byId(model).get("scissors"));
+    expect(byId(merged).get("kitchen_knife")).not.toBe(byId(model).get("kitchen_knife")!);
   });
 });

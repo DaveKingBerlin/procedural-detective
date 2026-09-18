@@ -37,7 +37,7 @@ import { installLeakListener, scanJsonBody, seedPlaythroughCredentials } from ".
  * Credentials are seeded through the public API (helpers pattern).
  */
 
-const BACKEND_BASE = "http://localhost:8010";
+const BACKEND_BASE = "http://localhost:8000";
 
 interface KitCase {
   environmentId: string;

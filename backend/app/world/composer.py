@@ -36,9 +36,17 @@ Placement rules (documented, deterministic):
   non-empty interaction and an evidence-capable anchor, and no required
   evidence may be unreachable. All deviation is COLLECTED as sanitized
   ``world.``-prefixed issue strings (the WORld validation bucket) — never a
-  crash. An unresolvable request (unknown name with no procedural fallback)
-  is a world issue, and a KNOWN-UNSAFE request is recorded in the resolution
-  record and NOT composed (safe fail).
+  crash. A KNOWN-UNSAFE request is recorded in the resolution record and NOT
+  composed (safe fail).
+- ADV-153 — every prompt request resolves INDEPENDENTLY: an unresolvable
+  DECORATIVE unseen object is LEFT OUT of the world (never a silent wrong
+  substitution, never a blocking issue) and is reported through the
+  player-safe bounded ``compositionNotes`` tuple (``the '<noun>' you
+  described is not currently available - it was left out``); the successfully
+  resolved objects STAY in the composition. An unresolvable
+  CRITICALITY_REQUIRED object is NEVER dropped or substituted: it produces the
+  blocking ``world.unresolved-object`` issue so the generation lifecycle
+  repairs or fails publication.
 
 Provenance: every placed object id maps to its Asset Oracle provenance value
 (CATALOG_EXACT / CATALOG_ALIAS / SEMANTIC_MATCH / PARAMETRIC_VARIANT /
@@ -61,9 +69,11 @@ from app.assets.resolver import (
     resolve_with_variant,
 )
 from app.assets.spec_provider import (
+    MAX_SPEC_PROVIDER_CALLS_PER_GENERATION,
     AssetSpecProvider,
     AssetSpecRequest,
     AssetSpecResponse,
+    BoundedSpecProvider,
 )
 from app.environments.manifests import EnvironmentKit, load_environment
 from app.environments.placer import (
@@ -78,9 +88,12 @@ from app.environments.resolver import FALLBACK_ENVIRONMENT_ID
 from app.generation.schemas import ObjectSpec, PlacementSpec
 from app.world.extract import is_base_object_request
 from app.world.requirements import (
+    CRITICALITY_DECORATIVE,
+    CRITICALITY_REQUIRED,
     RELATION_KINDS,
     RELATION_TO_ANCHOR_TYPES,
     WorldRequirements,
+    safe_string_issues,
 )
 
 # --------------------------------------------------------------------------- #
@@ -89,6 +102,30 @@ from app.world.requirements import (
 
 # Proximity (world units) inside which a near_victim-bound object is satisfied.
 NEAR_VICTIM_PROXIMITY = 5.0
+
+# Phase 14_5 — the documented minimum semantic-match confidence for a
+# CRITICALITY_REQUIRED object. A SEMANTIC_MATCH produced by a tag tie alone
+# (confidence == SEMANTIC_TAG_WEIGHT == 3.0) would be a DIFFERENT semantic
+# class than the request (e.g. "ice pick" mapped onto an unrelated sharp
+# object). Below this threshold a REQUIRED request is NEVER substituted: it
+# escalates to the AssetSpecProvider; if the provider yields nothing valid the
+# composer records ``world.unresolved-object`` (repair/regenerate/fail
+# publication — never a wrong substitution). 6.0 == tag + category + subtype
+# agreement (the resolver weights 3.0/2.0/1.0), i.e. a full-vector agreement.
+CRITICAL_MIN_SEMANTIC_CONFIDENCE = 6.0
+
+# Per-composition provider-call budget cap (see BoundedSpecProvider); the
+# service hoists ONE budget over the whole attempt so repair passes share it.
+SPEC_PROVIDER_CALL_LIMIT = MAX_SPEC_PROVIDER_CALLS_PER_GENERATION
+
+# ADV-153 — player-safe composition notes for DECORATIVE unseen objects that
+# could not be generated/placed: they are left OUT of the world (never a
+# silent substitution), the SUCCESSFULLY resolved objects stay, and the world
+# carries at most MAX_COMPOSITION_NOTES short sanitized notes (the browser may
+# surface them). REQUIRED/CRITICAL unresolved objects keep the blocking
+# ``world.unresolved-object`` issue (repair then terminal-fail, never dropped).
+MAX_COMPOSITION_NOTES = 3
+MAX_COMPOSITION_NOTE_LENGTH = 120
 
 # Relation kind -> preferred anchor TYPES (fallback order). The FIRST type that
 # can host the resolved asset in the resolved kit becomes the placement hint.
@@ -351,7 +388,16 @@ class WorldComposition:
     Asset Oracle provenance value; ``relation_satisfied`` maps each relation
     kind to the bound object ids that satisfied it after placement;
     ``resolution_record`` is a diagnostic-only mapping NEVER serialized;
-    ``issues`` is the sanitized WORld validation bucket.
+    ``issues`` is the sanitized WORld validation bucket (non-empty -> the
+    composition is NOT publishable without repair);
+
+    ``composition_notes`` (ADV-153) is a PLAYER-SAFE, bounded tuple of short
+    sanitized notes (max ``MAX_COMPOSITION_NOTES``, max
+    ``MAX_COMPOSITION_NOTE_LENGTH`` chars each): one per DECORATIVE unseen
+    object that could not be generated or placed — it was left out of the
+    world (the successfully resolved objects stay). A REQUIRED unresolved
+    object never produces a note: it produces a blocking ``world.*`` issue
+    (repair then FAILED, never silently dropped).
     """
 
     environment_id: str
@@ -364,6 +410,7 @@ class WorldComposition:
     relation_notes: tuple[str, ...]
     resolution_record: Mapping[str, Any]
     issues: tuple[str, ...]
+    composition_notes: tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -494,6 +541,26 @@ def _world_issue(category: str, message: str) -> str:
     return f"world.{category}: {message}"
 
 
+def _decorative_unresolved_note(requested_name: str) -> str:
+    """Player-safe 'left out' note for ONE DECORATIVE unseen object (ADV-153).
+
+    Deterministic and sanitized: no prompt echo beyond the noun itself (the
+    casefolded, punctuation-stripped requested name, truncated), no URLs /
+    path separators / traversal / executable word tokens, bounded length
+    (<= ``MAX_COMPOSITION_NOTE_LENGTH``). Used as a non-blocking world warning
+    when a decorative object cannot be generated or placed.
+    """
+    cleaned = "".join(
+        ch
+        for ch in str(requested_name).casefold()
+        if ch.isalnum() or ch == " "
+    )
+    label = " ".join(cleaned.split())[:60].strip("'\"")
+    if not label or safe_string_issues(label, "compositionNote"):
+        return "an item you described is not currently available - it was left out"
+    return f"the '{label}' you described is not currently available - it was left out"
+
+
 # --------------------------------------------------------------------------- #
 # compose_world
 # --------------------------------------------------------------------------- #
@@ -523,6 +590,13 @@ def compose_world(
         raise TypeError("compose_world requires a WorldRequirements")
     if catalog is None:
         catalog = load_catalog_from_repo()
+    # Phase 14_5 — provider-call budget: one bounded provider wrapper per
+    # composition (a service-hoisted BoundedSpecProvider is reused as-is so
+    # every repair pass of ONE attempt shares a single budget).
+    if spec_provider is not None and not isinstance(spec_provider, BoundedSpecProvider):
+        spec_provider = BoundedSpecProvider(
+            spec_provider, call_limit=SPEC_PROVIDER_CALL_LIMIT
+        )
     resolver: Callable[[str], Any] = (
         env_resolver if env_resolver is not None else _default_env_resolver
     )
@@ -572,8 +646,21 @@ def compose_world(
     generated_definitions: dict[str, GeneratedAssetDefinition] = {}
 
     def _resolve_prompt_object(request: Any) -> ResolvedObject | None:
-        """One Oracle resolution (catalog/variant/procedural) or None."""
+        """One Oracle resolution (catalog/variant/procedural) or None.
+
+        Phase 14_5 escalation order: EXACT -> ALIAS -> SEMANTIC (with
+        confidence; low-confidence + variantParams -> PARAMETRIC_VARIANT) ->
+        no adequate match -> AssetSpecProvider -> strict validate/compile ->
+        ``proc.*`` + PROCEDURAL_GENERATED -> explicit FALLBACK only when the
+        provider yields nothing valid. A CRITICALITY_REQUIRED object whose
+        only catalog answer is a LOW-CONFIDENCE semantic match (a DIFFERENT
+        semantic class, e.g. "ice pick" tied onto an unrelated sharp object
+        by a tag) is NEVER substituted: it escalates to the provider, and
+        when that fails the caller records ``world.unresolved-object`` (the
+        generation lifecycle repairs or fails publication — never a drop).
+        """
         asset_request = _to_asset_request(request)
+        criticality = str(getattr(request, "criticality", CRITICALITY_DECORATIVE))
         try:
             outcome = resolve_or_generate(
                 asset_request,
@@ -581,9 +668,27 @@ def compose_world(
                 cache=cache,
                 catalog=catalog,
             )
+            resolution = outcome.resolution
+            low_conf_semantic = (
+                resolution is not None
+                and resolution.provenance is Provenance.SEMANTIC_MATCH
+                and resolution.confidence is not None
+                and resolution.confidence < CRITICAL_MIN_SEMANTIC_CONFIDENCE
+            )
+            if low_conf_semantic and criticality == CRITICALITY_REQUIRED:
+                # SEMANTIC BUT LOSSY: escalate to the provider; never substitute.
+                outcome = resolve_or_generate(
+                    asset_request,
+                    spec_provider=spec_provider,
+                    cache=cache,
+                    catalog=catalog,
+                    force_generate=True,
+                )
+                if outcome.generated is None:
+                    return None
+                resolution = outcome.resolution
         except Exception:  # noqa: BLE001 - degraded, never a crash
             return None
-        resolution = outcome.resolution
         if outcome.generated is not None:
             generated = outcome.generated
             if generated.definition is not None:
@@ -645,10 +750,16 @@ def compose_world(
             }
         )
 
-    # 2. prompt object resolution + dedupe against the base set.
+    # 2. prompt object resolution + dedupe against the base set. Each request
+    #    resolves INDEPENDENTLY (ADV-153): the successfully resolved objects
+    #    ALWAYS stay in the composition; an unresolvable DECORATIVE object is
+    #    left out with a player-safe note (never a blocking issue, never a
+    #    silent wrong substitution), an unresolvable REQUIRED object keeps the
+    #    blocking ``world.unresolved-object`` issue (repair -> terminal fail).
     base_assets = {plan["asset_id"] for plan in base_plans}
     new_plans: list[dict[str, Any]] = []
     seen_new_assets: set[str] = set()
+    composition_notes: list[str] = []
     for request in world_reqs.objects:
         resolved = _resolve_prompt_object(request)
         requested_name = str(getattr(request, "requested_name", ""))
@@ -657,13 +768,21 @@ def compose_world(
                 "assetId": None,
                 "provenance": "UNRESOLVED",
             }
-            issues.append(
-                _world_issue(
-                    "unresolved-object",
-                    f"requested object {requested_name!r} has no catalog or "
-                    "procedural resolution",
-                )
+            criticality = str(
+                getattr(request, "criticality", CRITICALITY_DECORATIVE)
             )
+            if criticality == CRITICALITY_REQUIRED:
+                issues.append(
+                    _world_issue(
+                        "unresolved-object",
+                        f"requested object {requested_name!r} has no catalog or "
+                        "procedural resolution",
+                    )
+                )
+            else:
+                note = _decorative_unresolved_note(requested_name)
+                if note not in composition_notes:
+                    composition_notes.append(note)
             continue
         resolution_record["resolved"][requested_name] = {
             "assetId": resolved.asset_id,
@@ -850,6 +969,7 @@ def compose_world(
         relation_notes=tuple(sorted(set(relation_notes))),
         resolution_record=resolution_record,
         issues=tuple(sorted(set(issues))),
+        composition_notes=tuple(composition_notes[:MAX_COMPOSITION_NOTES]),
     )
 
 
@@ -983,11 +1103,15 @@ def _place_plans(
 
 
 __all__ = [
+    "CRITICAL_MIN_SEMANTIC_CONFIDENCE",
     "KIT_BASE_OBJECT_IDS",
     "KnownObjectSpecProvider",
+    "MAX_COMPOSITION_NOTES",
+    "MAX_COMPOSITION_NOTE_LENGTH",
     "NEAR_VICTIM_PROXIMITY",
     "RELATION_PREFERENCE_TYPES",
     "ResolvedObject",
+    "SPEC_PROVIDER_CALL_LIMIT",
     "WorldComposition",
     "compose_world",
     "is_base_object_request",

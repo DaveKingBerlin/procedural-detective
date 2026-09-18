@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { setJourneyParams, type JourneyDifficulty } from "../journey/context";
 import { PROMPT_MAX_CHARS } from "../journey/demoPrompt";
+import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
 
 /**
@@ -14,6 +15,12 @@ import { examplePromptText, validatePrompt } from "../journey/promptValidation";
  * through the in-memory journey context — no prompt/token ever enters the
  * URL. "Try the demo case" starts the same deterministic demo journey with
  * the REQUIREMENTS 48 example prompt.
+ *
+ * Phase 15 Track B — the two paths are clearly labelled here too: this form
+ * IS the "Generate a New Mystery" path (custom prompt emphasised, with a
+ * provider-honest note: the deterministic generator in the default build,
+ * "Live AI provider" only when VITE_APP_PROVIDER=live), while the demo link
+ * carries its own zero-cost/deterministic sub-note.
  */
 export default function NewCasePage() {
   const navigate = useNavigate();
@@ -58,9 +65,13 @@ export default function NewCasePage() {
   return (
     <section className="page new-case">
       <h2>New Investigation</h2>
-      <p className="new-case-intro">
-        Describe a crime in your own words. The AI builds a complete,
-        logically solvable investigation around it.
+      <p className="new-case-intro" data-testid="generate-intro">
+        Write your own detective scenario, then generate a complete,
+        logically solvable investigation around it — every prompt produces its
+        own world of suspects, evidence and red herrings.
+      </p>
+      <p className="new-case-provider-note" data-testid="generate-provider-note">
+        {providerPathNote(APP_PROVIDER_MODE)}
       </p>
 
       <form className="new-case-form" data-testid="prompt-form" onSubmit={handleSubmit} noValidate>
@@ -114,13 +125,23 @@ export default function NewCasePage() {
             Use example prompt
           </button>
         </div>
+        {/* ADV-152 — honest app-level provider qualifier next to the primary CTA
+            (same wording + spot as the landing): the generate intro's per-path
+            note stays untouched; this line makes the default deterministic
+            build's "AI" claim unambiguous (mode-aware, config-driven). */}
+        <p className="provider-qualifier" data-testid="provider-qualifier">
+          {providerQualifier(APP_PROVIDER_MODE)}
+        </p>
       </form>
 
-      <p className="new-case-demo">
+      <div className="new-case-demo">
         <Link data-testid="try-demo-from-new" to="/generating" onClick={handleDemoLink}>
           Try the demo case
         </Link>
-      </p>
+        <p className="new-case-demo-note" data-testid="try-demo-note">
+          Deterministic demo — no API keys, no cost.
+        </p>
+      </div>
     </section>
   );
 }

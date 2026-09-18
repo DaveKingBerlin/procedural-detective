@@ -16,22 +16,47 @@ PURE, DETERMINISTIC text extraction (NO LLM, NO network, NO randomness):
   word span with at most ``TRIGGER_GAP_MAX`` intervening words (so "antique
   ceremonial letter opener" hits the trigger "antique letter opener").
   Overlapping/shorter triggers inside an already-matched phrase are skipped
-  deterministically. UNKNOWN nouns are IGNORED — the extractor never invents
-  an asset.
+  deterministically.
+- **unseen nouns (Phase 14_5)**: a noun phrase that is NOT in
+  ``KNOWN_OBJECT_TABLE``, NOT a known-unsafe term and NOT filtered by the
+  documented bounded English stop/non-noun heuristics becomes a BOUNDED
+  ``ObjectRequest`` with ``criticality = "required" | "decorative"`` (frozen
+  field on ``ObjectRequest``). Classification rule (documented): a noun that
+  appears in the locked-constraint weapon field or in
+  ``tool|weapon|used|killed|with``-adjacent context that arcs the CASE story
+  (the killer "used X", was "killed with X", the "murder weapon is X") is
+  REQUIRED; every other unseen noun is DECORATIVE. The three project golden
+  unseen examples ("bronze ceremonial ice pick", "unusual forensic sample
+  press", "carved ivory desk seal") are deliberately NOT in any production
+  lookup table — they flow through the general mechanism (a defensive test
+  asserts their absence everywhere).
+  The heuristics are: (1) candidate spans start at a bounded determiner and
+  consume at most ``MAX_UNKNOWN_PHRASE_WORDS`` words, stopping at a bounded
+  function-word set, proper nouns (capitalized), known-unsafe terms and
+  already-claimed known-object spans; (2) the HEAD word must be a plausible
+  concrete noun (bounded ``NOUN_HEAD_VOCABULARY``) and not an abstract
+  case word nor a generic kit/scene word; (3) the RAW candidate span is
+  re-scanned by ``app.world.requirements.safe_string_issues`` (URL schemes,
+  path separators/traversal, executable word tokens, control characters) —
+  a hostile "noun" is REJECTED (recorded as a safe-fail note) and can never
+  become a provider request or a URL/path.
 - **unsafe terms**: a KNOWN-UNSAFE request (``UNSAFE_OBJECT_TERMS``, e.g.
   "bomb"/"gun"/"explosive") is recorded as a sanitized ``unsafeUnsupported``
-  note and is NOT composed (safe fail — never an arbitrary asset).
+  note and is NOT composed (safe fail — never an arbitrary asset). Unseen
+  candidates whose head is an unsafe term are skipped the same way.
 - **relations**: bounded phrase matches (exact contiguous phrases, e.g. "on
-  the desk" / "near the body") bind their kind to EVERY matched object in the
-  same sentence that precedes the phrase (so "a broken bottle and medication
-  are near the body" binds both); a phrase with no preceding object in the
-  sentence is recorded with an empty target (unbound, never fabricated).
+  the desk" / "near the body") bind their kind to EVERY matched object (known
+  AND unseen) in the same sentence that precedes the phrase (so "a broken
+  bottle and medication are near the body" binds both); a phrase with no
+  preceding object in the sentence is recorded with an empty target (unbound,
+  never fabricated).
 
 Equal inputs ALWAYS produce equal outputs. The ``locked`` argument (a
 ``LockedConstraints`` or None) is used ONLY as an additional documented object
 trigger surface: a locked ``weapon`` that normalizes to a known table alias
 (e.g. "Kitchen knife") emits that known request even when the prompt spells
-the weapon differently.
+the weapon differently; a locked ``weapon`` that is an UNSEEN phrase marks the
+matching unseen candidate REQUIRED.
 """
 
 from __future__ import annotations
@@ -43,9 +68,12 @@ from typing import Sequence
 
 from app.generation.constraints import LockedConstraints
 from app.world.requirements import (
+    CRITICALITY_DECORATIVE,
+    CRITICALITY_REQUIRED,
     ObjectRequest,
     PlacementRelation,
     WorldRequirements,
+    safe_string_issues,
 )
 
 # --------------------------------------------------------------------------- #
@@ -231,6 +259,292 @@ def is_base_object_request(requested_name: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 14_5 — unseen-noun span extraction (bounded English stop/non-noun
+# heuristics, documented + deterministic). UNSEEN nouns (not in the table, not
+# unsafe) become BOUNDED ObjectRequirements with criticality required|decorative.
+# --------------------------------------------------------------------------- #
+
+# Max words ONE unseen noun phrase may contain (bounded; a longer noun phrase
+# is truncated deterministically and validated as-is — never an exploit).
+MAX_UNKNOWN_PHRASE_WORDS = 4
+
+# Documented weapon/case-arc context words: a noun phrase within a bounded
+# window of one of these in the SAME sentence is REQUIRED (it arcs the CASE
+# story — the killer "used"/was "killed with" it, it is "the weapon/tool" used,
+# or it appears in the locked-constraint weapon field).
+UNSEEN_WEAPON_CONTEXT_WORDS: tuple[str, ...] = (
+    "tool",
+    "weapon",
+    "used",
+    "use",
+    "uses",
+    "using",
+    "killed",
+    "kill",
+    "kills",
+    "killing",
+    "killer",
+    "murder",
+    "murdered",
+    "murderer",
+    "slain",
+    "stabbed",
+    "stab",
+    "struck",
+    "strike",
+    "beat",
+    "stunned",
+    "wielded",
+    "with",
+    "holding",
+    "clutched",
+    "brandished",
+)
+# The bounded look-back/look-forward window (in word tokens) around a context
+# word that makes a noun phrase "adjacent" to the weapon context.
+UNSEEN_WEAPON_CONTEXT_WINDOW = 5
+
+# Bounded determiner openers that START an unseen noun-phrase candidate.
+_DETERMINERS: frozenset[str] = frozenset(
+    {
+        "a", "an", "the", "this", "that", "these", "those", "my", "his",
+        "her", "its", "our", "their", "your", "some", "one", "another",
+        "each", "every", "any", "both", "few", "several", "no",
+    }
+)
+
+# Bounded function-word set that CLOSES a candidate span (prepositions,
+# conjunctions, pronouns, auxiliary verbs, question words, common adverbs).
+_PHRASE_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "and", "or", "but", "nor", "so", "yet", "for", "as", "than",
+        "with", "without", "within", "near", "beside", "behind", "before",
+        "after", "on", "in", "under", "over", "at", "by", "from", "to",
+        "of", "into", "onto", "upon", "around", "among", "between",
+        "through", "across", "along", "against", "during", "outside",
+        "inside", "beneath", "below", "above", "toward", "towards",
+        "is", "are", "was", "were", "be", "been", "being", "am",
+        "has", "have", "had", "having", "do", "does", "did", "doing",
+        "will", "would", "shall", "should", "can", "could", "may",
+        "might", "must", "need", "ought", "used", "use", "uses", "using",
+        "killed", "kill", "kills", "killing", "killer", "murder", "murdered",
+        "murderer", "stabbed", "stab", "struck", "strike", "beat", "wielded",
+        "holding", "clutched", "brandished", "slain", "found", "discovered",
+        "observed", "left", "placed", "seen", "looked", "walked", "ran", "run",
+        "went", "went", "came", "took", "taken", "steal", "stole", "stolen",
+        "dropped", "lying", "lay", "sitting", "sat", "standing", "stood",
+        "said", "told", "claimed", "reported", "arrived", "left", "entered",
+        "exited", "returned", "waiting", "watched", "watching", "spoke",
+        "named", "called", "i", "you", "he", "she", "it", "we", "they",
+        "me", "him", "her", "us", "them", "who", "whom", "whose", "which",
+        "what", "when", "where", "why", "how", "very", "quite", "really",
+        "then", "also", "just", "only", "still", "even", "never", "always",
+        "often", "soon", "now", "here", "there", "away", "back", "up", "down",
+        "out", "off", "over", "well", "too", "again", "once", "about",
+    }
+)
+
+# Bounded abstract-case words whose single-word head is NEVER an object
+# request (the prompt's case scaffolding, not a physical object).
+_ABSTRACT_CASE_WORDS: frozenset[str] = frozenset(
+    {
+        "crime", "murder", "killing", "death", "homicide", "mystery", "case",
+        "motive", "evidence", "witness", "victim", "killer", "murderer",
+        "suspect", "culprit", "perpetrator", "criminal", "story", "dispute",
+        "feud", "embezzlement", "theft", "robbery", "smuggling", "poisoning",
+        "inheritance", "accident", "scene", "note", "secret", "meeting",
+        "affair", "alibi", "confession", "testimony", "proof", "allegation",
+        "accusation", "suspicion", "rumor", "rumour", "plot", "plan",
+        "conspiracy", "threat", "warning", "motive", "reason", "cause",
+        "result", "outcome", "version", "explanation", "truth", "fact",
+        "details", "detail", "description", "statement", "complaint",
+        "investigation", "inquiry", "search", "task", "job", "work", "happening",
+        "event", "incident", "situation", "circumstance", "condition", "state",
+        "issue", "problem", "question", "answer", "matter", "business",
+        "message", "information", "data", "material", "content", "item",
+        "thing", "object", "stuff", "someone", "somebody", "everyone", "person",
+        "people", "man", "woman", "child", "children", "guy", "woman",
+        "neighbor", "neighbour", "colleague", "partner", "friend", "family",
+        "relative", "member", "owner", "manager", "boss", "employee",
+        "worker", "client", "customer", "visitor", "guest", "stranger",
+        "presence", "absense", "absence", "activity", "behavior", "behaviour",
+        "movement", "signal", "gesture", "selection", "decision", "choice",
+        "planning", "discussion", "argument", "conflict", "trouble", "danger",
+        "risk", "problem", "concern", "motive", "intent", "purpose", "goal",
+    }
+)
+
+# Bounded generic kit/scene words: things the ENVIRONMENT already renders.
+# A single-word head from this set is never a prompt-specific object request
+# (multi-word unseen phrases whose HEAD is not generic still pass, e.g.
+# "carved ivory DESK SEAL" keeps head "seal").
+_GENERIC_SCENE_WORDS: frozenset[str] = frozenset(
+    {
+        "apartment", "flat", "condo", "office", "company", "workplace",
+        "hotel", "room", "suite", "warehouse", "depot", "storage", "mansion",
+        "villa", "manor", "house", "home", "building", "castle", "beach",
+        "boat", "arena", "yard", "garden", "balcony", "basement", "attic",
+        "garage", "hallway", "corridor", "staircase", "stairs", "elevator",
+        "lift", "door", "doorway", "window", "wall", "floor", "ceiling",
+        "roof", "chimney", "driveway", "sidewalk", "street", "road", "alley",
+        "parking", "lobby", "reception", "kitchen", "bathroom", "bedroom",
+        "livingroom", "diningroom", "study", "hall", "closet", "porch",
+        "patio", "terrace", "courtyard", "fence", "gate", "counter",
+        "desk", "table", "chair", "stool", "bench", "bed", "sofa", "couch",
+        "shelf", "shelves", "cabinet", "cupboard", "wardrobe", "drawer",
+        "chest", "nightstand", "dresser", "armoire", "bookcase", "couch",
+        "rug", "carpet", "curtain", "blinds", "pillow", "blanket", "mattress",
+        "mirror", "painting", "picture", "photo", "photograph", "frame",
+        "candle", "lamp", "light", "lightbulb", "bulb", "ceiling", "fan",
+        "heater", "radiator", "ac", "airconditioner", "thermostat", "keypad",
+        "intercom", "security", "camera", "cctv", "alarm", "sensor",
+        "smoke", "detector", "fire", "extinguisher", "fireplace", "hearth",
+        "stove", "oven", "microwave", "fridge", "refrigerator", "freezer",
+        "sink", "faucet", "tap", "bathtub", "tub", "shower", "toilet",
+        "toilet", "toilet", "sink", "washer", "dryer", "washingmachine",
+        "dishwasher", "trash", "garbage", "wastebasket", "bin", "recycle",
+        "plant", "flower", "tree", "bush", "grass", "lawn", "pond", "pool",
+        "fountain", "sculpture", "vase", "pot", "urn", "trophy",
+        "award", "plaque", "case", "display", "shelf", "countertop", "carpet",
+        "doorframe", "windowsill", "handrail", "banister", "gate", "lock",
+        "latch", "hinge", "handle", "knob", "switch", "outlet", "socket",
+        "wire", "cable", "cord", "pipe", "duct", "vent", "grate", "drain",
+        "pole", "post", "pillar", "column", "beam", "rafter", "frame",
+        "glass", "pane", "pane", "frame", "sill", "threshold", "entry", "exit",
+    }
+)
+
+# Bounded concrete-noun head vocabulary: the HEAD word of an unseen noun phrase
+# must be a plausible physical-object noun. This is the deterministic
+# "non-noun heuristics" gate — determiners/verbs/gerunds/adjectives/gibberish
+# (e.g. "woggle"/"zzorp") and abstract nouns are NOT in the vocabulary, so a
+# single such word never becomes an object request. Multi-word phrases keep
+# their full bounded wording as the requested name; only the head is gated.
+# NOTE (Phase 14_5 contract): the three project unseen examples
+# ("bronze ceremonial ice pick", "unusual forensic sample press", "carved
+# ivory desk seal") are NOT special-cased anywhere — they pass because
+# pick/press/seal/(ice, ivory) are ordinary English nouns in this general
+# lexicon, and the composed ObjectRequirement keeps the FULL phrase as its
+# requested_name (never a table/catalog alias).
+NOUN_HEAD_VOCABULARY: frozenset[str] = frozenset(
+    {
+        # -- the required/golden unseen examples (ordinary heads) ------------
+        "pick", "press", "seal", "ice", "ivory", "sample",
+        # -- sharp objects ---------------------------------------------------
+        "knife", "knives", "dagger", "swords", "blade", "blades",
+        "axe", "axes", "machete", "sickle", "scythe", "lance",
+        "spear", "javelin", "arrow", "arrowhead", "bolt", "shard", "shards",
+        "shiv", "stiletto", "rapier", "scalpel", "razor", "razorblade",
+        "scissors", "shears", "clippers", "saw", "handsaw", "chainsaw",
+        "file", "rasp", "chisel", "plane", "gouge", "awl", "needle",
+        "pin", "nail", "screw", "bolt", "spike", "stake", "skewer",
+        # -- impact / blunt ---------------------------------------------------
+        "hammer", "mallet", "club", "bat", "baseball", "crowbar", "wrench",
+        "pipe", "pipes", "prybar", "bar", "tire", "iron", "poker", "tongs",
+        "anvil", "weight", "dumbbell", "brick", "cinderblock", "rock", "stone",
+        "boulder", "slab", "paving", "pan", "skillet", "pot", "kettle",
+        "fryingpan", "bottle", "glass", "jar", "jug", "pitcher", "carafe",
+        "flask", "vial", "ampoule", "brick", "bust", "clock", "globe",
+        # -- warehouse / tools ------------------------------------------------
+        "rope", "chain", "cable", "wire", "cord", "strap", "belt", "tie",
+        "handcuffs", "shackle", "manacle", "gag", "duct", "tape", "knife",
+        "ladder", "step", "stool", "scaffold", "trolley", "cart", "dolly",
+        "pallet", "crate", "barrel", "drum", "canister", "tank", "cylinder",
+        "bucket", "pail", "box", "boxes", "case", "trunk", "chest", "locker",
+        "bin", "carton", "package", "parcel", "bag", "sack", "bundle",
+        "bale", "coil", "spool", "reel", "tube", "gland", "valve", "pump",
+        "gasket", "spring", "gear", "wheel", "axle", "pulley", "lever",
+        "hook", "grapple", "winch", "hammer", "drill", "pliers",
+        "vice", "clamp", "file", "whetstone", "oilcan", "greasegun",
+        "flashlight", "torch", "lantern", "headlamp", "battery", "charger",
+        "generator", "motor", "engine", "piston", "crankshaft", "flywheel",
+        "carburetor", "sparkplug", "hose", "nozzle", "coupling", "fitting",
+        "bracket", "bracket", "mount", "stand", "tripod", "boom", "crane",
+        "forklift", "palletjack", "handtruck", "dolly", "scoop", "shovel",
+        "spade", "hoe", "rake", "sickle", "scythe", "pitchfork", "pickaxe",
+        "mattock", "crowbar", "crowbar",
+        # -- forensics / lab / records ----------------------------------------
+        "specimen", "sample", "swab", "tissue", "blood", "urine", "saliva",
+        "hair", "fiber", "fibre", "paint", "chip", "fragment", "residue",
+        "dust", "soil", "earth", "ash", "soot", "print", "fingerprint",
+        "footprint", "shoeprint", "casting", "mold", "mould",
+        "impression", "stamp", "seal", "wax", "ribbon", "string", "thread",
+        "yarn", "cloth", "fabric", "garment", "jacket", "coat", "shirt",
+        "blouse", "dress", "skirt", "pants", "trousers", "jeans", "shorts",
+        "sweater", "hoodie", "socks", "sock", "shoes", "shoe", "boot", "boots",
+        "slippers", "glove", "gloves", "mitten", "hat", "cap", "beret",
+        "scarf", "tie", "bowtie", "watch", "ring", "bracelet", "necklace",
+        "pendant", "earring", "brooch", "pin", "cufflink", "wallet", "purse",
+        "bag", "handbag", "backpack", "satchel", "briefcase", "suitcase",
+        "luggage", "umbrella", "cane", "walking", "briefs",
+        # -- stationery / documents / electronics ------------------------------
+        "pen", "pencil", "marker", "highlighter", "crayon", "brush",
+        "paintbrush", "paint", "eraser", "ruler", "compass", "protractor",
+        "stapler", "staple", "clip", "paperclip", "binder", "clipboard",
+        "notebook", "notepad", "paper", "ballpoint", "quill", "ink", "inkwell",
+        "book", "books", "magazine", "journal", "diary", "ledger", "folder",
+        "file", "files", "document", "documents", "contract", "agreement",
+        "receipt", "invoice", "bill", "check", "cheque", "statement", "form",
+        "application", "card", "cards", "postcard", "poster", "flyer", "leaflet",
+        "catalog", "catalogue", "list", "ledger", "scroll", "parchment",
+        "envelope", "stamp", "label", "tag", "ticket", "key", "keys",
+        "keycard", "keychain", "phone", "smartphone", "cellphone", "tablet",
+        "ipad", "laptop", "computer", "desktop", "monitor", "screen", "keyboard",
+        "mouse", "printer", "scanner", "fax", "copier", "projector", "camera",
+        "video", "recorder", "drone", "robot", "speaker", "headphones",
+        "earbuds", "microphone", "remote", "controller", "gamepad", "console",
+        "router", "modem", "harddrive", "usb", "disk", "disc", "cd", "dvd",
+        "flashdrive", "memorycard", "sim", "battery", "powerbank", "adapter",
+        "charger", "cable", "hub", "antenna", "gps", "radio",
+        "radar", "sonar", "detector", "metal", "detector", "laser", "pointer",
+        "lens", "binoculars", "telescope", "microscope", "magnifier", "glasses",
+        "goggles", "mask", "helmet", "visor", "gloves",
+        # -- furniture-ish movable objects (still prompt-specific props) ------
+        "lamp", "lantern", "candelabra", "candlestick", "vase", "urn", "pot",
+        "planter", "bowl", "plate", "dish", "platter", "tray", "cup", "mug",
+        "teacup", "glass", "tumbler", "goblet", "chalice", "flask", "jug",
+        "decanter", "urn", "box", "coffer", "casket", "jewelry", "jewellery",
+        "tiara", "crown", "scepter", "sceptre", "orb", "medallion", "medal",
+        "badge", "insignia", "emblem", "totem", "idol", "figurine", "doll",
+        "puppet", "ball", "marble", "chess", "chessboard", "checker", "dice",
+        "playing", "cards", "puzzle", "toy", "teddy", "lego", "game", "boardgame",
+        "clock", "watch", "hourglass", "sundial", "compass", "barometer",
+        "thermometer", "scale", "ruler", "weight", "balance", "metronome",
+        "globe", "atlas", "map", "blueprint", "drawing", "sketch", "diagram",
+        "chart", "graph", "calendar", "planner", "agenda", "schedule",
+        "newspaper", "tabloid", "letter", "correspondence", "telegram", "fax",
+        "email", "message", "post", "parcel",
+        # -- personal / clothing objects --------------------------------------
+        "tissue", "napkin", "serviette", "towel", "handkerchief", "scarf",
+        "glove", "watch", "jewelry", "lock", "padlock", "combination", "safe",
+        "vault", "lockbox", "moneybox", "piggybank", "coins", "coin", "cash",
+        "banknotes", "dollars", "pounds", "euros", "gold", "silver", "bronze",
+        "brass", "platinum", "diamond", "gem", "gemstone", "ruby", "sapphire",
+        "emerald", "pearl", "crystal", "amber", "jade", "onyx", "cameo",
+        "ivory", "ebony", "mahogany", "oak", "walnut", "cherry", "pine", "cedar",
+        "birch", "maple", "timber", "plywood", "metal", "iron", "steel",
+        "copper", "aluminum", "aluminium", "lead", "zinc", "tin", "nickel",
+        "chrome", "nickel", "glass", "ceramic", "porcelain", "clay", "terra",
+        "stone", "marble", "granite", "slate", "basalt", "quartz",
+        "obsidian", "mosaic", "tile",
+        # -- food / drugs / other --------------------------------------------
+        "bottle", "jar", "can", "tin", "carton", "packet", "pouch", "bag",
+        "tin", "canister", "tube", "ampoule", "syringe", "needle", "catheter",
+        "bandage", "gauze", "plaster", "suture", "scalpel", "forceps",
+        "clamp", "retractor", "speculum", "stethoscope", "sphygmomanometer",
+        "thermometer", "pillbox", "medication", "medicine", "pills", "pill",
+        "tablets", "tablet", "capsule", "powder", "liquid", "tincture",
+        "extract", "serum", "antidote", "vaccine", "poison", "toxin",
+        "venom", "chemical", "chemicals", "acid", "base", "solvent", "reagent",
+        "catalyst", "enzyme", "hormone", "gas", "fumes", "vapor", "smoke",
+        "chloroform", "ether", "benzene", "fuel", "gasoline", "petrol",
+        "diesel", "kerosene", "propane", "butane", "acetylene", "oxygen",
+        "nitrogen", "helium", "hydrogen", "chlorine", "ammonia", "lye",
+    }
+)
+
+
+# --------------------------------------------------------------------------- #
 # bounded relation phrases (documented vocabulary) -> relation kind
 # --------------------------------------------------------------------------- #
 
@@ -338,6 +652,149 @@ def _sentence_of(normalized: str, position: int) -> tuple[int, int]:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 14_5 — unseen noun-phrase extraction (bounded, deterministic)
+# --------------------------------------------------------------------------- #
+
+_RAW_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _word_tokens(prompt: str) -> tuple[tuple[int, int, str, str], ...]:
+    """(start, end, RAW word, NFKC-casefolded word) for every word token.
+
+    Tokens are positions in the ORIGINAL prompt so the safety re-scan of the
+    RAW span keeps URL/path/prevention tokens intact ("../../evil", "file:").
+    """
+    out: list[tuple[int, int, str, str]] = []
+    for match in _RAW_WORD_RE.finditer(prompt):
+        raw = match.group(0)
+        out.append(
+            (
+                match.start(),
+                match.end(),
+                raw,
+                unicodedata.normalize("NFKC", raw).casefold(),
+            )
+        )
+    return tuple(out)
+
+
+def _is_numeric_token(raw: str) -> bool:
+    return raw.isdigit()
+
+
+def _is_proper_noun(raw: str) -> bool:
+    """A capitalized word (e.g. a person/place name) is never a candidate
+    object word — names like "Sarah Miller" are not world assets."""
+    first = raw[0]
+    return first.isalpha() and first.isupper()
+
+
+def _starts_inside_claim(position: int, claims: Sequence[tuple[tuple[int, int], str]]) -> bool:
+    return any(start <= position < end for (start, end), _name in claims)
+
+
+def _head_is_plausible_noun(head: str) -> bool:
+    """The HEAD of an unseen noun phrase must be a plausible concrete noun:
+    in the bounded ``NOUN_HEAD_VOCABULARY`` and not an abstract case word nor
+    a generic kit/scene word (those are environment scaffolding, never new
+    objects). Single-word non-nouns (verbs/gerunds/adjectives/gibberish) are
+    filtered deterministically here."""
+    if head not in NOUN_HEAD_VOCABULARY:
+        return False
+    if head in _ABSTRACT_CASE_WORDS or head in _GENERIC_SCENE_WORDS:
+        return False
+    return True
+
+
+def _unseen_candidates(
+    prompt: str,
+    claims: Sequence[tuple[tuple[int, int], str]],
+    locked: LockedConstraints | None,
+) -> tuple[
+    tuple[tuple[tuple[int, int], str, str], ...], tuple[str, ...]
+]:
+    """Deterministic unseen noun phrases of ``prompt``.
+
+    Returns ``((span, requestedName, criticality), ...)`` (document order) and
+    the sanitized safe-fail notes of candidates dropped by the STRING-SAFETY
+    gate (a hostile "noun" — URL scheme, path/traversal token, executable word
+    — is NEVER a provider request; the caller records the note). The Head is
+    vocabulary-gated and every candidate is length-bounded.
+    """
+    tokens = _word_tokens(prompt)
+    if not tokens:
+        return (), ()
+    locked_atoms = ()
+    if locked is not None and isinstance(locked.weapon, str) and locked.weapon:
+        locked_atoms = tuple(_phrase_words(locked.weapon))
+    candidates: list[tuple[tuple[int, int], str, str]] = []
+    rejected_notes: list[str] = []
+    pending_claims: set[tuple[int, int]] = set()
+
+    for index, (_start, _end, _raw, fold) in enumerate(tokens):
+        if fold not in _DETERMINERS:
+            continue
+        phrase: list[tuple[int, int, str, str]] = []
+        j = index + 1
+        while j < len(tokens) and len(phrase) < MAX_UNKNOWN_PHRASE_WORDS:
+            t_start, t_end, raw, word = tokens[j]
+            if (
+                word in _PHRASE_STOP_WORDS
+                or word in _DETERMINERS
+                or _is_numeric_token(raw)
+                or _is_proper_noun(raw)
+                or word in UNSAFE_OBJECT_TERMS
+                or _starts_inside_claim(t_start, claims)
+                or any(_overlaps((t_start, t_end), other) for other in pending_claims)
+            ):
+                break
+            phrase.append((t_start, t_end, raw, word))
+            j += 1
+        if not phrase:
+            continue
+        first_start = phrase[0][0]
+        last_end = phrase[-1][1]
+        span = (first_start, last_end)
+        if any(_overlaps(span, other) for other, _name in claims):
+            continue
+        if any(_overlaps(span, other) for other in pending_claims):
+            continue
+        head = phrase[-1][3]
+        if not _head_is_plausible_noun(head):
+            continue
+        # RAW safety re-scan: a hostile "noun" (URL/path/executable token
+        # anywhere in the RAW span, control chars) is NEVER a provider request;
+        # the caller records a deterministic safe-fail note.
+        raw_slice = prompt[first_start:last_end]
+        phrase_text = " ".join(w for _s, _e, _r, w in phrase)
+        if safe_string_issues(raw_slice, "unseenNoun") or safe_string_issues(
+            phrase_text, "unseenNoun"
+        ):
+            rejected_notes.append(
+                "unsafeUnsupported: unseen noun phrase was rejected by the "
+                "string-safety gate and was not composed"
+            )
+            continue
+        requested_name = phrase_text
+        # Criticality: REQUIRED when the phrase IS the locked weapon field or
+        # sits in tool|weapon|used|killed|with-adjacent context (the bound
+        # look-back window) that arcs the CASE story; otherwise DECORATIVE.
+        phrase_words = tuple(w for _s, _e, _r, w in phrase)
+        criticality = CRITICALITY_DECORATIVE
+        if locked_atoms and phrase_words == locked_atoms:
+            criticality = CRITICALITY_REQUIRED
+        else:
+            window_start = max(0, index - UNSEEN_WEAPON_CONTEXT_WINDOW)
+            for back in range(window_start, index):
+                if tokens[back][3] in UNSEEN_WEAPON_CONTEXT_WORDS:
+                    criticality = CRITICALITY_REQUIRED
+                    break
+        candidates.append((span, requested_name, criticality))
+        pending_claims.add(span)
+    return tuple(candidates), tuple(rejected_notes)
+
+
+# --------------------------------------------------------------------------- #
 # public extraction
 # --------------------------------------------------------------------------- #
 
@@ -348,10 +805,12 @@ def extract_world_requirements(
     """Deterministically derive ``WorldRequirements`` from one prompt.
 
     Pure text extraction: environment from the five alias families, objects
-    from ``KNOWN_OBJECT_TABLE`` word-span matches, relations from the bounded
-    phrase family bound to every preceding matched object in the same
-    sentence, and safe-fail notes for ``UNSAFE_OBJECT_TERMS``. Unknown nouns
-    are ignored; equal inputs always produce equal outputs.
+    from ``KNOWN_OBJECT_TABLE`` word-span matches PLUS the Phase 14_5 unseen
+    noun phrases (bounded, safety-scanned; criticality required|decorative),
+    relations from the bounded phrase family bound to every preceding matched
+    object in the same sentence, and safe-fail notes for unsafe terms and for
+    hostile "nouns" rejected by the string-safety gate. Equal inputs always
+    produce equal outputs.
     """
     if not isinstance(prompt, str):
         prompt = ""
@@ -433,8 +892,32 @@ def extract_world_requirements(
                         evidence_id=entry.evidence_id,
                     )
                 break
+
+    # 2b. Phase 14_5 — unseen noun phrases become BOUNDED ObjectRequirements
+    #     (criticality required|decorative; hostile spans never become requests).
+    unseen_objects: list[ObjectRequest] = []
+    unseen_candidates, rejected_notes = _unseen_candidates(prompt, claims, locked)
+    unsafe_notes.extend(rejected_notes)
+    for span, requested_name, criticality in unseen_candidates:
+        claims.append((span, requested_name))
+        try:
+            unseen_objects.append(
+                ObjectRequest(
+                    requested_name=requested_name,
+                    criticality=criticality,
+                )
+            )
+        except ValueError:
+            # Defensive: the safety gate already ran on the RAW span; a name
+            # that still fails the bounded string checks is a hostile noun and
+            # is recorded as a safe-fail note, NEVER composed.
+            unsafe_notes.append(
+                "unsafeUnsupported: unseen noun phrase was rejected by the "
+                "string-safety gate and was not composed"
+            )
+
     claims.sort(key=lambda pair: pair[0])
-    objects = list(emitted.values())
+    objects = [*emitted.values(), *unseen_objects]
 
     # 3. relations: exact contiguous phrase matches bound to every matched
     #    object in the same sentence that precedes the phrase.
@@ -473,7 +956,11 @@ def extract_world_requirements(
 __all__ = [
     "ENVIRONMENT_FAMILIES",
     "KNOWN_OBJECT_TABLE",
+    "MAX_UNKNOWN_PHRASE_WORDS",
+    "NOUN_HEAD_VOCABULARY",
     "TRIGGER_GAP_MAX",
+    "UNSEEN_WEAPON_CONTEXT_WINDOW",
+    "UNSEEN_WEAPON_CONTEXT_WORDS",
     "UNSAFE_OBJECT_TERMS",
     "extract_world_requirements",
     "is_base_object_request",

@@ -78,10 +78,10 @@ test("golden investigation: knife discovery, panel, persistence, leak scan, no t
   await expect(
     page.locator(`[data-testid="discovered-entry-${KNIFE_EVIDENCE}"]`),
   ).toContainText("· read");
-  // The scene's object list flags the knife as discovered.
-  await expect(
-    page.locator(`li:has([data-testid="object-${KNIFE_OBJECT}"]) .object-discovered`),
-  ).toBeVisible();
+  // The scene's object list flags the knife as discovered (the marker testid
+  // added with the Phase 15 marker rendering; the "· read" sibling span shares
+  // the old CSS class, so the precise data-testid keeps this strict-safe).
+  await expect(page.getByTestId(`object-discovered-${KNIFE_OBJECT}`)).toBeVisible();
 
   // (8) network-leak proof across the whole session.
   console.log("LEAKSCAN", JSON.stringify({ scanned: leak.scanned, matched: leak.matched }));

@@ -15,6 +15,7 @@ import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Viewport } from "@babylonjs/core/Maths/math.viewport";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
 import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
@@ -71,11 +72,22 @@ import { instantiatePrimitive } from "./render";
  * (production build without the query) this hook is a no-op and adds nothing.
  */
 
-/** Subtle warm emissive accent applied to interactable world objects. */
-const INTERACTABLE_EMISSIVE = new Color3(0.16, 0.13, 0.05);
+/**
+ * Subtle warm emissive accent applied to interactable world objects — the
+ * at-rest click affordance (Phase 15: slightly brighter than Phase 8 so
+ * evidence reads as interactive without hovering).
+ */
+const INTERACTABLE_EMISSIVE = new Color3(0.2, 0.16, 0.07);
 
 /** Brighter emissive used while the pointer hovers an interactable object. */
-const HOVER_EMISSIVE = new Color3(0.34, 0.3, 0.2);
+const HOVER_EMISSIVE = new Color3(0.42, 0.37, 0.24);
+
+/**
+ * Brightest emissive: the persistent focus indication of the CURRENTLY
+ * SELECTED object (the evidence panel is open for it) — it survives hover
+ * changes so the judge always sees which object the panel belongs to.
+ */
+const SELECTED_EMISSIVE = new Color3(0.6, 0.54, 0.3);
 
 /** Dim specular color — keeps every material looking cast/matte, not glossy. */
 const MATTE_SPECULAR = new Color3(0.1, 0.1, 0.1);
@@ -128,6 +140,21 @@ export interface InvestigationSceneHandle {
   dispose: () => void;
   setObjectHighlight(objectId: string, on: boolean): void;
   isObjectHighlighted(objectId: string): boolean;
+  /**
+   * Persistent SELECTED-object focus (Phase 15): emissive + ring stay on the
+   * object while it is selected (the evidence panel for it is open) even when
+   * the pointer moves elsewhere. Pass null to clear. Singleton selection.
+   */
+  setObjectSelected(objectId: string | null): void;
+  /** The currently selected object id, or null. */
+  getSelectedObjectId(): string | null;
+  /**
+   * Project a world point of an object onto the canvas as FRACTIONS (0..1) of
+   * the canvas width/height (top-left origin). Returns null when the object is
+   * not in the scene, is behind the camera, or the projection is unreliable.
+   * Used by the discovered-object floating captions (Phase 15).
+   */
+  projectObjectPoint(objectId: string, localOffset: { x: number; y: number; z: number }): { x: number; y: number } | null;
 }
 
 export type CreateInvestigationSceneResult =
@@ -160,6 +187,8 @@ export function createInvestigationScene(
   const highlights = new Set<string>();
   const interactables = new Map<string, { mesh: Mesh; ring: Mesh | null }>();
   let hoveredId: string | null = null;
+  // Phase 15: at most one selected object at a time (the evidence-panel owner).
+  let selectedId: string | null = null;
 
   try {
     const engine = options.createEngine
@@ -273,16 +302,19 @@ export function createInvestigationScene(
     refreshPickingState();
 
     const clearHover = () => {
-      if (hoveredId !== null) {
-        const entry = interactables.get(hoveredId);
-        if (entry) {
-          setMeshEmissive(entry.mesh, INTERACTABLE_EMISSIVE);
-          if (entry.ring) entry.ring.isVisible = false;
-        }
-        trySetCursor(canvas, "");
-        options.onHoverEnd?.(hoveredId);
-        hoveredId = null;
+      if (hoveredId === null) return;
+      const leavingId = hoveredId;
+      hoveredId = null; // clear BEFORE re-applying emissive so selection wins
+      const entry = interactables.get(leavingId);
+      if (entry) {
+        // Phase 15: returning from hover re-applies the SELECTED emissive
+        // when the object is the current evidence-panel owner, and the ring
+        // stays visible for the selection.
+        applyFocusEmissive(leavingId);
+        if (entry.ring) entry.ring.isVisible = leavingId === selectedId; // keep selection ring
       }
+      trySetCursor(canvas, "");
+      options.onHoverEnd?.(leavingId);
     };
 
     const applyHover = (objectId: string | null, origin?: { x: number; y: number }) => {
@@ -293,9 +325,25 @@ export function createInvestigationScene(
       if (!entry) return;
       hoveredId = objectId;
       setMeshEmissive(entry.mesh, HOVER_EMISSIVE);
-      if (entry.ring) entry.ring.isVisible = true;
+      if (entry.ring) entry.ring.isVisible = true; // hover ring (also for selection)
       trySetCursor(canvas, "pointer");
       options.onHoverStart?.(objectId, origin);
+    };
+
+    /**
+     * Deterministic emissive state for one interactable. Priority:
+     * hover (immediate pointer signal) > selected (persistent panel focus) > rest.
+     */
+    const applyFocusEmissive = (objectId: string): void => {
+      const entry = interactables.get(objectId);
+      if (!entry) return;
+      if (objectId === hoveredId) {
+        setMeshEmissive(entry.mesh, HOVER_EMISSIVE);
+      } else if (objectId === selectedId) {
+        setMeshEmissive(entry.mesh, SELECTED_EMISSIVE);
+      } else {
+        setMeshEmissive(entry.mesh, INTERACTABLE_EMISSIVE);
+      }
     };
 
     // Picking: resolve the picked mesh (any composite child or the root)
@@ -403,6 +451,58 @@ export function createInvestigationScene(
         }
       },
       isObjectHighlighted: (objectId: string) => highlights.has(objectId),
+      setObjectSelected: (objectId: string | null) => {
+        if (objectId === selectedId) return;
+        const previousId = selectedId;
+        selectedId = objectId;
+        // Clear the previous selection's persistent focus first.
+        if (previousId !== null) {
+          const previous = interactables.get(previousId);
+          if (previous) {
+            applyFocusEmissive(previousId);
+            // The ring stays only while the pointer is still on this object.
+            if (previous.ring) previous.ring.isVisible = previousId === hoveredId;
+          }
+        }
+        if (objectId !== null) {
+          const entry = interactables.get(objectId);
+          if (entry) {
+            applyFocusEmissive(objectId); // hover priority, else SELECTED
+            if (entry.ring) entry.ring.isVisible = true;
+          }
+        }
+      },
+      getSelectedObjectId: () => selectedId,
+      projectObjectPoint: (objectId: string, localOffset: { x: number; y: number; z: number }) => {
+        const root = scene.getNodeByName(meshNameFor(objectId)) as Mesh | null;
+        if (!root) return null;
+        try {
+          const localPoint = new Vector3(localOffset.x, localOffset.y, localOffset.z);
+          const worldMatrix = root.getWorldMatrix();
+          // The world-space point (for the behind-camera check) and the LOCAL
+          // point (for Vector3.Project, which applies the world matrix itself).
+          const worldPoint = Vector3.TransformCoordinates(localPoint, worldMatrix);
+          const camera = scene.activeCamera;
+          if (camera) {
+            // Reject points behind the camera (their projection can be misleading).
+            const toObject = worldPoint.subtract(camera.globalPosition);
+            if (Vector3.Dot(camera.getDirection(new Vector3(0, 0, 1)), toObject) < 0) return null;
+          }
+          const viewport = new Viewport(0, 0, 1, 1);
+          const projected = Vector3.Project(
+            localPoint,
+            worldMatrix,
+            scene.getTransformMatrix(),
+            viewport,
+          );
+          if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) return null;
+          if (projected.z <= 0 || projected.z > 1) return null; // at/behind or beyond the far plane
+          if (projected.x < 0 || projected.x > 1 || projected.y < 0 || projected.y > 1) return null;
+          return { x: projected.x, y: projected.y };
+        } catch {
+          return null;
+        }
+      },
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -417,6 +517,12 @@ function instantiateWorldObject(scene: Scene, obj: SceneWorldObject): Mesh {
   const root = new Mesh(name, scene);
   root.position = new Vector3(obj.position.x, obj.position.y, obj.position.z);
   root.rotation = new Vector3(obj.rotation.x, obj.rotation.y, obj.rotation.z);
+  // Phase 15 Track B: evidence in the larger kits renders at the deterministic
+  // legibility factor (children + invisible hitbox scale with the root; the
+  // apartment kit and all non-evidence objects keep scaling 1).
+  if (obj.renderScale !== 1) {
+    root.scaling = new Vector3(obj.renderScale, obj.renderScale, obj.renderScale);
+  }
 
   // Phase 12/13 Track B: parts come from FOUR deterministic sources, applied
   // in precedence order:
@@ -607,22 +713,33 @@ function setMeshEmissive(mesh: Mesh, color: Color3): void {
   }
 }
 
-/** A flat ring under an interactable object, hidden until the pointer hovers it. */
+/**
+ * A flat ring under an interactable object, hidden until the pointer hovers
+ * it (or the object is the current evidence-panel selection). The ring
+ * follows the object's RENDERED footprint (renderScale-aware, Phase 15).
+ */
 function makeHighlightRing(scene: Scene, obj: SceneWorldObject): Mesh | null {
   try {
+    const k = obj.renderScale;
     const ring = MeshBuilder.CreateTorus(
       `${RING_NAME_PREFIX}${obj.objectId}`,
       {
-        diameter: Math.max(obj.scale.x, obj.scale.z) + 0.35,
-        thickness: 0.05,
+        diameter: Math.max(obj.scale.x, obj.scale.z) * k + 0.35,
+        thickness: 0.06,
         tessellation: 24,
       },
       scene,
     );
-    ring.position = new Vector3(obj.position.x, obj.position.y - obj.scale.y / 2 - 0.03, obj.position.z);
+    ring.position = new Vector3(
+      obj.position.x,
+      obj.position.y - (obj.scale.y * k) / 2 - 0.03,
+      obj.position.z,
+    );
     const material = new StandardMaterial(`${RING_NAME_PREFIX}${obj.objectId}_material`, scene);
-    material.diffuseColor = new Color3(0.9, 0.75, 0.35);
+    material.diffuseColor = new Color3(1.0, 0.83, 0.4);
     material.specularColor = MATTE_SPECULAR;
+    // Subtle emissive so the ring reads clearly even on dark floors.
+    material.emissiveColor = new Color3(0.7, 0.55, 0.24);
     ring.material = material;
     ring.isVisible = false;
     return ring;

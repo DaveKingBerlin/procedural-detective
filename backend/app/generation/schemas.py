@@ -40,6 +40,12 @@ MAX_TRAVEL_TIME_SECONDS = 86400 * 7  # one week
 MAX_OBSERVATION_UNCERTAINTY_SECONDS = 86400 * 2
 MAX_ACCUSATION_TOLERANCE_SECONDS = 86400 * 30
 
+# ADV-153 — bounded player-safe composition notes (mirror of the composer's
+# MAX_COMPOSITION_NOTES / MAX_COMPOSITION_NOTE_LENGTH; pinned here so a
+# hand-built draft can never carry more/longer notes than the composer emits).
+MAX_DRAFT_COMPOSITION_NOTES = 3
+MAX_DRAFT_COMPOSITION_NOTE_CHARS = 120
+
 _OPTIONAL_AFFORDANCES: frozenset[str] = frozenset(
     {"POTENTIAL_SHARP_WEAPON", "POTENTIAL_BLUNT_WEAPON", "POTENTIAL_POISON"}
 )
@@ -449,7 +455,15 @@ class EvidenceSetSpec:
 
 @dataclass(frozen=True)
 class GeneratedDraft:
-    """The fully assembled generated draft (REPAIR stage output)."""
+    """The fully assembled generated draft (REPAIR stage output).
+
+    ``composition_notes`` (ADV-153) is the player-safe, bounded warning tuple
+    the world composer exposes when DECORATIVE unseen objects were left out of
+    the world (max ``MAX_DRAFT_COMPOSITION_NOTES`` entries, each bounded to
+    ``MAX_DRAFT_COMPOSITION_NOTE_CHARS``). Set by the generation service from
+    ``WorldComposition.composition_notes``; the strict parser NEVER accepts it
+    from a provider document (it is service-owned, applied after validation).
+    """
 
     crime: CrimeSpec
     persons: tuple[PersonSpec, ...] = ()
@@ -460,6 +474,7 @@ class GeneratedDraft:
     scene: SceneSpec | None = None
     evidence: tuple[EvidenceSpec, ...] = ()
     world_graph: WorldGraphSpec = field(default_factory=WorldGraphSpec)
+    composition_notes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.crime, CrimeSpec):
@@ -484,6 +499,22 @@ class GeneratedDraft:
             raise ValueError("GeneratedDraft.scene must be a SceneSpec or None")
         if not isinstance(self.world_graph, WorldGraphSpec):
             raise ValueError("GeneratedDraft.world_graph must be a WorldGraphSpec")
+        object.__setattr__(self, "composition_notes", tuple(self.composition_notes))
+        if len(self.composition_notes) > MAX_DRAFT_COMPOSITION_NOTES:
+            raise ValueError(
+                f"GeneratedDraft.composition_notes exceeds the maximum of "
+                f"{MAX_DRAFT_COMPOSITION_NOTES} entries"
+            )
+        for note in self.composition_notes:
+            if not isinstance(note, str) or not note:
+                raise ValueError(
+                    "GeneratedDraft.composition_notes must contain non-empty strings"
+                )
+            if len(note) > MAX_DRAFT_COMPOSITION_NOTE_CHARS:
+                raise ValueError(
+                    f"GeneratedDraft.composition_notes entries exceed "
+                    f"{MAX_DRAFT_COMPOSITION_NOTE_CHARS} characters"
+                )
 
 
 # The per-stage return value of ``parse_stage`` (REPAIR stage returns the full

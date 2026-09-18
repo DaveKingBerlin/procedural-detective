@@ -58,6 +58,20 @@ MAX_CAPABILITIES = 8
 MAX_VARIANT_PARAMS = 16  # one per Phase 12 VARIANT_PARAM_KINDS is enough; headroom
 MAX_STRING_LENGTH = 120  # every other free-form string (hints/tags/values)
 
+# Phase 14_5 — the frozen criticality vocabulary of an ObjectRequest. A
+# REQUESTED (crime-critical) object must never silently disappear or be
+# substituted with a semantically-incorrect catalog asset: the world composer
+# records ``world.unresolved-object`` and the generation lifecycle repairs or
+# fails publication. A DECORATIVE object may degrade gracefully.
+# Documented classification rule (applied by ``app.world.extract``): a prompt
+# noun is REQUIRED when it appears in the locked-constraint weapon field or in
+# "tool|weapon|used|killed|with"-adjacent context that arcs the CASE story
+# (the weapon the killer is described as using); every other unseen noun is
+# DECORATIVE.
+CRITICALITY_REQUIRED = "required"
+CRITICALITY_DECORATIVE = "decorative"
+CRITICALITY_ALLOWED: tuple[str, ...] = (CRITICALITY_REQUIRED, CRITICALITY_DECORATIVE)
+
 # The six documented relation kinds (bounded semantic relations only).
 RELATION_KINDS: tuple[str, ...] = (
     "on_desk",
@@ -166,6 +180,13 @@ class ObjectRequest:
     safe strings (allowlist-validated later by the variant machinery) or finite
     numbers. The composer passes the dict form to
     ``app.assets.resolver.resolve_with_variant``.
+
+    ``criticality`` (Phase 14_5) is the frozen REQUIRED/DECORATIVE label of a
+    prompt-derived unseen object (see ``CRITICALITY_ALLOWED``). Hand-built
+    requests default to DECORATIVE so legacy callers keep the degradable
+    behavior; the extractor sets REQUIRED for weapon/locked-constraint-context
+    objects and the generation lifecycle treats an unresolvable REQUIRED object
+    as a recoverable/terminal world failure (never a silent drop).
     """
 
     requested_name: str
@@ -176,6 +197,7 @@ class ObjectRequest:
     evidence_id: str | None = None
     required_evidence_capabilities: tuple[str, ...] = ()
     variant_params: tuple[tuple[str, Any], ...] = ()
+    criticality: str = CRITICALITY_DECORATIVE
 
     def __post_init__(self) -> None:
         issues = object_request_issues(self)
@@ -258,6 +280,11 @@ def object_request_issues(request: ObjectRequest) -> tuple[str, ...]:
                 issues.extend(safe_string_issues(value, f"{where}.value"))
             elif isinstance(value, float) and not math.isfinite(value):
                 issues.append(f"{where}.value: must be a finite number")
+    if request.criticality not in CRITICALITY_ALLOWED:
+        issues.append(
+            f"criticality {request.criticality!r} is not in the allowed "
+            f"vocabulary {list(CRITICALITY_ALLOWED)!r}"
+        )
     return tuple(sorted(set(issues)))
 
 
@@ -371,6 +398,9 @@ def world_requirements_issues(requirements: WorldRequirements) -> tuple[str, ...
 
 
 __all__ = [
+    "CRITICALITY_ALLOWED",
+    "CRITICALITY_DECORATIVE",
+    "CRITICALITY_REQUIRED",
     "MAX_CAPABILITIES",
     "MAX_OBJECT_REQUESTS",
     "MAX_RELATIONS",

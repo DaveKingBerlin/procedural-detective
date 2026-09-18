@@ -143,3 +143,7 @@ class PublicCaseResponse(BaseModel):
     travelRules: list[TravelRuleDTO] = Field(default_factory=list)
     evidence: list[EvidenceDTO] = Field(default_factory=list)
     worldGraph: WorldGraphDTO = Field(default_factory=WorldGraphDTO)
+    # ADV-153 — player-safe bounded composition notes (sanitized "left out"
+    # warnings for decorative unseen objects; browser surface). Bounded: at
+    # most MAX_DRAFT_COMPOSITION_NOTES, each <= MAX_DRAFT_COMPOSITION_NOTE_CHARS.
+    compositionNotes: list[str] = Field(default_factory=list)

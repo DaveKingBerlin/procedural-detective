@@ -39,6 +39,7 @@ PUBLIC_CASE_KEYS = {
     "travelRules",
     "evidence",
     "worldGraph",
+    "compositionNotes",  # ADV-153: player-safe bounded notes (browser seam)
 }
 
 

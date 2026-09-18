@@ -29,7 +29,11 @@ from app.world.composer import (  # noqa: E402
     compose_world,
 )
 from app.world.extract import extract_world_requirements  # noqa: E402
-from app.world.requirements import ObjectRequest, WorldRequirements  # noqa: E402
+from app.world.requirements import (  # noqa: E402
+    CRITICALITY_REQUIRED,
+    ObjectRequest,
+    WorldRequirements,
+)
 
 from fixtures.world_showcase import (  # noqa: E402
     SHOWCASE_EXPECTED,
@@ -213,18 +217,39 @@ def test_unknown_but_valid_object_goes_through_procedural_builder():
     assert all(p.generated_definition is not None for p in composition.placements if p.asset_id.startswith("proc."))
 
 
-def test_unresolvable_object_is_a_structured_world_issue():
+def test_unresolvable_decorative_object_is_a_sanitized_note_not_a_roadblock():
+    # ADV-153: a DECORATIVE unseen object that cannot be generated is LEFT OUT
+    # with a player-safe bounded note — the rest of the world still composes
+    # (never a blocking issue, never a silent wrong substitution).
     world_reqs = WorldRequirements(
         objects=(ObjectRequest(requested_name="quantum woggle"),)
     )
     composition = _compose(world_reqs, "office")
-    assert composition.issues
-    assert any("world.unresolved-object" in issue for issue in composition.issues)
-    # sanitized: no prompt echo, no paths, no internals
-    combined = " ".join(composition.issues)
-    assert "quantum woggle" in combined  # the (already-safe) request name
-    assert "http" not in combined and "/" not in combined
-    assert "\\" not in combined and ".." not in combined
+    assert composition.issues == ()
+    assert composition.composition_notes
+    note = composition.composition_notes[0]
+    assert "quantum woggle" in note  # the (already-safe) noun itself only
+    assert note.startswith("the '")
+    assert note.endswith("- it was left out")
+    # sanitized: no prompt echo beyond the noun, no paths, no internals
+    assert "http" not in note and "/" not in note
+    assert "\\" not in note and ".." not in note
+    # REQUIRED/CRITICAL unresolved KEEPS the blocking world issue (the
+    # generation lifecycle repairs it or fails publication — never dropped)
+    required = _compose(
+        WorldRequirements(
+            objects=(
+                ObjectRequest(
+                    requested_name="quantum woggle", criticality=CRITICALITY_REQUIRED
+                ),
+            )
+        ),
+        "office",
+    )
+    assert required.issues
+    assert any("world.unresolved-object" in issue for issue in required.issues)
+    assert required.composition_notes == ()
+
     # requirement: KNOWN-UNSAFE requests are never composed into an asset
     unsafe_reqs = WorldRequirements(
         objects=(),

@@ -3,10 +3,9 @@ import type { APIRequestContext, Page } from "@playwright/test";
 
 /**
  * QA-owned shared helpers for the Playwright suite. The QA backend is
- * started OUTSIDE Playwright via tools/process_guard; Phase 14 gates run it
- * on :8010 because the environment's demo-launcher process occupies :8000
- * (holding the repo-root scratch DB lock; per QA boundary it is left
- * untouched). All assertions are port-agnostic.
+ * started OUTSIDE Playwright via tools/process_guard on :8000 (fresh
+ * migrated scratch DB) and vite preview serves dist/ on :4173. All
+ * assertions are port-agnostic.
  *
  * - `createPlaythroughViaApi` drives the public backend API exactly like the
  *   HOME "Start an investigation" entry would receive them (session -> case ->
@@ -18,7 +17,7 @@ import type { APIRequestContext, Page } from "@playwright/test";
  *   matched bodies (Phase 6 Q network-leak proof).
  */
 
-export const BACKEND_BASE = "http://localhost:8010";
+export const BACKEND_BASE = "http://localhost:8000";
 
 /** Forbidden pre-reveal key paths (REQUIREMENTS 41.4 + Phase 6 Q). */
 export const FORBIDDEN_KEY_PATHS = [

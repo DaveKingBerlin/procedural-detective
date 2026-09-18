@@ -143,10 +143,26 @@ def test_antique_phrase_is_not_shadowed_by_letter_opener():
 
 
 def test_unknown_nouns_are_ignored_never_invented():
+    # Phase 14_5: genuinely UNSEEN object nouns DO become bounded
+    # ObjectRequirements, but NON-NOUN words (determiners/verbs/gerunds/generic
+    # case words/gibberish that is not a concrete English noun) are filtered by
+    # the documented bounded stop/non-noun heuristics — never invented.
     extracted = _extract(
         "A quantum woggle and a zzorp were observed near the evidence."
     )
     assert extracted.objects == ()
+    gerunds = _extract(
+        "A purple jumping was seen and the walking stopped near a leading."
+    )
+    assert gerunds.objects == ()
+    # ... whereas a REAL unseen noun phrase becomes a bounded requirement
+    unseen = _extract(
+        "An unusual forensic sample press was found in the office."
+    )
+    names = {request.requested_name for request in unseen.objects}
+    assert "unusual forensic sample press" in names
+    request = next(r for r in unseen.objects if r.requested_name == "unusual forensic sample press")
+    assert request.criticality == "decorative"  # no weapon context -> decorative
 
 
 # --------------------------------------------------------------------------- #

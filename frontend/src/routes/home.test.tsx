@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
+import { APP_PROVIDER_MODE, providerQualifier } from "../journey/providerMode";
 import Home from "./home";
 
 /**
@@ -36,6 +37,28 @@ describe("landing page", () => {
   it("renders the Try Demo Case action with no external navigation", () => {
     expect(html).toContain('data-testid="try-demo"');
     expect(html).toContain("Try Demo Case");
+  });
+
+  it("labels the demo path as deterministic / zero-cost / no API keys (Phase 15)", () => {
+    expect(html).toContain('data-testid="try-demo-note"');
+    expect(html).toContain("Deterministic demo — no API keys, no cost.");
+  });
+
+  it("renders the honest provider qualifier near the primary CTA (ADV-152)", () => {
+    // The qualifier is app-level + mode-aware: the rendered wording is exactly
+    // what the providerMode module produces for the CURRENT build mode (default
+    // fake -> honest deterministic-demo wording; the live wording is pinned in
+    // providerMode.test.ts). The REQUIREMENTS §62 tagline stays verbatim above it.
+    expect(html).toContain("Describe a crime. AI builds a logically solvable 3D investigation.");
+    expect(html).toContain('data-testid="provider-qualifier"');
+    expect(html).toContain(providerQualifier(APP_PROVIDER_MODE));
+  });
+
+  it("renders the Generate a New Mystery path to /new with an honest provider note (Phase 15)", () => {
+    expect(html).toMatch(/data-testid="generate-new-mystery"[^>]*href="\/new"/);
+    expect(html).toContain("Generate a New Mystery");
+    // Default fake build: the note must NOT claim live-AI behavior.
+    expect(html).toContain("uses the built-in deterministic generator in this demo build");
   });
 
   it("explains the AI-native value proposition in three bullets", () => {

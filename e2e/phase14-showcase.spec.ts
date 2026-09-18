@@ -32,18 +32,13 @@ import { installLeakListener, scanJsonBody, seedPlaythroughCredentials } from ".
  *  6. every session: leak scan 0 truth, 0 console/page errors, 0 failed
  *     resources, 0 external traffic.
  *
- * Server topology of THIS gate (documented deviation): the demo-launcher
- * process left from the environment occupies :8000 serving STALE pre-Phase-14
- * code with no CORS for :4173 and holding the repo-root scratch DB lock. Per
- * the QA boundary ("do NOT kill processes") it is left untouched. The QA
- * stack therefore runs: backend :8010 (FRESH migrated scratch DB,
+ * Server topology of THIS gate: backend :8000 (FRESH migrated scratch DB,
  * CORS_ALLOWED_ORIGINS=http://localhost:4173,http://localhost:5173, via
- * tools/process_guard) + a QA production build (VITE_API_BASE_URL=http://
- * localhost:8010) served by vite preview :4173. All assertions are
- * port-agnostic.
+ * tools/process_guard) serving the REAL public API + a QA production build
+ * served by vite preview :4173. All assertions are port-agnostic.
  */
 
-const BACKEND_BASE = "http://localhost:8010";
+const BACKEND_BASE = "http://localhost:8000";
 
 interface Kit {
   key: string;
@@ -156,7 +151,7 @@ function installSessionObservers(page: Page): SessionReport {
     const method = request.method();
     if (url.startsWith("http:") || url.startsWith("https:")) {
       const from = new URL(url);
-      if (!(from.hostname === "localhost" && (from.port === "4173" || from.port === "8010"))) {
+      if (!(from.hostname === "localhost" && (from.port === "4173" || from.port === "8000"))) {
         report.external.push({ url, status });
       }
     }
@@ -482,8 +477,21 @@ async function showcaseKit(page: Page, request: APIRequestContext, kit: Kit): Pr
     (id) => DECORATIVE_TONES[id] !== undefined,
   );
   if (decorative) {
-    await page.getByTestId("evidence-close").click().catch(() => {});
+    // Dismiss the toast FIRST (it can overlap the panel's Close button), then
+    // close the panel with a small retry loop — identical contract to the
+    // phase-15 showcase helper; the assertion (panel must close) is unchanged.
     await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
+    const closeButton = page.getByTestId("evidence-close");
+    const panelLocator = page.getByTestId("evidence-panel");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await closeButton.click({ timeout: 3_000 }).catch(() => {});
+      try {
+        await expect(panelLocator).not.toBeVisible({ timeout: 8_000 });
+        break;
+      } catch (closeError) {
+        if (attempt === 2) throw closeError;
+      }
+    }
     await expect(page.getByTestId("evidence-panel")).not.toBeVisible();
     const census = await censusTone(page, decorative, DECORATIVE_TONES[decorative]);
     expect(census.count, `${kit.key}: ${decorative} tone pixels drawn on screen`).toBeGreaterThan(0);
@@ -675,9 +683,16 @@ async function fullLoop(
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await expect(panel).toContainText("Blood on the kitchen knife matches the victim");
   await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
-  const closePanel = page.getByTestId("evidence-close");
-  if (await closePanel.isVisible().catch(() => false)) await closePanel.click();
-  await expect(panel).not.toBeVisible();
+  const closeBtn = page.getByTestId("evidence-close");
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await closeBtn.click({ timeout: 3_000 }).catch(() => {});
+    try {
+      await expect(panel).not.toBeVisible({ timeout: 8_000 });
+      break;
+    } catch (closeError) {
+      if (attempt === 2) throw closeError;
+    }
+  }
 
   const laptop = page.getByTestId("object-apartment_laptop");
   await expect(laptop).toBeVisible({ timeout: 20_000 });
@@ -685,9 +700,16 @@ async function fullLoop(
   await expect(page.getByTestId("discovery-toast")).toBeVisible({ timeout: 15_000 });
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await expect(panel).toContainText("Re: the missing funds");
-  await page.getByTestId("evidence-close").click().catch(() => {});
   await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
-  await expect(panel).not.toBeVisible();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await closeBtn.click({ timeout: 3_000 }).catch(() => {});
+    try {
+      await expect(panel).not.toBeVisible({ timeout: 8_000 });
+      break;
+    } catch (closeError) {
+      if (attempt === 2) throw closeError;
+    }
+  }
   transcript.investigated = ["kitchen_knife", "apartment_laptop"];
 
   // Decorative prompt object click falls back cleanly (office: trophy).

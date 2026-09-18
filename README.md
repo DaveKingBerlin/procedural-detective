@@ -30,6 +30,51 @@ Captured evidence from the Phase 8 demo build (`screenshots/evidence/`):
 - Accusation screen — `screenshots/evidence/phase8-accusation-screen.png`
 - Reveal screen — `screenshots/evidence/phase8-reveal-screen.png`
 
+## Multi-environment / multi-object visuals (Phase 15)
+
+The Asset Oracle ships **five environment kits** — apartment, office, hotel
+suite, warehouse and mansion — each with its own shell, lighting profile,
+camera framing and anchor layout. Different prompts visibly produce different
+worlds with different evidence objects (Phase 14/15 showcase prompts):
+
+- Apartment (golden Sarah/Thomas case): `screenshots/evidence/phase8-apartment-scene.png`
+- Office — `screenshots/evidence/phase11-office-kit.png`, `screenshots/evidence/phase14-office-prompt-world.png`, `screenshots/evidence/phase14-office-reveal.png`
+- Hotel suite — `screenshots/evidence/phase11-hotel-suite-kit.png`
+- Warehouse — `screenshots/evidence/phase11-warehouse-kit.png`, `screenshots/evidence/phase14-warehouse-reveal.png`
+- Mansion — `screenshots/evidence/phase11-mansion-kit.png`, `screenshots/evidence/phase14-mansion-prompt-world.png`
+
+Object diversity beyond the golden knife/laptop:
+
+- Procedurally generated custom trophy: `screenshots/evidence/phase13-generated-object.png`
+- Unseen-weapon procedural evidence: `screenshots/evidence/phase145-unseen-object.png`, `screenshots/evidence/phase145-unseen-panel.png`
+- Critical-object render sheet: `screenshots/evidence/phase12-critical-sheet.png`
+- Judging polish (hover ring, tooltip, selected-object focus):
+  `screenshots/evidence/phase81-hover-tooltip-direct.png`,
+  `screenshots/evidence/phase81-panel-knife.png`,
+  `screenshots/evidence/phase81-knife-opener-both.png`
+
+## The full pipeline (Phase 15)
+
+```text
+Prompt
+→ Truth & story generation
+→ Asset Oracle
+→ Environment + object resolution
+→ Safe procedural asset generation when needed
+→ World composition
+→ Deterministic solvability validation
+→ 3D investigation
+```
+
+A prompt first produces the immutable case truth (with the user's constraints
+locked). The **Asset Oracle** then resolves every requested object and
+environment against the bundled catalog and the five environment kits; when no
+catalog asset is a sensible match it falls back to **safe procedural
+generation** (declarative primitive compositions, no arbitrary geometry or
+scripts). The composed world is validated by a **deterministic solver** that
+proves the case has exactly one solvable answer from the discoverable
+evidence — and only then is it published as a playable 3D investigation.
+
 ## Architecture overview
 
 ```text
@@ -58,7 +103,8 @@ SQLite volume and migrations running automatically on startup.
 ```text
 Prompt
   → CaseTruth (immutable ground truth, user constraints locked)
-  → Evidence / World generation (typed, validated, allowlisted)
+  → Asset Oracle (catalog + environment kit resolution, safe procedural fallback)
+  → World composition (validated, allowlisted)
   → deterministic validation (exactly one provable solution)
   → 3D investigation (Babylon.js scene, discoverable evidence)
   → accusation / reveal
@@ -85,15 +131,31 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-Demo flow: the frontend opens at `http://localhost:5173`. Click **New
-Investigation**, enter any prompt (or the example Sarah Miller case), watch the
-generation progress, then enter the 3D scene, inspect the knife / laptop / email,
-make an accusation (WHO / WHY / WEAPON / WHEN) and reveal the truth.
+Demo flow: the frontend opens at `http://localhost:5173`. Two obvious paths
+(Phase 15 demo mode):
 
+- **Try Demo Case** — deterministic, zero-cost, zero-credentials: runs the
+  shipped showcase case immediately (`Victim: Sarah Miller / Murderer: Thomas
+  Reed / Motive: €240,000 embezzlement / Weapon: Kitchen knife / Time: 22:17 /
+  Witness: Emily Reed`) and is labelled *"Deterministic demo — no API keys, no
+  cost"*.
+- **Generate a New Mystery** — the same generation journey from your own
+  custom prompt (any text, difficulty optional). Watch the generation
+  progress, then enter the 3D scene, inspect evidence, make an accusation
+  (WHO / WHY / WEAPON / WHEN) and reveal the truth.
+
+Both paths hit the exact same `POST /cases → progress → playthrough` journey.
 `GENERATION_PROVIDER=fake` is the default: the deterministic offline demo
 provider answers every prompt with the shipped, fully validated golden case —
 zero credentials, zero cost (`LLM_API_KEY` etc. are placeholders in
-`.env.example`, never real values).
+`.env.example`, never real values). The frontend keeps the UI honest about
+this: the generate path shows *"uses the built-in deterministic generator in
+this demo build"* unless the SPA was built with `VITE_APP_PROVIDER=live`, in
+which case it shows *"Live AI provider"* instead. Plain prompts therefore
+produce the same deterministic case by default — to see genuinely different
+worlds, enable live mode (`GENERATION_PROVIDER=live` + the three credential
+vars) or use the documented showcase prompts in `backend/tests/fixtures/
+world_showcase.py`.
 
 ### Troubleshooting — "Demo errors" / "Try Demo Case fails"
 

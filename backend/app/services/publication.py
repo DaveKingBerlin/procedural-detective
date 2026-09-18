@@ -331,6 +331,14 @@ def public_case_dict_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         ],
         "evidence": _evidence(),
         "worldGraph": world_graph_dto,
+        # ADV-153 — the player-safe bounded composition notes (sanitized
+        # "left out" warnings for decorative unseen objects). Browser seam:
+        # surfaced as a small optional note; never solver input.
+        "compositionNotes": [
+            str(note)
+            for note in (draft.get("composition_notes") or ())
+            if isinstance(note, str) and note
+        ],
     }
 
 

@@ -24,7 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.generation.pipeline import normalize_prompt  # noqa: E402
 from app.generation.state_machine import GenerationState  # noqa: E402
-from app.world.requirements import ObjectRequest, WorldRequirements  # noqa: E402
+from app.world.requirements import (  # noqa: E402
+    CRITICALITY_REQUIRED,
+    ObjectRequest,
+    WorldRequirements,
+)
 
 from fixtures.golden_generation import GOLDEN_LOCKED  # noqa: E402
 from phase5_helpers import (  # noqa: E402
@@ -90,8 +94,15 @@ def test_repair_resolves_unresolved_object_and_publishes_keeping_locks(
     assert record.state is GenerationState.PUBLISHED
     locked_before = record.published.locked
 
+    # ADV-153: a REQUIRED (CRIME-CRITICAL) unresolved object keeps the
+    # blocking world issue -> the repair provider is consulted and the FULL
+    # validation pipeline re-runs (decorative objects never reach this path).
     crafted = WorldRequirements(
-        objects=(ObjectRequest(requested_name="quantum woggle"),)
+        objects=(
+            ObjectRequest(
+                requested_name="quantum woggle", criticality=CRITICALITY_REQUIRED
+            ),
+        )
     )
     ok = service._apply_kit_composition(record, "apartment", crafted, None)
     assert ok is True
@@ -149,7 +160,10 @@ def test_repair_removes_invalid_evidence_placement_and_publishes(database_url):
     assert any("world.invalid-placement" in i or "world.unreachable-evidence" in i for i in diagnostics)
 
 
-def test_repair_without_provider_degrades_but_never_crashes(database_url):
+def test_decorative_unresolved_without_provider_publishes_with_note(database_url):
+    """ADV-153: a DECORATIVE unseen object without a resolving provider NEVER
+    degrades the whole composition — it is left out with a player-safe note and
+    the rest of the world publishes (never a crash, never a FAILED)."""
     from app.persistence.store import Store
 
     store, service = _service_ctx(database_url, world_repair_provider=None)
@@ -158,9 +172,14 @@ def test_repair_without_provider_degrades_but_never_crashes(database_url):
         objects=(ObjectRequest(requested_name="quantum woggle"),)
     )
     ok = service._apply_kit_composition(record, "apartment", crafted, None)
-    assert ok is False  # documented degradation, never a crash
+    assert ok is True  # the composition publishes (nothing blocking)
     assert record.state is GenerationState.PUBLISHED
     assert record.published.draft.scene.environment_id == "apartment"
+    # the world carries the sanitized bounded note; the woggle is NOT placed
+    notes = tuple(record.published.draft.composition_notes)
+    assert notes, "a decorative-unresolved object must produce a note"
+    assert "quantum woggle" in notes[0]
+    assert all("woggle" not in p.object_id for p in record.published.draft.world_graph.placements)
 
 
 # --------------------------------------------------------------------------- #
@@ -208,7 +227,11 @@ def test_world_repair_never_receives_locked_constraints(database_url):
     )
     _published, record, _session_id, _clock = _held_record(database_url, store)
     crafted = WorldRequirements(
-        objects=(ObjectRequest(requested_name="quantum woggle"),)
+        objects=(
+            ObjectRequest(
+                requested_name="quantum woggle", criticality=CRITICALITY_REQUIRED
+            ),
+        )
     )
     service._apply_kit_composition(record, "apartment", crafted, None)
     diagnostics = service._world_repair_provider.calls[0]

@@ -7,7 +7,7 @@ import type {
   PlaythroughLifecycleState,
   PlayerKnowledgeDTO,
 } from "../api/types";
-import { buildInvestigationScene, type InvestigationSceneModel } from "./buildInvestigationScene";
+import { buildInvestigationScene, applyKnowledgeToSceneModel, type InvestigationSceneModel } from "./buildInvestigationScene";
 import type { CreateInvestigationSceneResult, InvestigationSceneHandle } from "./renderInvestigation";
 import { ValidationError } from "./validation";
 
@@ -187,6 +187,9 @@ export class InvestigationSession {
     };
     this.lifecycleStateValue = bootstrap.state;
     this.model = model;
+    // DEF-072 invariant: the scene-model flags ALWAYS mirror the knowledge
+    // snapshot — the bootstrap DTO flags define the same sets at start.
+    this.syncSceneModelKnowledge();
     return { ok: true, model };
   }
 
@@ -264,6 +267,19 @@ export class InvestigationSession {
       ...this.knowledge,
       discoveredEvidenceIds: sortedUnique([...this.knowledge.discoveredEvidenceIds, discovery.evidenceId]),
     };
+    // DEF-072: the same server-derived knowledge that drives the summary strip
+    // now flips the world-object flags/captions immediately (no reload needed).
+    this.syncSceneModelKnowledge();
+  }
+
+  /**
+   * DEF-072 — re-derive the scene-model entity flags from the current
+   * server-authoritative knowledge snapshot. Deterministic, idempotent and
+   * reference-stable: unchanged world objects keep their object identity.
+   */
+  private syncSceneModelKnowledge(): void {
+    if (this.model === null || this.knowledge === null) return;
+    this.model = applyKnowledgeToSceneModel(this.model, this.knowledge);
   }
 
   /** Read a discovered record, caching the player-safe DTO; null when unreadable. */
@@ -278,6 +294,9 @@ export class InvestigationSession {
           ...this.knowledge,
           readEvidenceIds: sortedUnique([...this.knowledge.readEvidenceIds, recordId]),
         };
+        // DEF-072: a completed read flips the model's `read` flag immediately
+        // (the object list "· read" marker + summary strip stay in lockstep).
+        this.syncSceneModelKnowledge();
       }
       return record;
     } catch {

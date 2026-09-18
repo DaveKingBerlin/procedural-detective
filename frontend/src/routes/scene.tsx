@@ -20,8 +20,13 @@ import {
   type InvestigationErrorKind,
   type SessionToast,
 } from "../scene/investigationFlow";
+import {
+  discoveredCaptionsForWorld,
+  type ObjectCaptionModel,
+} from "../scene/objectCaption";
 import { tooltipForHover, type ObjectTooltipModel } from "../scene/objectTooltip";
 import { createInvestigationScene } from "../scene/renderInvestigation";
+import type { InvestigationSceneHandle } from "../scene/renderInvestigation";
 
 type PageStatus =
   | { status: "loading" }
@@ -49,6 +54,7 @@ export default function ScenePage() {
   const navigate = useNavigate();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sessionRef = useRef<InvestigationSession | null>(null);
+  const sceneHandleRef = useRef<InvestigationSceneHandle | null>(null);
   const [status, setStatus] = useState<PageStatus>(() =>
     hasStoredCredential() ? { status: "loading" } : { status: "no-token" },
   );
@@ -61,6 +67,18 @@ export default function ScenePage() {
   const [sceneStatus, setSceneStatus] = useState<"idle" | "ready" | "failed">("idle");
   const [hintsHidden, setHintsHidden] = useState(false);
   const [hasInteracted, setHasInteracted] = useState(false);
+  /**
+   * Phase 15 Track B — the currently selected world object (the one whose
+   * evidence panel is open): its 3D emissive/ring persists until the panel
+   * closes, and the object-list button shows the focus state.
+   */
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+  /**
+   * Projected caption positions for DISCOVERED evidence (fractions of the
+   * canvas, from the live Babylon camera via projectObjectPoint). At most one
+   * setState per poll when positions actually moved.
+   */
+  const [captionPos, setCaptionPos] = useState<Readonly<Record<string, { x: number; y: number }>>>({});
 
   const retry = () => {
     setRunId((n) => n + 1);
@@ -69,18 +87,37 @@ export default function ScenePage() {
   const resetCredential = () => {
     clearPlaythroughCredentials();
     sessionRef.current = null;
+    sceneHandleRef.current = null;
     setToast(null);
     setRecordPanel(null);
     setPanelContext(null);
     setTooltip(null);
     setInteractionError(null);
     setHasInteracted(false);
+    setSelectedObjectId(null);
+    setCaptionPos({});
     setStatus({ status: "no-token" });
   };
 
   const applyFeedback = (feedback: InteractionFeedback) => {
     if (feedback.toast !== null && feedback.error === null) {
       setHasInteracted(true);
+    }
+    // DEF-072: after every server-confirmed interaction (discovery OR read) the
+    // session has merged the returned knowledge (discoveredEvidenceIds /
+    // readEvidenceIds) into its scene model — re-sync it into React state so
+    // the object-list markers and the discovered-only caption overlay flip
+    // IMMEDIATELY (no reload needed). The flags stay server-authoritative:
+    // knowledge only ever grows with ids the server returned, and the reused
+    // model reference makes no-change cases (already-discovered, decorative
+    // objects) cheap no-ops. Feedback errors never touch knowledge and skip.
+    const session = sessionRef.current;
+    if (feedback.error === null) {
+      setStatus((prev) =>
+        prev.status === "ready" && session?.sceneModel != null
+          ? { ...prev, model: session.sceneModel }
+          : prev,
+      );
     }
     setToast(feedback.toast);
     setRecordPanel(feedback.record);
@@ -89,8 +126,19 @@ export default function ScenePage() {
     // object context (registry label + color) so the panel can identify the
     // selected object and show its small-evidence preview (Phase 8_1 D).
     if (feedback.record !== null) {
-      setPanelContext(evidencePreviewFor(sessionRef.current?.sceneModel ?? null, feedback.objectId) ?? null);
+      setPanelContext(evidencePreviewFor(session?.sceneModel ?? null, feedback.objectId) ?? null);
+      // Phase 15: persistent selected-object focus (3D emissive/ring + list).
+      setSelectedObjectId(feedback.objectId);
+      sceneHandleRef.current?.setObjectSelected(feedback.objectId);
     }
+  };
+
+  /** Close the evidence panel and release the selected-object focus. */
+  const closeRecordPanel = () => {
+    setRecordPanel(null);
+    setPanelContext(null);
+    setSelectedObjectId(null);
+    sceneHandleRef.current?.setObjectSelected(null);
   };
 
   useEffect(() => {
@@ -120,13 +168,16 @@ export default function ScenePage() {
     setTooltip(null);
     setInteractionError(null);
     setSceneStatus("idle");
+    setSelectedObjectId(null);
+    setCaptionPos({});
+    sceneHandleRef.current = null;
 
     const services = { getInvestigation, interactObject, discoverEvidence, readRecord };
     const session = new InvestigationSession(
       services,
       token,
-      (sceneCanvas, model) =>
-        createInvestigationScene(sceneCanvas, model, {
+      (sceneCanvas, model) => {
+        const result = createInvestigationScene(sceneCanvas, model, {
           onPick: (objectId) => {
             void session.interact(objectId).then((feedback) => {
               if (!cancelled) applyFeedback(feedback);
@@ -137,7 +188,10 @@ export default function ScenePage() {
             setTooltip(next ? { ...next, x: origin?.x ?? 0, y: origin?.y ?? 0 } : null);
           },
           onHoverEnd: () => setTooltip(null),
-        }),
+        });
+        if (result.ok) sceneHandleRef.current = result as InvestigationSceneHandle;
+        return result;
+      },
       { playthroughId },
     );
 
@@ -164,6 +218,7 @@ export default function ScenePage() {
       cancelled = true;
       session.disposeScene();
       sessionRef.current = null;
+      sceneHandleRef.current = null;
     };
   }, [runId]);
 
@@ -173,7 +228,7 @@ export default function ScenePage() {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (handleEvidencePanelKey(event.key) === "close") {
         event.preventDefault();
-        setRecordPanel(null);
+        closeRecordPanel();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -204,6 +259,36 @@ export default function ScenePage() {
     hasInteracted || (knowledge != null && knowledge.discoveredEvidenceIds.length > 0);
   const lifecycle = sessionRef.current?.bootstrapState;
 
+  // Phase 15: floating captions for DISCOVERED evidence only. The text comes
+  // from what the player already saw (record titles / public registry labels).
+  const discoveredTitles = new Map((summary?.entries ?? []).map((entry) => [entry.evidenceId, entry.title]));
+  const captions: ObjectCaptionModel[] =
+    status.status === "ready"
+      ? discoveredCaptionsForWorld(status.model.worldObjects, discoveredTitles)
+      : [];
+  const discoveredKey = captions.map((caption) => caption.objectId).join("|");
+
+  // Follow the camera: re-project caption anchors at a low rate (positions
+  // only change while orbiting), and at once when the caption set changes.
+  useEffect(() => {
+    if (status.status !== "ready") return;
+    const handle = sceneHandleRef.current;
+    if (!handle) return;
+    const project = () => {
+      const next: Record<string, { x: number; y: number }> = {};
+      for (const caption of captions) {
+        const point = handle.projectObjectPoint(caption.objectId, { x: 0, y: 0.3, z: 0 });
+        if (point !== null) next[caption.objectId] = point;
+      }
+      setCaptionPos((previous) => (sameCaptionMap(previous, next) ? previous : next));
+    };
+    project();
+    const timer = window.setInterval(project, 400);
+    return () => window.clearInterval(timer);
+    // Dependency note: `captions` is a fresh array every render, but only the
+    // discovery ID set (discoveredKey) changes its projected positions.
+  }, [status.status, runId, discoveredKey]);
+
   return (
     <section className="page scene">
       <h2>Investigation</h2>
@@ -229,6 +314,23 @@ export default function ScenePage() {
               {tooltip.label}
             </div>
           )}
+          {/* Phase 15: floating captions over DISCOVERED evidence only — app-authored
+              plain text (read-record titles / public registry labels). Position is
+              re-projected from the live camera; never interactive. */}
+          {captions.map((caption) => {
+            const pos = captionPos[caption.objectId];
+            if (pos === undefined) return null;
+            return (
+              <div
+                key={caption.objectId}
+                className="object-caption"
+                data-testid={`object-caption-${caption.objectId}`}
+                style={{ left: `${pos.x * 100}%`, top: `${pos.y * 100}%` }}
+              >
+                {caption.text}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -348,6 +450,12 @@ export default function ScenePage() {
                     <button
                       type="button"
                       data-testid={`object-${obj.objectId}`}
+                      className={
+                        obj.objectId === selectedObjectId
+                          ? "scene-object-button scene-object-button--selected"
+                          : "scene-object-button"
+                      }
+                      aria-pressed={obj.objectId === selectedObjectId}
                       onClick={() => handleObjectAction(obj.objectId)}
                     >
                       {obj.label ?? obj.objectId}
@@ -358,7 +466,27 @@ export default function ScenePage() {
                     >
                       {obj.label ?? obj.objectId}
                     </span>
-                    {obj.discovered && <span className="object-discovered"> · discovered</span>}
+                    {obj.discovered && (
+                      <span className="object-discovered" data-testid={`object-discovered-${obj.objectId}`}>
+                        {" "}
+                        · discovered
+                      </span>
+                    )}
+                    {obj.discovered && obj.read && (
+                      <span className="object-discovered" data-testid={`object-read-${obj.objectId}`}>
+                        {" "}
+                        · read
+                      </span>
+                    )}
+                    {obj.discovered && obj.evidenceId !== null && discoveredTitles.has(obj.evidenceId) && (
+                      <span
+                        className="object-label-discovered"
+                        data-testid={`object-discovered-label-${obj.objectId}`}
+                      >
+                        {" "}
+                        — {discoveredTitles.get(obj.evidenceId)}
+                      </span>
+                    )}
                   </li>
                 ) : (
                   <li key={obj.objectId}>
@@ -418,7 +546,7 @@ export default function ScenePage() {
       {recordPanel && (
         <EvidencePanel
           record={recordPanel}
-          onClose={() => setRecordPanel(null)}
+          onClose={closeRecordPanel}
           objectLabel={panelContext?.label ?? null}
           preview={panelContext}
         />
@@ -454,6 +582,22 @@ function NoTokenState() {
   );
 }
 
+/** Shallow content-equality for the caption-position map (avoids re-render churn). */
+function sameCaptionMap(
+  a: Readonly<Record<string, { x: number; y: number }>>,
+  b: Readonly<Record<string, { x: number; y: number }>>,
+): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    const pa = a[key];
+    const pb = b[key];
+    if (pb === undefined || pa.x !== pb.x || pa.y !== pb.y) return false;
+  }
+  return true;
+}
+
 /** Empty summary fallback used before the session starts (never rendered). */
 function emptySummary() {
   return summarizeDiscovery([], [], [], new Map());
@@ -483,5 +627,5 @@ function environmentName(environmentId: string): string {
 function accusationActionLabel(state: string | null | undefined): string {
   if (state === "ACCUSED") return "Your accusation is on file — reveal it";
   if (state === "REVEALED") return "View the case reveal";
-  return "Make accusation";
+  return "Make your accusation";
 }

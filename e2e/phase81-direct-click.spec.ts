@@ -271,6 +271,10 @@ test("Phase 8_1 direct click: real-browser mesh picking -> server-authentic disc
   page,
   request,
 }) => {
+  // The full-canvas hover-scan (coarse + 14px fine fallback over the center
+  // band) plus the pixel-census probes exceed the 90s default on slower
+  // software-WebGL machines; the assertions themselves are unchanged.
+  test.setTimeout(240_000);
   // (d) leak scan over EVERY API response the direct-click session receives
   // (single response reader — see installSessionObservers).
   const net = installSessionObservers(page);

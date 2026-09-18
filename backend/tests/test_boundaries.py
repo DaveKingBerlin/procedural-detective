@@ -399,3 +399,38 @@ def test_api_and_schemas_never_import_domain_validation_or_generation():
             f"{module} must not import domain/validation/generation material "
             f"(found {hits}) — API/DTOs stay schema-only."
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 14_5 boundary addition: the AssetSpecProvider / procedural-asset
+# surface NEVER receives CaseTruth (REQUIREMENT + Phase 14_5 deliverable 2:
+# the provider request carries only the bounded ObjectRequirement surface).
+# ---------------------------------------------------------------------------
+
+
+def test_procedural_asset_modules_never_import_truth_or_case_material():
+    """app.assets (spec provider/oracle/compiler/specs) and the world composer
+    stay free of app.domain.truth — CaseTruth must never reach the provider
+    request construction (import-graph enforcement).
+    """
+    procedural_modules = {
+        "app.assets.spec_provider",
+        "app.assets.oracle",
+        "app.assets.compiler",
+        "app.assets.specs",
+        "app.assets.generated_cache",
+        "app.assets.resolver",
+        "app.world.composer",
+        "app.world.extract",
+        "app.world.requirements",
+    }
+    for module in procedural_modules:
+        path = APP_DIR / (module.replace("app.", "", 1).replace(".", "/") + ".py")
+        package = module.rsplit(".", 1)[0] if "." in module else None
+        targets = _collect_import_targets(path.read_text(encoding="utf-8"), package=package)
+        forbidden = sorted(_truth_targets(targets) | _validation_targets(targets))
+        assert not forbidden, (
+            f"{module} must not import app.domain.truth or app.validation "
+            f"material (found {forbidden}) — the AssetSpecProvider surface is "
+            "bounded to the ObjectRequirement request."
+        )

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
+import { APP_PROVIDER_MODE, providerQualifier } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
 import NewCasePage from "./new";
 
@@ -90,5 +91,29 @@ describe("/new form rendering", () => {
     expect(markup).toContain("Use example prompt");
     expect(markup).toContain('data-testid="try-demo-from-new"');
     expect(markup).toContain("Try the demo case");
+  });
+
+  it("labels the demo path as deterministic / zero-cost / no API keys (Phase 15)", () => {
+    const markup = html();
+    expect(markup).toContain('data-testid="try-demo-note"');
+    expect(markup).toContain("Deterministic demo — no API keys, no cost.");
+  });
+
+  it("emphasises the custom prompt and keeps the generate path provider-honest (Phase 15)", () => {
+    const markup = html();
+    // The form intro is the natural-language prompt emphasising copy.
+    expect(markup).toContain("Write your own detective scenario");
+    // Default fake build: the provider note must not claim live-AI behavior.
+    expect(markup).toContain('data-testid="generate-provider-note"');
+    expect(markup).toContain("uses the built-in deterministic generator in this demo build");
+  });
+
+  it("renders the honest provider qualifier next to the primary CTA (ADV-152)", () => {
+    const markup = html();
+    // Same spot + wording as the landing: mode-aware, driven by providerMode.
+    expect(markup).toContain('data-testid="provider-qualifier"');
+    expect(markup).toContain(providerQualifier(APP_PROVIDER_MODE));
+    // The per-path demo note stays verbatim (additive copy, nothing removed).
+    expect(markup).toContain("Deterministic demo — no API keys, no cost.");
   });
 });

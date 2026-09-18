@@ -8,6 +8,7 @@ import {
   type SceneFactory,
 } from "./investigationFlow";
 import { makeBootstrap, makeEmailRecord, TEST_TOKEN } from "./testFixtures";
+import { discoveredCaptionsForWorld } from "./objectCaption";
 
 /**
  * Phase 6 P frontend coverage that lives at the controller level:
@@ -363,5 +364,95 @@ describe("server-authoritative knowledge", () => {
     session.disposeScene();
     session.disposeScene();
     expect(session.sceneModel).not.toBeNull(); // knowledge/model untouched
+  });
+});
+
+describe("DEF-072 — live world-object flag merge (no reload needed)", () => {
+  it("knife discovery flips its model flag + list/caption derivations WITHOUT a reload", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+    expect(outcome.ok).toBe(true);
+
+    const modelBefore = session.sceneModel!;
+    const knifeBefore = modelBefore.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    expect(knifeBefore.discovered).toBe(false);
+    expect(knifeBefore.read).toBe(false);
+
+    await session.interact("kitchen_knife"); // server confirms discovery + read
+
+    const merged = session.sceneModel!;
+    const knife = merged.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    // model flag (what the object-list marker renders from) flips immediately:
+    expect(knife.discovered).toBe(true);
+    expect(knife.read).toBe(true);
+    // captions derive from the SAME merged model — the knife caption exists now:
+    const captions = discoveredCaptionsForWorld(
+      merged.worldObjects,
+      session.discoveredRecordTitles(),
+    );
+    expect(captions.map((c) => c.objectId)).toContain("kitchen_knife");
+    expect(captions.find((c) => c.objectId === "kitchen_knife")!.text).toBeTruthy();
+  });
+
+  it("an already-read object shows read straight from the server knowledge", async () => {
+    const services = makeServices({
+      getInvestigation: vi.fn(async () =>
+        makeBootstrap({
+          playerKnowledge: {
+            discoveredEvidenceIds: ["forensic_knife_match_01"],
+            readEvidenceIds: ["forensic_knife_match_01"],
+            visitedLocationIds: ["miller_apartment_kitchen"],
+          },
+        }) as never,
+      ),
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    const knife = session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    expect(knife.discovered).toBe(true);
+    expect(knife.read).toBe(true); // "· read" list marker renders immediately
+  });
+
+  it("a decorative / no-evidence object is unaffected by a discovery", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+    await session.start(null);
+
+    await session.interact("kitchen_knife");
+
+    const merged = session.sceneModel!.worldObjects;
+    const vase = merged.find((o) => o.objectId === "vase_01")!;
+    expect(vase.evidenceId).toBeNull();
+    expect(vase.discovered).toBe(false);
+    expect(vase.read).toBe(false);
+    const table = merged.find((o) => o.objectId === "apartment_table")!;
+    expect(table.discovered).toBe(false);
+    expect(table.read).toBe(false);
+  });
+
+  it("repeated interactions are idempotent — no duplicate or disappearing objects", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+    await session.start(null);
+    const originalIds = session.sceneModel!.worldObjects.map((o) => o.objectId);
+
+    await session.interact("kitchen_knife");
+    const afterFirst = session.sceneModel!;
+    await session.interact("kitchen_knife"); // already-discovered -> no knowledge change
+    const afterSecond = session.sceneModel!;
+
+    expect(afterSecond.worldObjects.map((o) => o.objectId)).toEqual(originalIds);
+    expect(new Set(afterSecond.worldObjects.map((o) => o.objectId)).size).toBe(
+      afterSecond.worldObjects.length,
+    );
+    // No knowledge churn: identical discovered/read sets after both interactions.
+    expect(afterSecond.worldObjects.find((o) => o.objectId === "kitchen_knife")!.discovered).toBe(true);
+    expect(session.knowledgeSnapshot?.discoveredEvidenceIds).toEqual(["forensic_knife_match_01"]);
+    expect(session.knowledgeSnapshot?.readEvidenceIds).toEqual(["forensic_knife_match_01"]);
+    // The no-op second pass is reference-stable (cheap — no model rebuild):
+    // an identical knowledge merge returns the SAME merged model reference.
+    expect(afterSecond).toBe(afterFirst);
   });
 });

@@ -34,7 +34,7 @@ import { installLeakListener, seedPlaythroughCredentials } from "./helpers";
  * Durable evidence promoted to screenshots/evidence/phase12-critical-sheet.png.
  */
 
-const BACKEND_BASE = "http://localhost:8010";
+const BACKEND_BASE = "http://localhost:8000";
 
 const CRITICAL_OBJECTS: Array<{ objectId: string; assetId: string; label: string; anchor: string; interaction: string }> = [
   { objectId: "critical_knife", assetId: "PROP_KITCHEN_KNIFE_01", label: "Kitchen knife", anchor: "kitchen_counter", interaction: "inspect" },

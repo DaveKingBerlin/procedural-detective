@@ -156,6 +156,118 @@ def _record_asset_oracle_provenance(published: Any, settings: Any) -> dict[str, 
         return {}
 
 
+def _has_unresolved_required(world_reqs: Any, composition: Any) -> bool:
+    """True when a CRITICALITY_REQUIRED prompt object is NOT in the world.
+
+    Phase 14_5 semantics: a crime-critical unknown object that could not be
+    generated or placed MUST NEVER be silently removed or substituted. After
+    the world repair budget is exhausted, a missing REQUIRED object is a
+    TERMINAL world failure (the attempt FAILS, nothing is published).
+    """
+    from app.world.requirements import CRITICALITY_REQUIRED
+
+    resolved = composition.resolution_record.get("resolved", {}) or {}
+    placed_assets = {p.asset_id for p in composition.placements}
+    for request in world_reqs.objects:
+        if getattr(request, "criticality", None) != CRITICALITY_REQUIRED:
+            continue
+        entry = resolved.get(getattr(request, "requested_name", ""))
+        if entry is None or not entry.get("assetId"):
+            return True
+        if entry["assetId"] not in placed_assets:
+            return True
+    return False
+
+
+def _link_required_unknown_evidence(
+    composition: Any, world_reqs: Any, draft: Any
+) -> tuple[list[Any] | None, tuple[Any, ...]]:
+    """Phase 14_5 DEV composition seam for REQUIRED unseen weapons.
+
+    A REQUIRED unknown object resolved via PROCEDURAL_GENERATED becomes the
+    crime-weapon EVIDENCE object: its placement gains ``interaction="inspect"``
+    and a discoverable forensic fingerprint evidence id ``<objectId>_fp_01``
+    whose proposition links the unseen object to ``michael_carter`` — a
+    suspect the golden scenario ALREADY excludes (cctv_michael_office_01).
+    The solver-critical facts stay on the catalog knife (golden all_true and
+    weapon uniqueness untouched); the new fact is a necessary-condition-neutral
+    label: ``OBJECT_CONTAINS_FINGERPRINT`` never excludes and the unseen
+    object carries only the INSPECTABLE affordance (never POTENTIAL_WEAPON),
+    so the candidate universe and every deduction are byte-identical.
+
+    Returns ``(placements | None, newEvidenceSpecs)`` — ``None`` when there is
+    nothing to link (no required procedural object, or the golden persons do
+    not contain michael_carter — the seam degrades gracefully, never breaking
+    a valid publication).
+    """
+    import dataclasses
+
+    from app.environments.placer import is_procedural_asset_id
+    from app.generation.schemas import EvidenceSpec, PropSpec
+    from app.world.requirements import CRITICALITY_REQUIRED
+
+    if not hasattr(draft, "persons") or not any(
+        getattr(p, "person_id", None) == "michael_carter" for p in draft.persons
+    ):
+        return None, ()
+    required_assets: dict[str, str] = {}
+    resolved = composition.resolution_record.get("resolved", {}) or {}
+    for request in world_reqs.objects:
+        if getattr(request, "criticality", None) != CRITICALITY_REQUIRED:
+            continue
+        entry = resolved.get(getattr(request, "requested_name", ""))
+        if entry is None:
+            continue
+        asset_id = entry.get("assetId")
+        if asset_id and is_procedural_asset_id(asset_id):
+            required_assets[asset_id] = getattr(request, "requested_name", "")
+    if not required_assets:
+        return None, ()
+    new_object_ids = {spec.object_id for spec in composition.new_objects}
+    placements = list(composition.placements)
+    new_facts: list[Any] = []
+    done: set[str] = set()
+    for index, placement in enumerate(placements):
+        if placement.asset_id not in required_assets:
+            continue
+        if placement.object_id not in new_object_ids or placement.asset_id in done:
+            continue
+        done.add(placement.asset_id)
+        label = placement.object_id.replace("_", " ")
+        fact_id = f"{placement.object_id}_fp_01"
+        new_facts.append(
+            EvidenceSpec(
+                id=fact_id,
+                kind="forensic",
+                propositions=(
+                    PropSpec(
+                        type="OBJECT_CONTAINS_FINGERPRINT",
+                        object_id=placement.object_id,
+                        person_id="michael_carter",
+                    ),
+                ),
+                source_ref={"kind": "record", "sourceId": fact_id},
+                reliability="high",
+                presentation={
+                    "title": f"Latent fingerprint on the {label}",
+                    "description": (
+                        "A forensic fingerprint lift taken from the {} during "
+                        "the investigation. The print belongs to Michael "
+                        "Carter, who was already at the consulting office when "
+                        "the murder happened — the deduction is unaffected."
+                    ).format(label),
+                },
+                discoverable=True,
+            )
+        )
+        placements[index] = dataclasses.replace(
+            placement, interaction="inspect", evidence_id=fact_id
+        )
+    if not new_facts:
+        return None, ()
+    return placements, tuple(new_facts)
+
+
 # --------------------------------------------------------------------------- #
 # Phase 11 — environment hint validation + kit composition (backend half)
 # --------------------------------------------------------------------------- #
@@ -699,10 +811,12 @@ class GenerationService:
 
             from app.assets.catalog import load_catalog_from_repo
             from app.assets.oracle import resolve_or_generate
+            from app.assets.spec_provider import BoundedSpecProvider
             from app.environments.compose import compose_world_graph_for_kit
             from app.environments.manifests import load_environment
             from app.generation.safety import validate_world_graph
             from app.generation.schemas import ObjectSpec
+            from app.world.composer import SPEC_PROVIDER_CALL_LIMIT
 
             published = getattr(record, "published", None)
             if published is None or getattr(published, "draft", None) is None:
@@ -712,12 +826,17 @@ class GenerationService:
             draft = published.draft
 
             resolved: list[tuple[Any, Any]] = []
+            # Phase 14_5 provider-call budget: the explicit unknown-object
+            # request list cannot burn unlimited provider calls either.
+            budgeted = BoundedSpecProvider(
+                self._spec_provider, call_limit=SPEC_PROVIDER_CALL_LIMIT
+            )
             for raw in list(unknown_requests)[:MAX_GENERATED_REQUESTS]:
                 if not isinstance(raw, Mapping):
                     continue
                 outcome = resolve_or_generate(
                     raw,
-                    spec_provider=self._spec_provider,
+                    spec_provider=budgeted,
                     cache=self._generated_cache,
                     catalog=catalog,
                 )
@@ -813,11 +932,15 @@ class GenerationService:
         import dataclasses
 
         from app.assets.catalog import load_catalog_from_repo
+        from app.assets.spec_provider import BoundedSpecProvider
         from app.environments.compose import scene_for_kit
         from app.environments.manifests import load_environment
+        from app.environments.placer import is_procedural_asset_id
         from app.generation import pipeline as pipeline_mod
         from app.generation.publish import build_published_case_version
         from app.generation.schemas import (
+            EvidenceSpec,
+            PropSpec,
             WorldGraphLocationSpec,
             WorldGraphSpec,
         )
@@ -825,9 +948,13 @@ class GenerationService:
             GenerationState,
             ValidationOutcome,
         )
-        from app.world.composer import KnownObjectSpecProvider, compose_world
+        from app.world.composer import (
+            KnownObjectSpecProvider,
+            SPEC_PROVIDER_CALL_LIMIT,
+            compose_world,
+        )
         from app.world.extract import is_base_object_request
-        from app.world.requirements import WorldRequirements
+        from app.world.requirements import CRITICALITY_REQUIRED, WorldRequirements
 
         published = getattr(record, "published", None)
         if published is None or getattr(published, "draft", None) is None:
@@ -859,12 +986,18 @@ class GenerationService:
                 if self._spec_provider is not None
                 else KnownObjectSpecProvider()
             )
+            # Phase 14_5 — ONE provider-call budget for the WHOLE attempt: the
+            # budget wrapper is hoisted here so every repair pass re-composes
+            # against the SAME bounded count (cache hits never call it).
+            attempt_budget = BoundedSpecProvider(
+                spec_provider, call_limit=SPEC_PROVIDER_CALL_LIMIT
+            )
 
             def _compose(reqs: WorldRequirements) -> Any:
                 return compose_world(
                     reqs,
                     env_resolver=None,
-                    spec_provider=spec_provider,
+                    spec_provider=attempt_budget,
                     cache=self._generated_cache,
                     evidence_placements=draft.world_graph.placements,
                     catalog=catalog,
@@ -892,16 +1025,43 @@ class GenerationService:
                         break
 
             if composition.issues:
+                if _has_unresolved_required(world_reqs, composition):
+                    # Phase 14_5: a crime-critical REQUIRED unknown object could
+                    # not be generated/placed within the repair budget —
+                    # TERMINAL failure. Never silently removed, never replaced
+                    # with a semantically-incorrect catalog asset.
+                    record.state = GenerationState.FAILED
+                    record.reason = (
+                        "terminal world failure: a crime-critical required "
+                        "prompt object could not be generated or placed"
+                    )
+                    return False
                 # Degrade (documented): pin the scene, keep the golden world.
                 record.published = dataclasses.replace(
                     published, draft=dataclasses.replace(draft, scene=scene)
                 )
                 return False
 
+            # Phase 14_5 — DEV composition seam: a REQUIRED unseen weapon
+            # (resolved PROCEDURAL_GENERATED from an unseen prompt noun) becomes
+            # the crime-weapon EVIDENCE object: it gains a discoverable forensic
+            # fingerprint fact linked to the ALREADY-EXCLUDED michael_carter.
+            # The solver-critical facts stay on the catalog knife (golden
+            # all_true/solvability untouched); the new fact ONLY labels the
+            # unseen object as evidence-bearing and discoverable — it never
+            # widens the candidate universe (INSPECTABLE affordance only, no
+            # POTENTIAL_WEAPON) and never alters a necessary-condition fact.
+            new_placements, new_facts = _link_required_unknown_evidence(
+                composition, world_reqs, draft
+            )
             new_draft = dataclasses.replace(
                 draft,
                 scene=scene,
                 objects=tuple([*draft.objects, *composition.new_objects]),
+                evidence=tuple([*draft.evidence, *new_facts]),
+                # ADV-153: the DECORATIVE-unresolved warnings are stored with
+                # the published draft (player-safe, bounded, sanitized).
+                composition_notes=tuple(composition.composition_notes or ()),
                 world_graph=WorldGraphSpec(
                     locations=tuple(
                         WorldGraphLocationSpec(
@@ -911,7 +1071,9 @@ class GenerationService:
                         )
                         for zone in kit.zones
                     ),
-                    placements=composition.placements,
+                    placements=tuple(
+                        new_placements if new_placements is not None else composition.placements
+                    ),
                 ),
             )
             # COMPLETE validation pipeline over the composed draft.

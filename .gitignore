@@ -255,3 +255,4 @@ screenshots/generated/
 *.db
 *.sqlite
 *.sqlite3
+tmp/

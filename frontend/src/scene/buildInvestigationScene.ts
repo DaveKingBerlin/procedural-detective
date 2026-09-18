@@ -1,5 +1,5 @@
 import type { GeneratedAssetDefinition, InvestigationBootstrapResponse, WorldObjectDTO } from "../api/types";
-import { transformFor } from "../environments/kitGeometry";
+import { APARTMENT_KIT_ID, transformFor } from "../environments/kitGeometry";
 import type { Vec3 } from "./apartment";
 import type { AssetEntry, AssetPrimitiveKind, AssetRegistry, CompositeKind, CompositePartDescriptor } from "./assetRegistry";
 import { ASSET_REGISTRY, FALLBACK_ASSET } from "./assetRegistry";
@@ -91,6 +91,15 @@ export interface SceneWorldObject {
   templateMaterial: string | null;
   /** Phase 12: resolved default-variant state token (pass-through only). */
   templateState: string | null;
+  /**
+   * Phase 15 Track B: deterministic VISUAL legibility factor for evidence in
+   * non-apartment kits. Pure render concern — the objectId, mesh names,
+   * anchor/transform and interaction are untouched: only the rendered scale
+   * (and ring/pick math that follows it) is affected. Always 1 for the
+   * apartment kit (the golden scene stays byte-identical) and for non-evidence
+   * objects.
+   */
+  renderScale: number;
 }
 
 export interface InvestigationSceneModel {
@@ -121,6 +130,50 @@ export function buildInvestigationScene(
     environmentId: scene.environmentId,
     worldObjects,
   };
+}
+
+/**
+ * DEF-072 — deterministic merge of server-confirmed knowledge into a live
+ * scene model (PURE, deterministic, offline).
+ *
+ * The scene model's world-object `discovered`/`read` flags are snapshotted
+ * from the bootstrap WorldObjectDTOs at build time. After a live discovery or
+ * record read the client's knowledge state (the SAME PlayerKnowledge-derived
+ * choice that drives the discovery-summary strip) must flip those flags
+ * immediately — otherwise the object-list "· discovered"/"· read" markers and
+ * the discovered-only caption overlay stay stale until a reload.
+ *
+ * Rules:
+ *  - the client NEVER fabricates knowledge: each object's flags are derived
+ *    EXCLUSIVELY from the server-returned `discoveredEvidenceIds` /
+ *    `readEvidenceIds` membership of the object's `evidenceId`;
+ *  - an object WITHOUT an `evidenceId` (decorative / no-evidence) is never
+ *    touched — its flags stay exactly as built;
+ *  - unchanged objects keep their EXACT reference (cheap, no rebuild); only
+ *    objects whose flags actually flip are re-created;
+ *  - when nothing changed the ORIGINAL model reference is returned (pure,
+ *    idempotent — callers can rely on reference stability to skip re-renders).
+ */
+export function applyKnowledgeToSceneModel(
+  model: InvestigationSceneModel,
+  knowledge: {
+    discoveredEvidenceIds: readonly string[];
+    readEvidenceIds: readonly string[];
+  },
+): InvestigationSceneModel {
+  const discoveredSet = new Set(knowledge.discoveredEvidenceIds);
+  const readSet = new Set(knowledge.readEvidenceIds);
+  let changed = false;
+  const worldObjects = model.worldObjects.map((obj) => {
+    if (obj.evidenceId === null) return obj;
+    const discovered = discoveredSet.has(obj.evidenceId);
+    const read = readSet.has(obj.evidenceId);
+    if (discovered === obj.discovered && read === obj.read) return obj;
+    changed = true;
+    return { ...obj, discovered, read };
+  });
+  if (!changed) return model;
+  return { ...model, worldObjects };
 }
 
 /**
@@ -190,6 +243,47 @@ function compareByObjectId(a: SceneWorldObject, b: SceneWorldObject): number {
   if (a.objectId < b.objectId) return -1;
   if (a.objectId > b.objectId) return 1;
   return 0;
+}
+
+/* ======================================================================
+ * Phase 15 Track B — evidence legibility in the larger environment kits.
+ *
+ * The golden apartment stays byte-identical (factor 1). In the four bigger
+ * kits (office / hotel_suite / warehouse / mansion) tiny evidence objects
+ * (knife, letter opener, wristwatch, medication bottle…) are easy to miss
+ * entirely from the default camera, so DISCOVERABLE, interactable evidence
+ * below a legible extent gets a deterministic uniform visual scale-up. This
+ * is a spot-fix, primitive-only and purely visual:
+ *   - objectIds / mesh names / anchors / interactions are untouched;
+ *   - the same (kit, object) pair ALWAYS yields the same factor;
+ *   - the apartment kit and all non-evidence objects always render at 1;
+ *   - picking boxes scale with the mesh, so direct 3D clicking keeps working
+ *     (it only gets EASIER for the previously underwhelming targets).
+ * ==================================================================== */
+
+/** Minimum legible evidence extent in world meters (Phase 15 visibility floor). */
+export const EVIDENCE_LEGIBLE_EXTENT = 0.45;
+
+/** Hard cap so an absurdly small item never becomes a room-scale prop. */
+export const MAX_EVIDENCE_RENDER_SCALE = 3;
+
+/**
+ * Deterministic evidence legibility factor for a world object (pure function
+ * of the kit id, the published evidence link, the interaction affordance and
+ * the catalog-derived scale). Apartment = 1; evidence that already spans at
+ * least {@link EVIDENCE_LEGIBLE_EXTENT} in its largest axis stays at 1.
+ */
+export function kitEvidenceRenderScale(
+  environmentId: string,
+  evidenceId: string | null,
+  interactionWorks: boolean,
+  scale: Vec3,
+): number {
+  if (environmentId === APARTMENT_KIT_ID) return 1;
+  if (evidenceId === null || !interactionWorks) return 1;
+  const extent = Math.max(scale.x, scale.y, scale.z);
+  if (!Number.isFinite(extent) || extent <= 0 || extent >= EVIDENCE_LEGIBLE_EXTENT) return 1;
+  return Math.min(MAX_EVIDENCE_RENDER_SCALE, EVIDENCE_LEGIBLE_EXTENT / extent);
 }
 
 function buildSceneWorldObject(
@@ -290,5 +384,7 @@ function buildSceneWorldObject(
     templateHitbox: templateBacked ? templateHitbox : null,
     templateMaterial: templateBacked ? templateMaterial : null,
     templateState: templateBacked ? templateState : null,
+    // Phase 15 Track B: visual legibility factor for non-apartment kit evidence.
+    renderScale: kitEvidenceRenderScale(environmentId, dto.evidenceId, dto.interaction !== "", scale),
   };
 }
