@@ -233,7 +233,13 @@ class OllamaAssetSpecProvider:
     - ``last_geometry_metrics`` — the sanitized metrics dict (see
       ``_record_geometry_metrics``): issueCountBeforeRepair, repairAttempts,
       finalPartCount, finalBoundingBox, declaredDimensions,
-      silhouettePassed, generatedOnFirstPass / repaired.
+      silhouettePassed, generatedOnFirstPass / repaired;
+    - ``last_repair_trace`` — the sanitized per-pass diagnostics list (one
+      entry per validation pass, order preserved): every entry carries the
+      Phase 13 structural issue strings and the Phase 17 geometry issues
+      (code/classification/message/partId) for THAT pass. Never serialized,
+      never served; read by the smoke CLI to report "each repair attempt's
+      issues".
     """
 
     def __init__(
@@ -256,6 +262,9 @@ class OllamaAssetSpecProvider:
         # Phase 17 internal trace (never serialized, never served).
         self.last_geometry_report: Any = None
         self.last_geometry_metrics: dict[str, Any] | None = None
+        # Phase17B: sanitized per-pass diagnostics trace (repair-path
+        # diagnostics for the smoke CLI; never serialized, never served).
+        self.last_repair_trace: list[dict[str, Any]] = []
 
     def generate(self, request: Any) -> Any:
         from app.assets.spec_provider import (
@@ -269,6 +278,7 @@ class OllamaAssetSpecProvider:
             request if isinstance(request, AssetSpecRequest) else AssetSpecRequest(**dict(request))
         )
         self.calls += 1
+        self.last_repair_trace = []
         concept = request.requested_name
         category_hint = request.category_hint or None
 
@@ -294,6 +304,11 @@ class OllamaAssetSpecProvider:
             if spec is not None:
                 # ---- 2. Phase 17 geometry-quality gate SECOND ----------------
                 geometry_report = validate_geometry(spec, requested_name=concept)
+
+            # Sanitized per-pass diagnostics (order preserved; never raw text).
+            trace_entry = self._trace_entry(struct_issues, geometry_report)
+            trace_entry["pass"] = _pass
+            self.last_repair_trace.append(trace_entry)
 
             accepted = (
                 not struct_issues
@@ -384,6 +399,29 @@ class OllamaAssetSpecProvider:
                 seen.add(line)
                 out.append(line)
         return tuple(out)
+
+    def _trace_entry(
+        self, struct_issues: Any, geometry_report: Any
+    ) -> dict[str, Any]:
+        """Sanitized per-pass diagnostics (never raw candidate text, never
+        player-facing). Structural issue strings are app-owned deterministic
+        messages; geometry issues carry only code/classification/message/partId.
+        """
+        geometry: list[dict[str, Any]] = []
+        if geometry_report is not None:
+            geometry = [
+                {
+                    "code": issue.code,
+                    "classification": issue.classification,
+                    "message": issue.message,
+                    "partId": issue.partId,
+                }
+                for issue in geometry_report.issues
+            ]
+        return {
+            "structuralIssues": [str(issue) for issue in (struct_issues or ())],
+            "geometryIssues": geometry,
+        }
 
     def _record_geometry_metrics(
         self,

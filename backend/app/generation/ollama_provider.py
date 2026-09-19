@@ -30,6 +30,17 @@ Design rules (locked for this module):
   never extracted or executed.
 - ``OLLAMA_BASE_URL`` is OPERATOR-ONLY: never derived from the request, never
   logged, never emitted to player DTOs. No logs of prompts/keys anywhere.
+- Structured output (Phase17B §2): when ``structured_output=True`` (the
+  caller — e.g. the smoke tool or the generation service — resolved the
+  documented capability probe ``ollama_structured_output_supported`` once),
+  the ``/api/chat`` body ``format`` carries the AUTHORITATIVE JSON Schema
+  derived from the SAME ``prompts.schema_contract(stage)`` mapping the prompt
+  embeds (``prompts.json_schema_for_generation_stage`` — one source, never a
+  duplicate); otherwise ``format: "json"`` (documented deterministic fallback).
+  The transported schema is structural and permissive; the strict parser still
+  runs on every response and malformed output still follows the normal
+  failure path. ``provider.last_format`` ("schema" | "json") records the
+  truthful flag of what was actually sent for the last call.
 - Ollama is synchronous-result only (like the live provider): the ``sink`` is
   accepted for interface compatibility, pending results are never produced and
   the existing pending/on-completion machinery is untouched.
@@ -52,6 +63,7 @@ from typing import Any, Mapping, Protocol
 import httpx
 
 from app.core.config import DEFAULT_OLLAMA_BASE_URL
+from app.generation import prompts
 from app.generation.provider import GenerateRequest, ProviderResult
 
 # Bounded request/response caps (documented; see module docstring).
@@ -60,6 +72,13 @@ MAX_OLLAMA_RESPONSE_BYTES = 256 * 1024  # 256 KiB
 
 OLLAMA_CHAT_ENDPOINT = "/api/chat"
 OLLAMA_TAGS_ENDPOINT = "/api/tags"
+OLLAMA_VERSION_ENDPOINT = "/api/version"
+
+# The documented minimum Ollama version whose ``/api/chat`` ``format`` field
+# accepts a JSON Schema object (structured output). Servers at or above this
+# version receive the authoritative schema; older/unknown servers get the
+# ``"json"`` fallback. (Phase17B §2 — deterministic, documented capability.)
+OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION: tuple[int, int, int] = (0, 8, 0)
 
 # One outer markdown code-fence header (``` or ```json/```python/...).
 _FENCE_HEADER_RE = re.compile(r"^```[A-Za-z0-9_\-]*$")
@@ -168,6 +187,13 @@ class OllamaProvider:
 
     All constructor arguments are OPERATOR configuration (already validated by
     ``Settings``); nothing is ever derivable from a ``GenerateRequest``.
+
+    ``structured_output`` is the resolved transport capability (Phase17B §2):
+    True sends the AUTHORITATIVE per-stage JSON Schema in ``/api/chat``
+    ``format``, False sends the documented ``format: "json"`` fallback. The
+    caller resolves it ONCE via ``ollama_structured_output_supported`` (the
+    smoke CLI and the generation service); the provider never probes the
+    network itself.
     """
 
     def __init__(
@@ -180,6 +206,7 @@ class OllamaProvider:
         num_ctx: int = 4096,
         transport: Any | None = None,  # OllamaTransport | factory | None
         sink: Any = None,  # CompletionSink | None (interface compatibility)
+        structured_output: bool = False,
     ) -> None:
         self._base_url = str(base_url).rstrip("/")
         self._model = str(model)
@@ -188,6 +215,18 @@ class OllamaProvider:
         self._num_ctx = int(num_ctx)
         self._transport = transport
         self._sink = sink
+        self._structured_output = bool(structured_output)
+        # Truthful transport flag: what the LAST call actually sent in
+        # ``format`` — "schema" (authoritative JSON Schema) or "json"
+        # (fallback). Read by the smoke tool for diagnostics; never a hint at
+        # what upstream did with the response.
+        self.last_format: str | None = None
+
+    @property
+    def structured_output_sent(self) -> bool:
+        """True when the last call sent the authoritative JSON Schema object
+        (``format`` was a JSON Schema, not the ``"json"`` fallback)."""
+        return self.last_format == "schema"
 
     # -- Provider protocol ---------------------------------------------------
 
@@ -210,6 +249,13 @@ class OllamaProvider:
                 "num_ctx": self._num_ctx,
             },
         }
+        format_value: Any = "json"
+        if self._structured_output:
+            schema = prompts.json_schema_for_generation_stage(request.stage.value)
+            if schema is not None:
+                format_value = schema
+        self.last_format = "schema" if isinstance(format_value, dict) else "json"
+        payload["format"] = format_value
         try:
             status, raw = self._get_transport().post_json(
                 url, payload, self._timeout_seconds
@@ -323,13 +369,73 @@ def ollama_available(settings: Any, transport: Any = None) -> tuple[bool, str]:
     return False, "not available"
 
 
+def _parse_ollama_version(raw: bytes) -> tuple[int, int, int] | None:
+    """Deterministic ``X.Y.Z[-suffix]`` parse of the ``/api/version`` body.
+
+    Returns a 3-tuple of ints, or None for any unparsable/absent/malformed
+    version (never raises). A non-numeric suffix (e.g. ``0.8.0-dev``) is
+    ignored for the comparison (the leading numeric triple decides).
+    """
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    version = data.get("version")
+    if not isinstance(version, str) or not version.strip():
+        return None
+    match = re.match(r"^([0-9]+)\.([0-9]+)\.([0-9]+)", version.strip())
+    if match is None:
+        return None
+    try:
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except (TypeError, ValueError):
+        return None
+
+
+def ollama_structured_output_supported(
+    settings: Any, transport: Any = None
+) -> bool:
+    """Documented one-time capability probe (Phase17B §2): GET ``/api/version``.
+
+    Returns True when the configured Ollama server reports a version >=
+    ``OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION`` (whose ``/api/chat`` ``format``
+    accepts an authoritative JSON Schema object). Every failure — timeout,
+    transport error, HTTP error, capped body, unparsable version, reported
+    version below the minimum — deterministically degrades to False (the
+    ``format: "json"`` documented fallback). NEVER raises and never reveals the
+    base URL or any network detail (mirror of ``ollama_available``).
+    """
+    transport = transport if transport is not None else _HttpxOllamaTransport()
+    base = str(
+        getattr(settings, "ollama_base_url", None) or DEFAULT_OLLAMA_BASE_URL
+    ).rstrip("/")
+    timeout = float(getattr(settings, "ollama_timeout_seconds", 60.0) or 60.0)
+    try:
+        status, raw = transport.get(f"{base}{OLLAMA_VERSION_ENDPOINT}", timeout)
+    except Exception:  # noqa: BLE001 - capability probe never raises
+        return False
+    if not (200 <= status < 300):
+        return False
+    if raw is None or len(raw) > MAX_OLLAMA_RESPONSE_BYTES:
+        return False
+    version = _parse_ollama_version(raw)
+    if version is None:
+        return False
+    return version >= OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION
+
+
 __all__ = [
     "DEFAULT_OLLAMA_BASE_URL",
     "MAX_OLLAMA_PROMPT_CHARS",
     "MAX_OLLAMA_RESPONSE_BYTES",
     "OLLAMA_CHAT_ENDPOINT",
+    "OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION",
     "OLLAMA_TAGS_ENDPOINT",
+    "OLLAMA_VERSION_ENDPOINT",
     "OllamaProvider",
     "ollama_available",
+    "ollama_structured_output_supported",
     "strip_outer_code_fence",
 ]

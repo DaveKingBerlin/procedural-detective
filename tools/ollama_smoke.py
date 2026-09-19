@@ -1,10 +1,26 @@
-"""Opt-in real-Ollama smoke CLI (Phase16 L / Phase16_2 §24 / Phase17 §13-§19).
+"""Opt-in real-Ollama smoke CLI (Phase16 L / Phase16_2 §24 / Phase17 §13-§19 /
+Phase17B).
 
-Usage (from the repository root):
+Usage (from the repository root) — REAL hermes3:8b operator run:
+
+PowerShell:
+
+    $env:OLLAMA_MODEL="hermes3:8b"; $env:OLLAMA_TEMPERATURE="0"; `
+    $env:OLLAMA_NUM_CTX="4096"; $env:OLLAMA_TIMEOUT_SECONDS="180"
+    python -m tools.ollama_smoke --enable --debug --stage case_truth
+
+POSIX/cmd:
+
+    SET OLLAMA_MODEL=hermes3:8b
+    SET OLLAMA_TEMPERATURE=0
+    SET OLLAMA_NUM_CTX=4096
+    SET OLLAMA_TIMEOUT_SECONDS=180
+    python -m tools.ollama_smoke --enable --debug --stage case_truth
 
     python -m tools.ollama_smoke --enable [--out report.json]
     python -m tools.ollama_smoke --enable --roundtrip        # + CASE/PEOPLE & ASSET_SPEC round-trip
     python -m tools.ollama_smoke --enable --geometry-repair  # + Phase 17 geometry repair round-trip
+    python -m tools.ollama_smoke --enable --debug --stage asset_spec
     python -m tools.ollama_smoke --showcase-steps            # print the manual Local-AI showcase E2E steps
 
 It is STRICTLY opt-in: without ``--enable`` (or the env flag
@@ -14,25 +30,43 @@ makes real calls impossible anyway).
 
 When enabled it:
 
-1. probes the configured Ollama (``ollama_available`` — real transport);
-2. when available, generates ONE small structured CASE_TRUTH stage response
-   through the REAL ``OllamaProvider`` adapter;
-3. runs that response through the strict parser (``parser.collect_issues``);
-4. with ``--roundtrip``: issues ONE CASE/PEOPLE and ONE ASSET_SPEC prompt
+1. probes the configured Ollama (``ollama_available`` — real transport) and
+   resolves the transport structured-output capability ONCE
+   (``ollama_structured_output_supported`` — documented /api/version probe);
+2. when available, runs ONE stage through the REAL ``OllamaProvider`` adapter
+   (default ``case_truth``; ``--stage`` selects the stage) and reports the
+   strict-parse outcome;
+3. with ``--roundtrip``: issues ONE CASE/PEOPLE and ONE ASSET_SPEC prompt
    through the real adapter and reports a sanitized PASS/FAIL per stage;
-5. with ``--geometry-repair`` (or as part of ``--roundtrip``): issues an
+4. with ``--geometry-repair`` (or as part of ``--roundtrip``): issues an
    ASSET_SPEC call and — when the returned AssetSpec fails the deterministic
    Phase 17 geometry-quality gate — up to the bounded number of
    ASSET_SPEC_REPAIR calls, all through the real adapter and the REAL driver
-   (``OllamaAssetSpecProvider``), reporting ONLY sanitized Phase 17 metrics
-   (issue counts, repair attempts, final declared dimensions, estimated
-   bounding box, silhouette state, first-pass/repaired);
-6. emits a sanitized JSON report to stdout (or ``--out``).
+   (``OllamaAssetSpecProvider``), reporting ONLY sanitized Phase 17 metrics;
+5. emits a sanitized deterministic JSON report to stdout (or ``--out``).
 
-The report NEVER contains prompts, keys, the base URL, raw AssetSpec geometry
-or any network detail — only availability, the public-safe model display name,
-the (sanitized) parse issue count, a boolean PASS/FAIL and the sanitized
-Phase 17 geometry metrics.
+Per-stage diagnostics (Phase17B §1 — sanitized):
+
+- ``stageTemplate`` — the exact prompt-template version used (e.g.
+  ``case_people_v1``);
+- exact parse issue strings (the strict parser's deterministic messages) +
+  ``parsedOk``;
+- ``transportStructuredOutput`` — what was ACTUALLY sent in ``/api/chat``
+  ``format``: ``true`` = the authoritative per-stage JSON Schema (derived from
+  the SAME ``schema_contract`` mapping the prompt embeds), ``false`` = the
+  documented ``"json"`` fallback;
+- a sanitized, ellipsized sample of the raw model response (first/last ~200
+  chars; the FULL sanitized text under ``--debug`` — credentials, URLs, hosts,
+  ports and truth seeds are ALWAYS stripped);
+- elapsed generation time + response byte count;
+- for the AssetSpec stage: first-pass Phase 13 structural issues AND first-pass
+  Phase 17 geometry issues (code/classification/message/partId), then EACH
+  repair attempt's issues (order preserved, sanitized), the repair count and
+  the final compiled ``proc.*`` id or a failure.
+
+The report NEVER contains prompts, keys, the base URL, or any network detail —
+only availability, the public-safe model display name, the sanitized issue
+texts and the sanitized Phase 17 metrics.
 
 ``--showcase-steps`` (no network) prints the manual browser E2E checklist for
 the full Local-AI showcase; this is the QA/submission-side opt-in E2E the
@@ -44,7 +78,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+import time
 from pathlib import Path
 
 # tools/ -> repo root -> backend (so the editable install / source tree is
@@ -56,11 +92,11 @@ if str(_BACKEND_DIR) not in sys.path:
 
 _SHOWCASE_MANUAL_STEPS = (
     "Full Local-AI showcase browser E2E (manual / QA-side, requires a local "
-    "Ollama running Llama 3.2, GENERATION_PROVIDER=ollama):\n"
+    "Ollama running a local model, GENERATION_PROVIDER=ollama):\n"
     "1. Start the backend with GENERATION_PROVIDER=ollama + OLLAMA_BASE_URL + "
-    "OLLAMA_MODEL=llama3.2:3b configured.\n"
+    "OLLAMA_MODEL (e.g. llama3.2:3b or hermes3:8b) configured.\n"
     "2. Start the frontend and open /new; verify the selector offers "
-    "'Local AI — llama3.2:3b — Ready' (and Demo alongside it).\n"
+    "'Local AI — <model> — Ready' (and Demo alongside it).\n"
     "3. Select Local AI and enter a NON-golden six-line crime prompt, e.g.:\n"
     "   Victim: Dr. Anna Weiss\n   Murderer: Paul Becker\n"
     "   Motive: stolen research data\n   Weapon: bronze ceremonial ice pick\n"
@@ -76,31 +112,331 @@ _SHOWCASE_MANUAL_STEPS = (
     "10. Confirm no hidden truth or host/URL leaked before reveal.\n"
 )
 
+# The documented single-stage smoke aliases (Phase17B §3 mapping table).
+_SMOKE_STAGES = (
+    "case_truth",
+    "evidence",
+    "world_requirements",
+    "asset_spec",
+    "asset_spec_repair",
+    "repair",
+)
 
-def _geometry_repair_roundtrip(settings) -> dict:
+# Truth-seed/secret tokens stripped from RAW model-response samples ALWAYS
+# (even under --debug). App-owned validator issue strings are NOT redacted —
+# they are deterministic, safe diagnostics the smoke is required to show.
+_TRUTH_SEED_TOKENS = (
+    "murdererId",
+    "crimeTime",
+    "solverProof",
+    "caseTruth",
+    "timeline",
+    "relationships",
+)
+
+_HERMES_OPERATOR_COMMAND = (
+    "Real hermes3:8b re-run (operator action; Phase17B section 5):\n"
+    "PowerShell:\n"
+    '    $env:OLLAMA_MODEL="hermes3:8b"; $env:OLLAMA_TEMPERATURE="0"; `\n'
+    '    $env:OLLAMA_NUM_CTX="4096"; $env:OLLAMA_TIMEOUT_SECONDS="180"\n'
+    "    python -m tools.ollama_smoke --enable --debug --stage case_truth\n"
+    "POSIX/cmd:\n"
+    "    SET OLLAMA_MODEL=hermes3:8b / export OLLAMA_MODEL=hermes3:8b\n"
+    "    SET OLLAMA_TEMPERATURE=0 / export OLLAMA_TEMPERATURE=0\n"
+    "    SET OLLAMA_NUM_CTX=4096 / export OLLAMA_NUM_CTX=4096\n"
+    "    SET OLLAMA_TIMEOUT_SECONDS=180 / export OLLAMA_TIMEOUT_SECONDS=180\n"
+    "    python -m tools.ollama_smoke --enable --debug --stage case_truth\n"
+)
+
+
+# --------------------------------------------------------------------------- #
+# sanitization / diagnostics helpers (never secrets, prompts or full raw text
+# unless --debug — and --debug still strips credentials/URLs/truth seeds)
+# --------------------------------------------------------------------------- #
+
+
+def _sanitize_text(text: str) -> str:
+    """Strip URLs, host tokens, ports and truth seeds from a RAW model sample.
+
+    Deterministic and ALWAYS applied (with and without ``--debug``). The model
+    response sample is untrusted provider text; only sanitized remnants may be
+    printed.
+    """
+    out = str(text)
+    out = re.sub(r"https?://[^\s)\]\"'}]+", "<url>", out)
+    out = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<host>", out)
+    out = re.sub(r"\blocalhost\b", "<host>", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bhost\.docker\.internal\b", "<host>", out, flags=re.IGNORECASE)
+    out = re.sub(r"\b11434\b", "<port>", out)
+    for token in _TRUTH_SEED_TOKENS:
+        out = out.replace(token, "<redacted>")
+        out = out.replace(token[0].upper() + token[1:], "<redacted>")
+    return out
+
+
+def _sample_sanitized(text: str, limit: int = 200) -> dict[str, object]:
+    """Ellipsized sanitized raw-response sample (first/last ~``limit`` chars)."""
+    clean = _sanitize_text(text)
+    entry: dict[str, object] = {
+        "byteLength": len(text.encode("utf-8", errors="replace")),
+        "sanitizedLength": len(clean),
+    }
+    if len(clean) <= limit * 2:
+        entry["text"] = clean
+    else:
+        entry["first"] = clean[:limit]
+        entry["last"] = clean[-limit:]
+        entry["ellipsized"] = True
+    return entry
+
+
+def _parse_issues_for(stage: str, content: str) -> tuple[bool, list[str]]:
+    """Exact strict-parse issue strings for one smoke stage (never raises).
+
+    Returns ``(parsedOk, issues)`` where issues is an empty list on success.
+    """
+    from app.generation import parser as stage_parser
+    from app.generation.provider import GenerationStage
+    from app.services.ollama_driver import parse_world_requirements
+
+    if stage == "world_requirements":
+        try:
+            parse_world_requirements(content)
+        except (TypeError, ValueError) as exc:
+            return False, [str(exc)]
+        return True, []
+    if stage in ("asset_spec", "asset_spec_repair"):
+        from app.assets.specs import validate_asset_spec
+
+        issues = list(validate_asset_spec(content))
+        return (not issues), issues
+    if stage == "repair":
+        issues = list(stage_parser.collect_full_draft_issues(content))
+        return (not issues), issues
+    # case_truth / evidence
+    issues = list(
+        stage_parser.collect_issues(GenerationStage(stage), content)
+        if stage in ("case_truth", "evidence")
+        else ()
+    )
+    return (not issues), issues
+
+
+def _geometry_issue_dict(issue: Any) -> dict[str, object]:
+    """One sanitized geometry issue (app-owned fields only)."""
+    return {
+        "code": issue.code,
+        "classification": issue.classification,
+        "message": issue.message,
+        "partId": issue.partId,
+    }
+
+
+def _geometry_details(provider: Any) -> dict[str, object]:
+    """Sanitized per-pass Phase 17 diagnostics from the driver trace."""
+    trace = getattr(provider, "last_repair_trace", None) or []
+    attempts = [
+        {
+            "pass": index,
+            "structuralIssues": list(entry.get("structuralIssues") or ()),
+            "geometryIssues": list(entry.get("geometryIssues") or ()),
+        }
+        for index, entry in enumerate(trace)
+    ]
+    return {"repairTrace": attempts, "traceLength": len(attempts)}
+
+
+# --------------------------------------------------------------------------- #
+# single-stage smoke (real provider call + strict parse diagnostics)
+# --------------------------------------------------------------------------- #
+
+
+def _stage_builders() -> dict[str, tuple[str, str, str]]:
+    """stage alias -> (prompt builder module attr, placeholder args, version).
+
+    The version strings are the CURRENT template versions; the smoke resolves
+    them through the same prompt builders the driver uses (Phase17B §3).
+    """
+    return {
+        "case_truth": (
+            "build_case_people_prompt",
+            "A small detective case: one victim, one murderer, one motive, one "
+            "weapon, one location and a canonical time. Names: Dr. Anna Weiss "
+            "(victim), Paul Becker (murderer).",
+            "case_people_v1",
+        ),
+        "evidence": (
+            "build_evidence_prompt",
+            "Structured evidence for the case: witness observations, a CCTV "
+            "record, an alibi claim and a forensic weapon match.",
+            "evidence_v1",
+        ),
+        "world_requirements": (
+            "build_world_requirements_prompt",
+            "An office environment with a bronze ceremonial ice pick on the "
+            "desk of the victim.",
+            "world_requirements_v1",
+        ),
+        "asset_spec": (
+            "build_asset_spec_prompt",
+            "bronze ceremonial ice pick",
+            "asset_spec_v1",
+        ),
+        "asset_spec_repair": (
+            "build_asset_spec_repair_prompt",
+            "bronze ceremonial ice pick",
+            "asset_spec_repair_v1",
+        ),
+        "repair": (
+            "build_repair_prompt",
+            "",
+            "repair_v1",
+        ),
+    }
+
+
+def _build_stage_prompt(
+    stage: str, prompts: Any, builders: dict[str, tuple[str, str, str]]
+) -> str:
+    """Build one stage prompt through the SAME versioned builders the driver
+    uses (never a hand-maintained clone)."""
+    name, arg, _version = builders[stage]
+    if stage == "case_truth":
+        return prompts.build_case_people_prompt(arg, None)
+    if stage == "evidence":
+        return prompts.build_evidence_prompt(arg, None)
+    if stage == "world_requirements":
+        return prompts.build_world_requirements_prompt(arg, None)
+    if stage == "asset_spec":
+        return prompts.build_asset_spec_prompt(arg, "decor")
+    if stage == "asset_spec_repair":
+        # Deterministic sanitized repair request: the observed-broken candidate
+        # plus the app-owned issue text it produces.
+        candidate = json.dumps(
+            {
+                "canonicalName": "Bronze Ceremonial Ice Pick",
+                "category": "decor",
+                "subtype": "ceremonial_ice_pick",
+                "dimensions": {"x": 0.3, "y": 0.3, "z": 0.3},
+                "parts": [
+                    {
+                        "id": "part_00",
+                        "role": "tip",
+                        "primitive": "sphere",
+                        "transform": {
+                            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                            "scale": {"x": 0.2, "y": 0.2, "z": 0.2},
+                        },
+                        "material": "metal.brass",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        return prompts.build_asset_spec_repair_prompt(
+            arg,
+            candidate,
+            (
+                "[QUALITY_ERROR SILHOUETTE_HEURISTIC]: this hand-held object "
+                "has no recognizable silhouette: at least TWO distinct parts "
+                "whose positions differ by more than 0.05m are required",
+            ),
+        )
+    # repair
+    draft = json.dumps(
+        {
+            "crime": {
+                "type": "murder",
+                "victimId": "anna_weiss",
+                "murdererId": "paul_becker",
+                "motiveId": "stolen_research_data",
+                "weaponId": "bronze_ceremonial_ice_pick",
+                "locationId": "office",
+                "crimeTime": {
+                    "canonical": "2026-09-11T23:42:00+02:00",
+                    "accusationToleranceSeconds": 300,
+                },
+            },
+            "scene": {"locationId": "office", "name": "Office"},
+            "worldGraph": {"locations": [], "placements": []},
+        },
+        sort_keys=True,
+    )
+    return prompts.build_repair_prompt(draft, ("sanitized validation issue",))
+
+
+def _single_stage_report(settings, provider, stage: str) -> dict[str, object]:
+    """ONE real provider call for ``stage`` + strict parse diagnostics."""
+    from app.generation import prompts
+    from app.generation.provider import GenerateRequest, GenerationStage
+
+    builders = _stage_builders()
+    _, _, version = builders[stage]
+    prompt = _build_stage_prompt(stage, prompts, builders)
+    generation_stage = (
+        GenerationStage.WORLD_GRAPH
+        if stage == "world_requirements"
+        else GenerationStage(stage)
+    )
+    request = GenerateRequest(
+        attempt_id="ollama-smoke-stage",
+        stage=generation_stage,
+        prompt_context=prompt,
+    )
+    entry: dict[str, object] = {
+        "stage": request.stage.value,
+        "stageAlias": stage,
+        "stageTemplate": version,
+        "promptChars": len(prompt),
+    }
+    started = time.perf_counter()
+    result = provider.generate(request)
+    entry["elapsedSeconds"] = round(time.perf_counter() - started, 4)
+    # Truthful transport flag: what was ACTUALLY sent in /api/chat format.
+    entry["transportStructuredOutput"] = bool(provider.structured_output_sent)
+    entry["providerResult"] = result.content is not None
+    if result.timed_out:
+        entry["errorSanitized"] = "timed out"
+    elif result.error is not None:
+        entry["errorSanitized"] = str(result.error)[:200]
+    if result.content is not None:
+        entry["responseBytes"] = len(result.content.encode("utf-8", errors="replace"))
+        ok, issues = _parse_issues_for(stage, result.content)
+        entry["parsedOk"] = ok
+        entry["parseIssues"] = issues
+        entry["parseIssueCount"] = len(issues)
+        entry["rawSanitized"] = _sample_sanitized(result.content)
+    if _DEBUG_FLAG:
+        if result.content is not None:
+            entry["rawSanitizedFull"] = _sanitize_text(result.content)
+        else:
+            entry["rawSanitizedFull"] = None
+    return entry
+
+
+# --------------------------------------------------------------------------- #
+# AssetSpec geometry round-trip through the REAL driver (Phase 17 diagnostics)
+# --------------------------------------------------------------------------- #
+
+
+def _geometry_repair_roundtrip(settings, provider) -> dict[str, object]:
     """One ASSET_SPEC + bounded Phase 17 geometry-repair round-trip through the
     REAL adapter and the REAL ``OllamaAssetSpecProvider`` driver.
 
     Reports ONLY sanitized Phase 17 metrics (issue count before repair, repair
-    attempts, final part count / declared dimensions / estimated bounding box /
-    silhouette state, first-pass vs repaired) — never the raw AssetSpec, the
-    prompt text, the base URL or any network detail.
+    attempts, per-pass issues, final part count / declared dimensions /
+    estimated bounding box / silhouette state, first-pass vs repaired, final
+    compiled ``proc.*`` id) — never the raw AssetSpec, the prompt text, the
+    base URL or any network detail.
     """
+    from app.assets.compiler import asset_id_for
     from app.assets.spec_provider import AssetSpecRequest
-    from app.generation.ollama_provider import OllamaProvider
+    from app.assets.specs import parse_asset_spec
     from app.services.ollama_driver import OllamaAssetSpecProvider
 
-    def _provider():
-        return OllamaProvider(
-            base_url=str(settings.ollama_base_url or "http://127.0.0.1:11434"),
-            model=settings.ollama_model,
-            timeout_seconds=settings.ollama_timeout_seconds,
-            temperature=settings.ollama_temperature,
-            num_ctx=settings.ollama_num_ctx,
-        )
-
     spec_provider = OllamaAssetSpecProvider(
-        provider=_provider(),
+        provider=provider,
         attempt_id="ollama-smoke-geometry",
         budget_consumer=lambda: True,
     )
@@ -109,127 +445,94 @@ def _geometry_repair_roundtrip(settings) -> dict:
             requested_name="bronze ceremonial ice pick", category_hint="decor"
         )
     )
-    out: dict = {
+    out: dict[str, object] = {
         "providerOk": result.error is None,
         "geometricallyValid": result.error is None,
+        "providerCalls": spec_provider.calls,
     }
     if result.error is not None:
         out["errorSanitized"] = str(result.error)[:200]
     if spec_provider.last_geometry_metrics is not None:
         out["geometryMetrics"] = spec_provider.last_geometry_metrics
+    out["perPassIssues"] = _geometry_details(spec_provider)
+    if result.content is not None:
+        try:
+            spec = parse_asset_spec(result.content, non_throwing=False)
+            out["finalProcId"] = asset_id_for(spec)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            out["failure"] = f"final candidate could not be compiled: {exc}"
     return out
 
 
-def _roundtrip_report(settings) -> dict:
-    """One CASE/PEOPLE + one ASSET_SPEC round-trip through the REAL adapter.
-    Reports sanitized PASS/FAIL per stage (only parse-issue counts and the
-    presence of expected public data — never the prompt, base URL or raw text)."""
-    from app.generation import prompts
-    from app.generation.ollama_provider import OllamaProvider
-    from app.generation.provider import GenerateRequest, GenerationStage
-    from app.services.ollama_driver import parse_case_people
-    from app.assets.specs import validate_asset_spec
+# --------------------------------------------------------------------------- #
+# report builders (never prompts / base URL / raw secrets)
+# --------------------------------------------------------------------------- #
 
-    provider = OllamaProvider(
-        base_url=str(settings.ollama_base_url or "http://127.0.0.1:11434"),
-        model=settings.ollama_model,
-        timeout_seconds=settings.ollama_timeout_seconds,
-        temperature=settings.ollama_temperature,
-        num_ctx=settings.ollama_num_ctx,
+
+def _base_report(settings, probe_available: bool, structured_supported: bool) -> dict:
+    from app.generation.ollama_provider import (
+        OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION,
     )
 
-    def _stage_result(stage, prompt):
-        req = GenerateRequest(
-            attempt_id="ollama-smoke-roundtrip",
-            stage=stage,
-            prompt_context=prompt,
-        )
-        result = provider.generate(req)
-        out = {"stage": stage.value, "providerOk": result.content is not None}
-        if result.error is not None:
-            out["errorSanitized"] = str(result.error)[:200]
-        if result.timed_out:
-            out["errorSanitized"] = "timed out"
-        out["content"] = result.content if result.content is not None else None
-        return out
-
-    case = _stage_result(
-        GenerationStage.CASE_TRUTH,
-        prompts.build_case_people_prompt(
-            "A small detective case: victim one, murderer one, motive one, "
-            "weapon one, a single location and a canonical time.",
-            {"victim": "Dr. Anna Weiss", "murderer": "Paul Becker"},
-        )[:2000],
-    )
-    case_out = {k: v for k, v in case.items() if k != "content"}
-    if case.get("content"):
-        try:
-            parse_case_people(case["content"])
-            case_ok = True
-        except (TypeError, ValueError):
-            case_ok = False
-        case_out["pass"] = case_ok
-    else:
-        case_out["pass"] = False
-
-    spec = _stage_result(
-        GenerationStage.ASSET_SPEC,
-        prompts.build_asset_spec_prompt("bronze ceremonial ice pick", "decor")[:2000],
-    )
-    spec_out = {k: v for k, v in spec.items() if k != "content"}
-    if spec.get("content"):
-        issues = validate_asset_spec(spec["content"])
-        spec_out["parseIssues"] = len(issues)
-        spec_out["pass"] = not issues
-    else:
-        spec_out["pass"] = False
-
-    return {
-        "casePeople": case_out,
-        "assetSpec": spec_out,
-        "geometryRepair": _geometry_repair_roundtrip(settings),
-    }
-
-
-def _sanitized_report(provider, settings, probe_available: bool) -> dict:
-    """One small real CALE_TRUTH generation through the real adapter + strict
-    parser. Never includes the prompt itself, the base URL or the raw output."""
-    from app.generation.parser import collect_issues
-    from app.generation.provider import GenerateRequest, GenerationStage
-
-    request = GenerateRequest(
-        attempt_id="ollama-smoke",
-        stage=GenerationStage.CASE_TRUTH,
-        prompt_context=(
-            "Generate a fresh, self-consistent minimal detective case: one "
-            "victim, one murderer, one real motive, one weapon and one crime "
-            "location with a canonical timestamp. Return ONLY the documented "
-            "JSON object."
-        ),
-    )
-    result = provider.generate(request)
-    entry: dict = {
-        "stage": GenerationStage.CASE_TRUTH.value,
-        "providerResult": result.content is not None,
-    }
-    if result.error is not None:
-        entry["errorSanitized"] = str(result.error)[:200]
-    if result.timed_out:
-        entry["errorSanitized"] = "timed out"
-    if result.content is not None:
-        issues = collect_issues(GenerationStage.CASE_TRUTH, result.content)
-        entry["parseIssues"] = len(issues)
-        entry["parsedOk"] = not issues
     return {
         "enabled": True,
         "provider": "ollama",
         "probeAvailable": probe_available,
+        "structuredOutputProbe": {
+            "supported": structured_supported,
+            "minSupportedVersion": ".".join(
+                str(part) for part in OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION
+            ),
+        },
         "model": str(getattr(settings, "ollama_model", "") or ""),
-        "generation": entry,
+        "generation": None,
     }
 
 
+def _sanitized_report(
+    settings,
+    provider,
+    probe_available: bool,
+    stage: str,
+    structured_supported: bool,
+) -> dict:
+    """One real per-stage generation through the real adapter + strict parser +
+    (for asset_spec) the full Phase 17 geometry round-trip."""
+    report = _base_report(settings, probe_available, structured_supported)
+    report["generation"] = _single_stage_report(settings, provider, stage)
+    if stage == "asset_spec":
+        report["geometryRoundtrip"] = _geometry_repair_roundtrip(settings, provider)
+    return report
+
+
+def _roundtrip_report(settings, provider) -> dict:
+    """One CASE/PEOPLE + one ASSET_SPEC round-trip through the REAL adapter.
+    Reports sanitized PASS/FAIL per stage (only parse-issue counts and the
+    presence of expected public data — never the prompt, base URL or raw text)."""
+    case = _single_stage_report(settings, provider, "case_truth")
+    case_out = dict(case)
+    case_out["pass"] = bool(case.get("parsedOk"))
+    case_out.pop("rawSanitized", None)
+    case_out.pop("rawSanitizedFull", None)
+
+    spec = _single_stage_report(settings, provider, "asset_spec")
+    spec_out = dict(spec)
+    spec_out["pass"] = bool(spec.get("parsedOk"))
+    spec_out.pop("rawSanitized", None)
+    spec_out.pop("rawSanitizedFull", None)
+
+    return {
+        "casePeople": case_out,
+        "assetSpec": spec_out,
+        "geometryRepair": _geometry_repair_roundtrip(settings, provider),
+    }
+
+
+_DEBUG_FLAG = False
+
+
 def main(argv: list[str] | None = None) -> int:
+    global _DEBUG_FLAG
     parser = argparse.ArgumentParser(
         prog="tools.ollama_smoke",
         description=(
@@ -237,11 +540,34 @@ def main(argv: list[str] | None = None) -> int:
             "Requires --enable or OLLAMA_SMOKE_ENABLED=1; never runs in CI. "
             "Use --showcase-steps for the manual Local-AI showcase E2E checklist."
         ),
+        epilog=_HERMES_OPERATOR_COMMAND,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--enable",
         action="store_true",
         help="actually run the smoke test (otherwise: skipped (opt-in)).",
+    )
+    parser.add_argument(
+        "--stage",
+        choices=list(_SMOKE_STAGES),
+        default=None,
+        help=(
+            "run the smoke for ONE stage only (case_truth | evidence | "
+            "world_requirements | asset_spec | asset_spec_repair | repair). "
+            "Default: case_truth. asset_spec additionally reports the full "
+            "Phase 17 geometry round-trip (first-pass issues, each repair "
+            "attempt, final proc.* id)."
+        ),
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "expand raw model response samples to the FULL sanitized text "
+            "(credentials/URLs/hosts/ports and truth seeds are ALWAYS "
+            "stripped; no secrets, prompts or full unsanitized raw output)."
+        ),
     )
     parser.add_argument(
         "--roundtrip",
@@ -251,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--geometry-repair",
         action="store_true",
-        help="also run one Phase 17 geometry-repair round-trip (sanitized metrics: issueCountBeforeRepair, repairAttempts, finalPartCount, finalBoundingBox, declaredDimensions, silhouettePassed, generatedOnFirstPass/repaired).",
+        help="also run one Phase 17 geometry-repair round-trip (sanitized metrics: issueCountBeforeRepair, repairAttempts, per-pass issues, finalPartCount, finalBoundingBox, declaredDimensions, silhouettePassed, generatedOnFirstPass/repaired, finalProcId).",
     )
     parser.add_argument(
         "--showcase-steps",
@@ -273,32 +599,54 @@ def main(argv: list[str] | None = None) -> int:
         print("skipped (opt-in)")
         return 0
 
+    _DEBUG_FLAG = args.debug
+
     from app.core.config import Settings
-    from app.generation.ollama_provider import OllamaProvider, ollama_available
+    from app.generation.ollama_provider import (
+        DEFAULT_OLLAMA_BASE_URL,
+        OllamaProvider,
+        ollama_available,
+        ollama_structured_output_supported,
+    )
 
     settings = Settings(generation_provider="ollama")
-    probe_available, _detail = ollama_available(settings)
-    report = {
-        "enabled": True,
-        "provider": "ollama",
-        "probeAvailable": probe_available,
-        "model": str(settings.ollama_model),
-        "generation": None,
-    }
+    try:
+        probe_available, _detail = ollama_available(settings)
+    except Exception:  # noqa: BLE001 - availability never raises; stay clean
+        probe_available = False
+    structured_supported = False
+    if probe_available:
+        try:
+            structured_supported = ollama_structured_output_supported(settings)
+        except Exception:  # noqa: BLE001 - capability probe never raises
+            structured_supported = False
+
+    report = _base_report(settings, probe_available, structured_supported)
     if probe_available:
         provider = OllamaProvider(
-            base_url=str(settings.ollama_base_url or "http://127.0.0.1:11434"),
+            base_url=str(settings.ollama_base_url or DEFAULT_OLLAMA_BASE_URL),
             model=settings.ollama_model,
             timeout_seconds=settings.ollama_timeout_seconds,
             temperature=settings.ollama_temperature,
             num_ctx=settings.ollama_num_ctx,
+            structured_output=structured_supported,
         )
-        report = _sanitized_report(provider, settings, probe_available=True)
-        if args.roundtrip:
-            report["roundtrip"] = _roundtrip_report(settings)
-        if args.geometry_repair and "roundtrip" not in report:
-            report["geometryRepair"] = _geometry_repair_roundtrip(settings)
-    text = json.dumps(report, indent=2, sort_keys=True)
+        try:
+            stage = args.stage or "case_truth"
+            report = _sanitized_report(
+                settings, provider, True, stage, structured_supported
+            )
+            if args.roundtrip:
+                report["roundtrip"] = _roundtrip_report(settings, provider)
+            if args.geometry_repair and "roundtrip" not in report:
+                report["geometryRepair"] = _geometry_repair_roundtrip(
+                    settings, provider
+                )
+        except Exception as exc:  # noqa: BLE001 - no tracebacks, sanitized JSON
+            report["errorSanitized"] = (
+                f"smoke run failed: {type(exc).__name__}: {str(exc)[:200]}"
+            )
+    text = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True)
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
     print(text)

@@ -1460,9 +1460,23 @@ class GenerationService:
             return _live
         if settings.generation_provider == "ollama":
             from app.core.config import DEFAULT_OLLAMA_BASE_URL
-            from app.generation.ollama_provider import OllamaProvider
+            from app.generation.ollama_provider import (
+                OllamaProvider,
+                ollama_structured_output_supported,
+            )
 
             base_url = settings.ollama_base_url or DEFAULT_OLLAMA_BASE_URL
+
+            # Phase17B §2: resolve the structured-output capability ONCE at
+            # factory build (a single documented /api/version probe; never per
+            # call, never raises). True => every request carries the
+            # AUTHORITATIVE per-stage JSON Schema in format; False => the
+            # documented "json" fallback.
+            structured_output = False
+            try:
+                structured_output = ollama_structured_output_supported(settings)
+            except Exception:  # noqa: BLE001 - capability probe never blocks
+                structured_output = False
 
             def _ollama() -> Provider:
                 return OllamaProvider(
@@ -1471,6 +1485,7 @@ class GenerationService:
                     timeout_seconds=settings.ollama_timeout_seconds,
                     temperature=settings.ollama_temperature,
                     num_ctx=settings.ollama_num_ctx,
+                    structured_output=structured_output,
                 )
 
             return _ollama
