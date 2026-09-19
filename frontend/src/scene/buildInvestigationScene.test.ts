@@ -5,7 +5,7 @@ import { buildTemplateComposite } from "../templates/templateRegistry";
 import { ANCHOR_REGISTRY } from "./anchorRegistry";
 import { ASSET_REGISTRY, FALLBACK_ASSET, FALLBACK_COLOR, isKnownAsset, resolveAsset, type AssetEntry, type AssetRegistry } from "./assetRegistry";
 import { applyKnowledgeToSceneModel, buildInvestigationScene, type InvestigationSceneModel } from "./buildInvestigationScene";
-import { EMITTED_ASSET_IDS, makeBootstrap, makeOfficeBootstrap, makeProcWorldObject, makeTrophyDefinition, makeWorldObject } from "./testFixtures";
+import { EMITTED_ASSET_IDS, makeBootstrap, makeIcePickDefinition, makeOfficeBootstrap, makeProcWorldObject, makeTrophyDefinition, makeWorldObject } from "./testFixtures";
 import { ValidationError } from "./validation";
 import type { GeneratedAssetDefinition } from "../api/types";
 
@@ -469,6 +469,45 @@ describe("Phase 13 — proc.* generated objects in the scene model", () => {
     expect(trophy!.position).toEqual(anchor.position);
     // Generated labels stay null (server text never reaches the page).
     expect(trophy!.label).toBeNull();
+  });
+
+  it("DEF-079: a REAL thin ice-pick generated object builds with generatedParts and is NOT dropped to the neutral placeholder", () => {
+    // The published thin def (dims {0.04,0.32,0.04}, blade scale {0.005,0.1,0.005})
+    // is exactly the geometry the pre-fix 0.05 m client floor rejected — the
+    // object rendered as gray fallback with unknownAsset=true. Post-fix it
+    // builds as a normal generated object at the drop point.
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [
+      ...bootstrap.scene.worldObjects,
+      makeProcWorldObject({
+        objectId: "bronze_ceremonial_ice_pick",
+        generated: makeIcePickDefinition(),
+      }),
+    ];
+    const model = buildInvestigationScene(bootstrap);
+    const pick = model.worldObjects.find((o) => o.objectId === "bronze_ceremonial_ice_pick")!;
+    expect(pick.unknownAsset).toBe(false);
+    expect(pick.generated).not.toBeNull();
+    expect(pick.generatedParts).not.toBeNull();
+    expect(pick.generatedParts!.length).toBe(2); // handle + blade — never the single fallback box
+    expect(pick.generatedParts![0].color).toBe("#8a5a2b"); // real handle wood color, not FALLBACK_COLOR
+    expect(pick.generatedParts![1].color).not.toBe(FALLBACK_COLOR);
+    expect(pick.generatedHitbox).toEqual({ x: 0.15, y: 0.66, z: 0.15 });
+    // A genuinely collapsed clump still falls back at the SAME drop point.
+    const clumped = makeProcWorldObject({
+      objectId: "ice_pick_clump",
+      generated: makeTrophyDefinition(),
+    });
+    for (const part of (clumped.generated as GeneratedAssetDefinition).parts) {
+      part.transform.position = { x: 0, y: 0, z: 0 };
+      part.transform.scale = { x: 0.001, y: 0.001, z: 0.001 };
+    }
+    const clumpBootstrap = makeBootstrap();
+    clumpBootstrap.scene.worldObjects = [...clumpBootstrap.scene.worldObjects, clumped];
+    const clumpModel = buildInvestigationScene(clumpBootstrap);
+    const clumpObj = clumpModel.worldObjects.find((o) => o.objectId === "ice_pick_clump")!;
+    expect(clumpObj.unknownAsset).toBe(true);
+    expect(clumpObj.generatedParts).toBeNull();
   });
 
   it("a generated object is interactable ONLY when its DTO interaction is non-empty (payload-driven)", () => {

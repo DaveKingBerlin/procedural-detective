@@ -167,7 +167,7 @@ def test_nan_inf_rejected(axis, value):
 @pytest.mark.parametrize(
     "mutate,needle",
     [
-        (lambda p: p.update({"transform": {**p["transform"], "scale": {"x": 0.001, "y": 0.001, "z": 0.001}}}), "scale"),  # too small
+        (lambda p: p.update({"transform": {**p["transform"], "scale": {"x": 0.0001, "y": 0.0001, "z": 0.0001}}}), "scale"),  # too small
         (lambda p: p.update({"transform": {**p["transform"], "scale": {"x": 5.0, "y": 5.0, "z": 5.0}}}), "scale"),  # too big
         (lambda p: p.update({"transform": {**p["transform"], "position": {"x": 5.0, "y": 0.0, "z": 0.0}}}), "position"),  # too far
         (lambda p: p.update({"transform": {**p["transform"], "position": {"x": 1e308, "y": 0.0, "z": 0.0}}}), "within"),  # 1e308
@@ -186,7 +186,7 @@ def test_extreme_overall_dimensions_rejected():
     spec = _valid_spec(dimensions={"x": 20.0, "y": 0.2, "z": 0.2})
     assert validate_asset_spec(spec)
     assert parse_asset_spec(spec) is None
-    spec = _valid_spec(dimensions={"x": 0.001, "y": 0.2, "z": 0.2})
+    spec = _valid_spec(dimensions={"x": 0.0001, "y": 0.2, "z": 0.2})
     assert validate_asset_spec(spec)
     assert parse_asset_spec(spec) is None
 

@@ -14,6 +14,7 @@ import {
   makeBootstrap,
   makeCandidates,
   makeGeneratedPart,
+  makeIcePickDefinition,
   makeProcWorldObject,
   makeTrophyDefinition,
   makeWorldObject,
@@ -360,12 +361,15 @@ describe("Phase 13 — validateGeneratedDefinition (strict client gate)", () => 
     expect(validateGeneratedDefinition(broken)).toBeNull();
   });
 
-  it("rejects out-of-bounds part scales (0.001 below minimum, 3 above maximum)", () => {
-    const tiny = cloneDefinition(makeTrophyDefinition());
-    tiny.parts[0].transform.scale.y = 0.001;
-    expect(validateGeneratedDefinition(tiny)).toBeNull();
+  it("rejects sub-floor part scales (0.0005 below the 0.001 floor, 0 zero) and above-max (3)", () => {
+    const subFloor = cloneDefinition(makeTrophyDefinition());
+    subFloor.parts[0].transform.scale.y = 0.0005; // < GENERATED_SCALE_MIN (0.001)
+    expect(validateGeneratedDefinition(subFloor)).toBeNull();
+    const zero = cloneDefinition(makeTrophyDefinition());
+    zero.parts[0].transform.scale.y = 0.0; // zero must never pass (near-zero gate)
+    expect(validateGeneratedDefinition(zero)).toBeNull();
     const huge = cloneDefinition(makeTrophyDefinition());
-    huge.parts[0].transform.scale.z = 3;
+    huge.parts[0].transform.scale.z = 3; // > GENERATED_SCALE_MAX (2.0)
     expect(validateGeneratedDefinition(huge)).toBeNull();
   });
 
@@ -535,5 +539,104 @@ describe("Phase 13 — generated block wiring in the world-object DTO", () => {
     );
     expect(parsed.assetId).toBe("PROP_VASE_01");
     expect(parsed.generated).toBeNull();
+  });
+});
+
+describe("Phase 13 — DEF-079 Phase17D thin physical geometry (0.001 m floor)", () => {
+  it("accepts 0.001 m dimensions and part scales (the physical floor is INCLUSIVE)", () => {
+    const thin: GeneratedAssetDefinition = {
+      ...makeTrophyDefinition(),
+      canonicalName: "Thin Medal",
+      dimensions: { x: 0.001, y: 0.2, z: 0.001 },
+      parts: [
+        makeGeneratedPart("part_00", {
+          role: "medal",
+          transform: {
+            position: { x: 0, y: 0, z: 0 },
+            rotation: { x: 0, y: 0, z: 0 },
+            scale: { x: 0.001, y: 0.2, z: 0.001 }, // 1 mm thick, 20 cm long
+          },
+          color: "#c9a227",
+        }),
+      ],
+      hitbox: { scale: { x: 0.15, y: 0.22, z: 0.15 } },
+    };
+    expect(generatedDefinitionIssues(thin)).toEqual([]);
+    expect(validateGeneratedDefinition(thin)).not.toBeNull();
+  });
+
+  it("a REAL thin-but-visible definition exactly like the published bronze ceremonial ice pick VALIDATES (dims {0.04,0.32,0.04}; blade scale {0.005,0.1,0.005}; hitbox {0.15,0.66,0.15})", () => {
+    const icePick = makeIcePickDefinition();
+    expect(generatedDefinitionIssues(icePick)).toEqual([]);
+    const parsed = validateGeneratedDefinition(icePick);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.dimensions).toEqual({ x: 0.04, y: 0.32, z: 0.04 });
+    expect(parsed!.parts[1].transform.scale).toEqual({ x: 0.005, y: 0.1, z: 0.005 });
+    expect(parsed!.hitbox.scale).toEqual({ x: 0.15, y: 0.66, z: 0.15 });
+  });
+
+  it("a proc.* world object carrying the thin ice-pick definition keeps its generated block (the object is NOT dropped)", () => {
+    const parsed = validateWorldObject.validate(
+      makeProcWorldObject({ generated: makeIcePickDefinition() }),
+    );
+    expect(parsed.generated).not.toBeNull();
+    expect(parsed.generated!.dimensions).toEqual({ x: 0.04, y: 0.32, z: 0.04 });
+    expect(parsed.generated!.parts).toHaveLength(2);
+  });
+
+  it("0.0005 and 0.0 axes still FAIL every gate (the near-zero hole cannot be bypassed)", () => {
+    const dimSubFloor = cloneDefinition(makeIcePickDefinition());
+    dimSubFloor.dimensions.x = 0.0005; // < 0.001
+    expect(validateGeneratedDefinition(dimSubFloor)).toBeNull();
+
+    const dimZero = cloneDefinition(makeIcePickDefinition());
+    dimZero.dimensions.y = 0.0; // zero is never a physical axis
+    expect(validateGeneratedDefinition(dimZero)).toBeNull();
+
+    const scaleSubFloor = cloneDefinition(makeIcePickDefinition());
+    scaleSubFloor.parts[0].transform.scale.x = 0.0005; // < 0.001
+    expect(validateGeneratedDefinition(scaleSubFloor)).toBeNull();
+
+    const scaleZero = cloneDefinition(makeIcePickDefinition());
+    scaleZero.parts[1].transform.scale.z = 0.0; // zero thickness is degenerate
+    expect(validateGeneratedDefinition(scaleZero)).toBeNull();
+  });
+
+  it("an all-axes-collapsed 5 cm clump is still rejected (composite span collapses below 0.06 m on EVERY axis)", () => {
+    // Exact mirror of the backend test_near_zero_clump_still_rejected: the
+    // declared dims are generous but every part is pinned to a {0.05,0.05,0.05}
+    // box at the origin — the PARTS composite span is what the shape-aware
+    // visible-extent gate measures (geometry_quality.py MIN_VISIBLE_AXIS=0.06).
+    const clump = makeTrophyDefinition();
+    clump.parts = [
+      makeGeneratedPart("part_00", { role: "clump", color: "#5b3a29" }),
+      makeGeneratedPart("part_01", { role: "clump", color: "#c9a227" }),
+    ];
+    for (const part of clump.parts) {
+      part.transform.position = { x: 0, y: 0, z: 0 };
+      part.transform.scale = { x: 0.05, y: 0.05, z: 0.05 };
+    }
+    expect(validateGeneratedDefinition(clump)).toBeNull();
+    expect(generatedDefinitionIssues(clump).join("\n")).toContain("visibleExtent");
+
+    // A truly sub-visual object (longest span < MIN_VISIBLE_EXTENT=0.02) is
+    // rejected by the longest-span leg alone (mirror of the backend tiny speck).
+    const tiny = makeTrophyDefinition();
+    tiny.parts = [
+      makeGeneratedPart("part_00", { role: "speck", color: "#5b3a29" }),
+      makeGeneratedPart("part_01", { role: "speck", color: "#c9a227" }),
+    ];
+    for (const part of tiny.parts) {
+      part.transform.position = { x: 0.0001, y: 0, z: 0 };
+      part.transform.scale = { x: 0.001, y: 0.001, z: 0.001 };
+    }
+    expect(validateGeneratedDefinition(tiny)).toBeNull();
+    expect(generatedDefinitionIssues(tiny).join("\n")).toContain("visibleExtent");
+  });
+
+  it("existing >= 0.05 fixture definitions still validate without any visible-extent issue", () => {
+    const trophy = makeTrophyDefinition();
+    expect(generatedDefinitionIssues(trophy)).toEqual([]);
+    expect(validateGeneratedDefinition(trophy)).not.toBeNull();
   });
 });

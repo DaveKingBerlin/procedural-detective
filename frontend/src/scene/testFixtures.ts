@@ -148,6 +148,48 @@ export function makeTrophyDefinition(overrides: Partial<GeneratedAssetDefinition
   };
 }
 
+/**
+ * DEF-079: the REAL published thin generated definition — the bronze
+ * ceremonial ice pick (dims {0.04,0.32,0.04}, blade scale {0.005,0.1,0.005},
+ * hitbox {0.15,0.66,0.15}) that Phase17D legalized and the pre-fix 0.05 m
+ * client floor DROPPED (the object rendered as the neutral gray placeholder).
+ * Its composite part span reaches 0.32 m in the longest axis and is NOT
+ * collapsed below 0.06 m on every axis, so the shape-aware visible-extent
+ * gate accepts it: thin-but-long is physically realistic, not near-zero.
+ */
+export function makeIcePickDefinition(overrides: Partial<GeneratedAssetDefinition> = {}): GeneratedAssetDefinition {
+  return {
+    compilerVersion: 1,
+    schemaVersion: 1,
+    assetId: "proc.decor.4551660f4a46b2eb", // the REAL published ice-pick id
+    canonicalName: "Bronze Ceremonial Ice Pick",
+    dimensions: { x: 0.04, y: 0.32, z: 0.04 },
+    parts: [
+      makeGeneratedPart("part_00", {
+        role: "handle",
+        primitive: "cylinder",
+        transform: {
+          position: { x: 0, y: -0.12, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.04, y: 0.2, z: 0.04 }, // 20 cm long, 4 cm diameter
+        },
+        color: "#8a5a2b",
+      }),
+      makeGeneratedPart("part_01", {
+        role: "blade",
+        transform: {
+          position: { x: 0, y: 0.05, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.005, y: 0.1, z: 0.005 }, // 10 cm long, 5 mm thick — the 17D thin axis
+        },
+        color: "#c9a227",
+      }),
+    ],
+    hitbox: { scale: { x: 0.15, y: 0.66, z: 0.15 } },
+    ...overrides,
+  };
+}
+
 /** A canned proc.* world object carrying a valid trophy definition. */
 export function makeProcWorldObject(overrides: Partial<WorldObjectDTO> = {}): WorldObjectDTO {
   return makeWorldObject({

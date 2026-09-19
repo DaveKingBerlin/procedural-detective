@@ -143,6 +143,47 @@ def test_unknown_environment_variables_are_ignored(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# DEF-080 — generation_deadline_seconds binds the CANONICAL §45 env name
+# CASE_GENERATION_DEADLINE_SECONDS (NOT the field-derived old
+# GENERATION_DEADLINE_SECONDS); exactly one canonical name per setting.
+# ---------------------------------------------------------------------------
+def _clear_deadline_env(monkeypatch) -> None:
+    monkeypatch.delenv("CASE_GENERATION_DEADLINE_SECONDS", raising=False)
+    monkeypatch.delenv("GENERATION_DEADLINE_SECONDS", raising=False)
+
+
+def test_generation_deadline_binds_canonical_env_name(monkeypatch):
+    _clear_env(monkeypatch)
+    _clear_deadline_env(monkeypatch)
+    assert Settings().generation_deadline_seconds == 60  # documented default
+    monkeypatch.setenv("CASE_GENERATION_DEADLINE_SECONDS", "123")
+    assert Settings().generation_deadline_seconds == 123
+
+
+def test_generation_deadline_old_env_name_is_not_bound(monkeypatch):
+    """§45 single-name rule: the old field-derived GENERATION_DEADLINE_SECONDS
+    must NOT bind (pre-fix it silently won over the canonical name)."""
+    _clear_env(monkeypatch)
+    _clear_deadline_env(monkeypatch)
+    monkeypatch.setenv("GENERATION_DEADLINE_SECONDS", "999")
+    assert Settings().generation_deadline_seconds == 60  # dead alias: default
+    # The canonical name still works while the dead alias is present.
+    monkeypatch.setenv("CASE_GENERATION_DEADLINE_SECONDS", "123")
+    assert Settings().generation_deadline_seconds == 123
+
+
+def test_generation_deadline_canonical_init_kwarg(monkeypatch):
+    """§45 single-name rule extends to construction: the canonical alias is the
+    accepted keyword (Settings(CASE_GENERATION_DEADLINE_SECONDS=...)); explicitly
+    setting it wins over the environment."""
+    _clear_env(monkeypatch)
+    _clear_deadline_env(monkeypatch)
+    monkeypatch.setenv("CASE_GENERATION_DEADLINE_SECONDS", "123")
+    s = Settings(CASE_GENERATION_DEADLINE_SECONDS=80)
+    assert s.generation_deadline_seconds == 80
+
+
+# ---------------------------------------------------------------------------
 # DEF-015 — wildcard / null CORS origins are rejected up front
 # ---------------------------------------------------------------------------
 def test_cors_wildcard_is_rejected(monkeypatch):

@@ -155,10 +155,20 @@ EXCESSIVE_SEPARATION_FACTOR = 3.0
 # its object). A 3 m child inside a 0.3 m object is always rejected.
 PARENT_CHILD_DISTANCE_FRACTION = 0.4
 PARENT_CHILD_DISTANCE_MIN = 0.05
-# 4.8 visible extent / volume gates (a ~0.05-m-anywhere clump collapses: volume
-# below the threshold; a single 0.05-metre cube is 1.25e-4 m^3 and is rejected).
+# 4.8 visible extent / volume gates. Physical-meter semantics (Phase17D B)
+# make honest thin objects (ice picks, letter openers, blades) legitimately
+# thin on ONE axis as a fraction of their overall size, so the gate is now
+# SHAPE-AWARE instead of a coarse absolute-volume floor:
+#   - the object must reach MIN_VISIBLE_EXTENT (>= 2 cm) in its LONGEST span
+#     (anything smaller than that everywhere is not a usable interactive
+#     object);
+#   - an object whose composite collapses below MIN_VISIBLE_AXIS (6 cm) on
+#     EVERY axis is a near-zero/collapsed clump (the old "~0.05 m clump")
+#     and is rejected even when declared dimensions are generous.
+# A thin-but-long object (blade/ice pick) is never "near-zero": one (or two)
+# thin axes are physically realistic; only omnidirectional collapse fails.
 MIN_VISIBLE_EXTENT = 0.02
-MIN_VISIBLE_VOLUME = 2.5e-4  # m^3
+MIN_VISIBLE_AXIS = 0.06
 # 4.9 silhouette separation along one axis after parent-unwind.
 SILHOUETTE_SEPARATION = 0.05
 
@@ -642,14 +652,17 @@ def validate_geometry(
                     )
                 )
     # ---- 4.8 VISUAL_EXTENT_TOO_SMALL -----------------------------------------
-    smallest = min(span)
-    volume = span[0] * span[1] * span[2]
-    if smallest < MIN_VISIBLE_EXTENT or volume < MIN_VISIBLE_VOLUME:
+    largest = max(span)
+    if (
+        largest < MIN_VISIBLE_EXTENT
+        or all(axis < MIN_VISIBLE_AXIS for axis in span)
+    ):
         issues.append(
             _geom(
                 "VISUAL_EXTENT_TOO_SMALL",
-                f"the object's visible geometry is too small (smallest span "
-                f"{smallest:g}m; volume {volume:g}m^3) — an LLM-proposed tiny "
+                f"the object's visible geometry is too small or collapsed "
+                f"(largest span {largest:g}m; spans "
+                f"{span[0]:g}x{span[1]:g}x{span[2]:g}m) — an LLM-proposed tiny "
                 "or collapsed mesh cannot be a usable interactive object",
             )
         )
@@ -810,7 +823,7 @@ __all__ = [
     "HANDHELD_MAX_SINGLE_DIMENSION",
     "HANDHELD_SUBTYPE_TAGS",
     "MIN_VISIBLE_EXTENT",
-    "MIN_VISIBLE_VOLUME",
+    "MIN_VISIBLE_AXIS",
     "PARENT_CHILD_DISTANCE_FRACTION",
     "PARENT_CHILD_DISTANCE_MIN",
     "SILHOUETTE_SEPARATION",

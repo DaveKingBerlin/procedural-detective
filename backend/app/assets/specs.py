@@ -28,14 +28,14 @@ Bound summary (all inclusive):
 |                                 | allows, which the catalog vocabulary  |
 |                                 | already provides)                    |
 | subtype                         | None or str 1..80                     |
-| dimensions (x/y/z)              | 0.05 <= d <= 4.0, finite              |
+| dimensions (x/y/z)              | 0.001 <= d <= 4.0, finite             |
 | parts                           | 1..24 parts                          |
 | part id                         | ^part_[0-9]{2}$ within part_00..part_23  |
 | part role                       | ^[a-z0-9_]+$ 1..24 chars              |
 | part primitive                 | box|cylinder|sphere|plane            |
 | part position (x/y/z)           | |v| <= 4.0, finite                   |
 | part rotation (x/y/z)           | |r| <= 2*pi, finite                  |
-| part scale (x/y/z)              | 0.05 <= s <= 2.0, finite            |
+| part scale (x/y/z)              | 0.001 <= s <= 2.0, finite            |
 | part material                   | frozen MATERIAL_VOCABULARY token        |
 | part sourceColor (optional)     | #RRGGBB hex                          |
 | part parentId (optional)        | id of an EARLIER part (depth <= 2)    |
@@ -78,6 +78,17 @@ from app.assets.glyphs import format_glyph_issues
 # --------------------------------------------------------------------------- #
 # frozen bounds + vocabularies
 # --------------------------------------------------------------------------- #
+#
+# Physical-meter semantics (Phase17D B): ``dimensions`` AND ``transform.scale``
+# are BOTH physical METERS (the compiler copies part scale verbatim into the
+# render definition, and the Babylon renderer applies it as absolute world
+# units). ``MIN_PART_SCALE``/``DIMENSION_MIN`` = 0.001 (1 mm) therefore express
+# realistic thin features (a 0.25 m ice pick shaft/blade 0.002-0.01 m thick)
+# that Hermes-class models naturally emit; the old 0.05 floor forced every
+# generated object to an unrealistic >= 5 cm slab. Near-zero/collapsed geometry
+# is still rejected — by the Phase 17 visible-extent gate (longest-span +
+# all-axis collapse checks) and every other deterministic geometry check, NOT
+# by a coarse per-axis floor.
 
 PRIMITIVE_ALLOWLIST: frozenset[str] = frozenset(
     {"box", "cylinder", "sphere", "plane"}
@@ -95,11 +106,11 @@ MAX_SUBTYPE_LENGTH = 80
 MAX_PARTS = 24
 MAX_PART_ROLE_LENGTH = 24
 
-DIMENSION_MIN = 0.05
+DIMENSION_MIN = 0.001
 DIMENSION_MAX = 4.0
 MAX_POSITION_BOUND = 4.0
 MAX_ROTATION_BOUND = 2.0 * math.pi
-MIN_PART_SCALE = 0.05
+MIN_PART_SCALE = 0.001
 MAX_PART_SCALE = 2.0
 
 # "part_00" .. "part_23" (id pattern + numeric range). DEF-076: the digits are

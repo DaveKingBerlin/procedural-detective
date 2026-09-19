@@ -18,7 +18,8 @@ import { FALLBACK_COLOR } from "./assetRegistry";
  * the scene glue (`renderInvestigation.ts`) applies the resulting descriptors
  * verbatim. Only validated definitions ever reach this module from the scene
  * model (the DTO gate is `validateGeneratedDefinition`), so geometry is
- * bounded by construction: |position| ≤ 4, |rotation| ≤ 2π, 0.05 ≤ scale ≤ 2,
+ * bounded by construction: |position| ≤ 4, |rotation| ≤ 2π, 0.001 ≤ scale ≤ 2
+ * (Phase17D physical meters — thin 1 mm features are legal),
  * ≤ 24 parts, #RRGGBB colors, hitbox within 0.15..10.
  *
  * TRANSFORM MODEL (documented):
@@ -36,9 +37,12 @@ import { FALLBACK_COLOR } from "./assetRegistry";
  *    a thick slab, whatever the spec declares.
  *
  * HITBOX: `def.hitbox.scale` is the declared picking extent basis (already
- * bounded 0.15..10 by both the backend derive step and the client gate). The
- * existing MIN_PICKABLE_EXTENT policy (renderInvestigation / assetRegistry)
- * still applies: a small generated object gets the safe invisible pick box.
+ * bounded 0.15..10 by both the backend derive step and the client gate —
+ * HITBOX_MIN floors the pick box so thin generated objects stay directly
+ * clickable, and the backend's HITBOX_VISIBLE_MAX_RATIO=2.0 cap on the derived
+ * box stays in force there). The existing MIN_PICKABLE_EXTENT policy
+ * (renderInvestigation / assetRegistry) still applies: a small generated
+ * object gets the safe invisible pick box.
  *
  * FALLBACK: a null/structurally-absent definition compiles to the same neutral
  * non-interactable 0.4 m box every other unknown asset uses — never a throw,

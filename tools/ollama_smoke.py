@@ -21,6 +21,7 @@ POSIX/cmd:
     python -m tools.ollama_smoke --enable --roundtrip        # + CASE/PEOPLE & ASSET_SPEC round-trip
     python -m tools.ollama_smoke --enable --geometry-repair  # + Phase 17 geometry repair round-trip
     python -m tools.ollama_smoke --enable --debug --stage asset_spec
+    python -m tools.ollama_smoke --enable --full-chain       # REAL full Prompt-to-World chain
     python -m tools.ollama_smoke --showcase-steps            # print the manual Local-AI showcase E2E steps
 
 It is STRICTLY opt-in: without ``--enable`` (or the env flag
@@ -213,13 +214,73 @@ def _parse_issues_for(stage: str, content: str) -> tuple[bool, list[str]]:
     if stage == "repair":
         issues = list(stage_parser.collect_full_draft_issues(content))
         return (not issues), issues
-    # case_truth / evidence
-    issues = list(
-        stage_parser.collect_issues(GenerationStage(stage), content)
-        if stage in ("case_truth", "evidence")
-        else ()
-    )
+    if stage == "case_truth":
+        issues = _case_truth_issues(content)
+        return (not issues), issues
+    # evidence
+    issues = list(stage_parser.collect_issues(GenerationStage.EVIDENCE, content))
     return (not issues), issues
+
+
+# The public sections of a case_people document (mirror of the driver's
+# ``parse_case_people`` public payload).
+_CASE_PEOPLE_PUBLIC_KEYS = (
+    "persons",
+    "motives",
+    "objects",
+    "locations",
+    "travelRules",
+    "scene",
+)
+
+
+def _case_truth_issues(content: str) -> list[str]:
+    """Exact strict-parse issue strings of a FULL case_people document.
+
+    The CASE_PEOPLE prompt asks for the complete document (crime + persons +
+    motives + locations + travelRules + scene), and the driver splits it the
+    same authoritative way (``ollama_driver.parse_case_people``): the
+    ``crime`` section through the CASE_TRUTH stage parser and the remaining
+    public sections through the PUBLIC_WORLD stage parser. Checking the FULL
+    document against the CRIME-only parser would wrongly report the public
+    sections as unknown keys (smoke-surface fix).
+    """
+    from app.generation import parser as stage_parser
+    from app.generation.provider import GenerationStage
+    from app.services.ollama_driver import _parse_doc
+
+    try:
+        data = _parse_doc(content)
+    except (TypeError, ValueError) as exc:
+        return [f"case_truth: {exc}"]
+    if not isinstance(data, dict):
+        return ["case_truth: root must be a JSON object"]
+    issues: list[str] = []
+    crime = data.get("crime")
+    if not isinstance(crime, dict):
+        issues.append("case_truth: missing required key 'crime'")
+    else:
+        issues += list(
+            stage_parser.collect_issues(
+                GenerationStage.CASE_TRUTH,
+                json.dumps({"crime": crime}, sort_keys=True),
+            )
+        )
+    public_payload = {
+        key: value for key, value in data.items() if key in _CASE_PEOPLE_PUBLIC_KEYS
+    }
+    # The driver tolerates an absent case_people ``objects`` section by
+    # defaulting it to [] (the prompt's ring-fence even omits the key); the
+    # smoke mirrors that authoritative default exactly.
+    if "objects" not in public_payload:
+        public_payload["objects"] = []
+    issues += list(
+        stage_parser.collect_issues(
+            GenerationStage.PUBLIC_WORLD,
+            json.dumps(public_payload, sort_keys=True),
+        )
+    )
+    return issues
 
 
 def _geometry_issue_dict(issue: Any) -> dict[str, object]:
@@ -244,6 +305,146 @@ def _geometry_details(provider: Any) -> dict[str, object]:
         for index, entry in enumerate(trace)
     ]
     return {"repairTrace": attempts, "traceLength": len(attempts)}
+
+
+# --------------------------------------------------------------------------- #
+# Phase17 Wave-2 — REAL full Prompt-to-World chain (operator re-run command)
+# --------------------------------------------------------------------------- #
+
+_FULL_CHAIN_PROMPT = (
+    "Victim: Dr. Anna Weiss\n"
+    "Murderer: Paul Becker\n"
+    "Motive: stolen research data\n"
+    "Weapon: bronze ceremonial ice pick\n"
+    "Time: 23:42\n"
+    "Witness: Lisa K\u00f6nig\n"
+    "Location: office\n"
+)
+
+
+def _solver_dim_summary(proof: Any) -> dict[str, object]:
+    """Sanitized per-dimension solver summary (winner ids are PUBLIC candidate
+    ids — never truth/hidden internals)."""
+    if proof is None:
+        return {}
+    out: dict[str, object] = {}
+    for name, dim in (("who", proof.who), ("why", proof.why), ("weapon", proof.weapon)):
+        if dim is None:
+            out[name] = None
+            continue
+        out[name] = {
+            "unique": bool(dim.unique),
+            "winner": dim.winner,
+            "excludedCount": len(dim.excluded or ()),
+            "unknownCount": len(dim.unknown_remaining or ()),
+        }
+    if proof.when is not None:
+        out["when"] = {
+            "ambiguous": bool(proof.when.ambiguous),
+            "overconstrained": bool(proof.when.overconstrained),
+        }
+    return out
+
+
+def _full_chain_report(settings, provider) -> dict[str, object]:
+    """One REAL full Prompt-to-World run through the stage driver + controller.
+
+    Walks the actual controller pipeline (the service path minus persistence):
+    CASE/PEOPLE -> EVIDENCE (with the app-owned deterministic evidence
+    projection) -> WORLD_REQUIREMENTS -> ASSET_SPEC (proc.*) -> deterministic
+    solver -> publication gate. Reports ONLY sanitized facts: final state,
+    validation outcome, provider-call count, elapsed, the solver winners
+    (public candidate ids), the proc.* placement (evidenceId + interaction)
+    and the evidence-completion audit counts. NEVER the base URL, prompts,
+    raw output, credentials, hidden truth or host details.
+    """
+    from app.generation.admission import AdmissionController
+    from app.generation.clock import RealClock
+    from app.generation.controller import GenerationController
+    from app.generation.ids import IdSource
+    from app.services.ollama_driver import OllamaStageDriver
+
+    clock = RealClock()
+    ids = IdSource()
+    admission = AdmissionController(
+        clock=clock,
+        ids=ids,
+        max_concurrent_generations=1,
+        max_concurrent_generations_global=3,
+        max_generations_per_session_per_window=3,
+        max_generations_global_per_window=50,
+        anonymous_quota_session_ttl_seconds=86400,
+    )
+    session = admission.create_anonymous_quota_session()
+    driver = OllamaStageDriver(settings=settings, provider_factory=lambda: provider)
+    controller = GenerationController(
+        provider=provider,
+        admission=admission,
+        clock=clock,
+        ids=ids,
+        deadline_seconds=settings.generation_deadline_seconds,
+        max_llm_calls_per_generation=settings.max_llm_calls_per_generation,
+        max_repair_passes=settings.max_repair_passes,
+        max_full_regenerations=settings.max_full_regenerations,
+        max_prompt_chars=settings.max_prompt_chars,
+        hold_before_publish=True,
+        stage_driver=driver,
+    )
+    started = time.perf_counter()
+    handle = controller.start_generation(
+        _FULL_CHAIN_PROMPT, anonymous_quota_session_id=session.session_id
+    )
+    record = controller.attempt(handle.attempt_id)
+    elapsed = round(time.perf_counter() - started, 4)
+    out: dict[str, object] = {
+        "state": record.state.value,
+        "elapsedSeconds": elapsed,
+        "providerCalls": record.budget.calls if record.budget else 0,
+        "evidenceCompletionNotes": len(getattr(driver, "last_evidence_injections", ()) or ()),
+    }
+    if record.last_validation is not None:
+        out["validationOutcome"] = record.last_validation.outcome.value
+        out["repairDiagnostics"] = list(record.last_validation.repair_diagnostics)
+    out["solverWinners"] = _solver_dim_summary(record.solver_proof)
+    if record.draft is not None and record.last_validation is not None and record.last_validation.valid:
+        out["draftSha256"] = _draft_sha(record.draft)
+        out["crime"] = {
+            "victimId": record.draft.crime.victim_id,
+            "murdererId": record.draft.crime.murderer_id,
+            "motiveId": record.draft.crime.motive_id,
+            "weaponId": record.draft.crime.weapon_id,
+            "locationId": record.draft.crime.location_id,
+        }
+        out["sceneEnvironment"] = getattr(record.draft.scene, "environment_id", None)
+        out["procPlacements"] = [
+            {
+                "objectId": p.object_id,
+                "assetId": p.asset_id,
+                "interaction": p.interaction,
+                "evidenceId": p.evidence_id,
+            }
+            for p in record.draft.world_graph.placements
+            if str(p.asset_id).startswith("proc.")
+        ]
+    return out
+
+
+def _draft_sha(draft: Any) -> str:
+    """Deterministic identity hash of the generated world (byte-determinism
+    check for repeated operator runs; draft material only, never metadata)."""
+    import hashlib
+
+    try:
+        payload = json.dumps(
+            draft.to_dict() if hasattr(draft, "to_dict") else repr(draft),
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -448,7 +649,14 @@ def _geometry_repair_roundtrip(settings, provider) -> dict[str, object]:
     out: dict[str, object] = {
         "providerOk": result.error is None,
         "geometricallyValid": result.error is None,
-        "providerCalls": spec_provider.calls,
+        # True request-level count: initial ASSET_SPEC + each ASSET_SPEC_REPAIR
+        # = repairAttempts + 1 (Phase17C §8 — a repair is a REAL provider call,
+        # never a free local reprocessing). ``calls`` (the outer spec-provider
+        # invocation) is always 1 and not a provider-consumption figure.
+        "providerCalls": spec_provider.request_calls,
+        "repairAttempts": spec_provider.last_geometry_metrics.get("repairAttempts", 0)
+        if spec_provider.last_geometry_metrics is not None
+        else 0,
     }
     if result.error is not None:
         out["errorSanitized"] = str(result.error)[:200]
@@ -580,6 +788,11 @@ def main(argv: list[str] | None = None) -> int:
         help="also run one Phase 17 geometry-repair round-trip (sanitized metrics: issueCountBeforeRepair, repairAttempts, per-pass issues, finalPartCount, finalBoundingBox, declaredDimensions, silhouettePassed, generatedOnFirstPass/repaired, finalProcId).",
     )
     parser.add_argument(
+        "--full-chain",
+        action="store_true",
+        help="run the REAL full Prompt-to-World chain (showcase prompt) through the stage driver + controller and report the sanitized publish outcome / solver winners / proc.* placement (operator re-run command for the Phase17 Wave-2 showcase; replaces the manual operator harness).",
+    )
+    parser.add_argument(
         "--showcase-steps",
         action="store_true",
         help="print the manual Local-AI showcase browser E2E steps and exit (no network).",
@@ -633,9 +846,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             stage = args.stage or "case_truth"
-            report = _sanitized_report(
-                settings, provider, True, stage, structured_supported
-            )
+            if args.full_chain:
+                report["fullChain"] = _full_chain_report(settings, provider)
+            else:
+                report = _sanitized_report(
+                    settings, provider, True, stage, structured_supported
+                )
             if args.roundtrip:
                 report["roundtrip"] = _roundtrip_report(settings, provider)
             if args.geometry_repair and "roundtrip" not in report:

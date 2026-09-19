@@ -337,7 +337,8 @@ export const parseInvestigationBootstrap: Validator<InvestigationBootstrapRespon
  *    compiler/schema versions (schema-version confusion falls back)
  *  - assetId: non-empty string (≤ 128 chars)
  *  - canonicalName: non-empty string (≤ 80 chars)
- *  - dimensions {x,y,z}: finite floats within 0.05..4
+ *  - dimensions {x,y,z}: finite floats within 0.001..4 (Phase17D physical
+ *    meters — a realistic 0.25 m ice pick has 0.002-0.01 m thick axes)
  *  - parts: array with 1..24 entries
  *  - per part: object; id matches ^[a-zA-Z0-9_]{1,24}$ (the backend emits
  *    part_00..part_23 — the pattern also accepts any other bounded id) and is
@@ -347,9 +348,14 @@ export const parseInvestigationBootstrap: Validator<InvestigationBootstrapRespon
  *    property names {style, href, src, class, method, proto}; primitive ∈
  *    {box, cylinder, sphere, plane} (capsule/extruded/etc. are rejected);
  *    color is #RRGGBB; transform.{position,rotation,scale} {x,y,z} finite
- *    floats, position |v|≤4, rotation |v|≤2π, scale within 0.05..2
+ *    floats, position |v|≤4, rotation |v|≤2π, scale within 0.001..2
+ *  - visible extent (Phase17D shape-aware mirror): the PARTS' composite span
+ *    must reach 0.02 m in its longest axis and may NOT collapse below 0.06 m
+ *    on EVERY axis — thin-but-long objects are legal, a near-zero clump never;
  *  - parentId: null or the id of an EARLIER EXISTING part; parent chains ≤ 2 deep
- *  - hitbox: {scale:{x,y,z}} — finite floats within 0.15..10
+ *  - hitbox: {scale:{x,y,z}} — finite floats within 0.15..10 (HITBOX_MIN floors
+ *    the pick box so thin objects stay directly clickable; the backend's
+ *    HITBOX_VISIBLE_MAX_RATIO=2.0 cap on the derived box stays in force there)
  * ==================================================================== */
 
 /** Current generated-definition compiler version (mirror of the backend constant). */
@@ -359,19 +365,53 @@ export const GENERATED_SCHEMA_VERSION = 1;
 
 /** Maximum number of parts per definition (backend MAX_PARTS mirror). */
 export const GENERATED_MAX_PARTS = 24;
-/** Dimension bounds (backend DIMENSION_MIN/MAX mirror). */
-export const GENERATED_DIMENSION_MIN = 0.05;
+/**
+ * Dimension bounds (backend DIMENSION_MIN/MAX mirror). DEF-079: the Phase17D
+ * physical-meter contract lowered the floor from 0.05 to 0.001 (1 mm) — a
+ * realistic 0.25 m ice pick has 0.002-0.01 m thick axes that Hermes-class
+ * models naturally emit, and the old 0.05 floor forced every generated object
+ * into an unrealistic >= 5 cm slab AND dropped legal thin geometry in the
+ * browser. Near-zero/collapsed geometry is still rejected by the Phase17D
+ * visible-extent gate below — never by a coarse per-axis floor.
+ */
+export const GENERATED_DIMENSION_MIN = 0.001;
 export const GENERATED_DIMENSION_MAX = 4.0;
 /** Part position bound (backend MAX_POSITION_BOUND mirror). */
 export const GENERATED_POSITION_BOUND = 4.0;
 /** Part rotation bound (backend MAX_ROTATION_BOUND mirror). */
 export const GENERATED_ROTATION_BOUND = 2 * Math.PI;
-/** Part scale bounds (backend MIN/MAX_PART_SCALE mirror). */
-export const GENERATED_SCALE_MIN = 0.05;
+/**
+ * Part scale bounds (backend MIN/MAX_PART_SCALE mirror). The SAME Phase17D
+ * floor as the dimension bound: part scales are physical METERS (the compiler
+ * copies them verbatim into the render definition), so 0.001 m thin features
+ * are legal. The near-zero gate is the visible-extent check below, not this
+ * bound — 0.0 / 0.0005 / non-finite values are still rejected here.
+ */
+export const GENERATED_SCALE_MIN = 0.001;
 export const GENERATED_SCALE_MAX = 2.0;
-/** Hitbox bounds (backend HITBOX_MIN/MAX mirror). */
+/**
+ * Hitbox bounds (backend HITBOX_MIN/MAX mirror): the derived picking extent is
+ * always min-clamped to HITBOX_MIN (0.15) so thin/small objects stay directly
+ * clickable, and capped at HITBOX_MAX. The backend ALSO caps the derived box at
+ * the visible span * HITBOX_VISIBLE_MAX_RATIO — that derivation-time cap stays
+ * in force on the backend; this client gate keeps validating the published
+ * [0.15..10] bounds.
+ */
 export const GENERATED_HITBOX_MIN = 0.15;
 export const GENERATED_HITBOX_MAX = 10.0;
+/** Backend derivation constant (documented mirror; the client gate does NOT
+ * re-derive hitboxes — the cap is enforced by the backend compiler). */
+export const GENERATED_HITBOX_VISIBLE_MAX_RATIO = 2.0;
+/**
+ * Phase17D shape-aware visible-extent gate (backend geometry_quality.py
+ * MIN_VISIBLE_EXTENT / MIN_VISIBLE_AXIS mirror): the PARTS' composite span
+ * must reach >= 0.02 m in its longest axis, and it may NOT collapse below
+ * 0.06 m on EVERY axis. Thin-but-long objects (ice picks, letter openers,
+ * blades) are legal — one or two thin axes are physically realistic; only
+ * omnidirectional near-zero collapse is rejected.
+ */
+export const GENERATED_VISIBLE_EXTENT_MIN = 0.02;
+export const GENERATED_VISIBLE_AXIS_MIN = 0.06;
 /** canonicalName cap (backend MAX_CANONICAL_NAME_LENGTH mirror). */
 const GENERATED_NAME_MAX = 80;
 /** assetId defensive length cap (the backend grammar is far shorter). */
@@ -444,6 +484,86 @@ function generatedVecIssues(
       out.add(`${where}.${axis} must be within [${low}, ${high}]`);
     }
   }
+}
+
+/** Extract a finite numeric {x,y,z} triple (null when not a usable vector). */
+function generatedNumericVec(value: unknown): [number, number, number] | null {
+  if (!isPlainRecord(value)) return null;
+  const x = value.x;
+  const y = value.y;
+  const z = value.z;
+  if (typeof x !== "number" || !Number.isFinite(x)) return null;
+  if (typeof y !== "number" || !Number.isFinite(y)) return null;
+  if (typeof z !== "number" || !Number.isFinite(z)) return null;
+  return [x, y, z];
+}
+
+/** One part box usable for the composite-span computation (finite numbers). */
+interface GeneratedPartBox {
+  position: [number, number, number];
+  scale: [number, number, number];
+  parentId: unknown;
+}
+
+/**
+ * Best-effort composite visible span (metres) of a definition's PART boxes in
+ * the object's world frame — an EXACT mirror of the backend Phase17D inputs
+ * (geometry_quality._world_positions + _composite_metrics): each part
+ * contributes [position ± scale/2] per axis after parent-unwind, and the
+ * per-axis span is max(hi) - min(lo) over ALL parts.
+ *
+ * Returns null when NO part yields a finite numeric box (such a definition is
+ * already rejected by structural issues). Out-of-range-but-finite values are
+ * still usable here — a definition that violates a bound is rejected anyway;
+ * only the deterministic visible-extent verdict of well-formed parts matters.
+ */
+function generatedCompositeSpan(parts: readonly unknown[]): [number, number, number] | null {
+  const byId = new Map<string, GeneratedPartBox>();
+  for (const part of parts) {
+    if (!isPlainRecord(part) || typeof part.id !== "string") continue;
+    if (!isPlainRecord(part.transform)) continue;
+    const position = generatedNumericVec(part.transform.position);
+    const scale = generatedNumericVec(part.transform.scale);
+    if (position === null || scale === null) continue;
+    byId.set(part.id, { position, scale, parentId: part.parentId });
+  }
+  if (byId.size === 0) return null;
+
+  const mins: [number, number, number] = [Infinity, Infinity, Infinity];
+  const maxs: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (const part of parts) {
+    if (!isPlainRecord(part) || typeof part.id !== "string") continue;
+    if (!isPlainRecord(part.transform)) continue;
+    const position = generatedNumericVec(part.transform.position);
+    const scale = generatedNumericVec(part.transform.scale);
+    if (position === null || scale === null) continue;
+    // Parent-unwind: world position = own position + every ancestor position
+    // (translation-only inheritance; the <= 2 hop chain is validated elsewhere).
+    let wx = position[0];
+    let wy = position[1];
+    let wz = position[2];
+    const seen = new Set<string>([part.id]);
+    let parentId: unknown = part.parentId;
+    while (typeof parentId === "string" && !seen.has(parentId)) {
+      const parent = byId.get(parentId);
+      if (parent === undefined) break;
+      seen.add(parentId);
+      wx += parent.position[0];
+      wy += parent.position[1];
+      wz += parent.position[2];
+      parentId = parent.parentId;
+    }
+    mins[0] = Math.min(mins[0], wx - scale[0] / 2);
+    maxs[0] = Math.max(maxs[0], wx + scale[0] / 2);
+    mins[1] = Math.min(mins[1], wy - scale[1] / 2);
+    maxs[1] = Math.max(maxs[1], wy + scale[1] / 2);
+    mins[2] = Math.min(mins[2], wz - scale[2] / 2);
+    maxs[2] = Math.max(maxs[2], wz + scale[2] / 2);
+  }
+  if (!Number.isFinite(mins[0] + mins[1] + mins[2] + maxs[0] + maxs[1] + maxs[2])) {
+    return null;
+  }
+  return [maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]];
 }
 
 /**
@@ -611,6 +731,31 @@ export function generatedDefinitionIssues(raw: unknown): readonly string[] {
         probe = parent;
       }
     });
+
+    // Phase17D shape-aware visible-extent gate (DEF-079): the physical 0.001 m
+    // floor must NEVER let a near-zero / all-axes-collapsed clump through — the
+    // PARTS' composite span has to reach MIN_VISIBLE_EXTENT (0.02 m) in its
+    // longest axis and may not collapse below MIN_VISIBLE_AXIS (0.06 m) on
+    // EVERY axis. Exact mirror of the backend geometry_quality.py 4.8 rule:
+    // thin-but-long objects (ice picks, letter openers, blades) pass; a 5 mm
+    // speck or a same-origin 5 cm clump never does.
+    const visibleSpan = generatedCompositeSpan(parts);
+    if (visibleSpan !== null) {
+      const largest = Math.max(visibleSpan[0], visibleSpan[1], visibleSpan[2]);
+      if (
+        largest < GENERATED_VISIBLE_EXTENT_MIN ||
+        (visibleSpan[0] < GENERATED_VISIBLE_AXIS_MIN &&
+          visibleSpan[1] < GENERATED_VISIBLE_AXIS_MIN &&
+          visibleSpan[2] < GENERATED_VISIBLE_AXIS_MIN)
+      ) {
+        out.add(
+          `generated.visibleExtent: the object's visible geometry is too small or collapsed ` +
+            `(largest span ${largest.toFixed(4)} m; spans ${visibleSpan[0].toFixed(4)}x${visibleSpan[1].toFixed(4)}x${visibleSpan[2].toFixed(4)} m) ` +
+            `— the longest span must be >= ${GENERATED_VISIBLE_EXTENT_MIN} m or at least one axis must ` +
+            `reach ${GENERATED_VISIBLE_AXIS_MIN} m (Phase17D shape-aware visible-extent gate)`,
+        );
+      }
+    }
   }
 
   const hitbox = raw.hitbox;

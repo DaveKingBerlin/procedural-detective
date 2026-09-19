@@ -249,7 +249,11 @@ def test_18_evidence_stage():
     record, transport = _run(_staged())
     assert record.state is GenerationState.PUBLISHED
     assert "evidence_v1" in transport.prompt_of_call(1)
-    assert any(f.id == "forensic_icepick_match_01" for f in record.draft.evidence)
+    # Phase17 Wave-2 acceptance path: the DETERMINISTIC canonical evidence
+    # (built from the model's case skeleton) is what the published draft
+    # carries — the model's raw propositions are shaping input, not copied
+    # verbatim.
+    assert any(f.id == "d_ev_weapon_true" for f in record.draft.evidence)
 
 
 def test_19_world_requirements_stage():
@@ -290,9 +294,15 @@ def test_22_solver_independently_validates():
     assert record.last_validation.validation.all_true is True
 
 
-def test_23_ambiguous_blocks_publication():
-    """Ambiguous evidence (two weapons match) -> solver not unique -> blocks."""
-    # craft evidence where TWO sharp objects match True -> weapon ambiguous.
+def test_23_conflicting_model_matches_are_deterministically_completed():
+    """Phase17 Wave-2 acceptance path: a model evidence where TWO weapons
+    match True (the old ambiguity blocker) is policy-sanitized (the
+    match:true on the alternative weapon is dropped) and deterministically
+    completed, so the ASSEMBLED evidence yields a UNIQUE solver winner. The
+    solver rules are untouched — the uniqueness it proves comes from the
+    assembled (model + driver-projected) evidence set."""
+    # craft evidence where an alternative weapon ALSO matches True -> the raw
+    # model evidence would leave the weapon dimension ambiguous.
     amb_evidence = dict(_evidence())
     amb_props = list(amb_evidence["evidence"])
     for entry in amb_props:
@@ -307,8 +317,15 @@ def test_23_ambiguous_blocks_publication():
     controller = _controller(driver, transport, admission, clock, ids, max_repair_passes=0)
     handle = controller.start_generation(PROMPT, anonymous_quota_session_id=session.session_id)
     record = controller.attempt(handle.attempt_id)
-    assert record.published is None
-    assert record.state in (GenerationState.FAILED,)
+    # The driver's policy pass dropped the conflicting alternative-weapon
+    # match and completed the weapon algebra -> the solver is UNIQUE.
+    assert record.state is GenerationState.PUBLISHED
+    assert record.last_validation.valid is True
+    assert record.last_validation.validation.all_true is True
+    proof = record.solver_proof
+    assert proof is not None and proof.weapon.unique
+    assert proof.weapon.winner == "bronze_ceremonial_ice_pick"
+    assert "d_ev_weapon_false_kitchenknife" in {f.id for f in record.draft.evidence}
 
 
 # --------------------------------------------------------------------------- #
@@ -382,7 +399,7 @@ def test_27_unit_regression_25_vs_025_meters():
 
 def test_28_scale_below_lower_bound_rejected():
     bad = json.loads(ICEPICK_SPEC)
-    bad["parts"][0]["transform"]["scale"] = {"x": 0.01, "y": 0.01, "z": 0.01}  # below 0.05
+    bad["parts"][0]["transform"]["scale"] = {"x": 0.0001, "y": 0.0001, "z": 0.0001}  # below 0.001
     good = json.loads(ICEPICK_SPEC)
     transport = MockOllamaTransport(posts=[_j(_case_people()), _j(_evidence()), _j(_world()), json.dumps(bad), json.dumps(good)])
     record, _t = _run(transport.posts)

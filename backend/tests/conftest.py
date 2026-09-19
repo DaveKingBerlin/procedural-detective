@@ -230,6 +230,48 @@ def _socket_peer_is_loopback(sock) -> bool:
 _ALLOWED_DNS_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+_OPERATOR_DOTENV_KEYS = (
+    "GENERATION_PROVIDER",
+    "ENV_FILE",
+    "OLLAMA_BASE_URL",
+    "OLLAMA_MODEL",
+    "OLLAMA_TEMPERATURE",
+    "OLLAMA_NUM_CTX",
+    "OLLAMA_TIMEOUT_SECONDS",
+    "LIVE_PROVIDER_URL",
+    "LLM_API_KEY",
+    "LLM_MODEL",
+    "FAKE_PROVIDER_SCRIPT",
+)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_provider_environment(monkeypatch):
+    """Autouse guarantee: the backend suite is hermetic against the OPERATOR
+    dotenv (``<repo-root>/.env`` may configure ``GENERATION_PROVIDER=ollama``
+    + OLLAMA_* on a live showcase box).
+
+    ``Settings`` precedence is constructor kwargs > real env vars > dotenv.
+    Without this fixture, ``Settings()`` on an operator box would resolve
+    ``generation_provider="ollama"`` and every default-config test would try
+    to reach the LAN Ollama host under the network block (FAILED, not fast).
+
+    This fixture pins the DOCUMENTED defaults so ``Settings()`` behaves like a
+    clean checkout: ``ENV_FILE`` points at an empty source (``os.devnull``),
+    the operator provider keys are removed, and ``GENERATION_PROVIDER`` is
+    pinned to ``fake``. Tests that configure an explicit provider always pass
+    constructor kwargs, which win over this env pin (nothing here weakens the
+    ollama/live-specific tests). Never configured here: anything that would
+    change solver/assertion behavior unrelated to provider selection.
+    """
+    monkeypatch.setenv("ENV_FILE", os.devnull)
+    for key in _OPERATOR_DOTENV_KEYS:
+        if key != "ENV_FILE":
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("GENERATION_PROVIDER", "fake")
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _block_network(monkeypatch):
     """Autouse guarantee: no backend test may open an EXTERNAL socket.

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { buildGeneratedComposite } from "./generatedRenderer";
 import { FALLBACK_COLOR } from "./assetRegistry";
-import { makeGeneratedPart, makeTrophyDefinition } from "./testFixtures";
+import { makeGeneratedPart, makeIcePickDefinition, makeTrophyDefinition } from "./testFixtures";
+import { validateGeneratedDefinition } from "./validation";
 import type { GeneratedAssetDefinition } from "../api/types";
 
 /**
@@ -89,6 +90,44 @@ describe("buildGeneratedComposite — declarative definition -> composite descri
       parts,
     };
     expect(buildGeneratedComposite(definition).parts).toHaveLength(24);
+  });
+});
+
+describe("buildGeneratedComposite — DEF-079 Phase17D thin geometry renders (never the fallback)", () => {
+  it("renders the REAL thin ice-pick definition as its two parts (not the neutral fallback)", () => {
+    const built = buildGeneratedComposite(makeIcePickDefinition());
+    expect(built.parts).toHaveLength(2);
+    // The fallback is a SINGLE 0.4 m neutral box — a 2-part composite is proof
+    // the real definition rendered, never the placeholder.
+    expect(built.parts[0].color).not.toBe(FALLBACK_COLOR);
+    expect(built.parts[1].color).not.toBe(FALLBACK_COLOR);
+    // The 17D thin blade axis survives verbatim (5 mm thick, 10 cm long).
+    expect(built.parts[1].size).toEqual({ x: 0.005, y: 0.1, z: 0.005 });
+    expect(built.hitbox).toEqual({ x: 0.15, y: 0.66, z: 0.15 });
+  });
+
+  it("a definition with a sub-0.001 axis fails the schema gate and falls back (never renders the thin parts)", () => {
+    const tiny = makeIcePickDefinition();
+    tiny.dimensions.x = 0.0005; // < GENERATED_DIMENSION_MIN — the gate rejects
+    const validated = validateGeneratedDefinition(tiny);
+    expect(validated).toBeNull();
+    // The scene routes a null definition to the neutral fallback (DEF-079:
+    // the drop must only ever happen for genuinely invalid geometry).
+    const built = buildGeneratedComposite(validated);
+    expect(built.parts).toHaveLength(1);
+    expect(built.parts[0]).toMatchObject({
+      kind: "box",
+      size: { x: 0.4, y: 0.4, z: 0.4 },
+      color: FALLBACK_COLOR,
+    });
+    expect(built.hitbox).toBeNull();
+  });
+
+  it("the existing >= 0.05 fixture trophy still renders without fallback (no regression)", () => {
+    const built = buildGeneratedComposite(makeTrophyDefinition());
+    expect(built.parts).toHaveLength(3);
+    for (const part of built.parts) expect(part.color).not.toBe(FALLBACK_COLOR);
+    expect(built.hitbox).toEqual({ x: 0.3, y: 0.5, z: 0.3 });
   });
 });
 

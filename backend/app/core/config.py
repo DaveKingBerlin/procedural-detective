@@ -2,7 +2,13 @@
 
 A single pydantic-settings object is the one source of runtime configuration.
 Exactly one canonical environment-variable name per setting (no duplicate
-aliases). Values are resolved with this precedence:
+aliases). A field whose Python name differs from its documented §45 env name
+carries an explicit ``validation_alias`` to the CANONICAL name, so the binding
+always matches the documentation (DEF-080: the generation deadline binds
+``CASE_GENERATION_DEADLINE_SECONDS`` — the old field-derived
+``GENERATION_DEADLINE_SECONDS`` is NOT read, and construction keywords use the
+canonical name too).
+Values are resolved with this precedence:
 
 1. values passed to ``Settings(...)`` at construction (tests, callers);
 2. real environment variables (canonical names from section 45);
@@ -136,7 +142,14 @@ class Settings(BaseSettings):
     # -- Phase 4 generation lifecycle (REQUIREMENTS 32.5-32.11, 45) -----------
 
     generation_deadline_seconds: int = Field(
-        default=60, gt=0, description="CASE_GENERATION_DEADLINE_SECONDS."
+        default=60,
+        gt=0,
+        # DEF-080: bind the CANONICAL §45 env name. The old field-derived
+        # GENERATION_DEADLINE_SECONDS must NOT be read ("exactly one canonical
+        # configuration name per setting"); the canonical name is also the
+        # construction keyword (construct as Settings(CASE_GENERATION_DEADLINE_SECONDS=...)).
+        validation_alias="CASE_GENERATION_DEADLINE_SECONDS",
+        description="CASE_GENERATION_DEADLINE_SECONDS.",
     )
     max_llm_calls_per_generation: int = Field(
         default=8, gt=0, description="MAX_LLM_CALLS_PER_GENERATION."

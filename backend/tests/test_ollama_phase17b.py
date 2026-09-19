@@ -401,14 +401,15 @@ def test_phase17b_targets_reachable_through_full_driver():
 
 def test_strict_validator_rule_constants_byte_unchanged():
     """The authoritative Phase 13 / Phase 17 numeric bounds and vocabularies are
-    untouched by the mapping tuning."""
+    untouched by the mapping tuning (Phase17D B changed ONLY the physical floor
+    for thin geometry: 0.05 -> 0.001 meters; every other rule is byte-identical)."""
     assert PRIMITIVE_ALLOWLIST == frozenset({"box", "cylinder", "sphere", "plane"})
-    assert DIMENSION_MIN == 0.05
+    assert DIMENSION_MIN == 0.001
     assert DIMENSION_MAX == 4.0
     assert MAX_PARTS == 24
     assert MAX_POSITION_BOUND == 4.0
     assert round(MAX_ROTATION_BOUND, 4) == round(2.0 * 3.141592653589793, 4)
-    assert MIN_PART_SCALE == 0.05
+    assert MIN_PART_SCALE == 0.001
     assert MAX_PART_SCALE == 2.0
     assert HANDHELD_MAX_DIMENSION == 0.5
     assert HANDHELD_MAX_SINGLE_DIMENSION == 1.0
@@ -422,8 +423,8 @@ def test_deliberately_invalid_responses_still_fail_identically():
     unit_confused = _hermes_asset_spec_broke()
     unit_confused["dimensions"] = {"x": 25, "y": 0.1, "z": 0.1}
     issues = validate_asset_spec(unit_confused)
-    assert "dimensions.x: dimension must be within [0.05, 4] (got 25)" in issues
-    assert "dimensions.y: dimension must be within [0.05, 4] (got 0.1)" not in issues
+    assert "dimensions.x: dimension must be within [0.001, 4] (got 25)" in issues
+    assert "dimensions.y: dimension must be within [0.001, 4] (got 0.1)" not in issues
     # (b) an unsupported primitive keeps its exact rejection message.
     bad_primitive = _hermes_asset_spec_broke()
     bad_primitive["parts"][0]["primitive"] = "capsule"
@@ -474,8 +475,11 @@ def test_transport_structured_output_sends_authoritative_schema():
 
 
 def test_transport_structured_output_fallback_json_and_repair_stage():
-    """Without structured output, and for the REPAIR stage (no schema contract),
-    the documented ``format: "json"`` fallback is what is ACTUALLY sent."""
+    """Without structured output the documented ``format: "json"`` fallback is
+    what is ACTUALLY sent. With structured output the REPAIR stage now carries
+    the AUTHORITATIVE FULL-DRAFT JSON Schema (Phase17D C — a complete repaired
+    draft is required, never a partial patch), so ``transportStructuredOutput``
+    is true for it too; unknown/unmapped stages keep the ``"json"`` fallback."""
     transport = MockOllamaTransport(posts=['{"crime": {}}'])
     provider = _provider(transport, structured_output=False)
     provider.generate(
@@ -489,8 +493,7 @@ def test_transport_structured_output_fallback_json_and_repair_stage():
     assert provider.last_format == "json"
     assert provider.structured_output_sent is False
 
-    # REPAIR has no per-stage skeleton -> "json" fallback even when structured
-    # output is enabled (never a crashed format build).
+    # structured output ENABLED -> REPAIR sends the derived full-draft schema.
     transport2 = MockOllamaTransport(posts=[_j(HERMES_CASE_TRUTH_GOOD)])
     provider2 = _provider(transport2, structured_output=True)
     provider2.generate(
@@ -500,8 +503,34 @@ def test_transport_structured_output_fallback_json_and_repair_stage():
             prompt_context="ctx",
         )
     )
-    assert transport2.format_of_call(0) == "json"
-    assert provider2.last_format == "json"
+    sent = transport2.format_of_call(0)
+    assert isinstance(sent, dict)
+    assert sent == prompts.json_schema_for_generation_stage("repair")
+    assert set(sent["properties"]) == {
+        "crime",
+        "persons",
+        "motives",
+        "objects",
+        "locations",
+        "travelRules",
+        "scene",
+        "evidence",
+        "worldGraph",
+    }
+    assert provider2.last_format == "schema"
+    assert provider2.structured_output_sent is True
+
+    # an unknown/unmapped stage value keeps the deterministic "json" fallback.
+    transport3 = MockOllamaTransport(posts=['{"x": 1}'])
+    provider3 = _provider(transport3, structured_output=True)
+    provider3.generate(
+        GenerateRequest(
+            attempt_id="att-4",
+            stage=GenerationStage.PUBLIC_WORLD,
+            prompt_context="ctx",
+        )
+    )
+    assert transport3.format_of_call(0) == "json"
 
 
 def test_structured_output_probe_matches_documented_ollama_version():
@@ -553,7 +582,9 @@ def test_stage_mapping_versions_are_current_no_stale_strings():
         "evidence",
         "world_requirements",
         "asset_spec",
+        "full_draft",
     }
+    assert prompts.STAGE_TO_CONTRACT["repair"] == "full_draft"
 
     # the rendered prompts embed the CURRENT versions verbatim.
     assert "case_people_v1" in prompts.build_case_people_prompt("x", None)
@@ -632,10 +663,42 @@ def test_smoke_offline_no_server_exits_zero_sanitized(monkeypatch, capsys):
         assert token not in blob, token
 
 
+# The FULL case_people document the REAL model emits (all public sections), with
+# the SAME broken crime section — the smoke parses it through the authoritative
+# full-document surface (crime -> CASE_TRUTH split + public -> PUBLIC_WORLD).
+def _full_case_truth_broke():
+    doc = dict(HERMES_CASE_TRUTH_BROKE)
+    doc.update(
+        {
+            "persons": [
+                {
+                    "personId": "person_01",
+                    "name": "Anna Weiss",
+                    "role": "victim",
+                    "affordances": ["VISIBLE_CHARACTER", "INSPECTABLE"],
+                }
+            ],
+            "motives": [
+                {"motiveId": "motive_01", "label": "money", "affordances": ["MOTIVE_CANDIDATE"]}
+            ],
+            "locations": [{"locationId": "location_01", "name": "Office"}],
+            "travelRules": [],
+            "objects": [],
+            "scene": {"locationId": "location_01", "name": "Office"},
+        }
+    )
+    return doc
+
+
 def test_smoke_stage_case_truth_mocked_end_to_end(monkeypatch, capsys):
     """smoke.main --stage case_truth with a mocked provider: the report shows
     the current template version, the truthful transport flag, parse issues on
-    the broke fixture, and the sanitized raw sample (never the prompt/base URL)."""
+    the broke fixture, and the sanitized raw sample (never the prompt/base URL).
+
+    The FULL case_people document is parsed through the driver's authoritative
+    split surface (crime -> CASE_TRUTH + public sections -> PUBLIC_WORLD) —
+    only the two broken crime fields are reported, never the public sections.
+    """
     import tools.ollama_smoke as smoke
     from app.generation import ollama_provider as ollama_mod
     from app.generation.provider import ProviderResult as PR
@@ -647,7 +710,7 @@ def test_smoke_stage_case_truth_mocked_end_to_end(monkeypatch, capsys):
             pass
 
         def generate(self, request) -> PR:
-            return PR(content=_j(HERMES_CASE_TRUTH_BROKE))
+            return PR(content=_j(_full_case_truth_broke()))
 
         @property
         def structured_output_sent(self):
