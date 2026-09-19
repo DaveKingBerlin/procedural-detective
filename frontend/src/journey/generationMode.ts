@@ -24,8 +24,12 @@ import type {
  *   - NO host/IP, credentials, prompts, URLs or diagnostics ever leave this
  *     module: the only strings it produces are the frozen public labels
  *     ("Demo", "Local AI", "Cloud AI"), the DTO-provided public display model
- *     name (verbatim) and the "Ready"/"Unavailable" tag derived strictly from
- *     `available`;
+ *     name (verbatim), the "Ready"/"Unavailable" tag derived strictly from
+ *     `available`, and the frozen §36 showcase sentence (app copy);
+ *   - availability is derived ONLY from the DTO `available` boolean
+ *     (isLocalModeAvailable), so a stored/selected local mode with an
+ *     unavailable backend surfaces the honest unavailable state — never a
+ *     silent demo fallback or a pretend-local claim;
  *   - a stale/tampered stored mode id never drives the journey: reads return
  *     only the frozen ids, otherwise null.
  */
@@ -170,6 +174,32 @@ export function parseGenerationCapabilities(raw: unknown): GenerationCapabilitie
  */
 export function availabilityTag(available: boolean): "Ready" | "Unavailable" {
   return available ? "Ready" : "Unavailable";
+}
+
+/**
+ * Phase 16.2 §36 — the Local-AI showcase sentence shown on /new ONLY while
+ * Local AI mode is the ACTIVE generation mode (selected AND backend-reported
+ * available). This is the accurate statement: the local model PROPOSES
+ * structured data; the deterministic engine verifies and constructs. It never
+ * claims the model proves the case, executes scene code or generates
+ * arbitrary 3D — and it is app-authored static copy, so no DTO string can
+ * ever reach it.
+ */
+export const LOCAL_AI_SHOWCASE_NOTE =
+  "Procedural Detective can run its generative Prompt-to-World pipeline with a local Llama 3.2 model: "
+  + "the model proposes structured data, and deterministic validators verify and construct "
+  + "the playable investigation.";
+
+/**
+ * True ONLY when the parsed allowlist carries the Local AI mode marked
+ * available. Used by /new to keep the display honest (Phase 16.2 §20): a
+ * stored/selected `local` mode combined with an unavailable/absent/down
+ * backend must surface the explicit "Local AI is unavailable" note — never a
+ * silent demo fallback and never a claim that Local AI is active.
+ */
+export function isLocalModeAvailable(capabilities: GenerationCapabilitiesResponse | null): boolean {
+  const entry = capabilities?.modes.find((mode) => mode.id === "local");
+  return entry?.available === true;
 }
 
 /** One mode the selector may actually offer (never an unavailable local/live). */

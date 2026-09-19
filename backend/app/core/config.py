@@ -203,6 +203,10 @@ class Settings(BaseSettings):
     # configurations (H): local ``http://127.0.0.1:11434`` (also the default
     # when unset), Docker Desktop ``http://host.docker.internal:11434``, LAN
     # ``http://<private-host>:11434`` (private-only hosts are validated below).
+    # Phase 17: every Ollama-proposed AssetSpec additionally passes the
+    # deterministic geometry-quality gate (app.assets.geometry_quality) after
+    # the strict Phase 13 schema/security validation; implausible geometry is
+    # repaired through a bounded ASSET_SPEC_REPAIR loop before compilation.
     ollama_base_url: str | None = Field(
         default=None,
         description=(

@@ -18,7 +18,17 @@ from typing import Protocol
 
 
 class GenerationStage(Enum):
-    """The explicit generation stages (Phase4 E)."""
+    """The explicit generation stages (Phase4 E).
+
+    ``ASSET_SPEC`` / ``ASSET_SPEC_REPAIR`` are INTERNAL stage-like request
+    names used ONLY by the Ollama stage driver (Phase 16_2) to key an
+    AssetSpec round-trip through the SAME ``GenerateRequest`` / ``ProviderResult``
+    boundary. They never appear in the controller's ``STAGE_ORDER`` and the
+    deterministic parser never consumes them — the driver parses their output
+    with the Phase 13 AssetSpec parser. Documented here so ``GenerateRequest``
+    accepts them; the pipeline/controller treat them only inside the ollama
+    driver path (frozen contract).
+    """
 
     CASE_TRUTH = "case_truth"
     PUBLIC_WORLD = "public_world"
@@ -26,6 +36,9 @@ class GenerationStage(Enum):
     WORLD_GRAPH = "world_graph"
     # REPAIR returns a COMPLETE replacement draft (all four sections).
     REPAIR = "repair"
+    # Phase 16_2 Ollama-stage-driver internal AssetSpec stages.
+    ASSET_SPEC = "asset_spec"
+    ASSET_SPEC_REPAIR = "asset_spec_repair"
 
 
 @dataclass(frozen=True)

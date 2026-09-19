@@ -4,7 +4,7 @@ import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/ty
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import { setJourneyParams, type JourneyDifficulty } from "../journey/context";
 import { PROMPT_MAX_CHARS } from "../journey/demoPrompt";
-import { getGenerationMode, setGenerationMode } from "../journey/generationMode";
+import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, setGenerationMode } from "../journey/generationMode";
 import { GenerationModeSelector } from "../journey/generationModeSelector";
 import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
@@ -32,6 +32,14 @@ export interface NewCasePageProps {
    * fixture; the route fetches + parses the public DTO at runtime).
    */
   capabilities?: GenerationCapabilitiesResponse | null;
+  /**
+   * Phase 16.2 Track B — test seam mirroring `capabilities`: the stored-mode
+   * value the journey reads from `pd_generation_mode` at runtime. When
+   * omitted the route reads that key (falling back to Demo); a fixture value
+   * lets the honesty copy (unavailable note / §36 showcase sentence) be
+   * unit-tested without a DOM.
+   */
+  modeOverride?: GenerationModeId | null;
 }
 
 export default function NewCasePage(overrides: NewCasePageProps = {}) {
@@ -42,7 +50,24 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
   const [prompt, setPrompt] = useState("");
   const [difficulty, setDifficulty] = useState<JourneyDifficulty>("medium");
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<GenerationModeId>(() => getGenerationMode() ?? "demo");
+  const [mode, setMode] = useState<GenerationModeId>(() =>
+    overrides.modeOverride ?? getGenerationMode() ?? "demo",
+  );
+
+  /**
+   * Phase 16.2 §20/§36 — mode-honesty flags. The UI only ever claims Local-AI
+   * behavior when the backend allowlist reports local available (the selector
+   * never offers an unavailable mode). A stored/selected `local` mode with an
+   * unavailable/absent/down backend must surface the explicit "Local AI is
+   * unavailable" note instead of silently pretending local is active — and it
+   * must NOT claim the §36 showcase pipeline while unavailable (Demo remains
+   * the honest fallback choice). While capabilities are unknown (null) no
+   * claim and no note is rendered.
+   */
+  const localActive =
+    mode === "local" && capabilities !== null && isLocalModeAvailable(capabilities);
+  const localUnavailable =
+    mode === "local" && capabilities !== null && !isLocalModeAvailable(capabilities);
 
   const selectMode = (next: GenerationModeId) => {
     setMode(next);
@@ -94,6 +119,16 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
       <p className="new-case-provider-note" data-testid="generate-provider-note">
         {providerPathNote(APP_PROVIDER_MODE)}
       </p>
+      {/* Phase 16.2 §36 — the accurate Local-AI showcase sentence, shown ONLY
+          while Local AI mode is ACTIVE (selected AND backend-available). The
+          model proposes structured data; deterministic validators verify and
+          construct — never a claim that the model proves the case. Frozen
+          app copy: no DTO string can reach it. */}
+      {localActive && (
+        <p className="new-case-local-showcase" data-testid="local-ai-showcase-note">
+          {LOCAL_AI_SHOWCASE_NOTE}
+        </p>
+      )}
 
       <form className="new-case-form" data-testid="prompt-form" onSubmit={handleSubmit} noValidate>
         <label htmlFor="prompt-input" className="new-case-label">
@@ -138,6 +173,18 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
             "Demo mode active" notice instead. No host/IP, credentials, prompts
             or diagnostics are ever rendered — only frozen public labels. */}
         <GenerationModeSelector capabilities={capabilities} value={mode} onSelect={selectMode} />
+
+        {/* Phase 16.2 §20 — honest unavailability. Local was STORED or freshly
+            selected, but the capabilities allowlist does not report local
+            available (backend down/unselected): show the explicit note and
+            keep Demo selectable — never a silent fallback to demo and never a
+            pretend-local claim (the generation request would otherwise fail
+            with the provider-unavailable reason from the backend). */}
+        {localUnavailable && (
+          <p className="new-case-local-unavailable" data-testid="local-ai-unavailable" role="status">
+            Local AI is unavailable right now. Demo Mode remains available.
+          </p>
+        )}
 
         {error && (
           <p className="new-case-error" data-testid="prompt-error" role="alert">

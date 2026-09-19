@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
-import type { GenerationCapabilitiesResponse } from "../api/types";
+import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { APP_PROVIDER_MODE, providerQualifier } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
 import NewCasePage from "./new";
@@ -145,5 +145,122 @@ describe("/new — Phase 16 Track B generation-mode selector", () => {
     expect(markup).not.toContain('data-testid="generation-mode-selector"');
     expect(markup).toContain('data-testid="generation-mode-demo-notice"');
     expect(markup).toContain("Demo mode active");
+  });
+});
+
+describe("/new — Phase 16.2 §20 mode-honest Local-AI availability", () => {
+  const renderWith = (
+    capabilities: GenerationCapabilitiesResponse | null,
+    modeOverride: GenerationModeId | null,
+  ): string =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={capabilities} modeOverride={modeOverride} />
+      </MemoryRouter>,
+    );
+
+  it("shows the explicit Local AI unavailable note when local is stored but the backend says unavailable", () => {
+    const markup = renderWith({ modes: [{ id: "demo", available: true }] }, "local");
+    expect(markup).toContain('data-testid="local-ai-unavailable"');
+    expect(markup).toContain("Local AI is unavailable right now.");
+    expect(markup).toContain("Demo Mode remains available.");
+  });
+
+  it("shows the note when the probe failed and resolved to the demo-only payload (backend down)", () => {
+    const markup = renderWith({ modes: [] }, "local");
+    expect(markup).toContain('data-testid="local-ai-unavailable"');
+    expect(markup).toContain("Local AI is unavailable right now.");
+  });
+
+  it("does NOT silently pretend local is active — no selected local option, no showcase claim", () => {
+    const markup = renderWith({ modes: [{ id: "demo", available: true }] }, "local");
+    expect(markup).not.toContain('value="local"');
+    expect(markup).not.toContain('data-testid="local-ai-showcase-note"');
+  });
+
+  it("does not show the unavailable note when the backend reports local available", () => {
+    const markup = renderWith(
+      {
+        modes: [
+          { id: "demo", available: true },
+          { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+        ],
+      },
+      "local",
+    );
+    expect(markup).not.toContain('data-testid="local-ai-unavailable"');
+  });
+
+  it("renders nothing about unavailability while capabilities are still unknown (no claim)", () => {
+    const markup = renderWith(null, "local");
+    expect(markup).not.toContain('data-testid="local-ai-unavailable"');
+  });
+
+  it("keeps the default demo journey free of any unavailability note", () => {
+    const markup = renderWith({ modes: [{ id: "demo", available: true }] }, null);
+    expect(markup).not.toContain('data-testid="local-ai-unavailable"');
+  });
+});
+
+describe("/new — Phase 16.2 §36 showcase copy honesty", () => {
+  const renderWith = (
+    capabilities: GenerationCapabilitiesResponse | null,
+    modeOverride: GenerationModeId | null,
+  ): string =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={capabilities} modeOverride={modeOverride} />
+      </MemoryRouter>,
+    );
+
+  const LOCAL_AVAILABLE: GenerationCapabilitiesResponse = {
+    modes: [
+      { id: "demo", available: true },
+      { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+    ],
+  };
+
+  it("shows the accurate muted showcase sentence when Local AI mode is active", () => {
+    const markup = renderWith(LOCAL_AVAILABLE, "local");
+    expect(markup).toContain('data-testid="local-ai-showcase-note"');
+    expect(markup).toContain("generative Prompt-to-World pipeline");
+    expect(markup).toContain("local Llama 3.2 model");
+    expect(markup).toContain("the model proposes structured data");
+    expect(markup).toContain("deterministic validators verify and construct");
+  });
+
+  it("never claims the local pipeline in demo/fake mode (no claiming copy)", () => {
+    const markup = renderWith(LOCAL_AVAILABLE, null);
+    expect(markup).not.toContain('data-testid="local-ai-showcase-note"');
+    expect(markup).not.toContain("Prompt-to-World");
+    expect(markup).not.toContain("Llama 3.2");
+    expect(markup).not.toContain("proposes structured data");
+    expect(markup.toLowerCase()).not.toContain("proves the case");
+  });
+
+  it("does not show the showcase claim while local is selected but unavailable", () => {
+    const markup = renderWith({ modes: [{ id: "demo", available: true }] }, "local");
+    expect(markup).not.toContain('data-testid="local-ai-showcase-note"');
+    expect(markup).not.toContain("Prompt-to-World");
+  });
+
+  it("never renders host/IP, credential, prompt or diagnostic strings from any DTO", () => {
+    const hostile: GenerationCapabilitiesResponse = {
+      modes: [
+        { id: "demo", available: true },
+        {
+          id: "local",
+          available: true,
+          label: "Local AI",
+          model: "http://127.0.0.1:11434 — apiKey=hunter2 — prompt=topsecret — diagnostics=boom",
+        },
+      ],
+    };
+    const markup = renderWith(hostile, "local");
+    expect(markup).not.toContain("127.0.0.1");
+    expect(markup).not.toContain("hunter2");
+    expect(markup).not.toContain("topsecret");
+    expect(markup).not.toContain("diagnostics");
+    expect(markup).not.toContain("11434");
   });
 });

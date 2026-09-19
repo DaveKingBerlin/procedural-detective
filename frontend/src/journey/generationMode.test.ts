@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   GENERATION_MODE_STORAGE_KEY,
+  LOCAL_AI_SHOWCASE_NOTE,
   availabilityTag,
   clearGenerationMode,
   generationModeOptionLabel,
   getGenerationMode,
+  isLocalModeAvailable,
   parseGenerationCapabilities,
   selectableGenerationModes,
   setGenerationMode,
@@ -254,6 +256,15 @@ describe("pd_generation_mode persistence", () => {
     expect(getGenerationMode(storage)).toBeNull();
   });
 
+  it("round-trips every frozen id (demo/local/live) through injectable storage", () => {
+    for (const id of ["demo", "local", "live"] as const) {
+      const storage = fakeStorage();
+      expect(setGenerationMode(id, storage)).toBe(true);
+      expect(getGenerationMode(storage)).toBe(id);
+      expect(storage.entries.get(GENERATION_MODE_STORAGE_KEY)).toBe(id);
+    }
+  });
+
   it("never throws when storage is unavailable or throws", () => {
     expect(getGenerationMode(null)).toBeNull();
     expect(setGenerationMode("demo", null)).toBe(false);
@@ -270,5 +281,43 @@ describe("pd_generation_mode persistence", () => {
     };
     expect(getGenerationMode(throwing)).toBeNull();
     expect(clearGenerationMode(throwing)).toBeUndefined();
+  });
+});
+
+describe("isLocalModeAvailable — §20 honesty probe over the parsed allowlist", () => {
+  const caps = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("is true only for an explicit local-available entry", () => {
+    expect(isLocalModeAvailable(caps({ modes: [{ id: "local", available: true }] }))).toBe(true);
+    expect(
+      isLocalModeAvailable(
+        caps({ modes: [{ id: "demo", available: true }, { id: "local", available: true }] }),
+      ),
+    ).toBe(true);
+  });
+
+  it("is false when local is unavailable, absent, malformed or unknown", () => {
+    expect(isLocalModeAvailable(caps({ modes: [{ id: "local", available: false }] }))).toBe(false);
+    expect(isLocalModeAvailable(caps({ modes: [{ id: "demo", available: true }] }))).toBe(false);
+    expect(isLocalModeAvailable(caps({ modes: [] }))).toBe(false);
+    expect(isLocalModeAvailable(caps({ modes: [{ id: "local", available: "yes" }] }))).toBe(false);
+    expect(isLocalModeAvailable(caps(null))).toBe(false);
+    expect(isLocalModeAvailable(null)).toBe(false);
+  });
+});
+
+describe("LOCAL_AI_SHOWCASE_NOTE — §36 accurate showcase copy", () => {
+  it("carries the accurate Prompt-to-World statement with the deterministic verifier role", () => {
+    expect(LOCAL_AI_SHOWCASE_NOTE).toContain("Procedural Detective");
+    expect(LOCAL_AI_SHOWCASE_NOTE).toContain("generative Prompt-to-World pipeline");
+    expect(LOCAL_AI_SHOWCASE_NOTE).toContain("local Llama 3.2 model");
+    expect(LOCAL_AI_SHOWCASE_NOTE).toContain("the model proposes structured data");
+    expect(LOCAL_AI_SHOWCASE_NOTE).toContain("deterministic validators verify and construct");
+  });
+
+  it("never overclaims (no prove/execute/arbitrary/perfect claims, no URL tokens)", () => {
+    for (const overclaim of ["proves the case", "executes", "arbitrary", "perfectly", "http"]) {
+      expect(LOCAL_AI_SHOWCASE_NOTE.toLowerCase()).not.toContain(overclaim);
+    }
   });
 });

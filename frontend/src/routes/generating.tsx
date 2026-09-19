@@ -28,6 +28,13 @@ import { stageInfoFromPhase, type StageInfo } from "../journey/generationProgres
  * request is in flight and then settle on the REAL server-reported
  * PUBLISHED/FAILED status — never a fabricated success.
  *
+ * Phase 16.2 §21 — the stored generation mode (`pd_generation_mode`, written
+ * by the /new selector) travels through the flow inside every progress
+ * snapshot, and (via {@link stageFromProgress}) switches the label sequence:
+ * `local` uses the seven Local-AI labels (Understanding the case… →
+ * … → Preparing the investigation…); demo/unset keeps the generic labels
+ * above, unchanged.
+ *
  * On PUBLISHED the journey stores {pd_playthrough_token, pd_playthrough_id}
  * (reuse playthroughToken.ts) and navigates to /scene (automatic after a
  * short beat, or immediately via "Enter investigation"). On FAILED / quota /
@@ -67,6 +74,22 @@ type RunFn = (
   onProgress: (progress: DemoProgress) => void,
 ) => Promise<DemoFlowResult>;
 
+/**
+ * Phase 16.2 §21 — pure, mode-aware stage model for one journey progress
+ * snapshot. The mode travels inside {@link DemoProgress.mode} (fed from the
+ * `pd_generation_mode` storage key when the journey was launched); demo/unset
+ * resolves to the generic staged labels exactly as before.
+ */
+export function stageFromProgress(progress: DemoProgress): StageInfo {
+  return stageInfoFromPhase(
+    progress.phase,
+    progress.status,
+    progress.stage,
+    progress.progress,
+    progress.mode,
+  );
+}
+
 export default function GeneratingPage() {
   const navigate = useNavigate();
   const params = getJourneyParams();
@@ -104,19 +127,22 @@ export function GenerationJourney({ params, run, onSuccess }: GenerationJourneyP
   const [view, setView] = useState<JourneyView>(() =>
     params === null
       ? { status: "no-session" }
-      : { status: "running", stage: stageInfoFromPhase("session", null, null, null) },
+      // Phase 16.2 §21 — read the stored mode up-front so even the pre-poll
+      // animation uses the Local-AI labels when local mode is active.
+      : { status: "running", stage: stageInfoFromPhase("session", null, null, null, getGenerationMode()) },
   );
   const [runId, setRunId] = useState(0);
 
   useEffect(() => {
     if (params === null) return;
     let cancelled = false;
-    setView({ status: "running", stage: stageInfoFromPhase("session", null, null, null) });
+    const mode = getGenerationMode();
+    setView({ status: "running", stage: stageInfoFromPhase("session", null, null, null, mode) });
     void run(params.prompt, params.difficulty, (progress) => {
       if (cancelled) return;
       setView({
         status: "running",
-        stage: stageInfoFromPhase(progress.phase, progress.status, progress.stage, progress.progress),
+        stage: stageFromProgress(progress),
       });
     }).then((result) => {
       if (cancelled) return;

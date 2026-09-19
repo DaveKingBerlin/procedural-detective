@@ -854,6 +854,50 @@ def test_20_existing_suites_still_green():
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Phase16_2 extras: duplicate keys, provider exception, duplicate-parse, markdown
+# --------------------------------------------------------------------------- #
+
+
+def test_duplicate_json_keys_rejected_via_strict_parser():
+    """Duplicate JSON keys in an Ollama response never silently last-win: the
+    strict parser reports a deterministic parse issue (repair path)."""
+    from app.generation import parser as stage_parser
+    content = '{"crime": {"type": "murder", "type": "murder"}}'
+    issues = stage_parser.collect_issues(GenerationStage.CASE_TRUTH, content)
+    assert any("duplicate key" in issue for issue in issues)
+
+
+def test_provider_exception_is_sanitized():
+    """A provider whose transport raises (not a timed-out path) degrades to a
+    clean, sanitized error — never an escaped exception, never a config leak."""
+    def _boom(url, payload, timeout):
+        raise RuntimeError("secret provider detail")
+
+    transport = MockOllamaTransport(posts=[_boom])
+    result = _provider(transport).generate(_request())
+    assert isinstance(result, ProviderResult)
+    assert result.error is not None
+    assert "secret provider detail" not in result.error  # sanitized
+    assert result.content is None and result.timed_out is False
+
+
+def test_markdown_wrapped_duplicate_keys_still_fails_path():
+    """A markdown-fence-wrapped payload with duplicate keys: the ONE outer fence
+    is stripped, then the strict parser rejects the duplicate key (repair path,
+    never silently last-win)."""
+    from app.generation import parser as stage_parser
+    from app.generation.ollama_provider import strip_outer_code_fence
+
+    inner = '{"evidence": [{"id": "a", "id": "b", "kind": "physical", "reliability": "high", "discoverable": true, "sourceRef": {"kind": "k", "sourceId": "s"}, "propositions": [{"type": "OTHER"}], "presentation": {"title": "t", "description": "d"}}]}'
+    # the adapter strips the ONE outer fence, then the strict parser rejects
+    # the duplicate key (never silently last-win).
+    fenced = "```json\n" + inner + "\n```"
+    stripped = strip_outer_code_fence(fenced)
+    issues = stage_parser.collect_issues(GenerationStage.EVIDENCE, stripped)
+    assert any("duplicate key" in issue for issue in issues)
+
+
 def test_extra_response_size_cap_is_clean_error():
     huge = b"x" * (MAX_OLLAMA_RESPONSE_BYTES + 1)
     transport = MockOllamaTransport(posts=[(200, huge)])

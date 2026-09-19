@@ -82,6 +82,7 @@ class GenerationController:
         seed: int | None = None,
         hold_before_publish: bool = False,
         max_retained_attempts: int = 100,
+        stage_driver: Any = None,
     ) -> None:
         self._provider = provider
         self._admission = admission
@@ -94,6 +95,11 @@ class GenerationController:
         self._max_prompt_chars = int(max_prompt_chars)
         self._seed = seed
         self._hold_before_publish = bool(hold_before_publish)
+        # Phase 16_2: an optional OllamaStageDriver that owns the structured
+        # per-stage CALLS and produces a full draft; when set the controller
+        # delegates draft production to it (budget/repair/regenerate/publication
+        # machinery here is unchanged — no parallel lifecycle).
+        self._driver = stage_driver
         if isinstance(max_retained_attempts, bool) or not isinstance(
             max_retained_attempts, int
         ):
@@ -289,6 +295,17 @@ class GenerationController:
 
             state = attempt.state
             if state is GenerationState.GENERATING:
+                if self._driver is not None:
+                    # Phase 16_2: delegate draft production to the stage driver
+                    # and move to VALIDATING (the driver consumed the per-call
+                    # budget; a provider-level failure fails the attempt).
+                    try:
+                        self._driver.run_into(attempt)
+                    except Exception:  # noqa: BLE001 - provider path terminal
+                        self._fail(attempt, _PROVIDER_FAILURE_REASON)
+                        return
+                    self._set_state(attempt, GenerationState.VALIDATING)
+                    continue
                 stage = self._next_stage(attempt)
                 if stage is None:
                     self._set_state(attempt, GenerationState.VALIDATING)
@@ -312,6 +329,18 @@ class GenerationController:
                     ):
                         self._fail(attempt, "repair budget exhausted")
                         return
+                    if self._driver is not None:
+                        # driver repair: re-run the affected stages with the
+                        # sanitized validation diagnostics (state stays
+                        # VALIDATING; we re-validate on the next loop pass).
+                        try:
+                            self._driver.run_into(
+                                attempt, diagnostics=report.repair_diagnostics
+                            )
+                        except Exception:  # noqa: BLE001 - provider path terminal
+                            self._fail(attempt, _PROVIDER_FAILURE_REASON)
+                            return
+                        continue
                     self._set_state(attempt, GenerationState.REPAIRING)
                     if not self._invoke_provider(
                         attempt,

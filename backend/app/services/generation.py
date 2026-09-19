@@ -730,10 +730,13 @@ class GenerationService:
             created_at=now,
         )
         if record.state is GenerationState.PUBLISHED:
-            # Phase 14: compose the published draft from the prompt-derived
-            # WorldRequirements (default apartment prompt with no new object
-            # tokens = golden world graph + scene environment_id, byte-identical).
-            if self._last_environment_resolution is not None:
+            # Phase 16_2: in ollama mode the stage driver OWNS the composed
+            # world (LLM world-requirements -> environment -> oracle -> placer)
+            # inside the controller run; the deterministic re-composition below
+            # MUST NOT overwrite it. It still applies for fake/live unchanged.
+            if settings.generation_provider == "ollama":
+                pass
+            elif self._last_environment_resolution is not None:
                 self._last_environment_resolution["compositionFailed"] = not (
                     self._apply_kit_composition(
                         record, environment_id, world_reqs, environment
@@ -742,9 +745,11 @@ class GenerationService:
             # Phase 13: OPT-IN declarative procedural assets for the explicit
             # unknown-object request list (after the kit composition, so the
             # golden set is already re-anchored and the generated set is placed
-            # into the SAME kit).
+            # into the SAME kit). In ollama driver mode the unknown objects go
+            # through the driver's ASSET_SPEC path instead.
             if (
-                self._generate_unknown_assets
+                settings.generation_provider != "ollama"
+                and self._generate_unknown_assets
                 and self._spec_provider is not None
                 and unknown_asset_requests
             ):
@@ -1165,7 +1170,12 @@ class GenerationService:
             record
         )
         if record.state is GenerationState.PUBLISHED:
-            if self._last_environment_resolution is not None:
+            # Phase 16_2: skip the deterministic re-composition in ollama mode
+            # (the stage driver owns the composed world for the new version).
+            if (
+                settings.generation_provider != "ollama"
+                and self._last_environment_resolution is not None
+            ):
                 self._last_environment_resolution["compositionFailed"] = not (
                     self._apply_kit_composition(record, environment_id, world_reqs)
                 )
@@ -1209,6 +1219,10 @@ class GenerationService:
     ) -> tuple[Any, Any, float]:
         """Fresh per-request controller; admission inside; synchronous run."""
         settings = self._settings
+        # Phase 16_2: a selected local-Llama provider runs through the Ollama
+        # stage driver (structured per-stage calls producing a full draft),
+        # classified through the SAME controller lifecycle.
+        driver = self._build_stage_driver() if settings.generation_provider == "ollama" else None
         controller = GenerationController(
             provider=self._provider_factory(),
             admission=self._admission,
@@ -1220,6 +1234,7 @@ class GenerationService:
             max_full_regenerations=settings.max_full_regenerations,
             max_prompt_chars=settings.max_prompt_chars,
             seed=None,  # per-controller auto seed (deterministic per controller)
+            stage_driver=driver,
         )
         try:
             handle = controller.start_generation(
@@ -1467,6 +1482,22 @@ class GenerationService:
             return FakeProvider(script=script)
 
         return _fake
+
+    def _build_stage_driver(self) -> Any:
+        """Phase 16_2: an ``OllamaStageDriver`` for a selected local-Llama provider.
+
+        Only the ollama branch is enabled; fake/live return None (their
+        deterministic composition is UNCHANGED). The driver shares the cached
+        generated-asset store; unknown REQUIRED objects route through its
+        ASSET_SPEC adapter (bound)."""
+        from app.services.ollama_driver import OllamaStageDriver
+
+        return OllamaStageDriver(
+            settings=self._settings,
+            provider_factory=self._provider_factory,
+            generated_cache=self._generated_cache,
+            catalog=None,
+        )
 
     def _load_fake_script(self) -> dict[GenerationStage, list[str]]:
         """Deterministic fake script: FAKE_PROVIDER_SCRIPT JSON when configured

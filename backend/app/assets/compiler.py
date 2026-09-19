@@ -73,11 +73,20 @@ HITBOX_MIN = 0.15
 # Theoretical maximum hitbox component: 2 * (MAX_POSITION_BOUND +
 # MAX_PART_SCALE / 2) = 10.0 (defensive ceiling; documented bound).
 HITBOX_MAX = 10.0
+# DEF-077: the derived pick-hitbox extent may never exceed the estimated
+# VISIBLE span of the compiled geometry by more than this ratio (a tiny visible
+# mesh can never present a giant invisible pick target; the value is also
+# floored at HITBOX_MIN so legitimate small objects stay directly clickable).
+HITBOX_VISIBLE_MAX_RATIO = 2.0
 
 _EVENT_HANDLER_ROLE_RE = re.compile(r"^on[a-z_]+$")
 
 _COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
-_PART_ID_PATTERN = re.compile(r"^part_\d{2}$")
+# DEF-076: ASCII-only part ids. The compiler resolves parts by the fixed ASCII
+# part_00..part_23 sequence — a Unicode/fullwidth id could never map and would
+# be SILENTLY DROPPED. The read/validation side rejects non-ASCII ids; this
+# projection gate re-checks the same ASCII grammar for published definitions.
+_PART_ID_PATTERN = re.compile(r"^part_[0-9]{2}$")
 _ROLE_PATTERN = re.compile(r"^[a-z0-9_]+$")
 # Documented key allowlists of the serialized definition document.
 _DEFINITION_KEYS = frozenset(
@@ -280,6 +289,17 @@ class GeneratedAssetDefinition:
 # --------------------------------------------------------------------------- #
 
 
+class AssetSpecCompileError(AssetSpecError):
+    """A validated AssetSpec could NOT be compiled to its complete part set.
+
+    Raised (never a silent drop) when a part id cannot be mapped onto the fixed
+    ASCII ``part_00..part_23`` sequence — DEF-076. It subclasses
+    ``AssetSpecError`` so the Oracle/controller handle it as a sanitized
+    internal diagnostic and the generation degrades safely (never publishes
+    partial geometry).
+    """
+
+
 def _derive_hitbox(
     parts: tuple[GeneratedPart, ...],
     dimensions: tuple[float, float, float],
@@ -299,8 +319,16 @@ def _derive_hitbox(
         extents[2] = max(extents[2], abs(position.z) + scale.z / 2)
     values: list[float] = []
     for axis in range(3):
-        full = max(extents[axis] * 2, float(dimensions[axis]))
-        values.append(min(max(full, HITBOX_MIN), HITBOX_MAX))
+        visible_span = extents[axis] * 2.0
+        full = max(visible_span, float(dimensions[axis]))
+        value = min(max(full, HITBOX_MIN), HITBOX_MAX)
+        # DEF-077: the pick box is a defensive bound on the VISIBLE geometry —
+        # never larger than visible_span * HITBOX_VISIBLE_MAX_RATIO (floored at
+        # HITBOX_MIN so small objects stay pickable). A tiny visible mesh can
+        # therefore never present a giant invisible pick target, even when the
+        # declared dimensions grossly overstate the object.
+        cap = max(visible_span * HITBOX_VISIBLE_MAX_RATIO, HITBOX_MIN)
+        values.append(min(value, cap))
     return GeneratedHitbox(
         scale=GeneratedVec3(x=values[0], y=values[1], z=values[2])
     )
@@ -351,6 +379,22 @@ def compile_asset_spec(
                 ),
                 color=color,
                 parent_id=part.parent_id,
+            )
+        )
+
+    # DEF-076: the compiler NEVER silently drops a validated part. Every part id
+    # is resolved against the fixed ASCII part_00..part_23 sequence; if any
+    # validated id cannot be mapped (or the compiled count would differ), fail
+    # fast with a typed diagnostic instead of publishing partial geometry.
+    if len(resolved) != len(spec.parts):
+        unmapped = sorted(
+            pid for pid in by_id if pid not in _PART_IDS
+        )
+        raise AssetSpecCompileError(
+            (
+                "compile refused to drop validated parts: compiled "
+                f"{len(resolved)} of {len(spec.parts)} parts; unmappable part "
+                f"ids {unmapped}",
             )
         )
 
@@ -496,7 +540,9 @@ def definition_json_issues(
             )
             part_id = part.get("id")
             if not isinstance(part_id, str) or not _PART_ID_PATTERN.match(part_id):
-                issues.append(f"{where}.id must match ^part_\\d{{2}}$")
+                issues.append(
+                    f"{where}.id must match ^part_[0-9]{{2}}$ (ASCII digits only)"
+                )
             if part_id in index_of:
                 issues.append(f"{where}.id {part_id!r} is a duplicate part id")
             else:
@@ -625,6 +671,7 @@ def validate_embedded_definition(
 
 
 __all__ = [
+    "AssetSpecCompileError",
     "COMPILER_VERSION",
     "SCHEMA_VERSION",
     "GeneratedAssetDefinition",
@@ -634,6 +681,7 @@ __all__ = [
     "GeneratedVec3",
     "HITBOX_MAX",
     "HITBOX_MIN",
+    "HITBOX_VISIBLE_MAX_RATIO",
     "PROCEDURAL_ASSET_CATEGORY_MAX_LENGTH",
     "PROCEDURAL_ASSET_ID_MAX_LENGTH",
     "PROCEDURAL_ASSET_PATTERN",

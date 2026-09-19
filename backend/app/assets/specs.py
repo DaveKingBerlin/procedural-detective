@@ -30,7 +30,7 @@ Bound summary (all inclusive):
 | subtype                         | None or str 1..80                     |
 | dimensions (x/y/z)              | 0.05 <= d <= 4.0, finite              |
 | parts                           | 1..24 parts                          |
-| part id                         | ^part_\\d{2}$ within part_00..part_23  |
+| part id                         | ^part_[0-9]{2}$ within part_00..part_23  |
 | part role                       | ^[a-z0-9_]+$ 1..24 chars              |
 | part primitive                 | box|cylinder|sphere|plane            |
 | part position (x/y/z)           | |v| <= 4.0, finite                   |
@@ -102,8 +102,14 @@ MAX_ROTATION_BOUND = 2.0 * math.pi
 MIN_PART_SCALE = 0.05
 MAX_PART_SCALE = 2.0
 
-# "part_00" .. "part_23" (id pattern + numeric range).
-PART_ID_PATTERN = re.compile(r"^part_(\d{2})$")
+# "part_00" .. "part_23" (id pattern + numeric range). DEF-076: the digits are
+# ASCII-ONLY ([0-9]) — Python ``\\d`` matches Unicode/fullwidth decimal digits
+# (e.g. "part_０１"), which would pass validation but silently DROP the part at
+# compile time (the compiler's ASCII-only part_00..part_23 sequence could never
+# map it). Non-ASCII ids are rejected here with a clean issue so a validated
+# spec ALWAYS compiles to ALL of its parts (the compiler additionally asserts
+# the count — never a silent drop).
+PART_ID_PATTERN = re.compile(r"^part_([0-9]{2})$")
 MIN_PART_ID = 0
 MAX_PART_ID = MAX_PARTS - 1  # 23
 ROLE_PATTERN = re.compile(r"^[a-z0-9_]+$")
@@ -292,7 +298,10 @@ def _part_issues(item: Any, where: str, seen_ids: list[str]) -> list[str]:
     else:
         match = PART_ID_PATTERN.match(part_id)
         if not match:
-            issues.append(f"{where}.id {part_id!r} must match ^part_\\d{{2}}$")
+            issues.append(
+                f"{where}.id {part_id!r} must match ^part_[0-9]{{2}}$ "
+                "(ASCII digits only: part_00..part_23)"
+            )
         else:
             part_number = int(match.group(1))
             if not (MIN_PART_ID <= part_number <= MAX_PART_ID):
@@ -546,7 +555,7 @@ class AssetSpecPart:
             issues.append(message)
 
         if not isinstance(self.id, str) or not PART_ID_PATTERN.match(self.id):
-            _bad(f"part id {self.id!r} must match ^part_\\d{{2}}$")
+            _bad(f"part id {self.id!r} must match ^part_[0-9]{{2}}$ (ASCII digits only)")
         if not isinstance(self.role, str) or not ROLE_PATTERN.match(self.role):
             _bad(f"role {self.role!r} must match ^[a-z0-9_]+$")
         elif _EVENT_HANDLER_ROLE_RE.match(self.role):
