@@ -29,7 +29,7 @@ interface CreateCaseRequest {
 export const API_BASE_URL: string =
   import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
-const REQUEST_TIMEOUT_MS = 60000;
+const REQUEST_TIMEOUT_MS = 300000;
 
 /** Structured error produced for non-2xx responses and transport failures. */
 export class ApiError extends Error {
