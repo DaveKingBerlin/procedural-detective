@@ -23,10 +23,11 @@ fields (usable evidence ids). The projection NEVER returns SolverProof /
 SolutionProof internals, ``acceptedScoring``, prompts, diagnostics, tokens,
 verifiers, generationAttemptId, private admission/quota state, or internal
 database ids. Weapon display names are NOT stored on the public objects: they
-are derived deterministically from the public ``asset_id`` (a documented
-extension of REQUIREMENTS 12's object-title convention; the golden
-``PROP_KITCHEN_KNIFE_01`` renders "Kitchen Knife", matching the frontend asset
-registry label family).
+are derived deterministically from the SEMANTIC weapon identity — the public
+``object_id`` (``bronze_ceremonial_ice_pick`` renders
+"Bronze Ceremonial Ice Pick"; ``kitchen_knife`` renders "Kitchen Knife";
+DEF-081 — a procedural render id ``proc.decor.<hash>`` is a render-layer token
+and can NEVER be a player-facing weapon label).
 """
 
 from __future__ import annotations
@@ -82,22 +83,40 @@ _ASSET_PREFIXES = ("PROP_", "DOOR_", "FURN_", "TECH_")
 _TRAILING_NUM_RE = re.compile(r"_\d+$")
 
 
-def weapon_label_of(asset_id: Any) -> str:
+def weapon_label_of(asset_id: Any, *, object_id: Any = None) -> str:
     """Deterministic PUBLIC display label of a world-object weapon.
 
-    The published objects carry no display name, so the label is derived from
-    the public ``asset_id`` (strip the registry prefix and trailing numeric
-    suffix, title-case the underscores) — ``PROP_KITCHEN_KNIFE_01`` renders
-    "Kitchen Knife". Deterministic and player-safe (public material only).
+    DEF-081 identity separation: the player-visible label is derived ONLY
+    from the SEMANTIC object identity — the published public ``object_id``
+    (e.g. ``bronze_ceremonial_ice_pick`` -> "Bronze Ceremonial Ice Pick") —
+    NEVER from the render ``asset_id``. A procedural render id
+    (``proc.decor.<hash>``) is a render-layer token and must never surface as
+    a player-facing weapon label; the semantic id is what the player sees,
+    submits and reveals. For catalog objects the semantic id is the same
+    human-oriented slug as before (``kitchen_knife`` -> "Kitchen Knife"), so
+    catalog rendering is byte-identical. The render ``asset_id`` is kept ONLY
+    as a defensive fallback for legacy/crafted payloads that carry no
+    ``object_id``.
     """
-    name = str(asset_id if asset_id is not None else "")
+    source = (
+        str(object_id)
+        if object_id is not None and str(object_id)
+        else str(asset_id if asset_id is not None else "")
+    )
     for prefix in _ASSET_PREFIXES:
-        if name.startswith(prefix):
-            name = name[len(prefix):]
+        if source.startswith(prefix):
+            source = source[len(prefix):]
             break
-    name = _TRAILING_NUM_RE.sub("", name)
-    words = [w for w in name.split("_") if w]
-    return " ".join(word.capitalize() for word in words) or str(asset_id or "")
+    source = _TRAILING_NUM_RE.sub("", source)
+    words = [w for w in source.split("_") if w]
+    label = " ".join(word.capitalize() for word in words) or str(asset_id or "")
+    # DEF-081 hard guarantee: a procedural render id can NEVER become the
+    # player-facing label — even for a crafted payload whose semantic object
+    # id is missing entirely, the label degrades to a neutral literal instead
+    # of leaking the render asset id.
+    if label.casefold().startswith("proc.") or label.casefold().startswith("proc_"):
+        return "Object"
+    return label
 
 
 # --------------------------------------------------------------------------- #
@@ -154,7 +173,11 @@ def candidate_block_of(payload: Mapping[str, Any]) -> dict[str, list[dict[str, A
             {
                 "id": weapon_id,
                 "assetId": str(asset_id),
-                "name": weapon_label_of(asset_id),
+                # DEF-081: the display label comes from the SEMANTIC object
+                # identity (the public object id), never from the render
+                # assetId (a procedural ``proc.decor.<hash>`` must never be a
+                # player-facing weapon label).
+                "name": weapon_label_of(asset_id, object_id=weapon_id),
             }
         )
 
@@ -393,7 +416,11 @@ def truth_labels(payload: Mapping[str, Any]) -> dict[str, str]:
         "motiveId": motive_id,
         "motiveLabel": str(motive.get("label") or motive_id),
         "weaponId": weapon_id,
-        "weaponName": weapon_label_of(asset_id),
+        # DEF-081: the canonical weapon label comes from the SEMANTIC weapon
+        # identity (the truth's public weapon id), never from the render
+        # assetId (a procedural ``proc.decor.<hash>`` must never be shown to
+        # the player as the weapon name).
+        "weaponName": weapon_label_of(asset_id, object_id=weapon_id),
         "crimeTime": canonical,
     }
 

@@ -12,6 +12,89 @@ import NewCasePage from "./new";
  * "Use example prompt" fill target), and the pure prompt validation.
  */
 
+describe("/new — Phase 17D Bugfix PART B example-prompt selector (static render)", () => {
+  const html = () =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage />
+      </MemoryRouter>,
+    );
+
+  it("renders the compact 'Try an example:' section under the prompt textarea", () => {
+    const markup = html();
+    // Section + heading + the three buttons with their contract test-ids.
+    expect(markup).toContain('data-testid="example-prompts"');
+    expect(markup).toContain('data-testid="example-prompts-heading"');
+    expect(markup).toContain("Try an example:");
+    expect(markup).toContain('data-testid="example-easy"');
+    expect(markup).toContain('data-testid="example-medium"');
+    expect(markup).toContain('data-testid="example-hard"');
+  });
+
+  it("shows the label + helper copy of every example on its button", () => {
+    const markup = html();
+    expect(markup).toContain(">Easy</span>");
+    expect(markup).toContain("Known environment and common objects.");
+    expect(markup).toContain(">Medium</span>");
+    expect(markup).toContain("More varied setting and evidence.");
+    expect(markup).toContain(">Hard</span>");
+    expect(markup).toContain("Includes an unusual object that may require procedural 3D generation.");
+  });
+
+  it("uses plain type=\"button\" actions — example select can never submit the form", () => {
+    const markup = html();
+    // Helper: capture the full element tag for a testid, whatever the
+    // attribute order, then assert its type.
+    const tagOf = (testid: string): string => {
+      const match = markup.match(new RegExp(`<button[^>]*data-testid="${testid}"[^>]*>`));
+      if (!match) throw new Error(`<button data-testid="${testid}"> not found in markup`);
+      return match[0];
+    };
+    // Every example button must be type="button" (NOT submit): clicking fills
+    // the textarea only and can never start generation on its own.
+    expect(tagOf("example-easy")).toContain('type="button"');
+    expect(tagOf("example-medium")).toContain('type="button"');
+    expect(tagOf("example-hard")).toContain('type="button"');
+    // The explicit Generate case button remains the ONLY submit action.
+    expect(tagOf("generate-case")).toContain('type="submit"');
+  });
+
+  it("starts with NO example active (all aria-pressed false, no active class)", () => {
+    const markup = html();
+    const tagOf = (testid: string): string => {
+      const match = markup.match(new RegExp(`<button[^>]*data-testid="${testid}"[^>]*>`));
+      if (!match) throw new Error(`<button data-testid="${testid}"> not found in markup`);
+      return match[0];
+    };
+    for (const id of ["example-easy", "example-medium", "example-hard"]) {
+      const tag = tagOf(id);
+      expect(tag).toContain('aria-pressed="false"');
+      expect(tag).not.toContain("new-case-example--active");
+    }
+    expect(markup).not.toContain('aria-pressed="true"');
+  });
+
+  it("exposes NO internal implementation detail in the prompt UI (D7)", () => {
+    const markup = html();
+    const lowered = markup.toLowerCase();
+    expect(markup).not.toContain("proc.");
+    expect(lowered).not.toContain("assetspec");
+    expect(lowered).not.toContain("asset spec");
+    expect(lowered).not.toContain("phase 13");
+    expect(lowered).not.toContain("phase 17");
+    expect(lowered).not.toContain("solver");
+    expect(lowered).not.toContain("4551660f4a46b2eb");
+  });
+
+  it("keeps the existing 'Use example prompt' and demo flows intact", () => {
+    const markup = html();
+    expect(markup).toContain('data-testid="use-example-prompt"');
+    expect(markup).toContain("Use example prompt");
+    expect(markup).toContain('data-testid="try-demo-from-new"');
+    expect(markup).toContain("Try the demo case");
+  });
+});
+
 describe("validatePrompt — /new form validation", () => {
   it("rejects an empty prompt with a safe message", () => {
     const result = validatePrompt("   ");

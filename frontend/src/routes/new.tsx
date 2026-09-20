@@ -4,6 +4,14 @@ import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/ty
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import { setJourneyParams, type JourneyDifficulty } from "../journey/context";
 import { PROMPT_MAX_CHARS } from "../journey/demoPrompt";
+import {
+  EXAMPLE_PROMPTS,
+  EXAMPLE_PROMPT_IDS,
+  isKnownExample,
+  noteExamplePromptEdit,
+  selectExamplePrompt,
+  type ExamplePromptId,
+} from "../journey/examplePrompts";
 import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, setGenerationMode } from "../journey/generationMode";
 import { GenerationModeSelector } from "../journey/generationModeSelector";
 import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journey/providerMode";
@@ -53,6 +61,13 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
   const [mode, setMode] = useState<GenerationModeId>(() =>
     overrides.modeOverride ?? getGenerationMode() ?? "demo",
   );
+  /**
+   * Phase 17D Bugfix PART B — id of the example prompt currently loaded in
+   * the textarea (null once the user edits away / writes their own prompt).
+   * Kept in sync with `prompt` ONLY through the pure transitions in
+   * src/journey/examplePrompts.ts — never derived ad hoc, never special-cased.
+   */
+  const [activeExampleId, setActiveExampleId] = useState<ExamplePromptId | null>(null);
 
   /**
    * Phase 16.2 §20/§36 — mode-honesty flags. The UI only ever claims Local-AI
@@ -74,8 +89,34 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     setGenerationMode(next);
   };
 
+  /** "Use example prompt" fills the REQUIREMENTS 48 Case A demo prompt — NOT
+   *  one of the three showcase examples, so any active example mark clears. */
   const useExample = () => {
     setPrompt(examplePromptText());
+    setActiveExampleId(null);
+    setError(null);
+  };
+
+  /** Phase 17D Bugfix PART B — select a showcase example: replace the textarea
+   *  text with the EXACT example prompt and mark it active. Purely fills the
+   *  input — it NEVER auto-starts generation (button type="button", no submit,
+   *  no navigation, no fetch); the normal Prompt-to-World pipeline runs only
+   *  when the user explicitly presses "Generate case". */
+  const onSelectExample = (id: ExamplePromptId) => {
+    if (!isKnownExample(id)) return;
+    const next = selectExamplePrompt({ prompt, activeExampleId }, id);
+    setPrompt(next.prompt);
+    setActiveExampleId(next.activeExampleId);
+    setError(null);
+  };
+
+  /** The textarea stays fully editable after any example fill: every change
+   *  is kept and deterministically clears the active mark once the text
+   *  diverges from the loaded example (pure transition, no ad-hoc logic). */
+  const onPromptChange = (text: string) => {
+    const next = noteExamplePromptEdit({ prompt, activeExampleId }, text);
+    setPrompt(next.prompt);
+    setActiveExampleId(next.activeExampleId);
     setError(null);
   };
 
@@ -142,16 +183,44 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
           rows={8}
           maxLength={PROMPT_MAX_CHARS}
           value={prompt}
-          onChange={(event) => {
-            setPrompt(event.target.value);
-            setError(null);
-          }}
+          onChange={(event) => onPromptChange(event.target.value)}
           autoComplete="off"
           spellCheck={false}
         />
         <p className="prompt-char-count" data-testid="prompt-char-count">
           {prompt.length} / {PROMPT_MAX_CHARS}
         </p>
+
+        {/* Phase 17D Bugfix PART B — compact "Try an example:" selector. Three
+            pure UI text fills demonstrating increasing Prompt-to-World
+            complexity (Easy/Medium/Hard). Each button is type="button": it
+            only populates the textarea — it NEVER submits the form, never
+            starts generation, and never adds backend/API logic. The active
+            example is exposed via aria-pressed + the --active class, and the
+            pure transitions in ../journey/examplePrompts clear it
+            deterministically as soon as the user edits the text. */}
+        <div className="new-case-examples" data-testid="example-prompts">
+          <p className="new-case-examples-heading" data-testid="example-prompts-heading">
+            Try an example:
+          </p>
+          {EXAMPLE_PROMPT_IDS.map((id) => {
+            const entry = EXAMPLE_PROMPTS[id];
+            const isActive = activeExampleId === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                data-testid={`example-${id}`}
+                className={`new-case-example${isActive ? " new-case-example--active" : ""}`}
+                aria-pressed={isActive}
+                onClick={() => onSelectExample(id)}
+              >
+                <span className="new-case-example-label">{entry.label}</span>
+                <span className="new-case-example-helper">{entry.helper}</span>
+              </button>
+            );
+          })}
+        </div>
 
         <label htmlFor="difficulty-select" className="new-case-label">
           Difficulty (optional)

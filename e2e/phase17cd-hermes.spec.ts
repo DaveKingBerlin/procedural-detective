@@ -668,7 +668,11 @@ test("Phase17C/17D Wave 3 — REAL hermes3:8b prompt-to-world journey (office + 
   await expect(page.getByTestId("accusation-confirmation")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId("accusation-summary-murderer")).toContainText("Paul");
   await expect(page.getByTestId("accusation-summary-motive")).toContainText(/research data/i);
-  await expect(page.getByTestId("accusation-summary-weapon")).toContainText(/proc\.decor\./i);
+  // DEF-081: the summary shows the player-facing HUMAN label of the SEMANTIC
+  // weapon identity — never the procedural render assetId (the old
+  // "Proc.decor.<hash>" leak is the defect under test).
+  await expect(page.getByTestId("accusation-summary-weapon")).toContainText("Bronze Ceremonial Ice Pick");
+  await expect(page.getByTestId("accusation-summary-weapon")).not.toContainText(/proc\./i);
   await expect(page.getByTestId("accusation-summary-time")).toHaveText("23:42");
   await page.screenshot({ path: evidence("phase17cd-hermes-accusation.png") });
 
@@ -714,7 +718,10 @@ test("Phase17C/17D Wave 3 — REAL hermes3:8b prompt-to-world journey (office + 
   // correct. The rendered truth time shows the canonical HH:MM.
   await expect(page.getByTestId("reveal-truth-murderer")).toContainText("Paul");
   await expect(page.getByTestId("reveal-truth-motive")).toContainText(/research data/i);
-  await expect(page.getByTestId("reveal-truth-weapon")).toContainText(/proc\.decor\./i);
+  // DEF-081: the reveal truth shows the canonical HUMAN weapon label of the
+  // semantic identity — NEVER "Proc.decor.<hash>".
+  await expect(page.getByTestId("reveal-truth-weapon")).toContainText("Bronze Ceremonial Ice Pick");
+  await expect(page.getByTestId("reveal-truth-weapon")).not.toContainText(/proc\./i);
   await expect(page.getByTestId("reveal-truth-time")).toContainText(/23:\d\d/);
   for (const dim of ["who", "why", "weapon", "when"]) {
     await expect(page.getByTestId(`reveal-dimension-${dim}`)).toContainText("Correct");
@@ -729,6 +736,64 @@ test("Phase17C/17D Wave 3 — REAL hermes3:8b prompt-to-world journey (office + 
   await expect(page.getByTestId("reveal-overall")).toContainText("CASE SOLVED");
   await expect(page.getByTestId("reveal-score")).toContainText("4 / 4");
   await page.screenshot({ path: evidence("phase17cd-hermes-reveal-reload.png"), fullPage: true });
+
+  // ---- (8b) DEF-081 LIVE 422/200 pair on the SAME published case (ZERO extra
+  // generation — a second playthrough reads the same immutable v1 row): the
+  // render assetId as weaponId answers 422 (unknown weapon in the semantic
+  // universe), the SEMANTIC id answers 200, and its reveal truth shows the
+  // human label with the semantic weaponId.
+  const pt2Res = await request.post(
+    `${BACKEND_BASE}/api/v1/cases/${caseId}/versions/1/playthroughs`,
+    { headers: { Authorization: `Bearer ${created.creatorAccessToken}` } },
+  );
+  expect(pt2Res.status(), "second playthrough of the published case").toBe(201);
+  const pt2 = await pt2Res.json();
+  const pt2Auth = { Authorization: `Bearer ${pt2.playthroughAccessToken}` };
+
+  const resAsset = await request.post(
+    `${BACKEND_BASE}/api/v1/playthroughs/${pt2.playthroughId}/accusation`,
+    { headers: pt2Auth, data: {
+      murdererId: SOLVER_IDS.who, motiveId: SOLVER_IDS.why, weaponId: procAssetId, crimeTime: "23:42:00",
+    } },
+  );
+  expect(resAsset.status(), "render assetId as weaponId answers 422 (unknown weapon)").toBe(422);
+  const resAssetBody = await resAsset.json();
+  expect(String(resAssetBody.error?.code), "422 error envelope code").toBe("VALIDATION_ERROR");
+  expect(hostHitsInBlob(JSON.stringify(resAssetBody)), "422 envelope has zero host material").toEqual([]);
+
+  const resSemantic = await request.post(
+    `${BACKEND_BASE}/api/v1/playthroughs/${pt2.playthroughId}/accusation`,
+    { headers: pt2Auth, data: {
+      murdererId: SOLVER_IDS.who, motiveId: SOLVER_IDS.why, weaponId: SOLVER_IDS.weapon, crimeTime: "23:42:00",
+    } },
+  );
+  expect(resSemantic.status(), "semantic weapon id accusation answers 200").toBe(200);
+  const resSemanticBody = await resSemantic.json();
+  expect(String(resSemanticBody.accusation?.weaponId), "accusation echo carries the SEMANTIC weapon id")
+    .toBe("bronze_ceremonial_ice_pick");
+  expect(String(resSemanticBody.accusation?.weaponId)).not.toBe(procAssetId);
+
+  const reveal2Res = await request.get(
+    `${BACKEND_BASE}/api/v1/playthroughs/${pt2.playthroughId}/reveal`,
+    { headers: pt2Auth },
+  );
+  expect(reveal2Res.status(), "second playthrough reveal").toBe(200);
+  const reveal2 = await reveal2Res.json();
+  expect(String(reveal2.truth?.weaponName), "reveal truth weapon name is the HUMAN label").toBe("Bronze Ceremonial Ice Pick");
+  expect(String(reveal2.truth?.weaponId), "reveal truth weapon id stays SEMANTIC").toBe("bronze_ceremonial_ice_pick");
+  expect(hostHitsInBlob(JSON.stringify(reveal2)), "reveal DTO has zero host material").toEqual([]);
+
+  // ---- (8c) DEF-081 DOM NO-PROC SCAN: no "proc." (case-insensitive) anywhere
+  // in the rendered DOM outside a data-testid attribute value.
+  const procLeaks = await page.evaluate(() => {
+    const html = document.documentElement?.outerHTML ?? "";
+    const testids: string[] = [];
+    for (const m of html.matchAll(/data-testid="([^"]*)"/g)) testids.push(m[1]);
+    let stripped = html;
+    for (const id of testids) stripped = stripped.replace(`data-testid="${id}"`, "");
+    return { testids, outside: stripped.toLowerCase().split("proc.").length - 1, raw: html.toLowerCase().split("proc.").length - 1 };
+  });
+  expect(procLeaks.outside, "DOM contains ZERO 'proc.' outside data-testid attributes").toBe(0);
 
   // ---------------------------------------------------------------------------
   // (9) FULL-SESSION NO-HOST SCAN: DOM text + every API JSON body (including

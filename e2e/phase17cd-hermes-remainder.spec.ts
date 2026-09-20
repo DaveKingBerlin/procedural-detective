@@ -247,9 +247,10 @@ test("Phase17C/17D Wave 3 — real Hermes journey remainder: proc.* interaction,
   await expect(page.getByTestId("accusation-confirmation")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId("accusation-summary-murderer")).toContainText("Paul");
   await expect(page.getByTestId("accusation-summary-motive")).toContainText(/research data/i);
-  // Generated assets get the deterministic player-safe label from the public
-  // assetId (reveal.weapon_label_of) — here the proc.* id itself.
-  await expect(page.getByTestId("accusation-summary-weapon")).toContainText(/proc\.decor\./i);
+  // DEF-081: the summary shows the HUMAN label of the SEMANTIC weapon
+  // identity — never the procedural render assetId.
+  await expect(page.getByTestId("accusation-summary-weapon")).toContainText("Bronze Ceremonial Ice Pick");
+  await expect(page.getByTestId("accusation-summary-weapon")).not.toContainText(/proc\./i);
   await page.getByTestId("accusation-confirm").click();
   await expect(page.getByTestId("accusation-accepted")).toBeVisible({ timeout: 30_000 });
   await page.screenshot({ path: evidence("phase17cd-hermes-accusation.png") });
@@ -276,7 +277,10 @@ test("Phase17C/17D Wave 3 — real Hermes journey remainder: proc.* interaction,
   await expect(page.getByTestId("reveal-screen")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("reveal-truth-murderer")).toContainText("Paul");
   await expect(page.getByTestId("reveal-truth-motive")).toContainText(/research data/i);
-  await expect(page.getByTestId("reveal-truth-weapon")).toContainText(/proc\.decor\./i);
+  // DEF-081: the reveal truth shows the canonical HUMAN weapon label — never
+  // "Proc.decor.<hash>".
+  await expect(page.getByTestId("reveal-truth-weapon")).toContainText("Bronze Ceremonial Ice Pick");
+  await expect(page.getByTestId("reveal-truth-weapon")).not.toContainText(/proc\./i);
   await expect(page.getByTestId("reveal-truth-time")).toContainText(/23:\d\d/);
   for (const dim of ["who", "why", "weapon", "when"]) {
     await expect(page.getByTestId(`reveal-dimension-${dim}`)).toContainText("Correct");
@@ -292,6 +296,17 @@ test("Phase17C/17D Wave 3 — real Hermes journey remainder: proc.* interaction,
   await page.screenshot({ path: evidence("phase17cd-hermes-reveal-reload.png"), fullPage: true });
 
   // (9) FULL no-host scan: DOM + every API body (incl. the reveal DTO).
+  // DEF-081 additionally: no "proc." (case-insensitive) in the DOM outside a
+  // data-testid attribute value.
+  const procLeaks = await page.evaluate(() => {
+    const html = document.documentElement?.outerHTML ?? "";
+    const testids: string[] = [];
+    for (const m of html.matchAll(/data-testid="([^"]*)"/g)) testids.push(m[1]);
+    let stripped = html;
+    for (const id of testids) stripped = stripped.replace(`data-testid="${id}"`, "");
+    return { outside: stripped.toLowerCase().split("proc.").length - 1 };
+  });
+  expect(procLeaks.outside, "DOM contains ZERO 'proc.' outside data-testid attributes").toBe(0);
   const domText = await page.locator("body").innerText();
   expect(hostHitsInBlob(domText), "DOM must be free of host/URL material").toEqual([]);
   const hostLeaks: Array<{ url: string; tokens: string[] }> = [];

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TimelineEntryDTO } from "../api/types";
-import { makeCandidates, makeHostileReveal, makeRevealResponse, makeWrongReveal, makePartialReveal } from "../scene/testFixtures";
+import { CANNED_REVEAL_CRIME_TIME, makeCandidates, makeHostileReveal, makeRevealResponse, makeWrongReveal, makePartialReveal } from "../scene/testFixtures";
 import { asText, formatCrimeTime, revealPresentation, sortTimeline } from "./revealFormat";
 
 /**
@@ -117,6 +117,53 @@ describe("revealPresentation fallbacks", () => {
     expect(unknown.dimensions[0].submitted).toBe("ghost_person");
     expect(unknown.dimensions[0].correct).toBe(false);
     expect(model.dimensions[0].submitted).toBe("Blake Niven");
+  });
+});
+
+describe("revealPresentation weapon identity (DEF-081 golden semantic label)", () => {
+  it("shows the HUMAN weapon label, never the procedural render assetId", () => {
+    // The reveal truth carries the canonical label ("Bronze Ceremonial Ice
+    // Pick"); the candidates carry the semantic weapon id + the render
+    // assetId. Both display surfaces must prefer the semantic label.
+    const reveal = makeRevealResponse({
+      truth: {
+        murdererId: "paul_becker",
+        murdererName: "Paul Becker",
+        motiveId: "stolen_research_data",
+        motiveLabel: "Stolen research data",
+        weaponId: "bronze_ceremonial_ice_pick",
+        weaponName: "Bronze Ceremonial Ice Pick",
+        crimeTime: CANNED_REVEAL_CRIME_TIME,
+      },
+      player: {
+        accusation: {
+          murdererId: "paul_becker",
+          motiveId: "stolen_research_data",
+          weaponId: "bronze_ceremonial_ice_pick",
+          crimeTime: "23:42:00",
+        },
+      },
+      result: { murdererCorrect: true, motiveCorrect: true, weaponCorrect: true, timeCorrect: true, overall: "solved" },
+    });
+    const candidates = makeCandidates({
+      suspects: [{ id: "paul_becker", name: "Paul Becker" }],
+      motives: [{ id: "stolen_research_data", label: "Stolen research data" }],
+      weapons: [
+        {
+          id: "bronze_ceremonial_ice_pick",
+          assetId: "proc.decor.4551660f4a46b2eb",
+          name: "Bronze Ceremonial Ice Pick",
+        },
+      ],
+    });
+    const model = revealPresentation(reveal, candidates);
+
+    expect(model.truth.weapon).toBe("Bronze Ceremonial Ice Pick");
+    expect(model.dimensions.find((row) => row.dimension === "WEAPON")!.truth).toBe("Bronze Ceremonial Ice Pick");
+    // the submitted id resolves through the candidate's semantic name — the
+    // render assetId never reaches the page.
+    expect(model.dimensions.find((row) => row.dimension === "WEAPON")!.submitted).toBe("Bronze Ceremonial Ice Pick");
+    expect(JSON.stringify(model)).not.toContain("proc.decor.4551660f4a46b2eb");
   });
 });
 

@@ -860,6 +860,64 @@ button {
   margin: 0;
 }
 
+/* Phase 17D Bugfix PART B — compact "Try an example:" selector under the
+   prompt textarea. Three pure UI text fills (Easy/Medium/Hard) with a
+   one-line helper each; the loaded example is visibly active (border + tint)
+   and cleared on edit. Buttons are type="button": populating the textarea
+   never submits the form or starts generation. */
+.new-case-examples {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.1rem 0 0.4rem;
+}
+
+.new-case-examples-heading {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin: 0;
+}
+
+.new-case-example {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.45rem 0.75rem;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.new-case-example-label {
+  font-weight: 700;
+}
+
+.new-case-example-helper {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.new-case-example:hover:not(:active):not(.new-case-example--active) {
+  border-color: var(--accent);
+}
+
+.new-case-example--active {
+  border-color: var(--accent);
+  background: rgba(230, 180, 85, 0.12);
+  box-shadow: 0 0 0 2px rgba(230, 180, 85, 0.35);
+}
+
+.new-case-example:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .new-case-form select {
   background: #0d1016;
   color: var(--text);

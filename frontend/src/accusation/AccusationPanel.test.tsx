@@ -101,6 +101,31 @@ describe("accusation candidate rendering", () => {
     expect(html).not.toContain("<b>bold</b>");
   });
 
+  it("renders the weapon candidate's SEMANTIC display name — never the render assetId (DEF-081)", () => {
+    // A procedural render assetId (proc.decor.<hash>) must never surface as
+    // the player-facing weapon label: the DTO carries the human name, the
+    // picker shows exactly that name and submits the semantic object id.
+    const icePick: AccusationCandidatesDTO = {
+      suspects: [{ id: "paul_becker", name: "Paul Becker" }],
+      motives: [{ id: "stolen_research_data", label: "Stolen research data" }],
+      weapons: [
+        {
+          id: "bronze_ceremonial_ice_pick",
+          assetId: "proc.decor.4551660f4a46b2eb",
+          name: "Bronze Ceremonial Ice Pick",
+        },
+      ],
+    };
+    const flow = makeFlow(icePick);
+    const html = render(flow);
+    expect(html).toContain("Bronze Ceremonial Ice Pick");
+    expect(html).not.toContain("proc.decor.4551660f4a46b2eb");
+    // the radio's value is the semantic object id (what the accusation submits)
+    expect(inputFor(html, "accusation-option-weaponId-bronze_ceremonial_ice_pick")).toContain(
+      'value="bronze_ceremonial_ice_pick"',
+    );
+  });
+
   it("renders a labelled 24h time-of-day input (WHEN) with no date control", () => {
     const html = render(makeFlow());
     expect(html).toContain('type="time"');

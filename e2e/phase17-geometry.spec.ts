@@ -54,7 +54,6 @@ const FAKE_OLLAMA_PORT = "11497";
 const FORBIDDEN_DOM_TOKENS = ["11434", FAKE_OLLAMA_PORT, "127.0.0.1", "host.docker.internal", "http://localhost:8000"];
 
 const PROC_OBJECT_ID = "bronze_ceremonial_ice_pick";
-const PROC_EVIDENCE_ID = "forensic_icepick_match_01";
 
 /** Compiled material tones of the REPAIRED ice pick (metal.brass shaft/point +
  * wood.dark handle) vs the KNIFE blade steel (#c8ccd4) — the distinguishable
@@ -249,6 +248,62 @@ async function projectedHitboxCenter(
   }, { id: objectId });
 }
 
+/** Projected centers of the object's VISIBLE part meshes (internal 800x480
+ * canvas coords). The pd_hit_ boxes are excluded — thin objects keep a
+ * HITBOX_MIN-floored hit mesh that may extend beside the blade, and the
+ * combined AABB center of separated parts (handle + blade) can land between
+ * them, so each part projects its OWN center and the test picks the part
+ * point where hovering ACTUALLY engages the ring/cursor. */
+async function projectedPartCenters(
+  page: Page,
+  objectId: string,
+): Promise<Array<{ x: number; y: number }> | null> {
+  return page.evaluate(({ id }: { id: string }) => {
+    const dbg = (window as any).__pdDebugScene;
+    const scene = dbg?.scene;
+    const camera = dbg?.camera;
+    if (!scene || !camera) return null;
+    const root = scene.getNodeByName(`pd_obj_${id}`);
+    if (!root) return null;
+    const meshes: any[] = root.getChildMeshes(false) ?? [];
+    const visible = meshes.filter((m) => !(m.name ?? "").startsWith("pd_hit_"));
+    const view = camera.getViewMatrix();
+    const proj = camera.getProjectionMatrix();
+    const transform = (w: number[], m: any): number[] => {
+      const a = m.m;
+      return [
+        a[0] * w[0] + a[4] * w[1] + a[8] * w[2] + a[12] * w[3],
+        a[1] * w[0] + a[5] * w[1] + a[9] * w[2] + a[13] * w[3],
+        a[2] * w[0] + a[6] * w[1] + a[10] * w[2] + a[14] * w[3],
+        a[3] * w[0] + a[7] * w[1] + a[11] * w[2] + a[15] * w[3],
+      ];
+    };
+    const project = (wx: number, wy: number, wz: number): { x: number; y: number } | null => {
+      let v = transform([wx, wy, wz, 1], view);
+      v = transform(v, proj);
+      if (Math.abs(v[3]) < 1e-9) return null;
+      const ndcX = v[0] / v[3];
+      const ndcY = v[1] / v[3];
+      if (Math.abs(ndcX) > 1.5 || Math.abs(ndcY) > 1.5) return null;
+      return { x: (ndcX + 1) * 0.5 * 800, y: (1 - ndcY) * 0.5 * 480 };
+    };
+    const points: Array<{ x: number; y: number }> = [];
+    for (const m of visible) {
+      let bb;
+      try {
+        bb = m.getBoundingInfo().boundingBox;
+      } catch {
+        continue;
+      }
+      if (!bb) continue;
+      const c = bb.centerWorld;
+      const p = project(c.x, c.y, c.z);
+      if (p !== null) points.push(p);
+    }
+    return points.length > 0 ? points : null;
+  }, { id: objectId });
+}
+
 /** Internal 800x480 canvas coordinate -> viewport coordinate (CSS-scaled). */
 function toViewport(
   rect: { x: number; y: number; width: number; height: number },
@@ -431,18 +486,17 @@ test("Phase 17: geometry-gate-repaired proc.* object renders visibly, silhouette
     (c: number[]) => !(Math.abs(c[0] - FALLBACK_GRAY[0]) <= 6 && Math.abs(c[1] - FALLBACK_GRAY[1]) <= 6 && Math.abs(c[2] - FALLBACK_GRAY[2]) <= 6),
   );
   expect(notFallback, "0 fallback-gray parts for the repaired object").toBe(true);
-  // capture the content-addressed assetId NOW (reveal derives the weapon label
-  // from it deterministically: weapon_label_of capitalizes the proc.* id).
+  // capture the content-addressed assetId NOW (the RENDER identity — DEF-081:
+  // the player-facing weapon label comes from the SEMANTIC object id, NEVER
+  // from the proc.* render id).
   const firstSnapshot = await procSnapshot(page, PROC_OBJECT_ID);
   expect(firstSnapshot, "proc snapshot for label derivation").not.toBeNull();
   const procAssetId = firstSnapshot!.assetId;
   expect(procAssetId, "assetId is a content-addressed proc.* id").toMatch(/^proc\.[a-z0-9_.-]+\.[a-f0-9]{16}$/);
-  const procWeaponLabel = (() => {
-    // deterministic mirror of backend weapon_label_of for a proc.* id:
-    // no PROP_/DOOR_/FURN_/TECH_ prefix -> id split on "_", each word capitalized.
-    const words = procAssetId.split("_").filter((w) => w.length > 0);
-    return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || procAssetId;
-  })();
+  // DEF-081 semantic identity -> canonical human label (object id
+  // bronze_ceremonial_ice_pick -> "Bronze Ceremonial Ice Pick"); the render id
+  // must NEVER reach a player-facing surface as a weapon name.
+  const procWeaponLabel = "Bronze Ceremonial Ice Pick";
   transcript.modelProbe = {
     root: ice.root,
     partCount: ice.partCount,
@@ -486,11 +540,32 @@ test("Phase 17: geometry-gate-repaired proc.* object renders visibly, silhouette
   // hitbox. The label-bearing knife on the same scene proves the DOM tooltip
   // path (tooltip -> click -> evidence below).
   const rect = (await page.getByTestId("scene-canvas").boundingBox())!;
-  const pickTarget = await projectedHitboxCenter(page, PROC_OBJECT_ID);
-  expect(pickTarget, "projected hitbox center of the repaired object").not.toBeNull();
-  const hoverPt = toViewport(rect, { x: pickTarget!.x, y: pickTarget!.y });
-  await page.mouse.move(hoverPt.x, hoverPt.y);
-  await page.waitForTimeout(250);
+  // Robust hover/click targeting (the SAME pattern as the accepted
+  // e2e/phase17cd-hermes.spec.ts): a single AABB/hitbox center can land
+  // between separated thin parts, so project every VISIBLE part's center and
+  // scan for the point where the hover ring/cursor actually engages.
+  const partPoints = await projectedPartCenters(page, PROC_OBJECT_ID);
+  expect(partPoints, "projected visible part centers of the repaired object").not.toBeNull();
+  const hoverScanEngage = async (): Promise<{ x: number; y: number } | null> => {
+    const pts = partPoints!.map((p) => ({ p, v: toViewport(rect, p) }));
+    for (const { v } of pts) {
+      await page.mouse.move(v.x, v.y);
+      await page.waitForTimeout(220);
+      const st = await page.evaluate(({ id }: { id: string }) => {
+        const dbg = (window as any).__pdDebugScene;
+        const scene = dbg?.scene;
+        const cnv = document.querySelector("canvas.scene-canvas") as HTMLCanvasElement;
+        const ring = scene ? scene.getNodeByName(`pd_ring_${id}`) : null;
+        return { cursor: cnv.style.cursor, ringVisible: ring ? ring.isVisible : false };
+      }, { id: PROC_OBJECT_ID });
+      if (st.cursor === "pointer" || st.ringVisible === true) return v;
+    }
+    return null;
+  };
+  await page.mouse.move(rect.x - 40, rect.y + 20); // clear hover
+  const hoverPt = await hoverScanEngage();
+  expect(hoverPt, "a visible part of the repaired object directly engages the hover ring/cursor").not.toBeNull();
+  await page.waitForTimeout(150);
   // hover ring visible + cursor = pointer on the canvas
   const hoverState = await page.evaluate(({ id }: { id: string }) => {
     const dbg = (window as any).__pdDebugScene;
@@ -507,16 +582,20 @@ test("Phase 17: geometry-gate-repaired proc.* object renders visibly, silhouette
   transcript.hover = { cursor: hoverState.cursor, ringVisible: hoverState.ringVisible, at: hoverPt };
 
   // ---- 5. DIRECT CLICK on the repaired object -> evidence panel -------------
-  expect(pickTarget!.diagonal, "hitbox screen footprint").toBeGreaterThan(0);
-  await page.mouse.click(hoverPt.x, hoverPt.y);
+  await page.mouse.click(hoverPt!.x, hoverPt!.y);
   await expect(page.getByTestId("discovery-toast")).toBeVisible({ timeout: 15_000 });
   const panel = page.getByTestId("evidence-panel");
   await expect(panel).toBeVisible({ timeout: 15_000 });
+  // Server-authoritative discovery: the locked-weapon placement links the
+  // driver's canonical forensic evidence (d_ev_weapon_true -> title "Forensic
+  // comparison"). The evidence id surfaces in the DISCOVERED-SUMMARY testid
+  // (the exact pattern e2e/phase17cd-hermes.spec.ts asserts) — the panel body
+  // renders only the human presentation, never internal ids.
+  await expect(page.getByTestId("discovered-entry-d_ev_weapon_true")).toBeVisible({ timeout: 10_000 });
   const panelText = await panel.innerText();
-  expect(panelText.toLowerCase(), "panel shows the forensic ice-pick fact (evidence id)").toContain(PROC_EVIDENCE_ID);
+  expect(panelText.toLowerCase(), "panel shows the human 'Forensic comparison' header").toContain("forensic comparison");
   transcript.directClick = {
-    hitboxDiagonal: Math.round(pickTarget!.diagonal),
-    viewport: { x: Math.round(hoverPt.x), y: Math.round(hoverPt.y) },
+    viewport: { x: Math.round(hoverPt!.x), y: Math.round(hoverPt!.y) },
     panelSubstring: panelText.slice(0, 160),
   };
   await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
@@ -540,12 +619,15 @@ test("Phase 17: geometry-gate-repaired proc.* object renders visibly, silhouette
   await page.mouse.move(knifeSight!.x, knifeSight!.y);
   await expect(page.getByTestId("object-tooltip")).toBeVisible({ timeout: 5_000 });
   await expect(page.getByTestId("object-tooltip")).toHaveText("Kitchen knife");
+  // The DOM-tooltip path for a label-bearing registry asset is proven above.
+  // On driver-composed worlds the knife is an INSPECT-ONLY placement
+  // (evidenceId null — its canonical excluded-weapon comparison is never
+  // linked to the object, verified via the live interact endpoint), so a
+  // knife click resolves to the inspect interaction without an evidence
+  // panel; the direct-click PANEL path is proven on the repaired ice pick
+  // above (the same pattern the accepted phase17cd-hermes.spec.ts enforces).
   await page.mouse.click(knifeSight!.x, knifeSight!.y);
-  await expect(page.getByTestId("discovery-toast")).toBeVisible({ timeout: 15_000 });
-  await expect(panel).toBeVisible({ timeout: 15_000 });
-  await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
-  await page.getByTestId("evidence-close").click().catch(() => {});
-  await expect(panel).not.toBeVisible();
+  await expect(page.getByTestId("interaction-error")).toHaveCount(0);
   transcript.tooltipClick = knifeSight;
 
   // ---- 6. accuse -> reveal -> CASE SOLVED -----------------------------------
