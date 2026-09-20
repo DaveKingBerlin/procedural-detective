@@ -8,6 +8,7 @@ import { Ray } from "@babylonjs/core/Culling/ray";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import type { DiscoveryResultDTO, InteractionResultDTO } from "../api/types";
 import { cameraProfileFor } from "../environments/kitGeometry";
+import { FOCUS_BG_LIGHT_SCALE, FOCUS_TRANSITION_MS, focusTransitionTickCount } from "./focusCamera";
 import type { InvestigationSceneModel } from "./buildInvestigationScene";
 import { buildInvestigationScene } from "./buildInvestigationScene";
 import { MIN_PICKABLE_EXTENT, needsPickHitbox, pickHitboxExtent, resolveAsset } from "./assetRegistry";
@@ -22,6 +23,7 @@ import {
 import {
   makeBootstrap,
   makeEmailRecord,
+  makeIcePickDefinition,
   makeOfficeBootstrap,
   makeProcWorldObject,
   makeTrophyDefinition,
@@ -944,6 +946,488 @@ describe("Phase 13 — generated definition rendering (NullEngine)", () => {
     // Neighbors still render (knife root + children intact).
     expect(scene.getNodeByName("pd_obj_kitchen_knife")).not.toBeNull();
     expect(scene.getNodeByName("pd_part_kitchen_knife_0")).not.toBeNull();
+    result.dispose();
+  });
+});
+
+/* ======================================================================
+ * Phase 18B — forensic focus mode (NullEngine).
+ *
+ * Covers requirements A/C/E/F: selecting evidence opens focus; the SAME
+ * ArcRotateCamera saves + restores state exactly; transition + safe radius
+ * limits + reduced-motion jump; background de-emphasis + object dominance
+ * with full cleanup; slow-orbit stop on interaction; no re-discovery; direct
+ * picking and reload stay byte-identical; repeated open/close cycles are
+ * deterministic and memory-stable; the hard-case ice pick is visible,
+ * pickable, distinguishable and proc.*-leak-free.
+ * ==================================================================== */
+
+function cameraOf(result: { scene: Scene }): ArcRotateCamera {
+  const camera = result.scene.getNodeByName("investigation_camera") as ArcRotateCamera | null;
+  expect(camera, "investigation_camera exists").not.toBeNull();
+  return camera!;
+}
+
+/** grayscale vector of a live camera state (equality-safe snapshot reader). */
+function cameraVec(state: { alpha: number; beta: number; radius: number; target: { x: number; y: number; z: number } }) {
+  return {
+    alpha: state.alpha,
+    beta: state.beta,
+    radius: state.radius,
+    tx: state.target.x,
+    ty: state.target.y,
+    tz: state.target.z,
+  };
+}
+
+/** Office fixture + the bronze ceremonial ice pick (Phase 18B hard case). */
+function icePickOfficeModel(): InvestigationSceneModel {
+  const bootstrap = makeOfficeBootstrap();
+  bootstrap.scene.worldObjects.push(
+    makeWorldObject({
+      objectId: "bronze_ceremonial_ice_pick",
+      assetId: "proc.decor.4551660f4a46b2eb",
+      assetType: "sharp_weapon",
+      subtype: "sharp_weapon",
+      locationId: "office_mainroom",
+      anchor: "office_desk_a",
+      interaction: "inspect",
+      evidenceId: "forensic_ice_pick_01",
+      generated: makeIcePickDefinition(),
+    }),
+  );
+  return buildInvestigationScene(bootstrap);
+}
+
+describe("Phase 18B — forensic focus mode (camera + state machine)", () => {
+  it("selecting an evidence object opens focus and focuses THE clicked object", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+
+    expect(result.isObjectFocused()).toBe(false);
+    expect(result.getFocusedObjectId()).toBeNull();
+    result.setObjectFocus("kitchen_knife");
+    expect(result.isObjectFocused()).toBe(true);
+    expect(result.getFocusedObjectId()).toBe("kitchen_knife");
+    // Idempotent: re-selecting the same object is a no-op (no re-entry).
+    const snapshot = result.getFocusSnapshot();
+    const before = result.getFocusSnapshot()!.saved;
+    result.setObjectFocus("kitchen_knife");
+    expect(result.getFocusedObjectId()).toBe("kitchen_knife");
+    expect(result.getFocusSnapshot()!.saved).toEqual(before);
+    expect(snapshot).not.toBeNull();
+    result.dispose();
+  });
+
+  it("a focus request for a NON-interactable object is refused (no session)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    result.setObjectFocus("vase_01"); // non-interactable -> no focus session
+    expect(result.isObjectFocused()).toBe(false);
+    result.dispose();
+  });
+
+  it("transition animates the SAME camera to the focus framing with safe radius limits", () => {
+    const model = icePickOfficeModel();
+    const pick = model.worldObjects.find((o) => o.objectId === "bronze_ceremonial_ice_pick")!;
+    const result = createInvestigationScene(NOOP_CANVAS, model, nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const camera = cameraOf(result);
+    const initialRadius = camera.radius;
+
+    result.setObjectFocus("bronze_ceremonial_ice_pick");
+    const snapshot = result.getFocusSnapshot()!;
+    // Framing radius scaled DOWN from the object's visible extent, but floored
+    // at the safe minimum (never a clipping close-up).
+    expect(snapshot.framing.radius).toBeGreaterThan(0);
+    expect(snapshot.framing.radius).toBeLessThan(initialRadius);
+    expect(snapshot.framing.radius).toBeGreaterThanOrEqual(1.5);
+
+    // Frame 0 = saved world state; after the full transition the camera state
+    // is EXACTLY the computed framing (same camera instance throughout).
+    expect(cameraVec(result.getFocusSnapshot()!.live)).toEqual(cameraVec(snapshot.saved));
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+    expect(result.getFocusSnapshot()!.transitionDone).toBe(true);
+    expect(cameraVec(result.getFocusSnapshot()!.live)).toEqual(cameraVec(snapshot.framing));
+    // Target centered on the object (its model position), not the room center.
+    expect(Math.abs(camera.target.x - pick.position.x)).toBeLessThan(1);
+    expect(Math.abs(camera.target.z - pick.position.z)).toBeLessThan(1);
+    result.dispose();
+  });
+
+  it("the saved world camera state is restored EXACTLY on close (alpha/beta/radius/target)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const camera = cameraOf(result);
+
+    result.setObjectFocus("kitchen_knife");
+    const saved = cameraVec(result.getFocusSnapshot()!.saved);
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+    // The player is free to orbit during inspection before closing.
+    camera.alpha += 2.3;
+    camera.beta += 0.4;
+
+    result.setObjectFocus(null);
+    expect(result.isObjectFocused()).toBe(false);
+    expect(cameraVec({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target })).toEqual(saved);
+    result.dispose();
+  });
+
+  it("close restores lights + emissive + ring byte-exactly (background de-emphasis cleaned)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const key = result.scene.getNodeByName("investigation_key") as LightProbe | null;
+    const hemi = result.scene.getNodeByName("investigation_hemi") as LightProbe | null;
+    const knifePart = result.scene.getNodeByName("pd_part_kitchen_knife_0") as Mesh | null;
+    expect(key).not.toBeNull();
+    expect(hemi).not.toBeNull();
+    expect(knifePart).not.toBeNull();
+
+    const normalKey = key!.intensity ?? 0;
+    const normalHemi = hemi!.intensity ?? 0;
+    const restEmissive = (knifePart!.material as StandardMaterial).emissiveColor.clone();
+
+    result.setObjectFocus("kitchen_knife");
+    // Background de-emphasis: deterministic key/hemi dip.
+    expect(key!.intensity).toBeCloseTo(normalKey * FOCUS_BG_LIGHT_SCALE, 10);
+    expect(hemi!.intensity).toBeCloseTo(normalHemi * FOCUS_BG_LIGHT_SCALE, 10);
+    // Object dominance: dedicated focus emissive outshines the rest state.
+    const focused = (knifePart!.material as StandardMaterial).emissiveColor;
+    expect(focused.r).toBeCloseTo(0.78, 5);
+    expect(focused.g).toBeCloseTo(0.7, 5);
+    expect(focused.b).toBeCloseTo(0.38, 5);
+    const ring = result.scene.getNodeByName("pd_ring_kitchen_knife");
+    expect(ring!.isVisible).toBe(true);
+
+    result.setObjectFocus(null);
+    expect(key!.intensity).toBe(normalKey);
+    expect(hemi!.intensity).toBe(normalHemi);
+    const restored = (knifePart!.material as StandardMaterial).emissiveColor;
+    expect(restored.r).toBeCloseTo(restEmissive.r, 10);
+    expect(restored.g).toBeCloseTo(restEmissive.g, 10);
+    expect(restored.b).toBeCloseTo(restEmissive.b, 10);
+    expect(ring!.isVisible).toBe(false); // no hover, no selection -> hidden again
+    result.dispose();
+  });
+
+  it("repeated open/close cycles are deterministic (same final camera state, no leaks)", async () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const camera = cameraOf(result);
+    const meshesBefore = result.scene.meshes.length;
+    const lightsBefore = result.scene.lights.length;
+    const observers = () => (result.scene.onBeforeRenderObservable as unknown as { observers: unknown[] }).observers.length;
+    // Babylon 8 defers observer removal to the next macrotask (setTimeout 0),
+    // so we settle before counting: no accumulation after the async removal.
+    const flushObservers = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(observers()).toBe(0);
+
+    result.setObjectFocus("kitchen_knife");
+    const world = cameraVec(result.getFocusSnapshot()!.saved);
+    result.setObjectFocus(null);
+    await flushObservers();
+    expect(observers()).toBe(0);
+
+    let restored: ReturnType<typeof cameraVec> | null = null;
+    for (let cycle = 0; cycle < 25; cycle += 1) {
+      result.setObjectFocus("kitchen_knife");
+      expect(observers()).toBe(1); // exactly one beforeRender observer during focus
+      for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+      // The SAVED world state is identical on every cycle (entered from the
+      // same restored camera state), so the restore target is deterministic.
+      expect(cameraVec(result.getFocusSnapshot()!.saved)).toEqual(world);
+      result.setObjectFocus(null);
+      await flushObservers();
+      expect(observers()).toBe(0); // observer fully unregistered after exit
+      const live = cameraVec({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target });
+      if (restored === null) restored = live;
+      expect(live).toEqual(restored); // every cycle restores to the identical state
+      expect(live).toEqual(world);
+    }
+    // Zero accumulation across 25 cycles: no meshes, lights or camera clones.
+    expect(result.scene.meshes.length).toBe(meshesBefore);
+    expect(result.scene.lights.length).toBe(lightsBefore);
+    expect(cameraOf(result)).toBe(camera);
+    result.dispose();
+  });
+
+  it("no evidence double-trigger: entering/leaving focus never calls onPick again", () => {
+    const onPick = vi.fn();
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions({ onPick }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+
+    result.setObjectFocus("kitchen_knife");
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+    result.setObjectFocus(null);
+    result.setObjectFocus("kitchen_knife");
+    result.setObjectFocus(null);
+    expect(onPick).not.toHaveBeenCalled();
+    result.dispose();
+  });
+
+  it("direct mesh picking is unchanged: normal dispatch when NOT in focus, and preserved after focus", () => {
+    const picked: string[] = [];
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions({ onPick: (id) => picked.push(id) }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    // Not in focus: a click dispatches exactly as before.
+    scene.onPointerDown?.(pointerMove(0, 0) as never, pickInfo(scene.getNodeByName("pd_hit_kitchen_knife")) as never, POINTER_TYPES);
+    expect(picked).toEqual(["kitchen_knife"]);
+
+    // Run a full focus session...
+    result.setObjectFocus("kitchen_knife");
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+    result.setObjectFocus(null);
+
+    // ...and direct picking still dispatches identically (no handler replaced).
+    picked.length = 0;
+    scene.onPointerDown?.(pointerMove(0, 0) as never, pickInfo(scene.getNodeByName("pd_part_kitchen_knife_0")) as never, POINTER_TYPES);
+    expect(picked).toEqual(["kitchen_knife"]);
+    result.dispose();
+  });
+
+  it("any pointer interaction stops the slow auto-orbit (must stop on interaction)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const camera = cameraOf(result);
+
+    result.setObjectFocus("kitchen_knife");
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+    expect(result.getFocusSnapshot()!.orbitEnabled).toBe(true);
+    const alphaBefore = camera.alpha;
+    result.tickFocus(1000); // drift while nothing has happened
+    expect(camera.alpha).toBeGreaterThan(alphaBefore);
+
+    const alphaAtPointer = camera.alpha;
+    // A pointer-down on ANY mesh (even the floor) halts the turntable.
+    result.scene.onPointerDown?.(pointerMove(1, 1) as never, pickInfo({ name: "floor_01", parent: null }) as never, POINTER_TYPES);
+    expect(result.getFocusSnapshot()!.orbitEnabled).toBe(false);
+    result.tickFocus(2000);
+    expect(camera.alpha).toBe(alphaAtPointer);
+    result.dispose();
+  });
+
+  it("reduced-motion: no animation frames, straight to framing, NO auto-orbit", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), {
+      ...nullEngineOptions(),
+      prefersReducedMotion: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const camera = cameraOf(result);
+
+    result.setObjectFocus("kitchen_knife");
+    const snapshot = result.getFocusSnapshot()!;
+    expect(snapshot.reducedMotion).toBe(true);
+    expect(snapshot.transitionDone).toBe(true); // jumped, not animated
+    expect(snapshot.orbitEnabled).toBe(false); // no turntable
+    expect(cameraVec(snapshot.live)).toEqual(cameraVec(snapshot.framing)); // framing still correct
+    // No beforeRender observer was ever registered -> no animation frame.
+    const observers = (result.scene.onBeforeRenderObservable as unknown as { observers: unknown[] }).observers.length;
+    expect(observers).toBe(0);
+    // Ticks after the jump move nothing (no drift, no re-entry).
+    const before = { alpha: camera.alpha, radius: camera.radius };
+    result.tickFocus(5000);
+    expect(camera.alpha).toBe(before.alpha);
+    expect(camera.radius).toBe(before.radius);
+    result.dispose();
+  });
+
+  it("reload unchanged: focus adds NO persistence and never mutates the scene model", () => {
+    const model = icePickOfficeModel();
+    const captured = model;
+
+    const first = createInvestigationScene(NOOP_CANVAS, model, nullEngineOptions());
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error("expected ok");
+    const initialState = cameraVec(cameraOf(first));
+    first.setObjectFocus("bronze_ceremonial_ice_pick");
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) first.tickFocus(18);
+    first.setObjectFocus(null);
+    first.dispose();
+
+    // A deterministically-rebuilt scene starts from the SAME camera (no
+    // persisted focus state) and the model reference is untouched.
+    const second = createInvestigationScene(NOOP_CANVAS, model, nullEngineOptions());
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("expected ok");
+    expect(cameraVec(cameraOf(second))).toEqual(initialState);
+    expect(model).toBe(captured);
+    expect(second.getFocusedObjectId()).toBeNull();
+    second.dispose();
+  });
+});
+
+describe("Phase 18B — hard-case acceptance (bronze ceremonial ice pick, office)", () => {
+  it("renders the ice pick visibly with DISTINCT materials (no fallback gray)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, icePickOfficeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    // Object visible with its own identity + geometry.
+    const root = scene.getNodeByName("pd_obj_bronze_ceremonial_ice_pick") as Mesh | null;
+    expect(root, "ice pick root visible").not.toBeNull();
+    expect(root!.isVisible).toBe(true);
+    const handle = scene.getNodeByName("pd_part_bronze_ceremonial_ice_pick_0") as Mesh | null;
+    const blade = scene.getNodeByName("pd_part_bronze_ceremonial_ice_pick_1") as Mesh | null;
+    expect(handle, "handle part").not.toBeNull();
+    expect(blade, "blade part").not.toBeNull();
+
+    // Materials distinguishable and NOT the neutral fallback gray.
+    const assertColor = (mesh: Mesh | null, expectedHex: string): void => {
+      expect(mesh).not.toBeNull();
+      const mat = mesh!.material as StandardMaterial;
+      const got = `#${[mat.diffuseColor.r, mat.diffuseColor.g, mat.diffuseColor.b]
+        .map((c) => Math.round(c * 255).toString(16).padStart(2, "0"))
+        .join("")}`;
+      expect(got).toBe(expectedHex);
+      expect(got).not.toBe("#8d8d93");
+    };
+    assertColor(handle, "#8a5a2b");
+    assertColor(blade, "#c9a227");
+    result.dispose();
+  });
+
+  it("direct picking works on the ice pick (mesh click -> canonical object)", () => {
+    const picked: string[] = [];
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      icePickOfficeModel(),
+      nullEngineOptions({ onPick: (id) => picked.push(id) }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    scene.onPointerDown?.(
+      pointerMove(0, 0) as never,
+      pickInfo(scene.getNodeByName("pd_part_bronze_ceremonial_ice_pick_1")) as never,
+      POINTER_TYPES,
+    );
+    expect(picked).toEqual(["bronze_ceremonial_ice_pick"]);
+    result.dispose();
+  });
+
+  it("focus shows geometry clearly and restores the exact world camera", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, icePickOfficeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const camera = cameraOf(result);
+
+    result.setObjectFocus("bronze_ceremonial_ice_pick");
+    const snapshot = result.getFocusSnapshot()!;
+    expect(snapshot.framing.radius).toBe(1.5); // small evidence -> safe floor close-up
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+    // After the full transition the LIVE camera equals the computed framing.
+    const live = result.getFocusSnapshot()!.live;
+    expect(cameraVec(live)).toEqual(cameraVec(snapshot.framing));
+    // The inspected object is centered (target near its world position).
+    const pick = icePickOfficeModel().worldObjects.find((o) => o.objectId === "bronze_ceremonial_ice_pick")!;
+    expect(Math.abs(camera.target.x - pick.position.x)).toBeLessThan(0.6);
+    expect(Math.abs(camera.target.z - pick.position.z)).toBeLessThan(0.6);
+
+    const saved = cameraVec(snapshot.saved);
+    result.setObjectFocus(null);
+    expect(cameraVec({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target })).toEqual(saved);
+    result.dispose();
+  });
+
+  it("no proc.* leak: scene node names and focus snapshot never carry the proc token", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, icePickOfficeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+    for (const mesh of scene.meshes) {
+      expect(mesh.name.toLowerCase()).not.toContain("proc.");
+      expect(mesh.name).not.toContain("decor.");
+    }
+    result.setObjectFocus("bronze_ceremonial_ice_pick");
+    const snapshot = JSON.stringify(result.getFocusSnapshot());
+    expect(snapshot).not.toContain("proc.");
+    expect(snapshot).not.toContain("truth");
+    expect(snapshot).not.toContain("murderer");
+    result.dispose();
+  });
+
+  it("the semantic label + badge path used by the UI is deterministic from the same model", () => {
+    // (Model-identity determinism edge: two loads of the same fixture focus
+    // the same object to the same framing — F15 reload guarantee.)
+    const first = createInvestigationScene(NOOP_CANVAS, icePickOfficeModel(), nullEngineOptions());
+    const second = createInvestigationScene(NOOP_CANVAS, icePickOfficeModel(), nullEngineOptions());
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) throw new Error("expected ok");
+    first.setObjectFocus("bronze_ceremonial_ice_pick");
+    second.setObjectFocus("bronze_ceremonial_ice_pick");
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) {
+      first.tickFocus(18);
+      second.tickFocus(18);
+    }
+    expect(cameraVec(first.getFocusSnapshot()!.framing)).toEqual(cameraVec(second.getFocusSnapshot()!.framing));
+    first.dispose();
+    second.dispose();
+  });
+});
+
+/* ======================================================================
+ * Phase 18B — performance probe (E).
+ *
+ * Same probe approach as the rest of the scene suite (deterministic
+ * NullEngine + injected 18ms frame steps — no heavy instrumentation): the
+ * transition length is MEASURED in frame-ticks, the exit restore is O(1),
+ * and repeated open/close cycles leave the mesh/light/observer counts stable
+ * (covered in the memory test above).
+ * ==================================================================== */
+
+describe("Phase 18B — performance probe (transition + memory numbers)", () => {
+  it("measures the focus transition: 900ms / 50 fixed frames entry, 0-tick restore", () => {
+    expect(FOCUS_TRANSITION_MS).toBe(900);
+    expect(focusTransitionTickCount(18)).toBe(50);
+
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+
+    result.setObjectFocus("kitchen_knife");
+    let ticksToComplete = 0;
+    for (let step = 1; step <= 100 && !result.getFocusSnapshot()!.transitionDone; step += 1) {
+      result.tickFocus(18);
+      ticksToComplete = step;
+    }
+    // Measured: entry transition = exactly 50 x 18ms = 900ms of sim time.
+    expect(ticksToComplete).toBe(focusTransitionTickCount(18));
+    expect(result.getFocusSnapshot()!.transitionDone).toBe(true);
+
+    // Measured: exit restore is instantaneous (session torn down, O(1) apply).
+    result.setObjectFocus(null);
+    expect(result.getFocusSnapshot()).toBeNull();
+    result.dispose();
+  });
+
+  it("a focus session adds zero render-visible objects (no camera/material/mesh re-creation)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const meshes = result.scene.meshes.length;
+    const lights = result.scene.lights.length;
+    const materials = result.scene.materials.length;
+
+    result.setObjectFocus("kitchen_knife");
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+    expect(result.scene.meshes.length).toBe(meshes);
+    expect(result.scene.lights.length).toBe(lights);
+    expect(result.scene.materials.length).toBe(materials);
+    result.setObjectFocus(null);
     result.dispose();
   });
 });

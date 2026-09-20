@@ -19,6 +19,7 @@ import { Viewport } from "@babylonjs/core/Maths/math.viewport";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
 import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
+import type { Observer } from "@babylonjs/core/Misc/observable";
 import { Scene } from "@babylonjs/core/scene";
 import type { ScenePrimitive } from "./apartment";
 import type { InvestigationSceneModel, SceneWorldObject } from "./buildInvestigationScene";
@@ -27,6 +28,14 @@ import { buildObjectComposite, needsPickHitbox, pickHitboxExtent } from "./asset
 import { buildKitShell, cameraProfileFor, lightingFor, APARTMENT_KIT_ID } from "../environments/kitGeometry";
 import { applyMaterialTint, materialTintFor, type MaterialTint } from "../templates/variantParams";
 import { instantiatePrimitive } from "./render";
+import {
+  FOCUS_BG_LIGHT_SCALE,
+  FOCUS_TRANSITION_MS,
+  focusFramingFor,
+  interpolateFocusState,
+  orbitFocusAlpha,
+  type FocusCameraState,
+} from "./focusCamera";
 
 /**
  * Babylon.js glue for the investigation scene (Phase 6 F/G + Phase 8 E).
@@ -88,6 +97,34 @@ const HOVER_EMISSIVE = new Color3(0.42, 0.37, 0.24);
  * changes so the judge always sees which object the panel belongs to.
  */
 const SELECTED_EMISSIVE = new Color3(0.6, 0.54, 0.3);
+
+/**
+ * Phase 18B — dedicated forensic-focus emissive: brighter than the SELECTED
+ * state so the inspected object stays visually dominant while the camera
+ * holds its close-up. Applied ONLY during a focus session and reverted to the
+ * normal hover/selection priority emission on exit.
+ */
+const FOCUS_EMISSIVE = new Color3(0.78, 0.7, 0.38);
+
+/** Phase 18B — the focus-state ring emissive (restored to the original on exit). */
+const FOCUS_RING_EMISSIVE = new Color3(1.0, 0.85, 0.5);
+
+/**
+ * Phase 18B — one active forensic-focus session. `saved` is the EXACT camera
+ * state captured on entry (the byte-exact restore target), `framing` is the
+ * computed close-up framing toward which the same camera transitions, and
+ * `ringEmissive` remembers the ring's original emission for exact restore.
+ */
+interface FocusSession {
+  objectId: string;
+  saved: FocusCameraState;
+  framing: FocusCameraState;
+  elapsedMs: number;
+  transitionDone: boolean;
+  reducedMotion: boolean;
+  orbitEnabled: boolean;
+  ringEmissive: Color3 | null;
+}
 
 /** Dim specular color — keeps every material looking cast/matte, not glossy. */
 const MATTE_SPECULAR = new Color3(0.1, 0.1, 0.1);
@@ -155,6 +192,46 @@ export interface InvestigationSceneHandle {
    * Used by the discovered-object floating captions (Phase 15).
    */
   projectObjectPoint(objectId: string, localOffset: { x: number; y: number; z: number }): { x: number; y: number } | null;
+  /**
+   * Phase 18B — forensic focus mode. Entering a focus session SAVES the
+   * current camera state (alpha/beta/radius/target), smoothly transitions the
+   * SAME ArcRotateCamera to a close-up framing of the object, applies the
+   * focus emissive/ring and slightly de-emphasizes the background lights.
+   * Passing null (or the same objectId twice) is a no-op. Exiting restores the
+   * EXACT saved camera state and every emissive/lighting value — the only
+   * world mutation is the presentation-only camera/lighting/emissive, and no
+   * interaction/discovery is ever re-triggered.
+   */
+  setObjectFocus(objectId: string | null): void;
+  /** True while a forensic-focus session is active. */
+  isObjectFocused(): boolean;
+  /** The currently focused object id (or null when idle). */
+  getFocusedObjectId(): string | null;
+  /**
+   * Advance the active focus session by a time delta in milliseconds (drives
+   * the transition and the slow auto-orbit). No-op while idle. The live render
+   * loop calls this automatically via an onBeforeRender observer; tests drive
+   * it directly for deterministic assertions.
+   */
+  tickFocus(deltaMs: number): void;
+  /** Deterministic focus-session snapshot (test/perf probe; null when idle). */
+  getFocusSnapshot(): FocusSnapshot | null;
+}
+
+/** Phase 18B — one deterministic focus-session snapshot for tests + perf. */
+export interface FocusSnapshot {
+  /** The camera state saved on focus entry (EXACT restore target). */
+  saved: FocusCameraState;
+  /** The computed close-up framing this session animates toward. */
+  framing: FocusCameraState;
+  /** The camera state right now. */
+  live: FocusCameraState;
+  /** True once the entry transition has reached the framing (no-op tick after). */
+  transitionDone: boolean;
+  /** True when the session was entered with prefers-reduced-motion. */
+  reducedMotion: boolean;
+  /** True while the slow auto-orbit is still allowed to drift. */
+  orbitEnabled: boolean;
 }
 
 export type CreateInvestigationSceneResult =
@@ -176,6 +253,13 @@ export interface RenderOptions {
   onHoverStart?: (objectId: string, origin?: { x: number; y: number }) => void;
   /** Called when the pointer stops hovering an interactable. */
   onHoverEnd?: (objectId: string | null) => void;
+  /**
+   * Phase 18B — override reduced-motion detection (tests inject a constant;
+   * the app defaults to `matchMedia('(prefers-reduced-motion: reduce)')`).
+   * When true, focus sessions SKIP the transition animation (jump straight to
+   * the focus framing) and never start the slow auto-orbit.
+   */
+  prefersReducedMotion?: boolean;
 }
 
 export function createInvestigationScene(
@@ -234,6 +318,17 @@ export function createInvestigationScene(
     const hemi = new HemisphericLight("investigation_hemi", new Vector3(0.35, 1, -0.25), scene);
     hemi.diffuse = new Color3(1, 0.93, 0.84);
     hemi.intensity = hemiIntensity;
+
+    // Phase 18B: prefers-reduced-motion detection (injectable for tests).
+    const reducedMotion =
+      options.prefersReducedMotion !== undefined
+        ? options.prefersReducedMotion
+        : detectPrefersReducedMotion();
+    // The singleton focus session + its render-loop observer. Presentation-only:
+    // identity/evidence semantics stay untouched, and every value it changes is
+    // restored byte-exactly on exit.
+    let focusSession: FocusSession | null = null;
+    let focusObserver: Observer<Scene> | null = null;
 
     // DEF-056 (click path, real-browser proof): Babylon's DEFAULT pointer
     // predicates admit EVERY mesh, so `scene.pick` on a pointer-down (or on a
@@ -324,7 +419,7 @@ export function createInvestigationScene(
       const entry = interactables.get(objectId);
       if (!entry) return;
       hoveredId = objectId;
-      setMeshEmissive(entry.mesh, HOVER_EMISSIVE);
+      applyFocusEmissive(objectId); // focus wins, then hover
       if (entry.ring) entry.ring.isVisible = true; // hover ring (also for selection)
       trySetCursor(canvas, "pointer");
       options.onHoverStart?.(objectId, origin);
@@ -332,12 +427,15 @@ export function createInvestigationScene(
 
     /**
      * Deterministic emissive state for one interactable. Priority:
-     * hover (immediate pointer signal) > selected (persistent panel focus) > rest.
+     * focus (active inspection session) > hover (immediate pointer signal) >
+     * selected (persistent panel focus) > rest.
      */
     const applyFocusEmissive = (objectId: string): void => {
       const entry = interactables.get(objectId);
       if (!entry) return;
-      if (objectId === hoveredId) {
+      if (focusSession !== null && focusSession.objectId === objectId) {
+        setMeshEmissive(entry.mesh, FOCUS_EMISSIVE);
+      } else if (objectId === hoveredId) {
         setMeshEmissive(entry.mesh, HOVER_EMISSIVE);
       } else if (objectId === selectedId) {
         setMeshEmissive(entry.mesh, SELECTED_EMISSIVE);
@@ -346,11 +444,118 @@ export function createInvestigationScene(
       }
     };
 
+    /* =====================================================================
+     * Phase 18B — forensic focus mode controller (presentation-only).
+     *
+     * Flow: world camera -> save state -> focus transition -> inspect ->
+     * restore. Entering saves the EXACT camera state, computes a close-up
+     * framing from the object's visible extent (safe min/max radius), animates
+     * the SAME ArcRotateCamera (unless prefers-reduced-motion), keeps the
+     * object dominant (FOCUS_EMISSIVE + visible ring) and slightly dims the
+     * background lights. Exiting restores EVERYTHING byte-exactly (camera,
+     * emissive, ring, lights) with zero world mutation and zero re-discovery.
+     * ===================================================================== */
+    const readCameraState = (): FocusCameraState => ({
+      alpha: camera.alpha,
+      beta: camera.beta,
+      radius: camera.radius,
+      target: { x: camera.target.x, y: camera.target.y, z: camera.target.z },
+    });
+
+    const applyCameraState = (state: FocusCameraState): void => {
+      camera.alpha = state.alpha;
+      camera.beta = state.beta;
+      camera.radius = state.radius;
+      camera.target.set(state.target.x, state.target.y, state.target.z);
+    };
+
+    const enterFocus = (objectId: string): void => {
+      const worldObject = model.worldObjects.find((o) => o.objectId === objectId);
+      if (!worldObject || !interactables.has(objectId)) return; // only interactables focus
+      exitFocus(); // a re-focus first restores the world camera exactly
+      const saved = readCameraState();
+      const framing = focusFramingFor(saved, worldObject);
+      const entry = interactables.get(objectId);
+      focusSession = {
+        objectId,
+        saved,
+        framing,
+        elapsedMs: 0,
+        transitionDone: false,
+        reducedMotion,
+        orbitEnabled: !reducedMotion,
+        ringEmissive: null,
+      };
+      // Object dominance: focus emissive + raised (visible, brighter) ring.
+      applyFocusEmissive(objectId);
+      if (entry?.ring) {
+        entry.ring.isVisible = true;
+        if (entry.ring.material instanceof StandardMaterial) {
+          focusSession.ringEmissive = entry.ring.material.emissiveColor.clone();
+          entry.ring.material.emissiveColor = FOCUS_RING_EMISSIVE;
+        }
+      }
+      // Background de-emphasis: deterministic key/hemi intensity dip.
+      key.intensity = keyIntensity * FOCUS_BG_LIGHT_SCALE;
+      hemi.intensity = hemiIntensity * FOCUS_BG_LIGHT_SCALE;
+      // Camera: animate toward the framing (or jump when reduced motion).
+      if (focusSession.reducedMotion) {
+        applyCameraState(framing);
+        focusSession.transitionDone = true;
+      } else {
+        applyCameraState(interpolateFocusState(saved, framing, 0));
+        // The render-loop observer drives the transition + turntable. Reduced
+        // motion registers NO observer at all — literally zero animation frames.
+        focusObserver = scene.onBeforeRenderObservable.add(() => tickFocus(engine.getDeltaTime()));
+      }
+    };
+
+    const exitFocus = (): void => {
+      if (focusSession === null) return;
+      const session = focusSession;
+      focusSession = null;
+      if (focusObserver !== null) {
+        scene.onBeforeRenderObservable.remove(focusObserver);
+        focusObserver = null;
+      }
+      // EXACT world-state restore: camera, emissive, ring, lights.
+      applyCameraState(session.saved);
+      applyFocusEmissive(session.objectId);
+      const entry = interactables.get(session.objectId);
+      if (entry?.ring) {
+        entry.ring.isVisible = session.objectId === selectedId || session.objectId === hoveredId;
+        if (session.ringEmissive !== null && entry.ring.material instanceof StandardMaterial) {
+          entry.ring.material.emissiveColor = session.ringEmissive;
+        }
+      }
+      key.intensity = keyIntensity;
+      hemi.intensity = hemiIntensity;
+    };
+
+    const tickFocus = (deltaMs: number): void => {
+      const session = focusSession;
+      if (session === null) return;
+      if (!session.transitionDone) {
+        session.elapsedMs += Math.max(0, deltaMs);
+        const progress = Math.min(1, session.elapsedMs / FOCUS_TRANSITION_MS);
+        applyCameraState(progress >= 1 ? session.framing : interpolateFocusState(session.saved, session.framing, progress));
+        if (progress >= 1) session.transitionDone = true;
+      } else if (!session.reducedMotion && session.orbitEnabled) {
+        camera.alpha = orbitFocusAlpha(camera.alpha, deltaMs);
+      }
+    };
+
+    const stopFocusOrbit = (): void => {
+      if (focusSession !== null) focusSession.orbitEnabled = false;
+    };
+
     // Picking: resolve the picked mesh (any composite child or the root)
     // back to a deterministic object id via the parent chain. Only
     // INTERACTABLE objects dispatch onPick — clicking the non-interactable
-    // victim never fires an interaction.
+    // victim never fires an interaction. Any pointer interaction also stops
+    // the slow auto-orbit (turntable must halt the moment the player acts).
     scene.onPointerDown = (_evt, pickInfo) => {
+      stopFocusOrbit();
       const objectId = objectIdFromPickedMesh(pickInfo.pickedMesh);
       if (objectId !== null && interactables.has(objectId) && options.onPick) {
         options.onPick(objectId);
@@ -433,6 +638,9 @@ export function createInvestigationScene(
       engine,
       scene,
       dispose: () => {
+        // Phase 18B: any active focus session is torn down (observer removed,
+        // camera/emissive/lights restored) before the engine dies.
+        exitFocus();
         if (resizeListener && typeof window !== "undefined") {
           window.removeEventListener("resize", resizeListener);
         }
@@ -502,6 +710,29 @@ export function createInvestigationScene(
         } catch {
           return null;
         }
+      },
+      setObjectFocus: (objectId: string | null) => {
+        if (objectId === null) {
+          exitFocus();
+          return;
+        }
+        if (focusSession !== null && focusSession.objectId === objectId) return; // idempotent
+        enterFocus(objectId);
+      },
+      isObjectFocused: () => focusSession !== null,
+      getFocusedObjectId: () => focusSession?.objectId ?? null,
+      tickFocus,
+      getFocusSnapshot: () => {
+        if (focusSession === null) return null;
+        const session = focusSession;
+        return {
+          saved: { ...session.saved, target: { ...session.saved.target } },
+          framing: { ...session.framing, target: { ...session.framing.target } },
+          live: readCameraState(),
+          transitionDone: session.transitionDone,
+          reducedMotion: session.reducedMotion,
+          orbitEnabled: session.orbitEnabled,
+        };
       },
     };
   } catch (error) {
@@ -783,6 +1014,20 @@ function isPickDebugEnabled(): boolean {
     if (typeof window === "undefined") return false;
     if (import.meta.env?.DEV) return true;
     return /[?&]pd-debug-pick=1/.test(window.location.search);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Phase 18B — OS prefers-reduced-motion gate. Defaults to
+ * `matchMedia('(prefers-reduced-motion: reduce)')` in the browser; always
+ * false in DOM-less test runtimes (tests inject the override explicitly).
+ */
+function detectPrefersReducedMotion(): boolean {
+  try {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   } catch {
     return false;
   }

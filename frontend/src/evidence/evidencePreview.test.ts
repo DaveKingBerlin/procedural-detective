@@ -34,7 +34,7 @@ describe("evidencePreviewFor — object context from the scene model (pure)", ()
     expect(evidencePreviewFor(MODEL, null)).toBeNull();
   });
 
-  it("falls back to the public object id when the label is missing (fallback asset)", () => {
+  it("never shows a raw id when the label is missing — safe human fallback (Phase 18B)", () => {
     const model = buildInvestigationScene(
       makeBootstrap({
         scene: {
@@ -56,11 +56,13 @@ describe("evidencePreviewFor — object context from the scene model (pure)", ()
         },
       }),
     );
-    expect(evidencePreviewFor(model, "mystery_box")).toEqual({
+    const preview = evidencePreviewFor(model, "mystery_box");
+    expect(preview).toEqual({
       objectId: "mystery_box",
-      label: "mystery_box",
+      label: "Evidence Object", // semantic fallback — never the raw objectId
       color: "#8d8d93",
     });
+    expect(preview?.label).not.toBe("mystery_box");
   });
 });
 

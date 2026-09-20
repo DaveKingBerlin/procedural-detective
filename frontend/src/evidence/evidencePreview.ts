@@ -1,4 +1,5 @@
 import type { InvestigationSceneModel } from "../scene/buildInvestigationScene";
+import { evidenceLabelFor } from "../scene/objectLabel";
 
 /**
  * Pure, deterministic evidence-panel context model (Phase 8_1 D).
@@ -22,7 +23,10 @@ export interface EvidencePreviewModel {
 /**
  * Derive the object context for the evidence panel from the scene model, or
  * null when the object is not part of the scene. The color/label come from
- * the registry only — never from the record payload.
+ * the registry only — never from the record payload. Phase 18B: the label
+ * funnels through the semantic label path (`evidenceLabelFor`), so a
+ * generated proc.* object never falls back to its raw id — the validated,
+ * humanized canonicalName (or a safe "Evidence Object" fallback) is shown.
  */
 export function evidencePreviewFor(
   model: InvestigationSceneModel | null,
@@ -33,7 +37,7 @@ export function evidencePreviewFor(
   if (worldObject === undefined) return null;
   return {
     objectId: worldObject.objectId,
-    label: worldObject.label ?? worldObject.objectId,
+    label: evidenceLabelFor(worldObject),
     color: worldObject.color,
   };
 }

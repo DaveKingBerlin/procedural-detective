@@ -24,6 +24,9 @@ import {
   discoveredCaptionsForWorld,
   type ObjectCaptionModel,
 } from "../scene/objectCaption";
+import { focusCloseKey } from "../scene/focusCamera";
+import { evidenceLabelFor, focusBadgesFor } from "../scene/objectLabel";
+import FocusInspection from "../scene/FocusInspection";
 import { tooltipForHover, type ObjectTooltipModel } from "../scene/objectTooltip";
 import { createInvestigationScene } from "../scene/renderInvestigation";
 import type { InvestigationSceneHandle } from "../scene/renderInvestigation";
@@ -289,6 +292,36 @@ export default function ScenePage() {
     // discovery ID set (discoveredKey) changes its projected positions.
   }, [status.status, runId, discoveredKey]);
 
+  // Phase 18B: the currently focused evidence object (derived from the
+  // selection — the same "which panel is open" state that drives the 3D ring).
+  const focusedWorldObject =
+    selectedObjectId === null || status.status !== "ready"
+      ? null
+      : status.model.worldObjects.find((o) => o.objectId === selectedObjectId && o.interactionWorks) ?? null;
+
+  // Forensic focus follows the selection. The glue's setObjectFocus is
+  // idempotent (same id = no-op) and presentation-only: it never re-dispatches
+  // a pick/interact, so no discovery is ever double-triggered.
+  useEffect(() => {
+    const handle = sceneHandleRef.current;
+    if (!handle) return;
+    handle.setObjectFocus(focusedWorldObject ? focusedWorldObject.objectId : null);
+  }, [selectedObjectId, runId]);
+
+  // ESC closes the inspection surface through the SAME restore path as the
+  // accessible Close button (closeRecordPanel -> setObjectFocus(null)).
+  useEffect(() => {
+    if (focusedWorldObject === null) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (focusCloseKey(event.key) === "close") {
+        event.preventDefault();
+        closeRecordPanel();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [focusedWorldObject]);
+
   return (
     <section className="page scene">
       <h2>Investigation</h2>
@@ -331,6 +364,16 @@ export default function ScenePage() {
               </div>
             );
           })}
+          {/* Phase 18B: forensic focus inspection surface (present only while an
+              evidence object is focused). The label/badges are public-safe
+              (evidenceLabelFor/focusBadgesFor); closing restores the world state. */}
+          {focusedWorldObject && (
+            <FocusInspection
+              label={evidenceLabelFor(focusedWorldObject)}
+              badges={focusBadgesFor(focusedWorldObject)}
+              onClose={closeRecordPanel}
+            />
+          )}
         </div>
       )}
 
