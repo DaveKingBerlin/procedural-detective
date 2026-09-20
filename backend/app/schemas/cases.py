@@ -54,6 +54,7 @@ class CaseStartedDTO(BaseModel):
     generationAttemptId: str
     creatorAccessToken: str
     status: str
+    failureCode: str | None = None
 
 
 class SceneDTO(BaseModel):

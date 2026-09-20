@@ -58,6 +58,10 @@ class GenerateRequest:
     locked: "LockedConstraints | None" = None
     diagnostics: tuple[str, ...] = ()  # sanitized structured repair diagnostics
     seed: int | None = None
+    # Runtime-only effective timeout for this call.  It is populated by the
+    # lifecycle controller/driver and is intentionally optional so FakeProvider
+    # and existing callers remain unchanged.
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_id, str) or not self.attempt_id:
@@ -79,6 +83,12 @@ class GenerateRequest:
             not isinstance(self.seed, int) or isinstance(self.seed, bool)
         ):
             raise ValueError("GenerateRequest.seed must be an int or None")
+        if self.timeout_seconds is not None and (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("GenerateRequest.timeout_seconds must be positive when set")
 
 
 @dataclass(frozen=True)

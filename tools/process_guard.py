@@ -1213,14 +1213,29 @@ def _cmd_launch(args) -> int:
     env[ENV_VAR] = run_id  # 65A.3
     # DEVNULL: the spawned server must never hold the caller's stdout/stderr
     # pipes open (that would hang `launch | ...` until the child exits).
+    log_handle = None
+    stdout_target = subprocess.DEVNULL
+    stderr_target = subprocess.DEVNULL
     try:
+        log_file = getattr(args, "log_file", None)
+        if log_file:
+            log_path = os.path.abspath(log_file)
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
+            stdout_target = log_handle
+            stderr_target = log_handle
         proc = subprocess.Popen(
             [args.cmd] + list(args.args), env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=stdout_target, stderr=stderr_target,
         )
     except OSError as exc:  # FileNotFoundError and friends (DEF-002)
+        if log_handle is not None:
+            log_handle.close()
         print(f"error: cannot launch {args.cmd} ({exc})", file=sys.stderr)
         return 2
+    finally:
+        if log_handle is not None:
+            log_handle.close()
 
     def _snapped():
         return snapshot_process(proc.pid)
@@ -1341,6 +1356,11 @@ def main(argv=None) -> int:
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--meta", required=True)
     p.add_argument("--wait", type=float, default=15.0)
+    p.add_argument(
+        "--log-file",
+        default=None,
+        help="append child stdout/stderr to this file instead of suppressing it",
+    )
     p.set_defaults(func=_cmd_launch)
 
     p = sub.add_parser("verify", help="probe ownership of the listener on --port (65A.2)")

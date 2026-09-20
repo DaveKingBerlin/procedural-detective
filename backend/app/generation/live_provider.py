@@ -54,15 +54,20 @@ class LiveHttpProvider:
         }
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
+            timeout_seconds = float(
+                request.timeout_seconds
+                if request.timeout_seconds is not None
+                else self._timeout_seconds
+            )
             response = httpx.post(
                 self._endpoint_url,
                 json=body,
                 headers=headers,
-                timeout=self._timeout_seconds,
+                timeout=timeout_seconds,
             )
         except httpx.TimeoutException as exc:
             raise ProviderTimeout(
-                f"provider request timed out after {self._timeout_seconds}s"
+                f"provider request timed out after {timeout_seconds}s"
             ) from exc
         except httpx.RequestError as exc:
             return ProviderResult(

@@ -860,23 +860,18 @@ button {
   margin: 0;
 }
 
-/* Phase 17D Bugfix PART B — compact "Try an example:" selector under the
-   prompt textarea. Three pure UI text fills (Easy/Medium/Hard) with a
-   one-line helper each; the loaded example is visibly active (border + tint)
-   and cleared on edit. Buttons are type="button": populating the textarea
-   never submits the form or starts generation. */
+/* Phase 17D Bugfix PART B / Phase 17E PART J — Easy/Medium/Hard example
+   selector under the prompt textarea (the redundant "Try an example:" heading
+   was removed in PART J). Three pure UI text fills with a one-line helper
+   each; the loaded example is visibly active (border + tint) and cleared on
+   edit. Buttons are type="button": populating the textarea never submits the
+   form or starts generation. */
 .new-case-examples {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.6rem;
   margin: 0.1rem 0 0.4rem;
-}
-
-.new-case-examples-heading {
-  color: var(--muted);
-  font-size: 0.92rem;
-  margin: 0;
 }
 
 .new-case-example {
@@ -950,17 +945,7 @@ button {
   cursor: pointer;
 }
 
-.new-case-secondary {
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text);
-  border-radius: 10px;
-  padding: 0.65rem 1.3rem;
-  cursor: pointer;
-}
-
 .new-case-submit:focus-visible,
-.new-case-secondary:focus-visible,
 .new-case-demo a:focus-visible,
 .prompt-input:focus-visible,
 .new-case-form select:focus-visible {

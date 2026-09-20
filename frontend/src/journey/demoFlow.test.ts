@@ -234,6 +234,64 @@ describe("runDemo — generation FAILED", () => {
     if (result.ok) throw new Error("expected failure");
     expect(result.failure.kind).toBe("failed");
   });
+
+  it("maps deadline and provider failures to distinct safe messages", async () => {
+    const deadline = await runDemo("prompt", {
+      services: makeServices({
+        createCase: vi.fn(async () => ({
+          caseId: "CASE-demo-01",
+          generationId: "GEN-demo-01",
+          generationAttemptId: "ATT-demo-01",
+          creatorAccessToken: CREATOR,
+          status: "FAILED",
+          failureCode: "GENERATION_DEADLINE_EXCEEDED",
+        })),
+      }),
+      wait: NO_WAIT,
+    });
+    expect(deadline.ok).toBe(false);
+    if (deadline.ok) throw new Error("expected deadline failure");
+    expect(deadline.failure.kind).toBe("deadline");
+    expect(deadline.failure.message).toBe(DEMO_FAILURE_MESSAGES.deadline);
+
+    const provider = await runDemo("prompt", {
+      services: makeServices({
+        createCase: vi.fn(async () => ({
+          caseId: "CASE-demo-01",
+          generationId: "GEN-demo-01",
+          generationAttemptId: "ATT-demo-01",
+          creatorAccessToken: CREATOR,
+          status: "FAILED",
+          failureCode: "PROVIDER_TIMEOUT",
+        })),
+      }),
+      wait: NO_WAIT,
+    });
+    expect(provider.ok).toBe(false);
+    if (provider.ok) throw new Error("expected provider failure");
+    expect(provider.failure.kind).toBe("provider");
+    expect(provider.failure.message).toBe(DEMO_FAILURE_MESSAGES.providerTimeout);
+
+    const providerBudget = await runDemo("prompt", {
+      services: makeServices({
+        createCase: vi.fn(async () => ({
+          caseId: "CASE-demo-01",
+          generationId: "GEN-demo-01",
+          generationAttemptId: "ATT-demo-01",
+          creatorAccessToken: CREATOR,
+          status: "FAILED",
+          failureCode: "PROVIDER_CALL_BUDGET_EXHAUSTED",
+        })),
+      }),
+      wait: NO_WAIT,
+    });
+    expect(providerBudget.ok).toBe(false);
+    if (providerBudget.ok) throw new Error("expected provider budget failure");
+    expect(providerBudget.failure.kind).toBe("provider");
+    expect(providerBudget.failure.message).toBe(
+      DEMO_FAILURE_MESSAGES.providerUnavailable,
+    );
+  });
 });
 
 describe("runDemo — quota / admission rejection", () => {

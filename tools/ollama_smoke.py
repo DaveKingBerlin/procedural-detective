@@ -389,6 +389,9 @@ def _full_chain_report(settings, provider) -> dict[str, object]:
         max_prompt_chars=settings.max_prompt_chars,
         hold_before_publish=True,
         stage_driver=driver,
+        provider_timeout_seconds=settings.ollama_timeout_seconds,
+        provider_name="ollama",
+        provider_model=settings.ollama_model,
     )
     started = time.perf_counter()
     handle = controller.start_generation(

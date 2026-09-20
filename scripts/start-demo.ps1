@@ -189,6 +189,19 @@ try {
     # the frontend production build) is set - single origin, no CORS needed.
     $distAbs = (Resolve-Path -LiteralPath (Join-Path $frontendDir "dist")).Path
     if (-not $env:STATIC_DIR) { $env:STATIC_DIR = $distAbs }
+    if (-not $env:PD_FILE_LOGS) { $env:PD_FILE_LOGS = "true" }
+    $logArgs = @()
+    if ($env:PD_FILE_LOGS -notmatch "^(0|false|no)$") {
+        if (-not $env:PD_LOG_FILE) {
+            $env:PD_LOG_FILE = Join-Path $repoRoot "logs\procedural-detective.log"
+        }
+        $consoleLogFile = Join-Path $repoRoot "logs\procedural-detective-console.log"
+        $logArgs = @("--log-file", $consoleLogFile)
+        Write-Host "[logs] structured: $env:PD_LOG_FILE (rotating, 5 MB, 3 backups)"
+        Write-Host "[logs] launcher console: $consoleLogFile"
+    } else {
+        Write-Host "[logs] console only"
+    }
     Write-Host "[start] launching server on 127.0.0.1:$Port (STATIC_DIR=$env:STATIC_DIR)..."
     Push-Location -LiteralPath $repoRoot
     try {
@@ -196,6 +209,7 @@ try {
             --cmd python `
             --port $Port `
             --meta $metaPath `
+            $logArgs `
             --args -m uvicorn app.main:app --host 127.0.0.1 --port $Port
         if ($LASTEXITCODE -ne 0) { throw "launch failed (see output above)" }
     } finally {

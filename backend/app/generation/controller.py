@@ -19,12 +19,16 @@ A late/stale provider result is DISCARDED with zero authoritative mutation
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
+from typing import Any
 
 from app.generation import pipeline
 from app.generation.admission import AdmissionController, AdmissionDenied
 from app.generation.budgets import BudgetTracker
 from app.generation.clock import Clock
+from app.generation.failure_codes import GenerationFailureCode, infer_failure_code, public_failure_code
 from app.generation.ids import IdSource
 from app.generation.pipeline import AttemptRecord
 from app.generation.provider import (
@@ -42,6 +46,32 @@ from app.generation.state_machine import (
     ValidationOutcome,
     assert_transition,
 )
+from app.core.observability import emit_event
+
+_PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
+
+
+def _dt(message: str) -> None:
+    """DEV-ONLY structured trace (Phase17E PART B); gated, default OFF.
+
+    Never logs prompts, truth, credentials or the Ollama URL — only elapsed /
+    deadline / call counters (the phase-mandated reproducible evidence).
+    """
+    if _PD_DEV_TRACE:
+        print(f"[PD-DEV-TRACE] {message}", flush=True)
+
+
+def _dt_remaining(attempt: AttemptRecord) -> str:
+    if attempt.budget is None:
+        return "none"
+    return str(int(attempt.budget.remaining_seconds() * 1000))
+
+
+def _remaining_ms(attempt: AttemptRecord) -> int | None:
+    if attempt.budget is None:
+        return None
+    return int(attempt.budget.remaining_seconds() * 1000)
+
 
 _PROVIDER_FAILURE_REASON = "provider failure: generator unavailable"
 
@@ -83,6 +113,9 @@ class GenerationController:
         hold_before_publish: bool = False,
         max_retained_attempts: int = 100,
         stage_driver: Any = None,
+        provider_timeout_seconds: float | None = None,
+        provider_name: str | None = None,
+        provider_model: str | None = None,
     ) -> None:
         self._provider = provider
         self._admission = admission
@@ -100,6 +133,11 @@ class GenerationController:
         # delegates draft production to it (budget/repair/regenerate/publication
         # machinery here is unchanged — no parallel lifecycle).
         self._driver = stage_driver
+        self._provider_timeout_seconds = (
+            float(provider_timeout_seconds) if provider_timeout_seconds is not None else None
+        )
+        self._provider_name = provider_name
+        self._provider_model = provider_model
         if isinstance(max_retained_attempts, bool) or not isinstance(
             max_retained_attempts, int
         ):
@@ -110,6 +148,7 @@ class GenerationController:
         self._auto_seed = 0
         self._current_attempt_id: str | None = None
         self._attempts: dict[str, AttemptRecord] = {}
+        self._wall_started: dict[str, float] = {}
         # pending_id -> (attempt_id, stage) — the ONLY way a deferred result is
         # routed back into the driver.
         self._pending_map: dict[str, tuple[str, GenerationStage]] = {}
@@ -182,7 +221,24 @@ class GenerationController:
             budget=budget,
         )
         self._attempts[attempt_id] = attempt
+        self._wall_started[attempt_id] = time.perf_counter()
         self._current_attempt_id = attempt_id
+        emit_event(
+            "generation.started",
+            caseId=case_id,
+            generationAttemptId=attempt_id,
+            configuredGenerationDeadlineMs=int(self._deadline_seconds * 1000),
+            configuredProviderTimeoutMs=(
+                int(self._provider_timeout_seconds * 1000)
+                if self._provider_timeout_seconds is not None else None
+            ),
+            provider=self._provider_name,
+            model=self._provider_model,
+            providerCallCount=0,
+            repairCount=0,
+            regenerationCount=0,
+            deadlineRemainingMs=int(budget.remaining_seconds() * 1000),
+        )
         self._advance(attempt)
         self._prune_retained_attempts()
         return GenerationHandle(
@@ -256,7 +312,11 @@ class GenerationController:
         # the CAS commit (ADV-123). A past-deadline attempt can never publish:
         # fail it (terminal) and refuse with no mutation.
         if attempt.budget is not None and attempt.budget.deadline_passed():
-            self._fail(attempt, "generation deadline exceeded")
+            self._fail(
+                attempt,
+                "generation deadline exceeded",
+                code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
+            )
             return PublishResult(False, "generation deadline exceeded")
         if self._hold_before_publish and not hold_ok:
             return PublishResult(
@@ -275,6 +335,18 @@ class GenerationController:
         attempt.state = GenerationState.PUBLISHED
         attempt.published = payload
         self._release_admission(attempt)
+        emit_event(
+            "generation.published",
+            caseId=attempt.case_id,
+            generationAttemptId=attempt.attempt_id,
+            published=True,
+            failureCode=None,
+            deadlineRemainingMs=_remaining_ms(attempt),
+            totalElapsedMs=self._elapsed_ms(attempt),
+            providerCallCount=attempt.budget.calls if attempt.budget is not None else None,
+            repairCount=attempt.budget.repair_passes if attempt.budget is not None else None,
+            regenerationCount=attempt.budget.regenerations if attempt.budget is not None else None,
+        )
         return PublishResult(True, published=payload)
 
     # -- driver loop -----------------------------------------------------------
@@ -282,6 +354,19 @@ class GenerationController:
     def _advance(self, attempt: AttemptRecord) -> None:
         """Synchronous lifecycle driver; returns on PUBLISHED/FAILED/pending."""
         while True:
+            if _PD_DEV_TRACE:
+                budget = attempt.budget
+                _dt(
+                    "advance.loop state=%s calls=%s repairs=%s regens=%s "
+                    "deadlineRemainingMs=%s"
+                    % (
+                        attempt.state.value,
+                        budget.calls if budget is not None else "?",
+                        budget.repair_passes if budget is not None else "?",
+                        budget.regenerations if budget is not None else "?",
+                        _dt_remaining(attempt),
+                    )
+                )
             if attempt.attempt_id != self._current_attempt_id:
                 return  # no longer authoritative
             if attempt.state in (GenerationState.PUBLISHED, GenerationState.FAILED):
@@ -290,7 +375,11 @@ class GenerationController:
                 self._set_state(attempt, GenerationState.GENERATING)
                 continue
             if attempt.budget is not None and attempt.budget.deadline_passed():
-                self._fail(attempt, "generation deadline exceeded")
+                self._fail(
+                    attempt,
+                    "generation deadline exceeded",
+                    code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
+                )
                 return
 
             state = attempt.state
@@ -301,8 +390,12 @@ class GenerationController:
                     # budget; a provider-level failure fails the attempt).
                     try:
                         self._driver.run_into(attempt)
-                    except Exception:  # noqa: BLE001 - provider path terminal
-                        self._fail(attempt, _PROVIDER_FAILURE_REASON)
+                    except Exception as exc:  # noqa: BLE001 - provider path terminal
+                        self._fail(
+                            attempt,
+                            _PROVIDER_FAILURE_REASON,
+                            code=getattr(exc, "code", None),
+                        )
                         return
                     self._set_state(attempt, GenerationState.VALIDATING)
                     continue
@@ -317,6 +410,17 @@ class GenerationController:
             if state is GenerationState.VALIDATING:
                 report = pipeline.validate_draft(attempt)
                 outcome = report.outcome
+                if outcome is not ValidationOutcome.VALID:
+                    emit_event(
+                        "generation.stage.validation_failed",
+                        caseId=attempt.case_id,
+                        generationAttemptId=attempt.attempt_id,
+                        validationOutcome=outcome.value,
+                        deadlineRemainingMs=_remaining_ms(attempt),
+                        validatorIssueCodes=(
+                            report.repair_diagnostics if report.repair_diagnostics else None
+                        ),
+                    )
                 if outcome is ValidationOutcome.VALID:
                     if self._hold_before_publish:
                         return  # validated + stored; the caller publishes later
@@ -327,8 +431,21 @@ class GenerationController:
                         attempt.budget is None
                         or not attempt.budget.consume_repair_pass()
                     ):
-                        self._fail(attempt, "repair budget exhausted")
+                        self._fail(
+                            attempt,
+                            "repair budget exhausted",
+                            code=GenerationFailureCode.REPAIR_BUDGET_EXHAUSTED,
+                        )
                         return
+                    emit_event(
+                        "generation.repair.started",
+                        caseId=attempt.case_id,
+                        generationAttemptId=attempt.attempt_id,
+                        repairCount=attempt.budget.repair_passes,
+                        providerCallCount=attempt.budget.calls,
+                        regenerationCount=attempt.budget.regenerations,
+                        deadlineRemainingMs=_remaining_ms(attempt),
+                    )
                     if self._driver is not None:
                         # driver repair: re-run the affected stages with the
                         # sanitized validation diagnostics (state stays
@@ -337,9 +454,22 @@ class GenerationController:
                             self._driver.run_into(
                                 attempt, diagnostics=report.repair_diagnostics
                             )
-                        except Exception:  # noqa: BLE001 - provider path terminal
-                            self._fail(attempt, _PROVIDER_FAILURE_REASON)
+                        except Exception as exc:  # noqa: BLE001 - provider path terminal
+                            self._fail(
+                                attempt,
+                                _PROVIDER_FAILURE_REASON,
+                                code=getattr(exc, "code", None),
+                            )
                             return
+                        emit_event(
+                            "generation.repair.complete",
+                            caseId=attempt.case_id,
+                            generationAttemptId=attempt.attempt_id,
+                            repairCount=attempt.budget.repair_passes,
+                            providerCallCount=attempt.budget.calls,
+                            regenerationCount=attempt.budget.regenerations,
+                            deadlineRemainingMs=_remaining_ms(attempt),
+                        )
                         continue
                     self._set_state(attempt, GenerationState.REPAIRING)
                     if not self._invoke_provider(
@@ -356,8 +486,21 @@ class GenerationController:
                         attempt.budget is None
                         or not attempt.budget.consume_regeneration()
                     ):
-                        self._fail(attempt, "regeneration budget exhausted")
+                        self._fail(
+                            attempt,
+                            "regeneration budget exhausted",
+                            code=GenerationFailureCode.REGENERATION_BUDGET_EXHAUSTED,
+                        )
                         return
+                    emit_event(
+                        "generation.regeneration.started",
+                        caseId=attempt.case_id,
+                        generationAttemptId=attempt.attempt_id,
+                        repairCount=attempt.budget.repair_passes,
+                        providerCallCount=attempt.budget.calls,
+                        regenerationCount=attempt.budget.regenerations,
+                        deadlineRemainingMs=_remaining_ms(attempt),
+                    )
                     self._reset_for_regeneration(attempt)
                     self._set_state(attempt, GenerationState.GENERATING)
                     continue
@@ -367,7 +510,11 @@ class GenerationController:
                     if report.locked_violations
                     else "terminal validation failure"
                 )
-                self._fail(attempt, f"terminal validation failure: {detail}")
+                self._fail(
+                    attempt,
+                    f"terminal validation failure: {detail}",
+                    code=self._validation_failure_code(report),
+                )
                 return
 
             if state is GenerationState.REPAIRING:
@@ -391,37 +538,156 @@ class GenerationController:
         without mutating the draft.
         """
         if attempt.budget is None:
-            self._fail(attempt, "generation budget unavailable")
+            self._fail(attempt, "generation budget unavailable", code=GenerationFailureCode.INTERNAL_ERROR)
             return False
         if attempt.budget.deadline_passed():
-            self._fail(attempt, "generation deadline exceeded")
-            return False
-        if not attempt.budget.consume_call():
-            self._fail(attempt, "model call budget exhausted")
-            return False
-        try:
-            request = pipeline.build_request(
-                attempt, stage, diagnostics=diagnostics
+            self._fail(
+                attempt,
+                "generation deadline exceeded",
+                code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
             )
+            return False
+        effective_timeout = None
+        if self._provider_timeout_seconds is not None:
+            effective_timeout = attempt.budget.effective_provider_timeout(
+                self._provider_timeout_seconds
+            )
+            if effective_timeout <= 0:
+                self._fail(
+                    attempt,
+                    "generation deadline exceeded",
+                    code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
+                )
+                return False
+        if not attempt.budget.consume_call():
+            self._fail(
+                attempt,
+                "model call budget exhausted",
+                code=GenerationFailureCode.PROVIDER_CALL_BUDGET_EXHAUSTED,
+            )
+            return False
+        emit_event(
+            "provider.call.start",
+            caseId=attempt.case_id,
+            generationAttemptId=attempt.attempt_id,
+            stage=stage.value,
+            provider=self._provider_name,
+            model=self._provider_model,
+            configuredGenerationDeadlineMs=int(attempt.budget.deadline_seconds * 1000),
+            deadlineRemainingMs=_remaining_ms(attempt),
+            configuredProviderTimeoutMs=(
+                int(self._provider_timeout_seconds * 1000)
+                if self._provider_timeout_seconds is not None else None
+            ),
+            effectiveProviderTimeoutMs=(
+                int(effective_timeout * 1000) if effective_timeout is not None else None
+            ),
+            providerCallCount=attempt.budget.calls,
+            repairCount=attempt.budget.repair_passes,
+            regenerationCount=attempt.budget.regenerations,
+        )
+        if _PD_DEV_TRACE:
+            _dt(
+                "provider.call.start stage=%s calls=%s deadlineRemainingMs=%s"
+                % (stage.value, attempt.budget.calls, _dt_remaining(attempt))
+            )
+        _t0 = time.perf_counter()
+        try:
+            request_kwargs: dict[str, Any] = {"diagnostics": diagnostics}
+            # Keep the legacy injectable seam compatible for non-timeout
+            # providers/tests; real HTTP providers receive the runtime clamp.
+            if effective_timeout is not None:
+                request_kwargs["timeout_seconds"] = effective_timeout
+            request = pipeline.build_request(attempt, stage, **request_kwargs)
             result = self._provider.generate(request)
-        except ProviderError:
+        except ProviderError as exc:
             # Expected provider-level failures: terminal, sanitized, no retry.
-            self._fail(attempt, _PROVIDER_FAILURE_REASON)
+            code = (
+                GenerationFailureCode.PROVIDER_TIMEOUT
+                if exc.__class__.__name__ == "ProviderTimeout"
+                else GenerationFailureCode.PROVIDER_UNAVAILABLE
+            )
+            emit_event(
+                "provider.call.timeout" if code is GenerationFailureCode.PROVIDER_TIMEOUT else "provider.call.error",
+                caseId=attempt.case_id,
+                generationAttemptId=attempt.attempt_id,
+                stage=stage.value,
+                provider=self._provider_name,
+                failureCode=code.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=(
+                    int(self._provider_timeout_seconds * 1000)
+                    if self._provider_timeout_seconds is not None else None
+                ),
+                effectiveProviderTimeoutMs=(
+                    int(effective_timeout * 1000) if effective_timeout is not None else None
+                ),
+                deadlineRemainingMs=_remaining_ms(attempt),
+                providerCallCount=attempt.budget.calls,
+                repairCount=attempt.budget.repair_passes,
+                regenerationCount=attempt.budget.regenerations,
+            )
+            self._fail(attempt, _PROVIDER_FAILURE_REASON, code=code)
             return False
         except Exception:  # noqa: BLE001 - ANY provider-path failure must be
             # terminal AND release the admission reservation (ADV-125); the
             # original exception still propagates to the caller.
-            self._fail(attempt, _PROVIDER_FAILURE_REASON)
+            self._fail(
+                attempt,
+                _PROVIDER_FAILURE_REASON,
+                code=GenerationFailureCode.PROVIDER_UNAVAILABLE,
+            )
+            emit_event(
+                "provider.call.error",
+                caseId=attempt.case_id,
+                generationAttemptId=attempt.attempt_id,
+                stage=stage.value,
+                provider=self._provider_name,
+                failureCode=GenerationFailureCode.PROVIDER_UNAVAILABLE.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=(
+                    int(self._provider_timeout_seconds * 1000)
+                    if self._provider_timeout_seconds is not None else None
+                ),
+                effectiveProviderTimeoutMs=(
+                    int(effective_timeout * 1000) if effective_timeout is not None else None
+                ),
+                deadlineRemainingMs=_remaining_ms(attempt),
+                providerCallCount=attempt.budget.calls,
+                repairCount=attempt.budget.repair_passes,
+                regenerationCount=attempt.budget.regenerations,
+            )
             raise
+        if _PD_DEV_TRACE:
+            if result.pending:
+                summary = "pending"
+            elif result.content is not None:
+                summary = "ok(content)"
+            elif result.timed_out:
+                summary = "FAILED(timed_out)"
+            else:
+                summary = "FAILED(error=%s)" % (result.error or "unknown")
+            _dt(
+                "provider.call.done stage=%s %s deadlineRemainingMs=%s"
+                % (stage.value, summary, _dt_remaining(attempt))
+            )
         if result.pending:
             if not result.pending_id:
-                self._fail(attempt, _PROVIDER_FAILURE_REASON)
+                self._fail(
+                    attempt,
+                    _PROVIDER_FAILURE_REASON,
+                    code=GenerationFailureCode.PROVIDER_INVALID_RESPONSE,
+                )
                 return False
             if result.pending_id in self._used_pending_ids:
                 # Protocol violation: a pending id must be globally unique for
                 # the controller lifetime (ADV-130) — re-registering one could
                 # cross-route a newer attempt's completion into an older one.
-                self._fail(attempt, _PROVIDER_FAILURE_REASON)
+                self._fail(
+                    attempt,
+                    _PROVIDER_FAILURE_REASON,
+                    code=GenerationFailureCode.PROVIDER_INVALID_RESPONSE,
+                )
                 return False
             self._used_pending_ids.add(result.pending_id)
             attempt.pending_id = result.pending_id
@@ -430,8 +696,56 @@ class GenerationController:
             return False
         if result.content is None:
             # timed_out/error/protocol violation -> provider-level failure
-            self._fail(attempt, _PROVIDER_FAILURE_REASON)
+            code = (
+                GenerationFailureCode.PROVIDER_TIMEOUT
+                if result.timed_out
+                else infer_failure_code(result.error)
+            )
+            emit_event(
+                "provider.call.timeout" if code is GenerationFailureCode.PROVIDER_TIMEOUT else "provider.call.error",
+                caseId=attempt.case_id,
+                generationAttemptId=attempt.attempt_id,
+                stage=stage.value,
+                provider=self._provider_name,
+                failureCode=code.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=(
+                    int(self._provider_timeout_seconds * 1000)
+                    if self._provider_timeout_seconds is not None else None
+                ),
+                effectiveProviderTimeoutMs=(
+                    int(effective_timeout * 1000) if effective_timeout is not None else None
+                ),
+                deadlineRemainingMs=_remaining_ms(attempt),
+                providerCallCount=attempt.budget.calls,
+                repairCount=attempt.budget.repair_passes,
+                regenerationCount=attempt.budget.regenerations,
+            )
+            self._fail(attempt, _PROVIDER_FAILURE_REASON, code=code)
             return False
+        emit_event(
+            "provider.call.complete",
+            caseId=attempt.case_id,
+            generationAttemptId=attempt.attempt_id,
+            stage=stage.value,
+            provider=self._provider_name,
+            model=self._provider_model,
+            success=True,
+            elapsedMs=int((time.perf_counter() - _t0) * 1000),
+            responseBytes=len(result.content.encode("utf-8")),
+            structuredOutput=False,
+            configuredProviderTimeoutMs=(
+                int(self._provider_timeout_seconds * 1000)
+                if self._provider_timeout_seconds is not None else None
+            ),
+            effectiveProviderTimeoutMs=(
+                int(effective_timeout * 1000) if effective_timeout is not None else None
+            ),
+            deadlineRemainingMs=_remaining_ms(attempt),
+            providerCallCount=attempt.budget.calls,
+            repairCount=attempt.budget.repair_passes,
+            regenerationCount=attempt.budget.regenerations,
+        )
         self._apply_provider_result(attempt, stage, result)
         return True
 
@@ -440,7 +754,12 @@ class GenerationController:
     ) -> None:
         """Apply a completed provider result for its recorded stage."""
         if result.timed_out or result.error is not None or result.content is None:
-            self._fail(attempt, _PROVIDER_FAILURE_REASON)
+            code = (
+                GenerationFailureCode.PROVIDER_TIMEOUT
+                if result.timed_out
+                else infer_failure_code(result.error)
+            )
+            self._fail(attempt, _PROVIDER_FAILURE_REASON, code=code)
             return
         content = result.content
         if stage is GenerationStage.REPAIR:
@@ -455,6 +774,23 @@ class GenerationController:
             if stage not in attempt.stage_done:
                 return stage
         return None
+
+    @staticmethod
+    def _validation_failure_code(report: Any) -> GenerationFailureCode:
+        proof = getattr(report, "solver_result", None)
+        if proof is not None:
+            dimensions = (proof.who, proof.why, proof.weapon)
+            if any(dimension is not None and not dimension.unique for dimension in dimensions):
+                return GenerationFailureCode.SOLVER_AMBIGUOUS
+            when = getattr(proof, "when", None)
+            if when is not None and (when.ambiguous or when.overconstrained):
+                return GenerationFailureCode.SOLVER_AMBIGUOUS
+        diagnostics = tuple(getattr(report, "repair_diagnostics", ()) or ())
+        if any("structured" in item.lower() or "parse" in item.lower() for item in diagnostics):
+            return GenerationFailureCode.STRUCTURED_OUTPUT_INVALID
+        if any("geometr" in item.lower() for item in diagnostics):
+            return GenerationFailureCode.GEOMETRY_VALIDATION_FAILED
+        return GenerationFailureCode.VALIDATION_FAILED
 
     def _reset_for_regeneration(self, attempt: AttemptRecord) -> None:
         """Reset staged outputs for a full regeneration (§32.2/§32.5).
@@ -476,18 +812,52 @@ class GenerationController:
         assert_transition(attempt.state, target)
         attempt.state = target
 
-    def _fail(self, attempt: AttemptRecord, reason: str) -> None:
+    def _fail(
+        self,
+        attempt: AttemptRecord,
+        reason: str,
+        *,
+        code: GenerationFailureCode | str | None = None,
+    ) -> None:
         """Terminal-fail an attempt (FAILED is terminal, §32.3)."""
         if attempt.state in (GenerationState.PUBLISHED, GenerationState.FAILED):
             return
         assert_transition(attempt.state, GenerationState.FAILED)
         attempt.reason = reason
+        attempt.failure_code = public_failure_code(code) or infer_failure_code(reason).value
         attempt.state = GenerationState.FAILED
+        emit_event(
+            "generation.failed",
+            caseId=attempt.case_id,
+            generationAttemptId=attempt.attempt_id,
+            published=False,
+            failureCode=attempt.failure_code,
+            providerCallCount=attempt.budget.calls if attempt.budget is not None else None,
+            repairCount=attempt.budget.repair_passes if attempt.budget is not None else None,
+            regenerationCount=attempt.budget.regenerations if attempt.budget is not None else None,
+            deadlineRemainingMs=_remaining_ms(attempt),
+            totalElapsedMs=self._elapsed_ms(attempt),
+        )
+        _dt(
+            "attempt.fail reason=%r state=%s calls=%s deadlineRemainingMs=%s"
+            % (
+                reason,
+                attempt.state.value,
+                attempt.budget.calls if attempt.budget is not None else "?",
+                _dt_remaining(attempt),
+            )
+        )
         self._release_admission(attempt)
         if attempt.pending_id is not None:
             self._pending_map.pop(attempt.pending_id, None)
             attempt.pending_id = None
             attempt.pending_stage = None
+
+    def _elapsed_ms(self, attempt: AttemptRecord) -> int | None:
+        started = self._wall_started.get(attempt.attempt_id)
+        if started is None:
+            return None
+        return int((time.perf_counter() - started) * 1000)
 
     def _release_admission(self, attempt: AttemptRecord) -> None:
         if attempt._admission_released:

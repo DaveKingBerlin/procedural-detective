@@ -14,6 +14,7 @@ from typing import Any
 
 from app.generation.clock import Clock
 
+PROVIDER_CALL_SAFETY_MARGIN_SECONDS = 0.1
 
 class BudgetTracker:
     """Deadline + model-call + repair/regeneration budgets for one attempt."""
@@ -72,6 +73,33 @@ class BudgetTracker:
     def deadline_passed(self) -> bool:
         """True when ``clock.now() >= started_at + deadline_seconds``."""
         return self._clock.now() >= self._started_at + self._deadline_seconds
+
+    def remaining_seconds(self) -> float:
+        """Seconds of overall deadline still available (0.0 when expired).
+
+        DEV/observability helper (Phase 17E diagnosis); never modifies state.
+        """
+        return max(0.0, self._started_at + self._deadline_seconds - float(self._clock.now()))
+
+    def effective_provider_timeout(
+        self,
+        configured_seconds: float,
+        *,
+        safety_margin_seconds: float = PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
+    ) -> float:
+        """Return a call timeout bounded by the remaining attempt deadline.
+
+        A small reserved margin leaves the controller enough time to classify a
+        timeout, release admission and persist the terminal state.  ``0.0`` is
+        the explicit signal that no meaningful provider call may start.
+        """
+
+        configured = max(0.0, float(configured_seconds))
+        remaining = self.remaining_seconds()
+        margin = max(0.0, float(safety_margin_seconds))
+        if remaining <= margin:
+            return 0.0
+        return min(configured, remaining - margin)
 
     def consume_call(self) -> bool:
         """Reserve one model call.

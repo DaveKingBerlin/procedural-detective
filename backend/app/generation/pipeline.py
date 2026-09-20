@@ -49,6 +49,7 @@ from app.generation.report import ValidationReport
 from app.generation.schemas import GeneratedDraft, WorldGraphSpec
 from app.generation.state_machine import GenerationState
 from app.validation.solution import evaluate_solution
+from app.core.observability import emit_event
 
 # The four staged GENERATING stages in pipeline order (Phase4 E).
 STAGE_ORDER: tuple[GenerationStage, ...] = (
@@ -91,6 +92,8 @@ class AttemptRecord:
     solver_proof: SolverProof | None = None
     last_validation: ValidationReport | None = None
     reason: str | None = None
+    # Canonical primary terminal code; internal detail remains in ``reason``.
+    failure_code: str | None = None
     pending_id: str | None = None
     pending_stage: GenerationStage | None = None
     published: Any | None = None  # PublishedCaseVersion (frozen) once published
@@ -403,6 +406,7 @@ def build_request(
     stage: GenerationStage,
     *,
     diagnostics: tuple[str, ...] = (),
+    timeout_seconds: float | None = None,
 ) -> GenerateRequest:
     """Build the next provider invocation for ``stage`` (sanitized material)."""
     return GenerateRequest(
@@ -412,6 +416,7 @@ def build_request(
         locked=attempt.locked,
         diagnostics=tuple(diagnostics),
         seed=attempt.seed,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -510,10 +515,30 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
     reason string are always consistent with what validation decided.
     """
     draft = current_draft(attempt)
+    emit_event(
+        "generation.validation.started",
+        caseId=attempt.case_id,
+        generationAttemptId=attempt.attempt_id,
+        deadlineRemainingMs=(
+            int(attempt.budget.remaining_seconds() * 1000)
+            if attempt.budget is not None else None
+        ),
+    )
     if draft is None:
         report = _incomplete_draft_report(attempt.deferred_structural)
         attempt.solver_proof = None
         attempt.last_validation = report
+        emit_event(
+            "generation.validation.complete",
+            caseId=attempt.case_id,
+            generationAttemptId=attempt.attempt_id,
+            validationOutcome=report.outcome.value,
+            issueCodes=report.repair_diagnostics,
+            deadlineRemainingMs=(
+                int(attempt.budget.remaining_seconds() * 1000)
+                if attempt.budget is not None else None
+            ),
+        )
         return report
 
     # (a) structural cross-references ---------------------------------------
@@ -601,6 +626,17 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
     )
     attempt.solver_proof = solver_result
     attempt.last_validation = report
+    emit_event(
+        "generation.validation.complete",
+        caseId=attempt.case_id,
+        generationAttemptId=attempt.attempt_id,
+        validationOutcome=report.outcome.value,
+        issueCodes=report.repair_diagnostics,
+        deadlineRemainingMs=(
+            int(attempt.budget.remaining_seconds() * 1000)
+            if attempt.budget is not None else None
+        ),
+    )
     return report
 
 

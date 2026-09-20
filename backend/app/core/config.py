@@ -270,6 +270,23 @@ class Settings(BaseSettings):
             "assets under /assets are served with immutable caching."
         ),
     )
+    # -- Phase 17E structured operator logging -------------------------------
+    pd_log_level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = Field(
+        default="INFO", validation_alias="PD_LOG_LEVEL",
+        description="PD_LOG_LEVEL (CRITICAL|ERROR|WARNING|INFO|DEBUG).",
+    )
+    pd_generation_debug_logs: bool = Field(
+        default=False, validation_alias="PD_GENERATION_DEBUG_LOGS",
+        description="PD_GENERATION_DEBUG_LOGS (sanitized debug fields only).",
+    )
+    pd_file_logs: bool = Field(
+        default=False, validation_alias="PD_FILE_LOGS",
+        description="PD_FILE_LOGS (enable bounded rotating file logs).",
+    )
+    pd_log_file: str | None = Field(
+        default=None, validation_alias="PD_LOG_FILE",
+        description="PD_LOG_FILE (optional rotating log path).",
+    )
     # -- Phase 10 Asset Oracle (Phase10 / Phase_POST_MVP_ROADMAP) ----------
     # Optional explicit path to the Asset Oracle manifest. None (default)
     # derives <repo-root>/assets/catalog/catalog.json from the package

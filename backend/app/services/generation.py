@@ -21,9 +21,11 @@ deterministic pipeline and the durable Phase 5 persistence model:
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import threading
+import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,11 @@ from app.auth.tokens import (
 from app.generation.admission import AdmissionDenied
 from app.generation.controller import GenerationController
 from app.generation.fake_provider import FakeProvider
+from app.generation.failure_codes import (
+    GenerationFailureCode,
+    infer_failure_code,
+    public_failure_code,
+)
 from app.generation.ids import IdSource
 from app.generation.live_provider import LiveHttpProvider
 from app.generation.pipeline import STAGE_ORDER, normalize_prompt
@@ -56,6 +63,7 @@ from app.services.publication import (
     derive_title_from_prompt,
     public_case_dict_from_payload,
 )
+from app.core.observability import emit_event
 
 # Terminal/sanitized progress snapshots (REQUIREMENTS 40.3 progress).
 _STATE_PROGRESS = {
@@ -92,6 +100,15 @@ def _bounded_provider_script_load(path: Path) -> Any:
 
 # Generation-service bound for the Phase 13 unknown-object request list.
 MAX_GENERATED_REQUESTS = 8
+
+
+_PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
+
+
+def _dev_trace(message: str) -> None:
+    """DEV-ONLY structured trace (Phase17E PART B); gated, default OFF."""
+    if _PD_DEV_TRACE:
+        print(f"[PD-DEV-TRACE] {message}", flush=True)
 
 
 class GenerationServiceError(Exception):
@@ -405,6 +422,7 @@ class CaseStarted:
     generation_attempt_id: str
     creator_access_token: str
     status: str
+    failure_code: str | None = None
 
 
 class _LockedIdSource:
@@ -494,7 +512,7 @@ def _sanitized_progress(record: Any) -> tuple[str, int]:
 
 
 def _pre_publish_snapshot(record: Any) -> tuple[str, str, str, int, str | None]:
-    """(state, status, stage, progress, reason) durable snapshot for placement.
+    """(state, status, stage, progress, failure code) durable snapshot.
 
     A PUBLISHED attempt is placed as VALIDATING and flipped to PUBLISHED only
     when the frozen payload is durably stored (never a "PUBLISHED without
@@ -509,12 +527,17 @@ def _pre_publish_snapshot(record: Any) -> tuple[str, str, str, int, str | None]:
             None,
         )
     pre_stage, pre_progress = _sanitized_progress(record)
+    failure_code = None
+    if record.state is GenerationState.FAILED:
+        failure_code = public_failure_code(getattr(record, "failure_code", None))
+        if failure_code is None:
+            failure_code = infer_failure_code(getattr(record, "reason", None)).value
     return (
         record.state.value,
         record.state.value,
         pre_stage,
         pre_progress,
-        record.reason if record.state is GenerationState.FAILED else None,
+        failure_code,
     )
 
 
@@ -729,6 +752,11 @@ class GenerationService:
             expires_at=now + settings.creator_token_ttl_seconds,
             created_at=now,
         )
+        if _PD_DEV_TRACE:
+            _dev_trace(
+                "service.persisted caseId=%s generationId=%s attemptId=%s state=%s dbn=none"
+                % (case_id, generation_id, attempt_id, pre_state)
+            )
         if record.state is GenerationState.PUBLISHED:
             # Phase 16_2: in ollama mode the stage driver OWNS the composed
             # world (LLM world-requirements -> environment -> oracle -> placer)
@@ -759,6 +787,16 @@ class GenerationService:
                     )
                 )
         status = self._publish_if_ready(record, title, settings, now, case_id, version) or record.state.value
+        if _PD_DEV_TRACE:
+            _dev_trace(
+                "service.publication.atompted status=%s recordState=%s "
+                "publishProvenance=%s"
+                % (
+                    status,
+                    record.state.value,
+                    "yes" if self._last_publish_provenance is not None else "no",
+                )
+            )
         self._sync_generations(anonymous_quota_session_id)
         return CaseStarted(
             case_id=case_id,
@@ -766,6 +804,11 @@ class GenerationService:
             generation_attempt_id=attempt_id,
             creator_access_token=creator_token_value,
             status=status,
+            failure_code=(
+                public_failure_code(getattr(record, "failure_code", None))
+                if record.state is GenerationState.FAILED
+                else None
+            ),
         )
 
     # ------------------------------------------------------------------ #
@@ -1205,6 +1248,11 @@ class GenerationService:
             generation_attempt_id=attempt_id,
             creator_access_token=creator_token_value,
             status=status,
+            failure_code=(
+                public_failure_code(getattr(record, "failure_code", None))
+                if record.state is GenerationState.FAILED
+                else None
+            ),
         )
 
     # -- shared run/persist machinery ------------------------------------ #
@@ -1235,7 +1283,21 @@ class GenerationService:
             max_prompt_chars=settings.max_prompt_chars,
             seed=None,  # per-controller auto seed (deterministic per controller)
             stage_driver=driver,
+            provider_timeout_seconds=(
+                settings.ollama_timeout_seconds
+                if settings.generation_provider == "ollama"
+                else 30.0
+                if settings.generation_provider == "live"
+                else None
+            ),
+            provider_name=settings.generation_provider,
+            provider_model=(
+                settings.ollama_model
+                if settings.generation_provider == "ollama"
+                else settings.llm_model
+            ),
         )
+        _t0 = time.perf_counter()
         try:
             handle = controller.start_generation(
                 prompt_text,
@@ -1249,6 +1311,23 @@ class GenerationService:
         record = controller.attempt(handle.attempt_id)
         if record is None:  # pragma: no cover - defensive
             raise GenerationServiceError("generation attempt record unavailable")
+        if _PD_DEV_TRACE:
+            budget = record.budget
+            _dev_trace(
+                "service.run_generation.done state=%s reason=%r dbn=none calls=%s "
+                "repairs=%s regens=%s elapsedMs=%d deadlineRemainingMs=%s "
+                "attemptId=%s"
+                % (
+                    record.state.value,
+                    record.reason,
+                    budget.calls if budget is not None else "?",
+                    budget.repair_passes if budget is not None else "?",
+                    budget.regenerations if budget is not None else "?",
+                    int((time.perf_counter() - _t0) * 1000),
+                    _dev_remaining(record),
+                    record.attempt_id,
+                )
+            )
         return handle, record, float(self._clock.now())
 
     def _publish_if_ready(
@@ -1283,23 +1362,81 @@ class GenerationService:
                 raise GenerationServiceError(
                     "cannot align the published aggregate version"
                 ) from None
-        self._publication.publish_transactionally(
-            published,
-            seed=record.seed,
-            prompt=record.prompt,
-            model=(
-                settings.llm_model
-                if settings.generation_provider == "live"
-                else settings.ollama_model
-                if settings.generation_provider == "ollama"
-                else None
+        emit_event(
+            "publication.started",
+            caseId=case_id,
+            caseVersion=version,
+            generationAttemptId=getattr(record, "attempt_id", None),
+            deadlineRemainingMs=(
+                int(record.budget.remaining_seconds() * 1000)
+                if getattr(record, "budget", None) is not None else None
             ),
-            title=title,
         )
+        try:
+            self._publication.publish_transactionally(
+                published,
+                seed=record.seed,
+                prompt=record.prompt,
+                model=(
+                    settings.llm_model
+                    if settings.generation_provider == "live"
+                    else settings.ollama_model
+                    if settings.generation_provider == "ollama"
+                    else None
+                ),
+                title=title,
+            )
+        except DuplicatePublication:
+            raise
+        except Exception:
+            failure_code = GenerationFailureCode.PUBLICATION_FAILED.value
+            try:
+                # The publication service transaction has rolled back. Mark
+                # the durable snapshot FAILED separately; no payload is ever
+                # left behind for this terminal state.
+                self._store.update_case_version_state(
+                    case_id,
+                    int(version),
+                    GenerationState.FAILED.value,
+                    state_reason=failure_code,
+                )
+                self._store.upsert_generation_attempt(
+                    attempt_id=record.attempt_id,
+                    case_id=case_id,
+                    case_version=int(version),
+                    status=GenerationState.FAILED.value,
+                    stage="failed",
+                    progress=100,
+                    created_at=float(now),
+                    updated_at=float(now),
+                )
+            except Exception:
+                # Preserve the original publication exception and its safe API
+                # mapping even if the defensive failure snapshot also fails.
+                pass
+            emit_event(
+                "publication.failed",
+                caseId=case_id,
+                caseVersion=version,
+                generationAttemptId=getattr(record, "attempt_id", None),
+                failureCode=failure_code,
+            )
+            raise
         # Phase 10 internal diagnostic: how the published placements resolved
         # through the Asset Oracle (never part of the payload / DTOs).
         self._last_publish_provenance = _record_asset_oracle_provenance(
             published, settings
+        )
+        emit_event(
+            "publication.complete",
+            caseId=case_id,
+            caseVersion=version,
+            generationAttemptId=getattr(record, "attempt_id", None),
+            published=True,
+            deadlineRemainingMs=(
+                int(record.budget.remaining_seconds() * 1000)
+                if getattr(record, "budget", None) is not None else None
+            ),
         )
         return GenerationState.PUBLISHED.value
 
@@ -1388,12 +1525,20 @@ class GenerationService:
         )
         if row is None:
             return None
+        version_row = self._store.get_case_version_by_generation_id(
+            generation_id, case_id=case_id
+        )
         return {
             "caseId": row.case_id,
             "generationId": generation_id,
             "status": row.status,
             "progress": row.progress,
             "stage": row.stage,
+            "failureCode": (
+                public_failure_code(version_row.state_reason)
+                if row.status == GenerationState.FAILED.value and version_row is not None
+                else None
+            ),
         }
 
     def get_public_case(self, case_id: str, case_version: int) -> dict[str, Any] | None:
@@ -1553,6 +1698,13 @@ class GenerationService:
                 )
             script[stage] = [str(entry) for entry in entries]
         return script
+
+
+def _dev_remaining(record: Any) -> str:
+    budget = getattr(record, "budget", None)
+    if budget is None or not hasattr(budget, "remaining_seconds"):
+        return "none"
+    return str(int(budget.remaining_seconds() * 1000))
 
 
 __all__ = [

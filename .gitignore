@@ -256,3 +256,6 @@ screenshots/generated/
 *.sqlite
 *.sqlite3
 tmp/
+
+# Optional runtime lifecycle logs
+logs/

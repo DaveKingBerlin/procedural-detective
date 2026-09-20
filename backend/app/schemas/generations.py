@@ -18,3 +18,4 @@ class GenerationProgressDTO(BaseModel):
     status: str
     progress: int
     stage: str | None = None
+    failureCode: str | None = None

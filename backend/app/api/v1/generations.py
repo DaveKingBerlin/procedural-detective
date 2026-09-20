@@ -22,6 +22,7 @@ router = APIRouter(prefix="/generations", tags=["generations"])
 @router.get(
     "/{generation_id}",
     response_model=GenerationProgressDTO,
+    response_model_exclude_none=True,
     summary="Get sanitized generation progress (durable)",
     description=(
         "Requires the case's creatorAccessToken (the credential determines "

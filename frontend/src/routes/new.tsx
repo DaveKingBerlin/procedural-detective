@@ -89,14 +89,6 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     setGenerationMode(next);
   };
 
-  /** "Use example prompt" fills the REQUIREMENTS 48 Case A demo prompt — NOT
-   *  one of the three showcase examples, so any active example mark clears. */
-  const useExample = () => {
-    setPrompt(examplePromptText());
-    setActiveExampleId(null);
-    setError(null);
-  };
-
   /** Phase 17D Bugfix PART B — select a showcase example: replace the textarea
    *  text with the EXACT example prompt and mark it active. Purely fills the
    *  input — it NEVER auto-starts generation (button type="button", no submit,
@@ -191,18 +183,18 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
           {prompt.length} / {PROMPT_MAX_CHARS}
         </p>
 
-        {/* Phase 17D Bugfix PART B — compact "Try an example:" selector. Three
-            pure UI text fills demonstrating increasing Prompt-to-World
-            complexity (Easy/Medium/Hard). Each button is type="button": it
-            only populates the textarea — it NEVER submits the form, never
-            starts generation, and never adds backend/API logic. The active
-            example is exposed via aria-pressed + the --active class, and the
-            pure transitions in ../journey/examplePrompts clear it
-            deterministically as soon as the user edits the text. */}
+        {/* Phase 17D Bugfix PART B / Phase 17E PART J — the Easy/Medium/Hard
+            example selector. Three pure UI text fills demonstrating increasing
+            Prompt-to-World complexity. Each button is type="button": it only
+            populates the textarea — it NEVER submits the form, never starts
+            generation, and never adds backend/API logic. The redundant
+            "Try an example:" heading and the redundant "Use example prompt"
+            button were removed in Phase 17E PART J (the example prompts and
+            this container remain, plugin-compatible). The active example is
+            exposed via aria-pressed + the --active class, and the pure
+            transitions in ../journey/examplePrompts clear it deterministically
+            as soon as the user edits the text. */}
         <div className="new-case-examples" data-testid="example-prompts">
-          <p className="new-case-examples-heading" data-testid="example-prompts-heading">
-            Try an example:
-          </p>
           {EXAMPLE_PROMPT_IDS.map((id) => {
             const entry = EXAMPLE_PROMPTS[id];
             const isActive = activeExampleId === id;
@@ -264,9 +256,6 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
         <div className="new-case-actions">
           <button type="submit" className="new-case-submit" data-testid="generate-case">
             Generate case
-          </button>
-          <button type="button" className="new-case-secondary" data-testid="use-example-prompt" onClick={useExample}>
-            Use example prompt
           </button>
         </div>
         {/* ADV-152 — honest app-level provider qualifier next to the primary CTA

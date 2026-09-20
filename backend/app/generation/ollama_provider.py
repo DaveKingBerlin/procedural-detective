@@ -257,9 +257,12 @@ class OllamaProvider:
         self.last_format = "schema" if isinstance(format_value, dict) else "json"
         payload["format"] = format_value
         try:
-            status, raw = self._get_transport().post_json(
-                url, payload, self._timeout_seconds
+            timeout_seconds = float(
+                request.timeout_seconds
+                if request.timeout_seconds is not None
+                else self._timeout_seconds
             )
+            status, raw = self._get_transport().post_json(url, payload, timeout_seconds)
         except TimeoutError:
             return ProviderResult(timed_out=True)
         except Exception as exc:  # noqa: BLE001 - transport error, sanitized

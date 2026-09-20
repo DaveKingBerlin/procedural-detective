@@ -42,6 +42,7 @@ from starlette.responses import Response
 
 from app.api.v1 import api_router
 from app.core.config import SERVICE_NAME, SERVICE_VERSION, Settings
+from app.core.observability import configure_logging
 from app.db.session import create_db_engine
 from app.persistence.store import Store
 from app.persistence.timebase import EpochClock
@@ -478,6 +479,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     singleton (env vars + optional .env) is used as the one config source.
     """
     settings = settings if settings is not None else Settings()
+    configure_logging(settings)
 
     app = FastAPI(
         title="Procedural Detective API",

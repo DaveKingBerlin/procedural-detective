@@ -176,7 +176,7 @@ describe("Phase 17D Bugfix PART B — example prompts (real interaction, D1–D7
     form.addEventListener("submit", submitSpy);
   };
 
-  it("D1 — the Easy button populates the EXACT Easy prompt and marks it active", async () => {
+  it("K1 — the Easy card populates the EXACT Easy prompt and marks it active", async () => {
     await settleEffects();
     attachSubmitSpy();
     clickExample(container(), "easy");
@@ -190,7 +190,7 @@ describe("Phase 17D Bugfix PART B — example prompts (real interaction, D1–D7
     expect(setJourneyParams).not.toHaveBeenCalled();
   });
 
-  it("D2 — the Medium button populates the EXACT Medium prompt and marks it active", async () => {
+  it("K2 — the Medium card populates the EXACT Medium prompt and marks it active", async () => {
     await settleEffects();
     clickExample(container(), "medium");
     expect(promptInput(container()).value).toBe(MEDIUM_EXPECTED);
@@ -201,7 +201,7 @@ describe("Phase 17D Bugfix PART B — example prompts (real interaction, D1–D7
     expect(setJourneyParams).not.toHaveBeenCalled();
   });
 
-  it("D3 — the Hard button populates the EXACT Hard prompt and marks it active", async () => {
+  it("K3 — the Hard card populates the EXACT Hard prompt and marks it active", async () => {
     await settleEffects();
     clickExample(container(), "hard");
     expect(promptInput(container()).value).toBe(HARD_EXPECTED);
@@ -212,7 +212,7 @@ describe("Phase 17D Bugfix PART B — example prompts (real interaction, D1–D7
     expect(setJourneyParams).not.toHaveBeenCalled();
   });
 
-  it("D4 — selecting examples NEVER auto-submits (no submit event, no journey stage, no navigation)", async () => {
+  it("K4 — selecting a card NEVER auto-submits (no submit event, no journey stage, no navigation)", async () => {
     await settleEffects();
     attachSubmitSpy();
     for (const id of EXAMPLE_IDS) clickExample(container(), id);
@@ -246,7 +246,7 @@ describe("Phase 17D Bugfix PART B — example prompts (real interaction, D1–D7
     });
   });
 
-  it("D5 — the prompt remains fully editable after an example fill", async () => {
+  it("K5 — the prompt remains fully editable after a card fill", async () => {
     await settleEffects();
     clickExample(container(), "easy");
     const ta = promptInput(container());

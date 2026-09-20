@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -46,6 +48,9 @@ from app.generation.provider import (
     GenerationStage,
     ProviderResult,
 )
+from app.generation.budgets import PROVIDER_CALL_SAFETY_MARGIN_SECONDS
+from app.generation.failure_codes import GenerationFailureCode, infer_failure_code
+from app.core.observability import emit_event
 from app.generation import prompts
 from app.generation import parser as stage_parser
 from app.domain.time_interval import (
@@ -61,6 +66,31 @@ from app.world.requirements import (
     WorldRequirements,
 )
 
+_PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
+
+
+def _dt(message: str) -> None:
+    """DEV-ONLY structured trace (Phase17E PART B); gated, default OFF.
+
+    Never logs prompts, truth, credentials or the Ollama URL.
+    """
+    if _PD_DEV_TRACE:
+        print(f"[PD-DEV-TRACE] {message}", flush=True)
+
+
+def _dt_remaining(attempt: Any) -> str:
+    budget = getattr(attempt, "budget", None)
+    if budget is None or not hasattr(budget, "remaining_seconds"):
+        return "none"
+    return str(int(budget.remaining_seconds() * 1000))
+
+
+def _remaining_ms(attempt: Any) -> int | None:
+    budget = getattr(attempt, "budget", None)
+    if budget is None or not hasattr(budget, "remaining_seconds"):
+        return None
+    return int(budget.remaining_seconds() * 1000)
+
 # Bounded AssetSpec repair passes INSIDE one AssetSpec round-trip (Phase16_2
 # §13: "bounded ≤2 per driver").
 MAX_SPEC_REPAIR_PASSES = 2
@@ -74,8 +104,16 @@ _DRIVER_STAGES = (
 
 
 class StageDriverProviderFailure(Exception):
-    """A provider-level failure inside the stage driver (terminal for the
-    attempt, sanitized by the controller)."""
+    """A provider-level failure inside the stage driver."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: GenerationFailureCode = GenerationFailureCode.PROVIDER_UNAVAILABLE,
+    ) -> None:
+        super().__init__(message)
+        self.code = code.value
 
 
 class _DuplicateKeyError(ValueError):
@@ -956,6 +994,9 @@ class OllamaAssetSpecProvider:
         locked: Any = None,
         seed: int | None = None,
         model_label: str = "",
+        configured_timeout_seconds: float | None = None,
+        timeout_provider: Callable[[], float] | None = None,
+        metrics_provider: Callable[[], Any] | None = None,
     ) -> None:
         self._provider = provider
         self._attempt_id = attempt_id
@@ -963,6 +1004,9 @@ class OllamaAssetSpecProvider:
         self._locked = locked
         self._seed = seed
         self._model_label = model_label
+        self._configured_timeout_seconds = configured_timeout_seconds
+        self._timeout_provider = timeout_provider
+        self._metrics_provider = metrics_provider
         # ``calls``: number of ``generate()`` invocations on THIS spec provider
         # (always 1 — the outer AssetSpec round-trip). ``request_calls``: the
         # number of REAL request-level provider calls (each ASSET_SPEC/REPAIR
@@ -1190,8 +1234,17 @@ class OllamaAssetSpecProvider:
         ``self.request_calls`` (Phase17C §8 — a repair attempt is a REAL
         request-level provider call, never a free local reprocessing).
         """
+        effective_timeout = self._effective_timeout()
+        if effective_timeout <= 0:
+            raise StageDriverProviderFailure(
+                "generation deadline exceeded",
+                code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
+            )
         if not self._budget_consumer():
-            raise StageDriverProviderFailure("model call budget exhausted")
+            raise StageDriverProviderFailure(
+                "model call budget exhausted",
+                code=GenerationFailureCode.PROVIDER_CALL_BUDGET_EXHAUSTED,
+            )
         self.request_calls += 1
         request = GenerateRequest(
             attempt_id=self._attempt_id,
@@ -1199,11 +1252,132 @@ class OllamaAssetSpecProvider:
             prompt_context=prompt,
             locked=self._locked,
             seed=self._seed,
+            timeout_seconds=effective_timeout,
         )
+        budget = self._metrics_provider() if self._metrics_provider is not None else None
+        configured_timeout_ms = (
+            int(float(self._configured_timeout_seconds) * 1000)
+            if self._configured_timeout_seconds is not None else None
+        )
+        emit_event(
+            "provider.call.start",
+            generationAttemptId=self._attempt_id,
+            stage=stage.value,
+            provider="ollama",
+            model=self._model_label or None,
+            configuredProviderTimeoutMs=configured_timeout_ms,
+            effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+            deadlineRemainingMs=(
+                int(budget.remaining_seconds() * 1000)
+                if budget is not None and hasattr(budget, "remaining_seconds") else None
+            ),
+            providerCallCount=getattr(budget, "calls", None),
+            repairCount=getattr(budget, "repair_passes", None),
+            regenerationCount=getattr(budget, "regenerations", None),
+            requestBytes=len(prompt.encode("utf-8")),
+        )
+        _t0 = time.perf_counter()
         result = self._provider.generate(request)
-        if result.timed_out or result.error is not None or result.content is None:
-            return None
+        if _PD_DEV_TRACE:
+            if result.content is not None:
+                summary = "ok(content)"
+            elif result.timed_out:
+                summary = "FAILED(timed_out)"
+            else:
+                summary = "FAILED(error=%s)" % (result.error or "unknown")
+            _dt(
+                "assetspec.call.done stage=%s %s elapsedMs=%d requestCalls=%d"
+                % (
+                    stage.value,
+                    summary,
+                    int((time.perf_counter() - _t0) * 1000),
+                    self.request_calls,
+                )
+            )
+        if result.timed_out:
+            emit_event(
+                "provider.call.timeout",
+                generationAttemptId=self._attempt_id,
+                stage=stage.value,
+                provider="ollama",
+                failureCode=GenerationFailureCode.PROVIDER_TIMEOUT.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=(
+                    int(budget.remaining_seconds() * 1000)
+                    if budget is not None and hasattr(budget, "remaining_seconds") else None
+                ),
+            )
+            raise StageDriverProviderFailure(
+                "provider request timed out",
+                code=GenerationFailureCode.PROVIDER_TIMEOUT,
+            )
+        if result.error is not None:
+            code = infer_failure_code(result.error)
+            emit_event(
+                "provider.call.error",
+                generationAttemptId=self._attempt_id,
+                stage=stage.value,
+                provider="ollama",
+                failureCode=code.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=(
+                    int(budget.remaining_seconds() * 1000)
+                    if budget is not None and hasattr(budget, "remaining_seconds") else None
+                ),
+            )
+            raise StageDriverProviderFailure(
+                "provider returned an unusable response",
+                code=infer_failure_code(result.error),
+            )
+        if result.content is None:
+            emit_event(
+                "provider.call.error",
+                generationAttemptId=self._attempt_id,
+                stage=stage.value,
+                provider="ollama",
+                failureCode=GenerationFailureCode.PROVIDER_INVALID_RESPONSE.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=(
+                    int(budget.remaining_seconds() * 1000)
+                    if budget is not None and hasattr(budget, "remaining_seconds") else None
+                ),
+            )
+            raise StageDriverProviderFailure(
+                "provider returned an invalid response",
+                code=GenerationFailureCode.PROVIDER_INVALID_RESPONSE,
+            )
+        emit_event(
+            "provider.call.complete",
+            generationAttemptId=self._attempt_id,
+            stage=stage.value,
+            provider="ollama",
+            model=self._model_label or None,
+            success=True,
+            elapsedMs=int((time.perf_counter() - _t0) * 1000),
+            configuredProviderTimeoutMs=configured_timeout_ms,
+            effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+            responseBytes=len(result.content.encode("utf-8")),
+            structuredOutput=True,
+            deadlineRemainingMs=(
+                int(budget.remaining_seconds() * 1000)
+                if budget is not None and hasattr(budget, "remaining_seconds") else None
+            ),
+            providerCallCount=getattr(budget, "calls", None),
+            repairCount=getattr(budget, "repair_passes", None),
+            regenerationCount=getattr(budget, "regenerations", None),
+        )
         return result.content
+
+    def _effective_timeout(self) -> float:
+        if self._timeout_provider is None:
+            return max(0.0, float(self._configured_timeout_seconds or 60.0))
+        return max(0.0, float(self._timeout_provider()))
 
 
 # --------------------------------------------------------------------------- #
@@ -1266,6 +1440,12 @@ class OllamaStageDriver:
         """
         from app.generation import pipeline
 
+        _t0 = time.perf_counter()
+        if _PD_DEV_TRACE:
+            _dt(
+                "driver.run_into.start repairDiagnostics=%d deadlineRemainingMs=%s"
+                % (len(diagnostics), _dt_remaining(attempt))
+            )
         deferred: list[str] = []
         provider = self._provider_factory()
         budget_consumer = self._make_budget_consumer(attempt)
@@ -1397,6 +1577,17 @@ class OllamaStageDriver:
             extra_travel_rules=tuple(extra_rules),
         )
         attempt._phase3_cache = None
+        if _PD_DEV_TRACE:
+            _dt(
+                "driver.run_into.end elapsedMs=%d deferredStructural=%d "
+                "draftSet=%s deadlineRemainingMs=%s"
+                % (
+                    int((time.perf_counter() - _t0) * 1000),
+                    len(attempt.deferred_structural),
+                    attempt.draft is not None,
+                    _dt_remaining(attempt),
+                )
+            )
 
     def _make_budget_consumer(self, attempt: Any) -> Callable[[], bool]:
         def _consume() -> bool:
@@ -1408,6 +1599,15 @@ class OllamaStageDriver:
             return budget.consume_call()
 
         return _consume
+
+    def _effective_timeout(self, attempt: Any | None = None) -> float:
+        budget = getattr(attempt, "budget", None)
+        if budget is None:
+            return max(0.0, float(getattr(self._settings, "ollama_timeout_seconds", 60.0)))
+        return budget.effective_provider_timeout(
+            float(getattr(self._settings, "ollama_timeout_seconds", 60.0)),
+            safety_margin_seconds=PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
+        )
 
     def _evidence_feedback(
         self,
@@ -1456,6 +1656,12 @@ class OllamaStageDriver:
             budget_consumer=budget,
             locked=attempt.locked,
             seed=attempt.seed,
+            model_label=getattr(self._settings, "ollama_model", ""),
+            configured_timeout_seconds=float(
+                getattr(self._settings, "ollama_timeout_seconds", 60.0)
+            ),
+            timeout_provider=lambda: self._effective_timeout(attempt),
+            metrics_provider=lambda: attempt.budget,
         )
 
     def _call(
@@ -1466,8 +1672,20 @@ class OllamaStageDriver:
         prompt: str,
         budget: Callable[[], bool],
     ) -> str | None:
+        effective_timeout = self._effective_timeout(attempt)
+        configured_timeout_ms = int(
+            float(getattr(self._settings, "ollama_timeout_seconds", 60.0)) * 1000
+        )
+        if effective_timeout <= 0:
+            raise StageDriverProviderFailure(
+                "generation deadline exceeded",
+                code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
+            )
         if not budget():
-            raise StageDriverProviderFailure("model call budget exhausted")
+            raise StageDriverProviderFailure(
+                "model call budget exhausted",
+                code=GenerationFailureCode.PROVIDER_CALL_BUDGET_EXHAUSTED,
+            )
         request = GenerateRequest(
             attempt_id=attempt.attempt_id,
             stage=stage,
@@ -1475,10 +1693,99 @@ class OllamaStageDriver:
             locked=attempt.locked,
             diagnostics=(),
             seed=attempt.seed,
+            timeout_seconds=effective_timeout,
         )
+        emit_event(
+            "provider.call.start",
+            caseId=getattr(attempt, "case_id", None),
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            stage=stage.value,
+            provider="ollama",
+            model=getattr(self._settings, "ollama_model", None),
+            configuredGenerationDeadlineMs=(
+                int(attempt.budget.deadline_seconds * 1000)
+                if getattr(attempt, "budget", None) is not None else None
+            ),
+            deadlineRemainingMs=_remaining_ms(attempt),
+            configuredProviderTimeoutMs=int(float(getattr(self._settings, "ollama_timeout_seconds", 60.0)) * 1000),
+            effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+            providerCallCount=getattr(attempt.budget, "calls", None),
+            repairCount=getattr(attempt.budget, "repair_passes", None),
+            regenerationCount=getattr(attempt.budget, "regenerations", None),
+            requestBytes=len(prompt.encode("utf-8")),
+        )
+        _t0 = time.perf_counter()
         result: ProviderResult = self._invoke(provider, request)
-        if result.timed_out or result.error is not None or result.content is None:
-            return None
+        if _PD_DEV_TRACE:
+            if result.content is not None:
+                summary = "ok(content)"
+            elif result.timed_out:
+                summary = "FAILED(timed_out)"
+            else:
+                summary = "FAILED(error=%s)" % (result.error or "unknown")
+            _dt(
+                "driver.call.done stage=%s %s elapsedMs=%d calls=%s "
+                "deadlineRemainingMs=%s"
+                % (
+                    stage.value,
+                    summary,
+                    int((time.perf_counter() - _t0) * 1000),
+                    getattr(attempt.budget, "calls", "?"),
+                    _dt_remaining(attempt),
+                )
+            )
+        if result.timed_out:
+            emit_event(
+                "provider.call.timeout",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                stage=stage.value,
+                provider="ollama",
+                failureCode=GenerationFailureCode.PROVIDER_TIMEOUT.value,
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=_remaining_ms(attempt),
+            )
+            raise StageDriverProviderFailure(
+                "provider request timed out",
+                code=GenerationFailureCode.PROVIDER_TIMEOUT,
+            )
+        if result.error is not None:
+            code = infer_failure_code(result.error)
+            emit_event(
+                "provider.call.error",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                stage=stage.value,
+                provider="ollama",
+                failureCode=code.value,
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=_remaining_ms(attempt),
+            )
+            raise StageDriverProviderFailure(
+                "provider returned an unusable response", code=code
+            )
+        if result.content is None:
+            raise StageDriverProviderFailure(
+                "provider returned an invalid response",
+                code=GenerationFailureCode.PROVIDER_INVALID_RESPONSE,
+            )
+        emit_event(
+            "provider.call.complete",
+            caseId=getattr(attempt, "case_id", None),
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            stage=stage.value,
+            provider="ollama",
+            model=getattr(self._settings, "ollama_model", None),
+            success=True,
+            requestBytes=len(prompt.encode("utf-8")),
+            responseBytes=len(result.content.encode("utf-8")),
+            structuredOutput=True,
+            configuredProviderTimeoutMs=configured_timeout_ms,
+            effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+            deadlineRemainingMs=_remaining_ms(attempt),
+        )
         return result.content
 
     def _stage_parse(

@@ -46,6 +46,7 @@ _VERSION_PATH = Path(ge=1, le=MAX_CASE_VERSION)
 @router.post(
     "",
     response_model=CaseStartedDTO,
+    response_model_exclude_none=True,
     status_code=201,
     summary="Create / start a private case generation",
     description=(
@@ -77,6 +78,7 @@ def create_case(
         generationAttemptId=started.generation_attempt_id,
         creatorAccessToken=started.creator_access_token,
         status=started.status,
+        failureCode=started.failure_code,
     )
 
 

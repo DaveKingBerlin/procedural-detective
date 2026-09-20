@@ -20,15 +20,16 @@ describe("/new — Phase 17D Bugfix PART B example-prompt selector (static rende
       </MemoryRouter>,
     );
 
-  it("renders the compact 'Try an example:' section under the prompt textarea", () => {
+  it("renders the example section with the three buttons (no redundant heading)", () => {
     const markup = html();
-    // Section + heading + the three buttons with their contract test-ids.
+    // Section + the three buttons keep their contract test-ids; the redundant
+    // "Try an example:" heading is gone (Phase 17E PART J).
     expect(markup).toContain('data-testid="example-prompts"');
-    expect(markup).toContain('data-testid="example-prompts-heading"');
-    expect(markup).toContain("Try an example:");
     expect(markup).toContain('data-testid="example-easy"');
     expect(markup).toContain('data-testid="example-medium"');
     expect(markup).toContain('data-testid="example-hard"');
+    expect(markup).not.toContain('data-testid="example-prompts-heading"');
+    expect(markup).not.toContain("Try an example:");
   });
 
   it("shows the label + helper copy of every example on its button", () => {
@@ -86,12 +87,74 @@ describe("/new — Phase 17D Bugfix PART B example-prompt selector (static rende
     expect(lowered).not.toContain("4551660f4a46b2eb");
   });
 
-  it("keeps the existing 'Use example prompt' and demo flows intact", () => {
+  it("removes the redundant 'Use example prompt' button while keeping the demo flows", () => {
     const markup = html();
-    expect(markup).toContain('data-testid="use-example-prompt"');
-    expect(markup).toContain("Use example prompt");
+    // Phase 17E PART J — the redundant button is GONE (new contract).
+    expect(markup).not.toContain('data-testid="use-example-prompt"');
+    expect(markup).not.toContain("Use example prompt");
+    // The deterministic demo link remains separate and unchanged.
     expect(markup).toContain('data-testid="try-demo-from-new"');
     expect(markup).toContain("Try the demo case");
+  });
+});
+
+describe("Phase 17E PART K — /new UI cleanup regression (static render)", () => {
+  const html = () =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage />
+      </MemoryRouter>,
+    );
+
+  it("K6 — the redundant 'Use example prompt' button is GONE (query returns nothing)", () => {
+    const markup = html();
+    expect(markup).not.toContain('data-testid="use-example-prompt"');
+    expect(markup).not.toContain("Use example prompt");
+  });
+
+  it("K7 — the redundant 'Try an example:' label is GONE while the section/testids remain", () => {
+    const markup = html();
+    expect(markup).not.toContain("Try an example:");
+    expect(markup).not.toContain('data-testid="example-prompts-heading"');
+    // The plugin-compatible section + the three card test-ids are preserved.
+    expect(markup).toContain('data-testid="example-prompts"');
+    expect(markup).toContain('data-testid="example-easy"');
+    expect(markup).toContain('data-testid="example-medium"');
+    expect(markup).toContain('data-testid="example-hard"');
+  });
+
+  it("K8 — [ Generate case ] remains present", () => {
+    const markup = html();
+    expect(markup).toContain('data-testid="generate-case"');
+    expect(markup).toContain("Generate case");
+  });
+
+  it("K9 — Difficulty remains present", () => {
+    const markup = html();
+    expect(markup).toContain('data-testid="difficulty-select"');
+    expect(markup).toContain("Difficulty (optional)");
+  });
+
+  it("K10 — Generation mode remains present", () => {
+    // Render with capabilities that expose the generation-mode selector.
+    const markup = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage
+          capabilities={{ modes: [{ id: "demo", available: true }] }}
+        />
+      </MemoryRouter>,
+    );
+    // Demo-only caps render the "Demo mode active" notice (no selector).
+    expect(markup).toContain('data-testid="generation-mode-demo-notice"');
+    expect(markup).toContain("Demo mode active");
+  });
+
+  it("K11 — the deterministic demo link remains unchanged", () => {
+    const markup = html();
+    expect(markup).toContain('data-testid="try-demo-from-new"');
+    expect(markup).toContain("Try the demo case");
+    expect(markup).toContain('data-testid="try-demo-note"');
+    expect(markup).toContain("Deterministic demo — no API keys, no cost.");
   });
 });
 
@@ -123,7 +186,7 @@ describe("validatePrompt — /new form validation", () => {
   });
 });
 
-describe("examplePromptText — the \"Use example prompt\" fill target", () => {
+describe("examplePromptText — the deterministic demo prompt fill target", () => {
   it("is the REQUIREMENTS 48 Case A input VERBATIM (user input, no solution logic)", () => {
     const expected = [
       "Victim: Sarah Miller",
@@ -167,12 +230,12 @@ describe("/new form rendering", () => {
     expect(markup).toContain("<option value=\"hard\">Hard</option>");
   });
 
-  it("renders the Generate case, Use example prompt and demo-link actions", () => {
+  it("renders the Generate case and demo-link actions (no redundant example button)", () => {
     const markup = html();
     expect(markup).toContain('data-testid="generate-case"');
     expect(markup).toContain("Generate case");
-    expect(markup).toContain('data-testid="use-example-prompt"');
-    expect(markup).toContain("Use example prompt");
+    expect(markup).not.toContain('data-testid="use-example-prompt"');
+    expect(markup).not.toContain("Use example prompt");
     expect(markup).toContain('data-testid="try-demo-from-new"');
     expect(markup).toContain("Try the demo case");
   });

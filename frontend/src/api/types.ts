@@ -330,6 +330,7 @@ export interface CreateCaseResponse {
   /** Appears exactly once, at creation — never stored by the client. */
   creatorAccessToken: string;
   status: string;
+  failureCode?: string | null;
 }
 
 /** GET /api/v1/generations/{generationId} -> 200 (Bearer creatorAccessToken). */
@@ -342,6 +343,7 @@ export interface GenerationStatusResponse {
   progress: number;
   /** Internal-safe stage text (mapped client-side to friendly labels). */
   stage: string | null;
+  failureCode?: string | null;
 }
 
 /** POST /api/v1/cases/{caseId}/versions/{caseVersion}/playthroughs -> 201. */

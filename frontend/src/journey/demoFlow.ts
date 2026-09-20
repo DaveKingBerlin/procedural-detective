@@ -69,7 +69,12 @@ export const POLL_MAX_DELAY_MS = 2000;
 export const PLAYTHROUGH_CASE_VERSION = 1;
 
 /** Typed failure kinds with distinct safe messages (never raw internals). */
-export type DemoFailureKind = "failed" | "quota" | "retryable";
+export type DemoFailureKind =
+  | "failed"
+  | "deadline"
+  | "provider"
+  | "quota"
+  | "retryable";
 
 export interface DemoFlowFailure {
   kind: DemoFailureKind;
@@ -104,6 +109,9 @@ export interface DemoProgress {
 /** Player-safe failure messages — the ONLY strings the journey surfaces. */
 export const DEMO_FAILURE_MESSAGES = Object.freeze({
   failed: "This prompt could not be turned into a solvable case. Adjust the prompt, then try again.",
+  deadline: "Generation exceeded its time budget. Please try again.",
+  providerTimeout: "The AI provider took too long to respond. Please try again.",
+  providerUnavailable: "The AI generation service is currently unavailable. Please try again.",
   quota: "Too many cases are being generated right now. Wait a few moments, then try again.",
   network: "The case service could not be reached. Check your connection, then try again.",
   server: "The case service reported a temporary problem. Please try again.",
@@ -193,10 +201,10 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
     return { ok: false, failure: mapDemoError(error) };
   }
 
-  const { caseId, generationId, creatorAccessToken, status } = created;
+  const { caseId, generationId, creatorAccessToken, status, failureCode } = created;
 
   if (status === "FAILED") {
-    return { ok: false, failure: generationFailed() };
+    return { ok: false, failure: generationFailed(failureCode) };
   }
 
   if (status !== "PUBLISHED") {
@@ -221,7 +229,7 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
         break;
       }
       if (polled.status === "FAILED") {
-        return { ok: false, failure: generationFailed() };
+        return { ok: false, failure: generationFailed(polled.failureCode) };
       }
       if (attempt >= maxPolls) {
         return { ok: false, failure: { kind: "retryable", message: DEMO_FAILURE_MESSAGES.tooSlow } };
@@ -260,6 +268,19 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
   }
 }
 
-function generationFailed(): DemoFlowFailure {
+function generationFailed(failureCode?: string | null): DemoFlowFailure {
+  if (failureCode === "GENERATION_DEADLINE_EXCEEDED") {
+    return { kind: "deadline", message: DEMO_FAILURE_MESSAGES.deadline };
+  }
+  if (failureCode === "PROVIDER_TIMEOUT") {
+    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.providerTimeout };
+  }
+  if (
+    failureCode === "PROVIDER_UNAVAILABLE" ||
+    failureCode === "PROVIDER_INVALID_RESPONSE" ||
+    failureCode === "PROVIDER_CALL_BUDGET_EXHAUSTED"
+  ) {
+    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.providerUnavailable };
+  }
   return { kind: "failed", message: DEMO_FAILURE_MESSAGES.failed };
 }
