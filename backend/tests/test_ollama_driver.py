@@ -16,6 +16,7 @@ bronze_ceremonial_ice_pick / stolen_research_data (all_true).
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -254,6 +255,128 @@ def test_18_evidence_stage():
     # carries — the model's raw propositions are shaping input, not copied
     # verbatim.
     assert any(f.id == "d_ev_weapon_true" for f in record.draft.evidence)
+
+
+def _invalid_raw_evidence(*, semantic: bool) -> dict:
+    """Raw EVIDENCE payloads that must never escape the strict parser."""
+    payload = _evidence()
+    payload["evidence"][0]["id"] = (
+        "raw_cross_field_must_not_leak" if semantic else "raw_token_must_not_leak"
+    )
+    proposition = payload["evidence"][0]["propositions"][0]
+    if semantic:
+        # Exact allowed type, but invalid Phase 3 semantics: the required
+        # claimedDeparture field is absent.
+        proposition.clear()
+        proposition.update({"type": "ALIBI_TIME_CLAIM", "personId": "anna_weiss", "structured": {}})
+    else:
+        proposition["type"] = "RAW_UNKNOWN_PROPOSITION_TOKEN"
+    return payload
+
+
+@pytest.mark.parametrize("semantic", (False, True))
+def test_18a_malformed_evidence_uses_local_projection_without_remote_retry(caplog, semantic):
+    """A rejected raw evidence response is locally replaced, not retried.
+
+    This drives the real controller/driver with the Ollama transport mock.  It
+    proves the exact production topology remains CASE -> EVIDENCE -> WORLD ->
+    ASSET_SPEC while the normal validators and solver certify the projection.
+    """
+    raw = _j(_invalid_raw_evidence(semantic=semantic))
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        record, transport = _run(
+            [_j(_case_people()), raw, _j(_world()), ICEPICK_SPEC],
+            max_llm_calls_per_generation=8,
+        )
+
+    assert record.state is GenerationState.PUBLISHED
+    assert transport.call_count == 4
+    assert record.budget.calls == 4
+    assert "world_requirements_v1" in transport.prompt_of_call(2)
+    assert record.deferred_structural == ()
+    assert record.last_validation.valid is True
+    assert record.last_validation.validation.all_true is True
+    assert record.solver_proof is not None
+    assert record.solver_proof.who.unique
+    assert record.solver_proof.why.unique
+    assert record.solver_proof.weapon.unique
+
+    from app.domain.evidence import PROPOSITION_TYPES, validate_evidence
+    from app.generation import pipeline
+    from app.services.publication import serialize_published_payload
+
+    public, evidence, _truth, _draft = pipeline.assemble(record)
+    assert validate_evidence(public, evidence) == ()
+    person_ids = {person.person_id for person in public.persons}
+    location_ids = {location.location_id for location in public.locations}
+    motive_ids = {motive.motive_id for motive in public.motives}
+    object_ids = {obj.object_id for obj in public.objects}
+    for fact in evidence:
+        for proposition in fact.propositions:
+            assert proposition.type in PROPOSITION_TYPES
+            assert proposition.person_id is None or proposition.person_id in person_ids
+            assert proposition.location_id is None or proposition.location_id in location_ids
+            assert proposition.motive_id is None or proposition.motive_id in motive_ids
+            assert proposition.object_id is None or proposition.object_id in object_ids
+
+    published_json = serialize_published_payload(record.published, title="t")
+    assert "raw_token_must_not_leak" not in published_json
+    assert "raw_cross_field_must_not_leak" not in published_json
+    assert "RAW_UNKNOWN_PROPOSITION_TOKEN" not in published_json
+
+    projection_events = [
+        event for event in caplog.records
+        if getattr(event, "pd_event", None) == "evidence.local_projection.used"
+    ]
+    assert len(projection_events) == 1
+    assert getattr(projection_events[0], "pd_fields") == {
+        "generationAttemptId": record.attempt_id,
+        "reasonCode": "STRUCTURED_OUTPUT_INVALID",
+        "originalStage": "evidence",
+        "providerCallCount": 2,
+        "projectionValid": True,
+        "elapsedMs": getattr(projection_events[0], "pd_fields")["elapsedMs"],
+    }
+
+
+def test_18b_valid_evidence_keeps_existing_ollama_path_without_local_projection(caplog):
+    """Valid Ollama evidence remains the same four-call published flow."""
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        record, transport = _run(_staged(), max_llm_calls_per_generation=8)
+
+    assert record.state is GenerationState.PUBLISHED
+    assert transport.call_count == 4
+    assert record.budget.calls == 4
+    assert record.deferred_structural == ()
+    assert not any(
+        getattr(event, "pd_event", None) == "evidence.local_projection.used"
+        for event in caplog.records
+    )
+
+
+def test_18c_invalid_deterministic_projection_stays_fail_closed(monkeypatch, caplog):
+    """A raw-evidence parse failure never publishes when local recovery fails."""
+    import app.services.ollama_driver as driver_module
+
+    monkeypatch.setattr(driver_module, "_evidence_gap_facts", lambda *_args: (None, (), ()))
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        record, transport = _run(
+            [_j(_case_people()), "<not-json>", _j(_world()), ICEPICK_SPEC],
+            max_llm_calls_per_generation=8,
+            max_repair_passes=0,
+            max_full_regenerations=0,
+        )
+
+    assert record.state is GenerationState.FAILED
+    assert record.published is None
+    assert transport.call_count == 4
+    assert record.budget.calls == 4
+    projection_events = [
+        event for event in caplog.records
+        if getattr(event, "pd_event", None) == "evidence.local_projection.used"
+    ]
+    assert len(projection_events) == 1
+    assert getattr(projection_events[0], "pd_fields")["projectionValid"] is False
 
 
 def test_19_world_requirements_stage():

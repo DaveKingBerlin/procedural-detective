@@ -24,6 +24,7 @@ _SAFE_FIELDS = frozenset(
         "providerCallCount", "repairCount", "regenerationCount", "provider", "model",
         "requestBytes", "responseBytes", "structuredOutput", "success", "published",
         "failureCode", "validationOutcome", "assetRequestCount", "assetRepairCount",
+        "reasonCode", "originalStage", "projectionValid",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

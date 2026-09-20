@@ -32,6 +32,7 @@ from app.assets.specs import (  # noqa: E402
     PRIMITIVE_ALLOWLIST,
 )
 from app.assets.catalog import CATEGORY_ALLOWLIST  # noqa: E402
+from app.domain.evidence import PROPOSITION_TYPES  # noqa: E402
 from app.generation import prompts  # noqa: E402
 
 
@@ -164,3 +165,16 @@ def test_empty_placeholders_are_filled():
     assert "__ISSUES__" not in prompts.build_asset_spec_repair_prompt(
         "ice pick", "{}", ("i",)
     )
+
+
+def test_evidence_transport_schema_uses_the_strict_proposition_enum():
+    """Ollama's grammar gets the parser's closed vocabulary, not just string."""
+    schema = prompts.schema_contract_as_json_schema("evidence")
+    proposition_type = (
+        schema["properties"]["evidence"]["items"]["properties"]
+        ["propositions"]["items"]["properties"]["type"]
+    )
+    assert proposition_type == {
+        "type": "string",
+        "enum": sorted(PROPOSITION_TYPES),
+    }

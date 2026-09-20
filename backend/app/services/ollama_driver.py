@@ -1502,6 +1502,7 @@ class OllamaStageDriver:
             ),
             "evidence",
             deferred,
+            retry_on_parse_failure=False,
         )
 
         # --- 2b. deterministic evidence completion (Phase17 Wave-2) ----------
@@ -1510,9 +1511,24 @@ class OllamaStageDriver:
         # own public tokens + locked ids + locked canonical time; still fully
         # solver-validated. Never hides, never fakes, never bypasses the
         # solver.
+        projection_started = time.perf_counter()
         completed_spec, extra_rules, injected = _evidence_gap_facts(
             attempt, crime, public, evidence_spec
         )
+        if evidence_spec is None:
+            # The rejected raw evidence is never retained in ``deferred`` and
+            # never enters the draft.  The existing driver-owned projection is
+            # the local recovery path; normal draft/solver validation below
+            # remains the authority for whether it can publish.
+            emit_event(
+                "evidence.local_projection.used",
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                reasonCode=GenerationFailureCode.STRUCTURED_OUTPUT_INVALID.value,
+                originalStage=GenerationStage.EVIDENCE.value,
+                providerCallCount=getattr(attempt.budget, "calls", None),
+                projectionValid=completed_spec is not None,
+                elapsedMs=int((time.perf_counter() - projection_started) * 1000),
+            )
         self.last_evidence_injections = tuple(injected)
         self.last_evidence_completed = bool(injected or extra_rules)
         if completed_spec is not None:
@@ -1798,15 +1814,21 @@ class OllamaStageDriver:
         parse_fn: Callable[[str], Any],
         label: str,
         deferred: list[str],
+        *,
+        retry_on_parse_failure: bool = True,
     ) -> Any:
-        """ONE stage call + strict parse, with ONE bounded parse retry.
+        """ONE stage call + strict parse, with an optional bounded retry.
 
         Real Hermes occasionally slips a single stage contract (e.g. omits a
         required proposition field) even after the smoke determinism fixes;
         a stage REPEAT with the sanitized strict-parse issue as feedback fixes
         those without weakening the parser. Every attempt is a REAL budgeted
         provider call; the global 8-call budget stays authoritative. Provider
-        failures are never retried (terminal per attempt).
+        failures are never retried (terminal per attempt).  Callers with an
+        application-owned deterministic replacement may set
+        ``retry_on_parse_failure=False``: the rejected raw response is then
+        neither retried nor recorded as a deferred draft defect.  The caller
+        must still route its replacement through normal validation.
         """
         content = self._call(provider, attempt, stage, prompt, budget)
         if content is None:
@@ -1815,6 +1837,8 @@ class OllamaStageDriver:
         try:
             return parse_fn(content)
         except (TypeError, ValueError) as exc:
+            if not retry_on_parse_failure:
+                return None
             retry_prompt = (
                 f"{prompt}\n\nThe previous response failed the strict "
                 f"application parser: {exc}\n"

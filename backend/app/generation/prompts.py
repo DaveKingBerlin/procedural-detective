@@ -51,6 +51,7 @@ from app.assets.specs import (
     MIN_PART_SCALE,
     PRIMITIVE_ALLOWLIST,
 )
+from app.domain.evidence import PROPOSITION_TYPES
 
 # --- schema-contract builder (deterministic, authoritative) ----------------
 #
@@ -59,6 +60,8 @@ from app.assets.specs import (
 # authoritative schema modules so the prompt and the strict parser share one
 # source of truth. Every bound in the rendered text is literally the constant
 # value (interpolated, never a copy).
+
+_PROPOSITION_TYPE_HINT_PREFIX = "use EXACTLY one of the proposition type tokens:"
 
 
 def _canonical_concept_sentence(concept: str | None) -> str:
@@ -484,6 +487,10 @@ def _contract_to_json_schema(node: Any) -> dict[str, Any]:
     if isinstance(node, (int, float)):
         return {"type": "number"}
     hint = str(node)
+    if hint.startswith(_PROPOSITION_TYPE_HINT_PREFIX):
+        # The strict evidence parser owns this vocabulary. Give Ollama's JSON
+        # Schema grammar that exact enum instead of merely accepting a string.
+        return {"type": "string", "enum": sorted(PROPOSITION_TYPES)}
     if "[x,y,z]" in hint:
         return {
             "type": "object",

@@ -29,6 +29,7 @@ from app.generation.admission import AdmissionController, AdmissionDenied  # noq
 from app.generation.clock import ManualClock  # noqa: E402
 from app.generation.controller import GenerationController  # noqa: E402
 from app.generation.constraints import LockedConstraints  # noqa: E402
+from app.domain.evidence import PROPOSITION_TYPES  # noqa: E402
 from app.generation.fake_provider import FakeProvider  # noqa: E402
 from app.generation.ids import IdSource  # noqa: E402
 from app.generation.ollama_provider import (  # noqa: E402
@@ -159,6 +160,7 @@ def _provider(
     base_url: str = OLLAMA_BASE,
     model: str = OLLAMA_MODEL,
     timeout_seconds: float = 5.0,
+    structured_output: bool = False,
 ) -> OllamaProvider:
     return OllamaProvider(
         base_url=base_url,
@@ -167,6 +169,7 @@ def _provider(
         temperature=0.2,
         num_ctx=4096,
         transport=transport,
+        structured_output=structured_output,
     )
 
 
@@ -274,6 +277,20 @@ def test_02_valid_response_maps_to_provider_result_content():
     assert result.error is None
     assert result.timed_out is False
     assert result.pending is False
+
+
+def test_02a_evidence_request_sends_the_closed_proposition_enum_schema():
+    transport = MockOllamaTransport(posts=['{"evidence":[]}'])
+    result = _provider(transport, structured_output=True).generate(
+        _request(stage=GenerationStage.EVIDENCE)
+    )
+    assert result.content == '{"evidence":[]}'
+    schema = transport.post_calls[0][1]["format"]
+    proposition_type = (
+        schema["properties"]["evidence"]["items"]["properties"]
+        ["propositions"]["items"]["properties"]["type"]
+    )
+    assert proposition_type["enum"] == sorted(PROPOSITION_TYPES)
 
 
 def test_02b_top_level_content_field_also_accepted():
