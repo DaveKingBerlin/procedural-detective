@@ -30,6 +30,9 @@ import FocusInspection from "../scene/FocusInspection";
 import { tooltipForHover, type ObjectTooltipModel } from "../scene/objectTooltip";
 import { createInvestigationScene } from "../scene/renderInvestigation";
 import type { InvestigationSceneHandle } from "../scene/renderInvestigation";
+import { loadHypothesis, saveHypothesis, type HypothesisPins } from "../notebook/hypothesisStore";
+import { buildNotebookModel } from "../notebook/notebookModel";
+import NotebookPanel from "../notebook/NotebookPanel";
 
 type PageStatus =
   | { status: "loading" }
@@ -82,6 +85,15 @@ export default function ScenePage() {
    * setState per poll when positions actually moved.
    */
   const [captionPos, setCaptionPos] = useState<Readonly<Record<string, { x: number; y: number }>>>({});
+  /**
+   * Phase 18C — Detective Notebook drawer state. `notebookOpen` is pure UI;
+   * `notebookRev` bumps when the lazy read-record hydration lands so the
+   * notebook re-derives from the now-populated record cache; `pins` are the
+   * PLAYER-NOTES-ONLY hypothesis pins (namespaced localStorage, never sent).
+   */
+  const [notebookOpen, setNotebookOpen] = useState(true);
+  const [notebookRev, setNotebookRev] = useState(0);
+  const [pins, setPins] = useState<HypothesisPins>(() => loadHypothesis(getPlaythroughId() ?? ""));
 
   const retry = () => {
     setRunId((n) => n + 1);
@@ -174,6 +186,11 @@ export default function ScenePage() {
     setSelectedObjectId(null);
     setCaptionPos({});
     sceneHandleRef.current = null;
+    // Phase 18C: the notebook reloads THIS playthrough's player pins (the
+    // localStorage namespace is per-playthrough, so a different playthrough
+    // cannot bleed pins in).
+    setPins(loadHypothesis(playthroughId));
+    setNotebookOpen(true);
 
     const services = { getInvestigation, interactObject, discoverEvidence, readRecord };
     const session = new InvestigationSession(
@@ -204,6 +221,14 @@ export default function ScenePage() {
         sessionRef.current = session;
         setStatus({ status: "ready", model: outcome.model });
         setSceneStatus("ready");
+        // Phase 18C: after a reload the read-record cache is empty; lazily
+        // hydrate ONLY ids the server confirmed READ (the notebook re-derives
+        // from world-object labels until the records land — never blocks).
+        if (session.knowledgeSnapshot && session.knowledgeSnapshot.readEvidenceIds.length > 0) {
+          void session.hydrateNotebookRecords().then(() => {
+            if (!cancelled) setNotebookRev((n) => n + 1);
+          });
+        }
       } else {
         sessionRef.current = null;
         setStatus({
@@ -261,6 +286,29 @@ export default function ScenePage() {
   const interacted =
     hasInteracted || (knowledge != null && knowledge.discoveredEvidenceIds.length > 0);
   const lifecycle = sessionRef.current?.bootstrapState;
+
+  // Phase 18C: the Detective Notebook model. Derived fresh on every render
+  // from the session's server-authoritative knowledge + read-record cache +
+  // world objects. `notebookRev` is consumed here so a lazy read-record
+  // hydration forces a re-derivation (groups catch up without a reload).
+  const session = sessionRef.current;
+  void notebookRev; // re-derive when the lazy record hydration lands
+  const notebookModel =
+    status.status === "ready" && session !== null
+      ? buildNotebookModel({
+          discoveredEvidenceIds: session.discoveredEvidenceIdsSnapshot(),
+          readEvidenceIds: session.readEvidenceIdsSnapshot(),
+          worldObjects: status.model.worldObjects,
+          records: session.recordCacheSnapshot(),
+        })
+      : null;
+
+  /** Persist player-authored pins ONLY (namespaced localStorage per playthrough). */
+  const handlePinsChanged = (next: HypothesisPins) => {
+    setPins(next);
+    const playthroughId = getPlaythroughId();
+    if (playthroughId) saveHypothesis(playthroughId, next);
+  };
 
   // Phase 15: floating captions for DISCOVERED evidence only. The text comes
   // from what the player already saw (record titles / public registry labels).
@@ -478,6 +526,20 @@ export default function ScenePage() {
                 </ul>
               )}
             </div>
+          )}
+
+          {/* Phase 18C: the Detective Notebook — a compact drawer listing ONLY
+              discovered, player-safe information, plus the player's private
+              hypothesis pins (localStorage only, never sent to the server). */}
+          {notebookModel !== null && (
+            <NotebookPanel
+              model={notebookModel}
+              candidates={sessionRef.current?.candidatesSnapshot ?? null}
+              pins={pins}
+              open={notebookOpen}
+              onToggle={() => setNotebookOpen((open) => !open)}
+              onPinsChanged={handlePinsChanged}
+            />
           )}
 
           <div className="scene-objects" data-testid="scene-objects">

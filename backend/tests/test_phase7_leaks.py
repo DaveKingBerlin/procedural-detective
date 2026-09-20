@@ -54,7 +54,8 @@ RESULT_KEYS = {
 }
 SCORE_KEYS = {"correctDimensions", "totalDimensions"}
 TIMELINE_ENTRY_KEYS = {"time", "description"}
-EXPLANATION_KEYS = {"evidence"}
+EXPLANATION_KEYS = {"evidence", "dimensions"}
+DIMENSION_KEYS = {"who", "why", "weapon", "when"}
 EVIDENCE_POINT_KEYS = {"evidenceId", "title", "point"}
 
 
@@ -149,6 +150,15 @@ def test_n25_reveal_dto_no_internal_material(phase5_app):
     assert set(reveal["explanation"].keys()) == EXPLANATION_KEYS
     for point in reveal["explanation"]["evidence"]:
         assert set(point.keys()) == EVIDENCE_POINT_KEYS
+    # Phase18C per-dimension proof board: exactly the four dimensions, every
+    # entry an EvidencePointDTO with a non-empty public title and a map phrase.
+    dimensions = reveal["explanation"]["dimensions"]
+    assert set(dimensions.keys()) == DIMENSION_KEYS
+    for dimension_points in dimensions.values():
+        assert isinstance(dimension_points, list)
+        for point in dimension_points:
+            assert set(point.keys()) == EVIDENCE_POINT_KEYS
+            assert point["evidenceId"] and point["title"] and point["point"]
 
     assert_no_reveal_internal_material(reveal, known_tokens={pt_token})
     text = json.dumps(reveal, sort_keys=True)

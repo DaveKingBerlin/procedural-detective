@@ -1,4 +1,4 @@
-import type { RevealResponse } from "../api/types";
+import type { ExplanationPointDTO, RevealExplanationDimensionsDTO, RevealResponse } from "../api/types";
 import { ValidationError } from "../scene/validation";
 
 /**
@@ -56,6 +56,41 @@ function parseAccusation(raw: unknown): { murdererId: string; motiveId: string; 
   };
 }
 
+/* ======================================================================
+ * Phase 18C — lenient parser for the OPTIONAL post-reveal `dimensions`
+ * block (the proof-board grouping).
+ *
+ * This block is deliberately NOT allowed to fail the reveal: an older
+ * server omits it entirely, and a malformed block must degrade to the
+ * flat-list fallback grouping — never a ValidationError, never a crash.
+ * Every entry is allowlisted to exactly {evidenceId, title, point};
+ * anything else in a list is DROPPED (unknown fields can never survive
+ * into the proof board or the bundle's runtime data).
+ * ==================================================================== */
+
+function parseOptionalPointList(value: unknown): ExplanationPointDTO[] | null {
+  if (!Array.isArray(value)) return null;
+  const points: ExplanationPointDTO[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const { evidenceId, title, point } = entry;
+    if (typeof evidenceId === "string" && typeof title === "string" && typeof point === "string") {
+      points.push({ evidenceId, title, point });
+    }
+  }
+  return points;
+}
+
+function parseOptionalDimensions(raw: unknown): RevealExplanationDimensionsDTO | null {
+  if (!isRecord(raw)) return null;
+  const who = parseOptionalPointList(raw.who);
+  const why = parseOptionalPointList(raw.why);
+  const weapon = parseOptionalPointList(raw.weapon);
+  const when = parseOptionalPointList(raw.when);
+  if (who === null && why === null && weapon === null && when === null) return null;
+  return { who: who ?? [], why: why ?? [], weapon: weapon ?? [], when: when ?? [] };
+}
+
 export function parseRevealResponse(raw: unknown): RevealResponse {
   if (!isRecord(raw)) {
     throw new ValidationError("Reveal response must be an object.");
@@ -105,6 +140,10 @@ export function parseRevealResponse(raw: unknown): RevealResponse {
   if (!Array.isArray(evidenceRaw)) {
     throw new ValidationError("reveal.explanation.evidence must be an array.");
   }
+  // Phase 18C: the proof-board `dimensions` block is OPTIONAL — a malformed
+  // or absent block is dropped (null), never fatal; the reveal screen falls
+  // back to a heuristic grouping of the flat evidence list.
+  const dimensions = parseOptionalDimensions(explanationRaw.dimensions);
 
   return {
     playthroughId,
@@ -152,6 +191,7 @@ export function parseRevealResponse(raw: unknown): RevealResponse {
           point: requireString(entry, "point", `reveal.explanation.evidence[${index}]`),
         };
       }),
+      ...(dimensions !== null ? { dimensions } : {}),
     },
   };
 }

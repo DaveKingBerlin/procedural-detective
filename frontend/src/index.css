@@ -1529,3 +1529,290 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+/* ======================================================================
+ * Phase 18C — Detective Notebook, player hypothesis & post-reveal proof
+ * board.
+ * ==================================================================== */
+
+/* -------------------------- Detective Notebook ----------------------- */
+
+.notebook-drawer {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.8rem 1.05rem;
+  margin: 0.6rem 0;
+}
+
+.notebook-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.notebook-heading {
+  margin: 0;
+  font-size: 1.02rem;
+  letter-spacing: 0.02em;
+}
+
+.notebook-toggle {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notebook-toggle:hover,
+.notebook-toggle:focus-visible {
+  background: rgba(230, 180, 85, 0.12);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.notebook-body {
+  margin-top: 0.5rem;
+}
+
+.notebook-intro {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0 0 0.7rem;
+}
+
+.notebook-group {
+  border-top: 1px solid var(--border);
+  padding: 0.5rem 0 0.35rem;
+}
+
+.notebook-group-title {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.notebook-group-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.15rem;
+}
+
+.notebook-entry {
+  margin: 0.2rem 0;
+  overflow-wrap: anywhere;
+  font-size: 0.92rem;
+}
+
+.notebook-entry-read {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.notebook-group-empty {
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin: 0.2rem 0 0;
+}
+
+/* --------------------------- Hypothesis (pins) ------------------------ */
+
+.hypothesis-block {
+  border-top: 1px solid var(--border);
+  padding: 0.5rem 0 0.4rem;
+  margin-top: 0.4rem;
+}
+
+.hypothesis-block h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.hypothesis-note,
+.hypothesis-use-hint {
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin: 0.2rem 0 0.5rem;
+}
+
+.hypothesis-unavailable {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0.2rem 0 0;
+}
+
+.hypothesis-pickers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem 0.9rem;
+  align-items: center;
+}
+
+.hypothesis-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.hypothesis-label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.hypothesis-field select,
+.hypothesis-field input {
+  background: #0d1016;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  max-width: 100%;
+}
+
+.hypothesis-field select:focus-visible,
+.hypothesis-field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* "Use my hypothesis" affordance on the accusation page. */
+.hypothesis-use {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.7rem 1rem;
+  margin: 0.6rem 0;
+}
+
+.hypothesis-use-note {
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin: 0 0 0.5rem;
+}
+
+.hypothesis-use button {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  padding: 0.5rem 1rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hypothesis-use button:hover,
+.hypothesis-use button:focus-visible {
+  background: rgba(230, 180, 85, 0.12);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ------------------------ Post-reveal proof board ---------------------- */
+
+.reveal-proof-board {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  margin: 1rem 0;
+}
+
+.reveal-proof-board h3 {
+  margin: 0 0 0.3rem;
+  font-size: 1.04rem;
+}
+
+.reveal-proof-note {
+  color: var(--muted);
+  font-size: 0.87rem;
+  margin: 0 0 0.7rem;
+}
+
+.reveal-proof-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+/* Four compact proof cards with pure-CSS connecting rails: a horizontal
+ * header rail shared across the row plus a short vertical stub down into
+ * each card — a cheap "chain of proof" grouping with no node editor. */
+.reveal-proof-card {
+  position: relative;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: #0d1016;
+  padding: 0.6rem 0.7rem;
+  min-width: 0;
+}
+
+.reveal-proof-card::before {
+  content: "";
+  position: absolute;
+  top: -0.85rem;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--accent);
+}
+
+.reveal-proof-cards > .reveal-proof-card:first-child::before {
+  display: none;
+}
+
+.reveal-proof-cards > .reveal-proof-card:first-child::after {
+  content: "";
+  position: absolute;
+  top: -0.85rem;
+  left: 0;
+  width: 1px;
+  height: 0.85rem;
+  border-left: 1px solid var(--accent);
+}
+
+.reveal-proof-card-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.92rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.reveal-proof-empty {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0.15rem 0 0;
+}
+
+.reveal-proof-nodes {
+  margin: 0.2rem 0 0;
+  padding-left: 0.9rem;
+}
+
+.reveal-proof-node {
+  margin: 0.3rem 0;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 860px) {
+  .reveal-proof-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .reveal-proof-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .hypothesis-pickers {
+    grid-template-columns: 1fr;
+  }
+}

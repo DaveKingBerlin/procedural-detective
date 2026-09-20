@@ -320,6 +320,28 @@ def evidence_ids_used_of(payload: Mapping[str, Any]) -> tuple[str, ...]:
     return ()
 
 
+def _evidence_point_of(
+    evidence_id: str, fact: Mapping[str, Any] | None
+) -> dict[str, str] | None:
+    """One player-safe EvidencePointDTO dict for an evidence id, or None when
+    the fact is unknown / not publicly discoverable / carries no public
+    presentation title (the SAME allowlist filter as ``explanation_evidence_of``
+    and the Phase18C dimension projection — one shared rule)."""
+    if fact is None:
+        return None
+    if fact.get("discoverable") is False:
+        return None
+    presentation = fact.get("presentation")
+    title = presentation.get("title") if isinstance(presentation, Mapping) else None
+    if not isinstance(title, str) or not title:
+        return None
+    return {
+        "evidenceId": evidence_id,
+        "title": title,
+        "point": point_for_kind(str(fact.get("kind"))),
+    }
+
+
 def explanation_evidence_of(
     payload: Mapping[str, Any],
 ) -> list[dict[str, str]]:
@@ -333,23 +355,120 @@ def explanation_evidence_of(
     facts = evidence_by_id(payload)
     out: list[dict[str, str]] = []
     for evidence_id in evidence_ids_used_of(payload):
-        fact = facts.get(evidence_id)
-        if fact is None:
-            continue
-        if fact.get("discoverable") is False:
-            continue
-        presentation = fact.get("presentation")
-        title = presentation.get("title") if isinstance(presentation, Mapping) else None
-        if not isinstance(title, str) or not title:
-            continue
-        out.append(
-            {
-                "evidenceId": evidence_id,
-                "title": title,
-                "point": point_for_kind(str(fact.get("kind"))),
-            }
-        )
+        point = _evidence_point_of(evidence_id, facts.get(evidence_id))
+        if point is not None:
+            out.append(point)
     return out
+
+
+_DIMENSION_NAMES = ("who", "why", "weapon", "when")
+
+# The serialized ``solverProof`` block carries the per-dimension usable
+# evidence ids under these snake_case keys (serialized dataclass fields of
+# ``app.validation.solution.SolutionProof``; ``when`` reuses the already
+# persisted ``time.critical_evidence_ids``).
+_DIMENSION_REF_KEYS = {
+    "who": "who_evidence_ids",
+    "why": "why_evidence_ids",
+    "weapon": "weapon_evidence_ids",
+}
+
+
+def _dimension_refs_of(payload: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Per-dimension usable evidence id references from the pinned payload's
+    ``solverProof`` block (Phase18C).
+
+    WHO/WHY/WEAPON read the per-dimension refs serialized at publish time from
+    the deduction proof's rule-outcome evidence ids; WHEN reuses
+    ``time.critical_evidence_ids``. Every list is sorted + stringified. A
+    missing/corrupt ref key degrades to an empty tuple (the empty-proof
+    resilience contract: empty refs -> empty dimension lists, reveal still
+    200s).
+    """
+    proof = _solver_proof_of(payload)
+
+    def _ids(key: str) -> tuple[str, ...]:
+        value = proof.get(key)
+        if isinstance(value, (list, tuple)):
+            return tuple(sorted(str(i) for i in value))
+        return ()
+
+    refs = {
+        name: _ids(key) for name, key in _DIMENSION_REF_KEYS.items()
+    }
+    when_block = proof.get("time")
+    critical = (
+        when_block.get("critical_evidence_ids")
+        if isinstance(when_block, Mapping)
+        else None
+    )
+    refs["when"] = (
+        tuple(sorted(str(i) for i in critical))
+        if isinstance(critical, (list, tuple))
+        else ()
+    )
+    return refs
+
+
+def _assert_dimension_flat_consistency(
+    refs: Mapping[str, tuple[str, ...]],
+    flat_ids: tuple[str, ...],
+) -> None:
+    """Phase18C cache-consistency invariant, fail-closed (DEF-053 pattern).
+
+    The union of the four per-dimension id sets must equal the flat
+    ``evidence_ids_used`` set when the flat list is non-empty; empty lists are
+    allowed ONLY when the flat list is also empty. A violation means the pinned
+    payload's proof material is internally inconsistent -> the reveal projection
+    raises (sanitized 500 INTERNAL_ERROR) instead of rendering a partial
+    dimension mapping.
+    """
+    union: set[str] = set()
+    for ids in refs.values():
+        union.update(ids)
+    flat = set(flat_ids)
+    if flat:
+        if union != flat:
+            raise RevealProjectionError(
+                "solver proof dimension refs are inconsistent with evidence_ids_used"
+            )
+    elif union:
+        raise RevealProjectionError(
+            "solver proof carries dimension refs but no flat evidence ids"
+        )
+
+
+def dimensions_of(payload: Mapping[str, Any]) -> dict[str, list[dict[str, str]]]:
+    """The Phase18C per-dimension proof board (WHO/WHY/WEAPON/WHEN -> supporting
+    discovered evidence), built ONLY from the server-side proof references.
+
+    Each dimension maps its usable evidence ids through the SAME public filter
+    and frozen ``point`` vocabulary as the flat explainer. The invariant
+    ``union(dimension ids) == flat evidence ids`` is enforced fail-closed (a
+    corrupt payload answers the sanitized 500, never a partial map).
+
+    DEF-053 fail-closed: a payload whose ``solverProof`` block is MISSING or
+    not a mapping is a corrupt reveal (the dimension refs cannot be derived) ->
+    ``RevealProjectionError`` -> the sanitized ``500 INTERNAL_ERROR`` envelope.
+    A PRESENT block with EMPTY per-dimension refs is the documented
+    empty-proof-resilience case: empty dimension lists, reveal still 200s.
+    """
+    if not isinstance(payload.get("solverProof"), Mapping):
+        raise RevealProjectionError("payload carries no solver proof section")
+    refs = _dimension_refs_of(payload)
+    _assert_dimension_flat_consistency(refs, evidence_ids_used_of(payload))
+    facts = evidence_by_id(payload)
+    return {
+        name: [
+            point
+            for point in (
+                _evidence_point_of(evidence_id, facts.get(evidence_id))
+                for evidence_id in refs.get(name, ())
+            )
+            if point is not None
+        ]
+        for name in _DIMENSION_NAMES
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -472,13 +591,17 @@ def reveal_dto_of(
         },
         "score": {"correctDimensions": correct, "totalDimensions": 4},
         "timeline": timeline_of(payload),
-        "explanation": {"evidence": explanation_evidence_of(payload)},
+        "explanation": {
+            "evidence": explanation_evidence_of(payload),
+            "dimensions": dimensions_of(payload),
+        },
     }
 
 
 __all__ = [
     "POINT_BY_KIND",
     "candidate_block_of",
+    "dimensions_of",
     "evidence_ids_used_of",
     "explanation_evidence_of",
     "point_for_kind",

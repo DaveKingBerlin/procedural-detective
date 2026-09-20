@@ -261,6 +261,30 @@ export interface ExplanationEvidenceDTO {
 }
 
 /**
+ * One evidence-backed proof point in a post-reveal proof-board dimension
+ * (Phase 18C). Identical in shape to the flat explanation entries.
+ */
+export interface ExplanationPointDTO {
+  evidenceId: string;
+  title: string;
+  point: string;
+}
+
+/**
+ * Phase 18C — post-reveal proof-board grouping the backend adds to the
+ * reveal DTO: the flat `explanation.evidence` list grouped per dimension
+ * (WHO / WHY / WEAPON / WHEN). Always present in REVEALED responses from
+ * the current backend; the client MUST treat absence (an older server) or
+ * malformation as a fall back to the flat list — never a crash.
+ */
+export interface RevealExplanationDimensionsDTO {
+  who: ExplanationPointDTO[];
+  why: ExplanationPointDTO[];
+  weapon: ExplanationPointDTO[];
+  when: ExplanationPointDTO[];
+}
+
+/**
  * 200 body of GET .../reveal — the explicit allowlist the reveal screen
  * renders. Every field crossing the trust boundary is re-parsed by
  * src/reveal/revealValidation.ts (unknown fields dropped).
@@ -275,7 +299,11 @@ export interface RevealResponse {
   result: RevealResultDTO;
   score: RevealScoreDTO;
   timeline: TimelineEntryDTO[];
-  explanation: { evidence: ExplanationEvidenceDTO[] };
+  explanation: {
+    evidence: ExplanationEvidenceDTO[];
+    /** Post-reveal proof-board grouping; absent/null from pre-18C servers. */
+    dimensions?: RevealExplanationDimensionsDTO | null;
+  };
 }
 
 /** Discovery half of an interaction/discover response. */

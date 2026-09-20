@@ -491,6 +491,38 @@ export function makeRevealResponse(overrides: Partial<RevealResponse> = {}): Rev
           point: "The kitchen knife carries traces matching the description of the crime.",
         },
       ],
+      // Phase 18C: the backend's authoritative per-dimension proof-board
+      // grouping. Generic fixture material only — never golden literals.
+      dimensions: {
+        who: [
+          {
+            evidenceId: "record_generic_01",
+            title: "A bank transfer",
+            point: "The transferred amount matches the embezzled total reported to the firm.",
+          },
+        ],
+        why: [
+          {
+            evidenceId: "record_generic_01",
+            title: "A bank transfer",
+            point: "The transferred amount matches the embezzled total reported to the firm.",
+          },
+        ],
+        weapon: [
+          {
+            evidenceId: "record_generic_02",
+            title: "Weapon match",
+            point: "The kitchen knife carries traces matching the description of the crime.",
+          },
+        ],
+        when: [
+          {
+            evidenceId: "record_generic_03",
+            title: "Hallway camera",
+            point: "The camera log places the visitor at the door just before the crime.",
+          },
+        ],
+      },
     },
     ...overrides,
   };
@@ -626,5 +658,80 @@ export function makeHostileRecord(): EvidenceReadResultDTO {
       body: hostile + " — ひらがな — 你好 — 😀",
       timestamp: hostile,
     },
+  };
+}
+
+/* ======================================================================
+ * Phase 18C — Detective Notebook fixtures.
+ *
+ * Player-safe READ records across the kinds the notebook groups on. These
+ * are generic fixtures (no golden literals): they exercise the grouping
+ * mechanics, not any real case's answer. `makeWitnessRecord` etc. may be
+ * overridden to inject HIDDEN truth markers so safety tests can prove
+ * those markers never reach the notebook model or markup.
+ * ==================================================================== */
+
+/** A read witness statement (People group + speaker safety tests). */
+export function makeWitnessRecord(overrides: Partial<EvidenceReadResultDTO> = {}): EvidenceReadResultDTO {
+  return {
+    evidenceId: "record_witness_hall_01",
+    kind: "witness_statement",
+    title: "A neighbour's statement",
+    description: "Statement from the neighbour across the hall.",
+    openedAt: "2026-09-11T22:20:00+02:00",
+    readByPlayer: true,
+    content: {
+      speakerName: "Sofia Lindgren",
+      statement: "I saw a tall figure hurrying out just before ten.",
+    },
+    ...overrides,
+  };
+}
+
+/** A read financial record (Motive group). */
+export function makeFinancialRecord(overrides: Partial<EvidenceReadResultDTO> = {}): EvidenceReadResultDTO {
+  return {
+    evidenceId: "record_financial_04",
+    kind: "financial",
+    title: "An unexpected transfer",
+    description: "A large transfer that stands out from the monthly pattern.",
+    openedAt: "2026-09-11T22:20:00+02:00",
+    readByPlayer: true,
+    content: { suspicious: true, rows: [] },
+    ...overrides,
+  };
+}
+
+/** A read CCTV record (Timeline group via content.events[].time). */
+export function makeCctvRecord(overrides: Partial<EvidenceReadResultDTO> = {}): EvidenceReadResultDTO {
+  return {
+    evidenceId: "record_cctv_02",
+    kind: "cctv",
+    title: "Hallway camera",
+    description: "Night footage from the hallway camera.",
+    openedAt: "2026-09-11T22:20:00+02:00",
+    readByPlayer: true,
+    content: {
+      cameraId: "hall_cam_1",
+      events: [
+        { time: "2026-09-11T21:38:00+02:00", personId: "unknown", action: "enters the hallway" },
+        { time: "2026-09-11T22:03:00+02:00", personId: "unknown", action: "leaves the hallway" },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+/** A read object-kind record (Digital/physical group). */
+export function makeObjectRecord(overrides: Partial<EvidenceReadResultDTO> = {}): EvidenceReadResultDTO {
+  return {
+    evidenceId: "record_object_trophy_01",
+    kind: "object",
+    title: "A heavy ornament",
+    description: "A heavy decorative object from the victim's study.",
+    openedAt: "2026-09-11T22:20:00+02:00",
+    readByPlayer: true,
+    content: { subtype: "trophy", locationId: "miller_consulting_office" },
+    ...overrides,
   };
 }

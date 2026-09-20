@@ -5,6 +5,7 @@ import { clearPlaythroughCredentials, getPlaythroughId, getPlaythroughToken } fr
 import type { InvestigationBootstrapResponse } from "../api/types";
 import AccusationPanel from "../accusation/AccusationPanel";
 import { AccusationFlow } from "../accusation/accusationFlow";
+import { loadHypothesis } from "../notebook/hypothesisStore";
 import { isAuthorisationFailure } from "../scene/investigationFlow";
 import { parseInvestigationBootstrap } from "../scene/validation";
 
@@ -135,6 +136,13 @@ export default function AccusationPage() {
       )}
 
       {bootstrap !== null && bootstrap.state === "PLAYING" && flow !== null && (
+        <HypothesisUseBlock
+          playthroughId={getPlaythroughId() ?? bootstrap.playthroughId}
+          flow={flow}
+        />
+      )}
+
+      {bootstrap !== null && bootstrap.state === "PLAYING" && flow !== null && (
         <AccusationPanel flow={flow} onReveal={() => void navigate("/reveal")} onResetToken={resetCredential} />
       )}
 
@@ -180,6 +188,32 @@ function NoTokenState() {
         Add your playthrough id and access token on the <Link to="/">Home</Link> page to make an
         accusation.
       </p>
+    </div>
+  );
+}
+
+/**
+ * Phase 18C — "Use my hypothesis". Loads the player's PRIVATE notebook pins
+ * (namespaced localStorage) and fills the accusation form ONLY from explicit
+ * pins; a missing pin leaves that dimension empty (NO implicit fill). This
+ * never touches the network — the pins live only in local storage, and the
+ * submission still requires the explicit confirmation step.
+ */
+function HypothesisUseBlock({ flow, playthroughId }: { flow: AccusationFlow; playthroughId: string }) {
+  const applyPins = () => {
+    const pins = loadHypothesis(playthroughId);
+    flow.applyHypothesis({ suspect: pins.suspect, motive: pins.motive, weapon: pins.weapon, time: pins.time });
+  };
+  return (
+    <div className="hypothesis-use" data-testid="hypothesis-use">
+      <p className="hypothesis-use-note">
+        Your Detective Notebook pins are private notes — they never affect the case, the solver or
+        your score. “Use my hypothesis” fills the form ONLY with the dimensions you pinned;
+        unpinned dimensions stay empty.
+      </p>
+      <button type="button" data-testid="accuse-use-hypothesis" onClick={applyPins}>
+        Use my hypothesis
+      </button>
     </div>
   );
 }

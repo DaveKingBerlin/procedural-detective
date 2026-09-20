@@ -134,3 +134,55 @@ describe("reveal markup surface", () => {
     expect(html).toContain('data-testid="reveal-score"');
   });
 });
+
+describe("Phase 18C proof board rendering (post-reveal)", () => {
+  it("the proof board section is present post-reveal with all four cards (reqs 9,10)", () => {
+    const html = markup(makeRevealResponse());
+
+    expect(html).toContain('data-testid="reveal-proof-board"');
+    for (const dimension of ["who", "why", "weapon", "when"]) {
+      expect(html).toContain(`data-testid="proof-card-${dimension}"`);
+      expect(html).toContain(`data-testid="proof-card-${dimension}-title"`);
+    }
+    // Server-dimensioned nodes render with their published titles/points.
+    expect(html).toContain("Hallway camera");
+    expect(html).toContain("places the visitor at the door");
+    expect(html).toContain('data-testid="proof-node-when-0"');
+  });
+
+  it("the pre-reveal scene page is not the place for the proof board: it only exists on the reveal screen", () => {
+    // The Only place this component renders is inside RevealScreen (post-reveal).
+    const html = markup(makeRevealResponse());
+    expect(html.indexOf('data-testid="reveal-proof-board"')).toBeGreaterThan(html.indexOf('data-testid="reveal-explanation"'));
+  });
+
+  it("fallback grouping still renders four cards when dimensions are absent (older server)", () => {
+    const reveal = makeRevealResponse() as unknown as Record<string, unknown>;
+    const explanation = reveal.explanation as Record<string, unknown>;
+    delete explanation.dimensions;
+    const html = markup(reveal as unknown as Parameters<typeof RevealScreen>[0]["reveal"]);
+    expect(html).toContain('data-testid="reveal-proof-board"');
+    for (const dimension of ["who", "why", "weapon", "when"]) {
+      expect(html).toContain(`data-testid="proof-card-${dimension}"`);
+    }
+    // Every published flat item still appears somewhere on the board.
+    expect(html).toContain("A bank transfer");
+    expect(html).toContain("Weapon match");
+  });
+
+  it("the proof board contains no proc.* tokens and never disturbs scoring markup (reqs 13,15)", () => {
+    const html = markup(makeRevealResponse());
+    const boardSection = html.slice(html.indexOf('data-testid="reveal-proof-board"'));
+    expect(boardSection).not.toContain("proc.");
+    // Scoring display is untouched by the board's presence.
+    expect(html).toContain('data-testid="reveal-score"');
+    expect(html).toContain("4 / 4");
+  });
+
+  it("hostile proof text stays inert on the board (escaped, no script/img children)", () => {
+    const html = markup(makeHostileReveal(), null);
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<img");
+  });
+});

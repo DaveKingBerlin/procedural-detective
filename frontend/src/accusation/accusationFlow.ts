@@ -192,6 +192,36 @@ export class AccusationFlow {
   }
 
   /**
+   * Phase 18C — copy the player's private notebook hypothesis pins into the
+   * selection ("Use my hypothesis").
+   *
+   * Player notes ONLY: this NEVER touches the server, never affects the
+   * solver/truth/scoring, and performs NO implicit fill — a dimension the
+   * player did not pin is left EMPTY (null). The existing pre-submit
+   * membership validation still runs, so a stale/forged pin (e.g. from an
+   * older playthrough's universe) can never be submitted: it degrades to a
+   * field error, not a request.
+   */
+  applyHypothesis(pins: {
+    suspect: string | null;
+    motive: string | null;
+    weapon: string | null;
+    time: string | null;
+  }): void {
+    if (this.phaseValue !== "editing") return; // a submitted accusation is immutable
+    this.selection = {
+      murdererId: pins.suspect,
+      motiveId: pins.motive,
+      weaponId: pins.weapon,
+      crimeTime: pins.time,
+    };
+    this.fieldErrors = {};
+    this.serverErrorValue = null;
+    this.tokenInvalidValue = false;
+    this.changed();
+  }
+
+  /**
    * Editing -> confirmation. Applies client-side validation; when any field is
    * missing/invalid the panel stays in editing with field-level errors.
    */

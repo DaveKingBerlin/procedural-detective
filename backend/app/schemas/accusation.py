@@ -159,10 +159,33 @@ class EvidencePointDTO(BaseModel):
     point: str
 
 
+class ProofDimensionMapDTO(BaseModel):
+    """Phase18C per-dimension proof board: WHO / WHY / WEAPON / WHEN -> the
+    supporting discovered evidence (each entry an EvidencePointDTO with a
+    public evidence id, its public title and a frozen MAP phrase)."""
+
+    who: list[EvidencePointDTO] = Field(default_factory=list)
+    why: list[EvidencePointDTO] = Field(default_factory=list)
+    weapon: list[EvidencePointDTO] = Field(default_factory=list)
+    when: list[EvidencePointDTO] = Field(default_factory=list)
+
+
 class RevealExplanationDTO(BaseModel):
-    """The player-safe explanation of why the solution is correct."""
+    """The player-safe explanation of why the solution is correct (Phase7 F +
+    Phase18C proof board).
+
+    ``evidence`` is the FLAT list of explainer references (frozen Phase7 F
+    shape, unchanged). ``dimensions`` is the Phase18C per-dimension proof map:
+    for every proof-board dimension (WHO/WHY/WEAPON/WHEN) the supporting
+    DISCOVERED evidence points. Both are built ONLY from public evidence ids +
+    public titles + frozen MAP phrases — never from raw proof/rule internals.
+    The union of the four dimension id lists equals the flat ``evidence`` id
+    set whenever the flat list is non-empty (empty lists only when the flat
+    list is also empty), so the two views are cache-consistent by contract.
+    """
 
     evidence: list[EvidencePointDTO] = Field(default_factory=list)
+    dimensions: ProofDimensionMapDTO = Field(default_factory=ProofDimensionMapDTO)
 
 
 class RevealResponseDTO(BaseModel):

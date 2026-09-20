@@ -1,4 +1,5 @@
 import type { AccusationCandidatesDTO, RevealResponse } from "../api/types";
+import ProofBoard from "./ProofBoard";
 import { revealPresentation } from "./revealFormat";
 
 /**
@@ -117,6 +118,11 @@ export default function RevealScreen({ reveal, candidates = null }: RevealScreen
           </ul>
         )}
       </div>
+
+      {/* Phase 18C: post-reveal proof board — four deterministic proof cards
+          sourcing ONLY server-published explanation text (dimensions block,
+          or a heuristic flat-list grouping when the block is absent). */}
+      <ProofBoard model={model.proofBoard} />
 
       <div className="reveal-timeline" data-testid="reveal-timeline">
         <h3>Timeline</h3>

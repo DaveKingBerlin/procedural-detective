@@ -1,4 +1,5 @@
 import type { AccusationCandidatesDTO, RevealResponse, TimelineEntryDTO } from "../api/types";
+import { buildProofBoard, type ProofBoardModel } from "./proofBoardModel";
 
 /**
  * Pure presentation model for the reveal screen (Phase 7 L).
@@ -73,6 +74,8 @@ export interface RevealPresentation {
   score: { correctDimensions: number; totalDimensions: number };
   explanation: RevealExplanationItem[];
   timeline: RevealTimelineItem[];
+  /** Phase 18C: post-reveal proof board (server `dimensions` or fallback). */
+  proofBoard: ProofBoardModel;
 }
 
 /**
@@ -150,5 +153,6 @@ export function revealPresentation(
       time: formatCrimeTime(entry.time),
       description: asText(entry.description),
     })),
+    proofBoard: buildProofBoard(reveal),
   };
 }

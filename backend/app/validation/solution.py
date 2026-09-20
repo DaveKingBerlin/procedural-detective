@@ -24,7 +24,7 @@ from typing import Any, Iterable, Tuple
 
 from app.domain.evidence import EvidenceFact
 from app.domain.inputs import ensure_public_case, evidence_by_id
-from app.domain.proof import SolverProof
+from app.domain.proof import CandidateDimensionResult, SolverProof
 from app.domain.public import PublicCase
 from app.domain.time_interval import (
     IntervalSet,
@@ -126,6 +126,17 @@ class SolutionProof:
 
     This is the internal model; a public DTO for the browser must be assembled
     from an allowlist on top of it and must NOT include the hidden fields.
+
+    NEW Phase18C: the per-dimension usable evidence ids (``who_evidence_ids`` /
+    ``why_evidence_ids`` / ``weapon_evidence_ids``) are the DETERMINISTIC
+    per-dimension projection of the deduction proof's rule-outcome evidence
+    refs. They are computed ONCE at publish time (from the domain
+    ``SolverProof``, which is NOT persisted) so the post-reveal proof board can
+    map WHO/WHY/WEAPON -> supporting discovered evidence WITHOUT re-running the
+    solver and without exposing rule/outcome internals. ``when`` reuses the
+    already-persisted ``time.critical_evidence_ids``. By construction
+    (``build_proof``) the union of the four per-dimension id sets equals
+    ``evidence_ids_used``.
     """
 
     case_id: str
@@ -135,6 +146,9 @@ class SolutionProof:
     winners: Tuple[str, str, str]
     time: TimeProof
     evidence_ids_used: Tuple[str, ...] = field(default_factory=tuple)
+    who_evidence_ids: Tuple[str, ...] = field(default_factory=tuple)
+    why_evidence_ids: Tuple[str, ...] = field(default_factory=tuple)
+    weapon_evidence_ids: Tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -146,6 +160,9 @@ class SolutionProof:
                         "weapon": self.winners[2]},
             "crimeTime": self.time.to_dict(),
             "evidenceIdsUsed": list(self.evidence_ids_used),
+            "whoEvidenceIds": list(self.who_evidence_ids),
+            "whyEvidenceIds": list(self.why_evidence_ids),
+            "weaponEvidenceIds": list(self.weapon_evidence_ids),
         }
 
 
@@ -220,6 +237,23 @@ def _assert_critical_evidence_reachable(proof: SolverProof, evidence: Iterable[E
         )
 
 
+def _dimension_evidence_ids(
+    dim: CandidateDimensionResult | None,
+) -> Tuple[str, ...]:
+    """Sorted union of the rule-outcome evidence ids of ONE deduction dimension.
+
+    Phase18C: the reveal-safe per-dimension proof mapping is built ONLY from
+    these server-side references (plus ``when.critical_evidence_ids``) — never
+    from re-running the solver or from rule/outcome internals. A ``None``
+    dimension contributes nothing.
+    """
+    used: set[str] = set()
+    if dim is not None:
+        for outcome in dim.rule_outcomes:
+            used.update(str(i) for i in (outcome.evidence_ids or ()))
+    return tuple(sorted(used))
+
+
 def assemble_solution_proof(
     public: PublicCase,
     evidence: Iterable[EvidenceFact],
@@ -230,7 +264,10 @@ def assemble_solution_proof(
 
     Runs the AccusedSolutionValidation, the reachability static check, and
     renders the accepted-scoring + feasible time intervals in the truth's
-    timezone.
+    timezone. Additionally snapshots the per-dimension usable evidence ids
+    (WHO/WHY/WEAPON from the deduction rule outcomes; WHEN reuses the time
+    proof's critical ids) so the post-reveal proof board can map each dimension
+    to supporting discovered evidence WITHOUT re-running the solver.
     """
     ensure_public_case(public)
     evidence = tuple(evidence)
@@ -269,4 +306,7 @@ def assemble_solution_proof(
         winners=(proof.who.winner or "", proof.why.winner or "", proof.weapon.winner or ""),
         time=time_proof,
         evidence_ids_used=proof.evidence_ids_used,
+        who_evidence_ids=_dimension_evidence_ids(proof.who),
+        why_evidence_ids=_dimension_evidence_ids(proof.why),
+        weapon_evidence_ids=_dimension_evidence_ids(proof.weapon),
     )

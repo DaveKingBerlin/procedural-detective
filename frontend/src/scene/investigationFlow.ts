@@ -1,5 +1,6 @@
 import { ApiError } from "../api/client";
 import type {
+  AccusationCandidatesDTO,
   DiscoveryResultDTO,
   EvidenceReadResultDTO,
   InteractionResultDTO,
@@ -74,6 +75,7 @@ export class InvestigationSession {
   private knowledge: PlayerKnowledgeDTO | null = null;
   private model: InvestigationSceneModel | null = null;
   private lifecycleStateValue: PlaythroughLifecycleState | null = null;
+  private candidatesValue: AccusationCandidatesDTO | null = null;
   private readonly records = new Map<string, EvidenceReadResultDTO>();
   private toast: SessionToast | null = null;
   private toastSeq = 0;
@@ -132,6 +134,45 @@ export class InvestigationSession {
   }
 
   /**
+   * Snapshot of the cached read records (Phase 18C Detective Notebook).
+   * Empty right after a reload — {@link hydrateNotebookRecords} refills it
+   * ONLY from ids the server already confirmed READ.
+   */
+  recordCacheSnapshot(): ReadonlyArray<EvidenceReadResultDTO> {
+    return [...this.records.values()];
+  }
+
+  /**
+   * Player-safe candidate universes from the bootstrap (Phase 18C). The
+   * notebook's hypothesis pins reference the same candidate ids the
+   * accusation page publishes. Null before a successful start.
+   */
+  get candidatesSnapshot(): AccusationCandidatesDTO | null {
+    return this.candidatesValue;
+  }
+
+  /**
+   * Phase 18C — lazy-hydrate the notebook's read-record cache AFTER a
+   * reload. Fetches ONLY ids the server itself confirmed READ
+   * (bootstrap `readEvidenceIds`) — never undiscovered evidence, never an
+   * id the knowledge snapshot does not carry. A failed fetch degrades
+   * gracefully (the notebook keeps deriving from world-object labels and
+   * whatever DID load). Idempotent: cached records are never re-fetched.
+   */
+  async hydrateNotebookRecords(): Promise<void> {
+    if (this.knowledge === null) return;
+    for (const recordId of this.knowledge.readEvidenceIds) {
+      if (this.records.has(recordId)) continue;
+      try {
+        const record = await this.services.readRecord(this.playthroughId, recordId, this.token);
+        this.records.set(recordId, record);
+      } catch {
+        // Safe degrade: a failed lazy fetch never blocks the notebook.
+      }
+    }
+  }
+
+  /**
    * Load the bootstrap, derive the scene model and (when a scene factory is
    * wired) build the 3D scene. Returns a StartOutcome — this method never
    * throws; every failure becomes a safe, player-facing error.
@@ -186,6 +227,7 @@ export class InvestigationSession {
       visitedLocationIds: [...bootstrap.playerKnowledge.visitedLocationIds],
     };
     this.lifecycleStateValue = bootstrap.state;
+    this.candidatesValue = bootstrap.candidates;
     this.model = model;
     // DEF-072 invariant: the scene-model flags ALWAYS mirror the knowledge
     // snapshot — the bootstrap DTO flags define the same sets at start.

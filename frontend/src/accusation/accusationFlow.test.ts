@@ -414,3 +414,87 @@ describe("crime time contract (WHEN)", () => {
     expect(reveal.truth.crimeTime).toBe(CANNED_REVEAL_CRIME_TIME);
   });
 });
+
+describe("Phase 18C — applyHypothesis (player notes never affect the solver or contract)", () => {
+  it("fills the form ONLY from explicit pins; unpinned dimensions stay empty (no implicit fill)", async () => {
+    const services = makeServices();
+    const flow = makeFlow(services);
+    // Only a suspect + time pin exists:
+    flow.applyHypothesis({ suspect: "suspect_beta", motive: null, weapon: null, time: "19:00" });
+
+    expect(flow.currentSelection).toEqual({
+      murdererId: "suspect_beta",
+      motiveId: null,
+      weaponId: null,
+      crimeTime: "19:00",
+    });
+    // Missing dimensions block confirmation — the player must still choose them
+    // explicitly; NO request fires.
+    expect(flow.openConfirmation()).toBe("invalid");
+    expect(services.submitAccusation).not.toHaveBeenCalled();
+  });
+
+  it("pins trigger NO network work by themselves (no request fired for applying)", () => {
+    const services = makeServices();
+    const flow = makeFlow(services);
+    flow.applyHypothesis({ suspect: "suspect_alpha", motive: "motive_alpha", weapon: "weapon_alpha", time: "21:45" });
+    expect(services.submitAccusation).not.toHaveBeenCalled();
+    expect(services.getReveal).not.toHaveBeenCalled();
+  });
+
+  it("submitting after applying pins sends EXACTLY the pinned values and nothing more", async () => {
+    const services = makeServices();
+    const flow = makeFlow(services);
+    flow.applyHypothesis({ suspect: "suspect_beta", motive: "motive_gamma", weapon: "weapon_beta", time: "19:00" });
+
+    expect(flow.openConfirmation()).toBe("confirmed");
+    const outcome = await flow.confirmAccusation();
+    expect(outcome.outcome).toBe("accepted");
+
+    expect(services.submitAccusation).toHaveBeenCalledTimes(1);
+    expect(services.submitAccusation).toHaveBeenCalledWith(
+      PT_ID,
+      { murdererId: "suspect_beta", motiveId: "motive_gamma", weaponId: "weapon_beta", crimeTime: "19:00:00" },
+      TEST_TOKEN,
+    );
+    // The accepted echo carries ONLY the four submitted dimensions.
+    expect(JSON.stringify(flow.acceptedAccusation)).not.toMatch(/murdererName|motiveLabel|weaponName|timeline|explanation/);
+  });
+
+  it("never alters the candidate universe, scoring or solver inputs", () => {
+    const services = makeServices();
+    const flow = makeFlow(services);
+    const before = flow.candidatesSnapshot;
+    flow.applyHypothesis({ suspect: "suspect_alpha", motive: "motive_alpha", weapon: "weapon_alpha", time: "21:45" });
+    // Same object identity/value — the pins only moved the selection.
+    expect(flow.candidatesSnapshot).toBe(before);
+    expect(flow.requestBody).toEqual({
+      murdererId: "suspect_alpha",
+      motiveId: "motive_alpha",
+      weaponId: "weapon_alpha",
+      crimeTime: "21:45:00",
+    });
+  });
+
+  it("a stale pin outside the current universe cannot be submitted (membership re-check)", async () => {
+    const services = makeServices();
+    const flow = makeFlow(services);
+    // From an older playthrough's universe:
+    flow.applyHypothesis({ suspect: "old_universe_suspect", motive: "motive_alpha", weapon: "weapon_alpha", time: "21:45" });
+    expect(flow.openConfirmation()).toBe("invalid");
+    expect(flow.lastFieldErrors.murdererId).toMatch(/Choose a suspect/);
+    expect(services.submitAccusation).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op once the accusation is past editing (submitted state is immutable)", async () => {
+    const services = makeServices();
+    const flow = makeFlow(services);
+    selectAll(flow);
+    flow.openConfirmation();
+    expect(flow.phase).toBe("confirming");
+
+    flow.applyHypothesis({ suspect: "suspect_gamma", motive: "motive_gamma", weapon: "weapon_gamma", time: "06:00" });
+    expect(flow.currentSelection.murdererId).toBe("suspect_alpha"); // unchanged
+    expect(flow.phase).toBe("confirming");
+  });
+});

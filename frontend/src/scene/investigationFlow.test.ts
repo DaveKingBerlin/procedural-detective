@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
-import type { InteractionResultDTO } from "../api/types";
+import type { EvidenceReadResultDTO, InteractionResultDTO } from "../api/types";
 import {
   InvestigationSession,
   isAuthorisationFailure,
   type InvestigationServices,
   type SceneFactory,
 } from "./investigationFlow";
-import { makeBootstrap, makeEmailRecord, TEST_TOKEN } from "./testFixtures";
+import { makeBootstrap, makeEmailRecord, makeWitnessRecord, TEST_TOKEN } from "./testFixtures";
 import { discoveredCaptionsForWorld } from "./objectCaption";
 
 /**
@@ -454,5 +454,113 @@ describe("DEF-072 — live world-object flag merge (no reload needed)", () => {
     // The no-op second pass is reference-stable (cheap — no model rebuild):
     // an identical knowledge merge returns the SAME merged model reference.
     expect(afterSecond).toBe(afterFirst);
+  });
+});
+
+describe("Phase 18C — Detective Notebook session access (record cache + hydration)", () => {
+  it("exposes the bootstrap candidates and an empty record cache before any read", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+    expect(outcome.ok).toBe(true);
+
+    expect(session.candidatesSnapshot?.suspects.map((entry) => entry.id)).toContain("suspect_alpha");
+    expect(session.recordCacheSnapshot()).toEqual([]);
+  });
+
+  it("recordCacheSnapshot returns the cached read records after discovery reads", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+    await session.start(null);
+
+    await session.interact("kitchen_knife"); // server confirms + reads a record
+    const cached = session.recordCacheSnapshot();
+    // The canned readRecord mock returns makeEmailRecord (id email_thomas_01)
+    // for whichever id is read — the cache holds exactly what the server sent.
+    expect(cached.map((record) => record.evidenceId)).toContain("email_thomas_01");
+  });
+
+  it("hydrateNotebookRecords fetches ONLY server-confirmed read ids (never undiscovered evidence)", async () => {
+    const readRecordMock = vi.fn(async (): Promise<EvidenceReadResultDTO> => makeWitnessRecord());
+    const services = makeServices({
+      getInvestigation: vi.fn(async () =>
+        makeBootstrap({
+          playerKnowledge: {
+            discoveredEvidenceIds: ["record_witness_hall_01", "forensic_knife_match_01"],
+            // The knife is discovered but NOT read — it must never be fetched
+            // by the notebook hydration.
+            readEvidenceIds: ["record_witness_hall_01"],
+            visitedLocationIds: ["miller_apartment_kitchen"],
+          },
+        }) as never,
+      ),
+      readRecord: readRecordMock,
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    await session.hydrateNotebookRecords();
+
+    expect(readRecordMock).toHaveBeenCalledTimes(1);
+    expect(readRecordMock).toHaveBeenCalledWith(PT_ID, "record_witness_hall_01", TEST_TOKEN);
+    expect(readRecordMock).not.toHaveBeenCalledWith(PT_ID, "forensic_knife_match_01", TEST_TOKEN);
+    expect(session.recordCacheSnapshot().map((record) => record.evidenceId)).toEqual([
+      "record_witness_hall_01",
+    ]);
+  });
+
+  it("hydration is idempotent: already-cached records are never re-fetched", async () => {
+    const readRecordMock = vi.fn(async (): Promise<EvidenceReadResultDTO> => makeEmailRecord());
+    const services = makeServices({
+      getInvestigation: vi.fn(async () =>
+        makeBootstrap({
+          playerKnowledge: {
+            discoveredEvidenceIds: ["email_thomas_01"],
+            readEvidenceIds: ["email_thomas_01"],
+            visitedLocationIds: ["miller_apartment_kitchen"],
+          },
+        }) as never,
+      ),
+      readRecord: readRecordMock,
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    await session.hydrateNotebookRecords();
+    await session.hydrateNotebookRecords();
+    await session.hydrateNotebookRecords();
+
+    expect(readRecordMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed lazy fetch degrades gracefully (cache keeps what loaded; no throw)", async () => {
+    const services = makeServices({
+      getInvestigation: vi.fn(async () =>
+        makeBootstrap({
+          playerKnowledge: {
+            discoveredEvidenceIds: ["record_witness_hall_01", "record_cctv_02"],
+            readEvidenceIds: ["record_cctv_02"],
+            visitedLocationIds: ["miller_apartment_kitchen"],
+          },
+        }) as never,
+      ),
+      readRecord: vi.fn(async () => {
+        throw new ApiError(500, "INTERNAL_ERROR", "record service hiccup", null);
+      }),
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    await session.hydrateNotebookRecords(); // must NOT throw
+    expect(session.recordCacheSnapshot()).toEqual([]);
+  });
+
+  it("hydration is a no-op before the session started (no knowledge, no fetch)", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+
+    await session.hydrateNotebookRecords(); // must NOT throw
+
+    expect(services.readRecord).not.toHaveBeenCalled();
   });
 });
