@@ -102,6 +102,25 @@ describe("mode selector rendering", () => {
     expect(html).toContain('<option value="demo" selected="">Demo</option>');
   });
 
+  it("Phase 18A — a 'local selected but backend says local unavailable' state is never rendered", () => {
+    // The selector can never render a select holding value="local" when the
+    // backend reports local unavailable: only the honest demo notice exists.
+    const html = render({
+      capabilities: {
+        modes: [
+          { id: "demo", available: true },
+          { id: "local", available: false, label: "Local AI", model: "qwen2.5:7b" },
+        ],
+      },
+      value: "local", // stale/tampered stored mode on a demo-only backend
+    });
+    expect(html).not.toContain("option");
+    expect(html).not.toContain('value="local"');
+    expect(html).not.toContain("Local AI");
+    expect(html).toContain('data-testid="generation-mode-demo-notice"');
+    expect(html).toContain("Demo mode active");
+  });
+
   it("keeps a valid selected value (no host/IP, URL or diagnostics in the markup)", () => {
     const html = render({ value: "local" });
     expect(html).toContain(

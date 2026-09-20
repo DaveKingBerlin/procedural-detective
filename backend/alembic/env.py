@@ -27,7 +27,20 @@ from app.core.config import Settings  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # ``disable_existing_loggers=False``: alembic's logging config must not
+    # DISABLE the application's own loggers.
+    #
+    # With the default ``True``, ``fileConfig`` marks every pre-existing,
+    # unconfigured logger as ``disabled`` (Python 3.12 ``Logger.disabled`` is
+    # honored by ``isEnabledFor``, so a disabled logger drops EVERY record
+    # regardless of level). In this repo the "procedural-detective" logger is
+    # created as soon as ``app.main`` is imported, and alembic runs IN-PROCESS
+    # in the backend test suite (conftest ``upgrade_db``) — so a migration
+    # executed after an ``app.main`` import silently disabled the app's
+    # structured events for the rest of the process (order-dependent caplog
+    # failures in test_ollama_driver.py). Alembic's own root/sqlalchemy/alembic
+    # loggers are still configured exactly as before.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 _url = config.get_main_option("sqlalchemy.url")
 if not _url:

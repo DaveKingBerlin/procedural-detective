@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
 import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
-import { APP_PROVIDER_MODE, providerQualifier } from "../journey/providerMode";
+import { providerQualifierFromCapabilities } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
 import NewCasePage from "./new";
 
@@ -257,9 +257,10 @@ describe("/new form rendering", () => {
 
   it("renders the honest provider qualifier next to the primary CTA (ADV-152)", () => {
     const markup = html();
-    // Same spot + wording as the landing: mode-aware, driven by providerMode.
+    // Same spot + wording as the landing. Phase 18A: capability-driven — with
+    // no capabilities injected the honest deterministic-demo default is shown.
     expect(markup).toContain('data-testid="provider-qualifier"');
-    expect(markup).toContain(providerQualifier(APP_PROVIDER_MODE));
+    expect(markup).toContain(providerQualifierFromCapabilities(null));
     // The per-path demo note stays verbatim (additive copy, nothing removed).
     expect(markup).toContain("Deterministic demo — no API keys, no cost.");
   });
@@ -377,11 +378,19 @@ describe("/new — Phase 16.2 §36 showcase copy honesty", () => {
 
   it("never claims the local pipeline in demo/fake mode (no claiming copy)", () => {
     const markup = renderWith(LOCAL_AVAILABLE, null);
+    // The §36 SHOWCASE element is rendered ONLY while local mode is ACTIVE
+    // (selected AND backend-reported available). In plain demo mode it is
+    // never rendered, and no in-context pipeline claim (Prompt-to-World /
+    // Llama / "proves the case") ever appears.
     expect(markup).not.toContain('data-testid="local-ai-showcase-note"');
     expect(markup).not.toContain("Prompt-to-World");
     expect(markup).not.toContain("Llama 3.2");
-    expect(markup).not.toContain("proposes structured data");
     expect(markup.toLowerCase()).not.toContain("proves the case");
+    // Phase 18A: the app-level QUALIFIER may describe local AVAILABILITY
+    // ("the model proposes structured data ... is available") because the
+    // backend capability report is the authority — that is additive honesty,
+    // it never expands the showcase element itself.
+    expect(markup).toContain("Local AI is available");
   });
 
   it("does not show the showcase claim while local is selected but unavailable", () => {
@@ -408,5 +417,97 @@ describe("/new — Phase 16.2 §36 showcase copy honesty", () => {
     expect(markup).not.toContain("topsecret");
     expect(markup).not.toContain("diagnostics");
     expect(markup).not.toContain("11434");
+  });
+});
+
+describe("/new — Phase 18A capability-driven provider notes", () => {
+  const renderWith = (capabilities: GenerationCapabilitiesResponse | null): string =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={capabilities} />
+      </MemoryRouter>,
+    );
+
+  const DEMO_ONLY: GenerationCapabilitiesResponse = {
+    modes: [
+      { id: "demo", available: true },
+      { id: "local", available: false, label: "Local AI" },
+    ],
+  };
+  const LOCAL_READY: GenerationCapabilitiesResponse = {
+    modes: [
+      { id: "demo", available: true },
+      { id: "local", available: true, label: "Local AI", model: "llama3.2:3b" },
+    ],
+  };
+  const LIVE_READY: GenerationCapabilitiesResponse = {
+    modes: [
+      { id: "demo", available: true },
+      { id: "live", available: true, label: "Cloud AI" },
+    ],
+  };
+
+  it("demo-only backend -> deterministic note and qualifier, never local/live claims", () => {
+    const markup = renderWith(DEMO_ONLY);
+    expect(markup).toContain("uses the built-in deterministic generator in this demo build");
+    expect(markup).toContain("Demo build: deterministic built-in generator");
+    expect(markup).not.toContain("Live AI provider");
+    expect(markup).not.toContain("Local AI is available");
+  });
+
+  it("local-ready backend -> the note and qualifier reflect local availability", () => {
+    const markup = renderWith(LOCAL_READY);
+    expect(markup).toContain("uses the local AI pipeline");
+    expect(markup).toContain("Local AI is available");
+    expect(markup).not.toContain("uses the built-in deterministic generator in this demo build");
+  });
+
+  it("local-unavailable backend -> the deterministic note; the explicit unavailable note only for a stored local", () => {
+    const markup = renderWith(DEMO_ONLY);
+    expect(markup).toContain("uses the built-in deterministic generator in this demo build");
+  });
+
+  it("live-ready backend -> the note and qualifier reflect the live provider", () => {
+    const markup = renderWith(LIVE_READY);
+    expect(markup).toContain("Live AI provider");
+    expect(markup).toContain("Live AI provider enabled.");
+    expect(markup).not.toContain("uses the built-in deterministic generator in this demo build");
+  });
+
+  it("unknown backend (capabilities still loading) -> honest deterministic default", () => {
+    const markup = renderWith(null);
+    expect(markup).toContain("uses the built-in deterministic generator in this demo build");
+    expect(markup).not.toContain("Live AI provider");
+    expect(markup).not.toContain("Local AI is available");
+  });
+
+  it("the deterministic demo link stays separate and is NEVER labelled live AI", () => {
+    // Whatever the backend reports, "Try the demo case" keeps its
+    // deterministic zero-cost sub-note and never claims live behavior.
+    for (const capabilities of [DEMO_ONLY, LOCAL_READY, LIVE_READY, null]) {
+      const markup = renderWith(capabilities);
+      const demoMarkup = markup.match(/data-testid="try-demo-note"[\s\S]*?<\/p>/)?.[0] ?? "";
+      expect(demoMarkup).toContain("Deterministic demo — no API keys, no cost.");
+      expect(demoMarkup).not.toContain("Live AI provider");
+      expect(markup).toContain('data-testid="try-demo-from-new"');
+    }
+  });
+
+  it("the §36 local showcase sentence still requires local mode ACTIVE + available", () => {
+    // Capability-driven notes must not soften the §36 gate: the showcase copy
+    // appears ONLY while local is selected AND the backend reports it ready.
+    const markup = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={LOCAL_READY} modeOverride="local" />
+      </MemoryRouter>,
+    );
+    expect(markup).toContain('data-testid="local-ai-showcase-note"');
+    const demoOnly = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={DEMO_ONLY} modeOverride="local" />
+      </MemoryRouter>,
+    );
+    expect(demoOnly).not.toContain('data-testid="local-ai-showcase-note"');
+    expect(demoOnly).toContain('data-testid="local-ai-unavailable"');
   });
 });

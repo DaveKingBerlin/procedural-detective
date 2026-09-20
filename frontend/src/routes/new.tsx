@@ -14,7 +14,10 @@ import {
 } from "../journey/examplePrompts";
 import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, setGenerationMode } from "../journey/generationMode";
 import { GenerationModeSelector } from "../journey/generationModeSelector";
-import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journey/providerMode";
+import {
+  providerPathNoteFromCapabilities,
+  providerQualifierFromCapabilities,
+} from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
 
 /**
@@ -30,9 +33,11 @@ import { examplePromptText, validatePrompt } from "../journey/promptValidation";
  *
  * Phase 15 Track B — the two paths are clearly labelled here too: this form
  * IS the "Generate a New Mystery" path (custom prompt emphasised, with a
- * provider-honest note: the deterministic generator in the default build,
- * "Live AI provider" only when VITE_APP_PROVIDER=live), while the demo link
- * carries its own zero-cost/deterministic sub-note.
+ * provider-honest note), while the demo link carries its own zero-cost/
+ * deterministic sub-note. Phase 18A — the provider note is CAPABILITY-DRIVEN:
+ * it reflects the backend's public generation-capabilities DTO (deterministic
+ * generator / local AI pipeline / live provider), so a build-time env value
+ * can never contradict the backend's actual provider.
  */
 export interface NewCasePageProps {
   /**
@@ -150,7 +155,7 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
         own world of suspects, evidence and red herrings.
       </p>
       <p className="new-case-provider-note" data-testid="generate-provider-note">
-        {providerPathNote(APP_PROVIDER_MODE)}
+        {providerPathNoteFromCapabilities(capabilities)}
       </p>
       {/* Phase 16.2 §36 — the accurate Local-AI showcase sentence, shown ONLY
           while Local AI mode is ACTIVE (selected AND backend-available). The
@@ -258,12 +263,13 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
             Generate case
           </button>
         </div>
-        {/* ADV-152 — honest app-level provider qualifier next to the primary CTA
+{/* ADV-152 — honest app-level provider qualifier next to the primary CTA
             (same wording + spot as the landing): the generate intro's per-path
-            note stays untouched; this line makes the default deterministic
-            build's "AI" claim unambiguous (mode-aware, config-driven). */}
+            note stays untouched; this line makes the provider story unambiguous
+            and is derived from the backend capability report (Phase 18A) — it
+            can never claim a provider the backend does not run. */}
         <p className="provider-qualifier" data-testid="provider-qualifier">
-          {providerQualifier(APP_PROVIDER_MODE)}
+          {providerQualifierFromCapabilities(capabilities)}
         </p>
       </form>
 

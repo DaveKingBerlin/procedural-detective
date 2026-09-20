@@ -7,7 +7,10 @@ import { setJourneyParams } from "../journey/context";
 import { EXAMPLE_PROMPT } from "../journey/demoPrompt";
 import { getGenerationMode, setGenerationMode } from "../journey/generationMode";
 import { GenerationModeSelector } from "../journey/generationModeSelector";
-import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journey/providerMode";
+import {
+  providerPathNoteFromCapabilities,
+  providerQualifierFromCapabilities,
+} from "../journey/providerMode";
 
 /**
  * "/" — the public landing page (Phase 8 D, REQUIREMENTS 3.1).
@@ -20,11 +23,12 @@ import { APP_PROVIDER_MODE, providerPathNote, providerQualifier } from "../journ
  *      is labelled as such ("Deterministic demo — no API keys, no cost").
  *   2. "Generate a New Mystery" — the SAME generation journey started from
  *      the /new prompt screen, emphasising a custom prompt. Mechanics are
- *      identical to the demo path: in the default build the backend answers
- *      with the deterministic generator (the note says so); when a live
- *      provider is configured at build time (VITE_APP_PROVIDER=live) the note
- *      says "Live AI provider" instead — the button label itself never claims
- *      live-AI behavior in fake mode.
+ *      identical to the demo path; the note beside it is CAPABILITY-DRIVEN
+ *      (Phase 18A): it reflects whatever the backend actually reports via the
+ *      public generation-capabilities DTO — the deterministic generator, the
+ *      local AI pipeline or the configured live provider. A build-time env
+ *      value can no longer contradict the backend's report, so the page never
+ *      claims a provider that is not really running.
  *
  * The legacy "New Investigation" entry stays as-is (it reaches the same
  * /new screen). The backend status indicator stays visible (data-testid
@@ -82,10 +86,10 @@ export default function Home(overrides: HomeProps = {}) {
       </div>
       {/* ADV-152 — honest app-level provider qualifier right below the primary
           CTA: the REQUIREMENTS §62 tagline stays verbatim, and this note makes
-          the deterministic default build's "AI" claim unambiguous (mode-aware,
-          config-driven; never server text). */}
+          the provider story unambiguous (Phase 18A: derived from the backend
+          capability report — never a build-time env claim, never server text). */}
       <p className="provider-qualifier" data-testid="provider-qualifier">
-        {providerQualifier(APP_PROVIDER_MODE)}
+        {providerQualifierFromCapabilities(capabilities)}
       </p>
       <p className="landing-path-note landing-path-note--demo" data-testid="try-demo-note">
         Deterministic demo — no API keys, no cost.
@@ -101,7 +105,7 @@ export default function Home(overrides: HomeProps = {}) {
         </Link>
       </div>
       <p className="landing-path-note landing-path-note--generate" data-testid="generate-provider-note">
-        {providerPathNote(APP_PROVIDER_MODE)}
+        {providerPathNoteFromCapabilities(capabilities)}
       </p>
 
       {/* Phase 16 Track B — generation-mode selector: always offers Demo and
@@ -138,7 +142,7 @@ export default function Home(overrides: HomeProps = {}) {
       </div>
 
       <p className="landing-github">
-        <a data-testid="github-link" href="https://github.com/">
+        <a data-testid="github-link" href="https://github.com/DaveKingBerlin/procedural-detective">
           View on GitHub
         </a>
       </p>

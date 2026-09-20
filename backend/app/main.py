@@ -20,6 +20,16 @@ Phase 8 additions (deployment hardening, Phase8 H/I/J):
   (local dev keeps Vite as the frontend server).
 - Lifespan shutdown — the SQLite engines (readiness + store) are disposed on
   graceful shutdown so the container releases the database file cleanly.
+
+Phase 18A addition (submission trust / release hygiene):
+
+- ``SecurityHeadersMiddleware`` — minimal security headers on EVERY HTTP
+  response: ``Content-Security-Policy: frame-ancestors 'none'`` +
+  ``X-Frame-Options: DENY`` (the app is served same-origin and never needs
+  iframing), ``X-Content-Type-Options: nosniff``, ``Referrer-Policy:
+  strict-origin-when-cross-origin`` and a deny-all ``Permissions-Policy``.
+  A full CSP (default-src) is deliberately NOT set — the Babylon.js renderer
+  needs data:/blob: URLs and generated inline material.
 """
 
 from __future__ import annotations
@@ -287,6 +297,60 @@ class CacheControlMiddleware:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 18A — minimal security headers (CSP frame-ancestors hardening)
+# --------------------------------------------------------------------------- #
+#
+# The app is served SAME-ORIGIN (single container: FastAPI + built SPA) and
+# never needs to be embedded in a third-party frame, so framing is denied.
+# A FULL Content-Security-Policy is intentionally NOT set here: the Babylon.js
+# 3D renderer relies on data:/blob: URLs and generated inline material, and a
+# restrictive default-src would risk breaking the shipped demo for debatable
+# gain. Only the framing directive is sent (frame-ancestors is the CSP level-3
+# equivalent of X-Frame-Options; both are sent for older browsers). The other
+# headers are advisory/non-restrictive and cannot break rendering:
+#  - X-Content-Type-Options: nosniff — don't MIME-sniff API/SPA responses;
+#  - Referrer-Policy: strict-origin-when-cross-origin — never leak query
+#    strings cross-origin (the SPA uses query params only on its own origin);
+#  - Permissions-Policy — deny camera/microphone/geolocation (unused).
+
+_SECURITY_HEADERS = (
+    ("content-security-policy", "frame-ancestors 'none'"),
+    ("x-frame-options", "DENY"),
+    ("x-content-type-options", "nosniff"),
+    ("referrer-policy", "strict-origin-when-cross-origin"),
+    ("permissions-policy", "camera=(), microphone=(), geolocation=()"),
+)
+
+
+class SecurityHeadersMiddleware:
+    """ASGI middleware: minimal security headers on every HTTP response.
+
+    Added as the OUTERMOST middleware so the headers are present on every
+    response — API success + error envelopes, static/SPA files and CORS
+    preflights alike. Header values are appended only when absent (an explicit
+    route-level header is never overwritten).
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_security_headers(message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in _SECURITY_HEADERS:
+                    if name not in headers:
+                        headers.append(name, value)
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
+
+
+# --------------------------------------------------------------------------- #
 # Phase 8 J2 — static/SPA serving (only when STATIC_DIR is configured)
 # --------------------------------------------------------------------------- #
 
@@ -519,6 +583,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # Phase 8 H1: no-store on every private/authenticated response (outermost,
     # so it also covers error envelopes and never blocks CORS header flow).
     app.add_middleware(CacheControlMiddleware)
+    # Phase 18A: minimal security headers on EVERY response (outermost — also
+    # covers error envelopes, CORS preflights and static/SPA responses).
+    app.add_middleware(SecurityHeadersMiddleware)
 
     app.include_router(api_router)
     _configure_static_serving(app, settings)
