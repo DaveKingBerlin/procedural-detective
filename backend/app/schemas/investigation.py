@@ -228,7 +228,21 @@ class ObjectInteractionRequest(BaseModel):
 
 
 class InteractionResultDTO(BaseModel):
-    """POST .../objects/{object_id}/interact -> 200."""
+    """POST .../objects/{object_id}/interact -> 200.
+
+    Phase 19C non-evidence contract (truthful discovery/feedback split):
+
+    - evidence discovered: ``discovery`` carries the ``{evidenceId, kind,
+      title, interaction, state}`` block and ``evidenceId`` is non-null — the
+      discovery DTO contains ONLY the newly player-known evidence;
+    - interacted, nothing found (a non-decorative informational object whose
+      placement carries no evidence association): ``discovery`` is null and
+      ``evidenceId`` is null — the frontend renders the Phase 19C "Nothing
+      relevant was found on <X>." feedback and the player can move on;
+    - a DECORATIVE placement (published interaction "") is NOT interactable:
+      the route answers 409 INTERACTION_NOT_ALLOWED with no state change (this
+      DTO is never produced for it).
+    """
 
     objectId: str
     interaction: str

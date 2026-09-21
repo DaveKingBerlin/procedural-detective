@@ -186,6 +186,33 @@ describe("Phase 18C notebook — discovered evidence appears (req 2)", () => {
     // Deterministic chronological order of the display HH:MM values.
     expect(labels).toEqual(["18:04", "19:10", "20:10", "21:38", "22:03", "23:05"]);
   });
+
+  it("WHEN support: device/cctv/email timestamps from READ content surface deterministically — and never pre-discovery (Phase 19C §5)", () => {
+    const model = modelFor(
+      ["record_cctv_02", "email_thomas_01"],
+      ["record_cctv_02", "email_thomas_01"],
+      [makeCctvRecord(), makeEmailRecord()],
+    );
+    const labels = groupOf(model, "timeline").entries.map((entry) => entry.label);
+    // CCTV events[].time (device/surveillance) + email timestamp both surface,
+    // chronologically sorted — WHEN is deterministically derivable from READ
+    // evidence, exactly like WHO/WHY/WEAPON.
+    expect(labels).toContain("21:38");
+    expect(labels).toContain("22:03");
+    expect(labels).toContain("18:04");
+    expect(labels).toEqual(["18:04", "21:38", "22:03"]);
+
+    // The SAME content on an UNDISCOVERED id never surfaces in any group.
+    const hidden = makeCctvRecord({
+      evidenceId: "record_cctv_hidden_99",
+      content: { cameraId: "hall_cam_1", events: [{ time: "2026-09-11T20:00:00+02:00", action: "x" }] },
+    });
+    const withoutDiscovery = modelFor(["email_thomas_01"], ["email_thomas_01"], [hidden, makeEmailRecord()]);
+    expect(groupOf(withoutDiscovery, "timeline").entries.map((entry) => entry.evidenceId)).not.toContain(
+      "record_cctv_hidden_99",
+    );
+    expect(JSON.stringify(withoutDiscovery)).not.toContain("record_cctv_hidden_99");
+  });
 });
 
 describe("Phase 18C notebook — hidden input safety (reqs 1,3,4,5,13)", () => {

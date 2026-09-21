@@ -77,6 +77,28 @@ describe("revealPresentation (solved, DTO-driven)", () => {
     // Timeline comes back sorted by time with display HH:MM.
     expect(model.timeline.map((entry) => entry.time)).toEqual(["21:38", "21:45", "22:03"]);
   });
+
+  it("renders EVERY timeline entry the backend returned — none dropped, sorted ascending (Phase 19C §5)", () => {
+    const reveal = makeRevealResponse();
+    const model = revealPresentation(reveal, makeCandidates());
+
+    // The reveal screen maps over exactly `model.timeline` — every entry the
+    // backend published must survive into the presentation model so WHEN is
+    // derivable from the notebook/reveal without inventing anything.
+    expect(model.timeline).toHaveLength(reveal.timeline.length);
+    const descriptions = new Set(reveal.timeline.map((entry) => entry.description));
+    for (const entry of model.timeline) {
+      expect(descriptions.has(entry.description)).toBe(true);
+      expect(entry.time).not.toBe("");
+    }
+    // Deterministic ascending order (WHEN is derivable from the DTO itself).
+    expect(model.timeline.map((entry) => entry.time)).toEqual(["21:38", "21:45", "22:03"]);
+    expect(model.timeline.map((entry) => entry.description)).toEqual([
+      "A visitor enters the apartment",
+      "The crime occurs",
+      "The visitor leaves in a hurry",
+    ]);
+  });
 });
 
 describe("revealPresentation (wrong answers)", () => {

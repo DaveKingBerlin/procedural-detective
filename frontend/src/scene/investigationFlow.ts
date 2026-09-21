@@ -271,8 +271,16 @@ export class InvestigationSession {
       );
       this.applyDiscovery(result.discovery);
     } else {
+      // Phase 19C §3 — a NON-EVIDENCE interact: the server confirmed NO
+      // discovery for this object (discovery === null). The old copy
+      // ("Interacted with <label>") dead-ended the player. Non-spoiling,
+      // label-anchored feedback signals nothing was found here and — because
+      // no knowledge changed — the scene stays fully interactive (the player
+      // can obviously move on; "find evidence, then accuse" keeps guiding).
       feedback.toast = this.makeToast(
-        worldObject.label ? `Interacted with ${worldObject.label}` : `Interacted: ${objectId}`,
+        worldObject.label
+          ? `Nothing relevant was found on the ${worldObject.label}.`
+          : "Nothing relevant was found here.",
         result.evidenceId,
       );
     }

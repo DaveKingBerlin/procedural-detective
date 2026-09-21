@@ -2538,6 +2538,41 @@ def _reconcile_evidence_interaction(
     return out
 
 
+def _first_evidence_referencing_object(
+    evidence_spec: Any, object_id: str
+) -> str | None:
+    """The FIRST (id-sorted) real evidence id whose propositions reference
+    ``object_id`` (normalized comparison), or ``None`` when no published
+    evidence references the object.
+
+    Phase 19C: the driver's canonical evidence algebra always emits forensic
+    comparison records for the kit base sharp weapons
+    (``d_ev_weapon_false_kitchenknife`` etc.), so a base sharp-object
+    placement whose composer evidence id (``forensic_knife_match_01`` ...)
+    does not exist in the driver world is re-bound to that REAL record — the
+    same experience the golden world gives (knife -> forensic comparison).
+    Deterministic by construction (sorted ids, first match); never fabricates.
+    """
+    from app.generation.constraints import normalize_identity
+
+    needle = normalize_identity(str(object_id or ""))
+    if not needle:
+        return None
+    matches: list[str] = []
+    for item in getattr(evidence_spec, "evidence", ()) or ():
+        item_id = str(getattr(item, "id", ""))
+        if not item_id:
+            continue
+        for prop in getattr(item, "propositions", ()) or ():
+            prop_id = normalize_identity(getattr(prop, "object_id", None))
+            if prop_id and prop_id == needle:
+                matches.append(item_id)
+                break
+    if not matches:
+        return None
+    return sorted(set(matches))[0]
+
+
 def _project_placement_evidence(
     placements: Any,
     evidence_spec: Any,
@@ -2554,6 +2589,30 @@ def _project_placement_evidence(
     SEALED weapon evidence id when one exists; everything else degrades to
     ``None`` (a decorative placement). Never fabricates evidence, never drops
     a placement, never serializes.
+
+    Phase 19C general rule (no object is special-cased): the composer wires
+    the GOLDEN evidence associations onto the kit base placements
+    (``_GOLDEN_OBJECT_FACTS``: knife -> forensic_knife_match_01, laptop ->
+    email_thomas_01, ...) but the DRIVER replaces the published evidence with
+    its canonical ``d_ev_*`` algebra — those golden ids do not exist in the
+    driver world. A placement whose composer evidence id is dropped must
+    NEVER publish as an interactable-but-evidence-less dead-end. Resolution:
+
+    - the placement is re-bound to the FIRST real canonical evidence fact
+      whose propositions reference the object (``kitchen_knife`` ->
+      ``d_ev_weapon_false_kitchenknife``, ``letter_opener`` ->
+      ``d_ev_weapon_false_letteropener``, ``scissors`` ->
+      ``d_ev_weapon_false_scissors``), exactly like the golden experience;
+    - a placement that was AUTHORED as evidence-bearing (composer evidence id
+      non-empty) but for which NO canonical evidence references the object
+      (e.g. a LAPTOP — a driver world carries no laptop email) is published
+      DECORATIVE (interaction "") so it never misleads the player into an
+      interaction with nothing to find;
+    - a placement that was NEVER authored as evidence-bearing (composer
+      evidence id ``None``) and carries an explicit requested interaction is
+      an informational object: its interaction stays (the frontend renders the
+      Phase 19C "Nothing relevant was found on <X>." feedback for a 200
+      ``discovery: null`` response), exactly as before.
     """
     from app.generation.constraints import normalize_identity
     from app.generation.schemas import PlacementSpec
@@ -2583,12 +2642,25 @@ def _project_placement_evidence(
         if not isinstance(placement, PlacementSpec):
             projected.append(placement)
             continue
+        interaction = getattr(placement, "interaction", "")
+        if evidence_id is None and interaction:
+            # Phase 19C resolution (see docstring): the composer's evidence
+            # association does not survive into the driver world. Try a real
+            # canonical fact referencing this object, else degrade.
+            rebound = _first_evidence_referencing_object(
+                evidence_spec, str(getattr(placement, "object_id", ""))
+            )
+            if rebound is not None:
+                evidence_id = rebound
+            elif existing is not None:
+                # Authored as evidence-bearing but no real association exists
+                # in THIS world -> decorative, never a misleading dead-end.
+                interaction = ""
         # An evidence-linked placement MUST be directly interactable (the
         # safety engine refuses an evidence-linked object with an empty
         # interaction). The locked weapon placement (and any other
         # evidence-linked placement) receives the deterministic inspect
         # interaction exactly as ``_enhance_weapon`` grants affordances.
-        interaction = getattr(placement, "interaction", "")
         if evidence_id is not None and not interaction:
             interaction = "inspect"
         projected.append(

@@ -366,7 +366,7 @@ describe("mesh click dispatch (Phase 8_1 A1/A4 + E)", () => {
       TEST_TOKEN,
     );
     expect(feedback.error).toBeNull();
-    expect(feedback.toast?.text).toBe("Interacted with Kitchen knife");
+    expect(feedback.toast?.text).toBe("Nothing relevant was found on the Kitchen knife.");
   });
 });
 

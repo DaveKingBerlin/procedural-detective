@@ -123,14 +123,23 @@ export default function ScenePage() {
     // readEvidenceIds) into its scene model — re-sync it into React state so
     // the object-list markers and the discovered-only caption overlay flip
     // IMMEDIATELY (no reload needed). The flags stay server-authoritative:
-    // knowledge only ever grows with ids the server returned, and the reused
-    // model reference makes no-change cases (already-discovered, decorative
-    // objects) cheap no-ops. Feedback errors never touch knowledge and skip.
+    // knowledge only ever grows with ids the server returned, and the reference
+    // stability of the merge makes no-change cases (409 errors, decorative
+    // objects, already-discovered repeats) cheap no-ops.
     const session = sessionRef.current;
-    if (feedback.error === null) {
+    const model = session?.sceneModel ?? null;
+    if (model !== null) {
+      // Phase 19C §4: re-sync by REFERENCE STABILITY, not by error status. The
+      // DEF-072 merge returns the SAME model reference when nothing changed
+      // (cheap no-op) and a NEW reference when a server-confirmed discovery or
+      // read flipped flags. Gating the old code on `error === null` left the
+      // object-list "· discovered" markers and the discovery captions stale
+      // whenever a discovery landed but its record read FAILED: the flags are
+      // the server-confirmed knowledge and must flip immediately regardless of
+      // the record-read outcome.
       setStatus((prev) =>
-        prev.status === "ready" && session?.sceneModel != null
-          ? { ...prev, model: session.sceneModel }
+        prev.status === "ready" && model !== prev.model
+          ? { ...prev, model }
           : prev,
       );
     }

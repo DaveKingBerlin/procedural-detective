@@ -7,8 +7,9 @@ import {
   type InvestigationServices,
   type SceneFactory,
 } from "./investigationFlow";
-import { makeBootstrap, makeEmailRecord, makeWitnessRecord, TEST_TOKEN } from "./testFixtures";
+import { makeBootstrap, makeEmailRecord, makeWitnessRecord, makeWorldObject, TEST_TOKEN } from "./testFixtures";
 import { discoveredCaptionsForWorld } from "./objectCaption";
+import { objectiveText, summaryFromSession } from "./discoverySummary";
 
 /**
  * Phase 6 P frontend coverage that lives at the controller level:
@@ -245,9 +246,76 @@ describe("interaction dispatch", () => {
 
     const feedback = await session.interact("kitchen_knife");
 
-    expect(feedback.toast?.text).toBe("Interacted with Kitchen knife");
+    // Phase 19C §3: a non-evidence interact gives meaningful, non-spoiling
+    // feedback (not a dead-end "Interacted with …" toast) and never reads.
+    expect(feedback.toast?.text).toBe("Nothing relevant was found on the Kitchen knife.");
     expect(feedback.record).toBeNull();
     expect(services.readRecord).not.toHaveBeenCalled();
+  });
+
+  it("reports the no-evidence case with the world object's label (Phase 19C)", async () => {
+    const services = makeServices({
+      interactObject: vi.fn(
+        async (): Promise<InteractionResultDTO> => ({
+          objectId: "apartment_laptop",
+          interaction: "read",
+          evidenceId: null,
+          discovery: null,
+          result: "interacted",
+        }),
+      ),
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    const feedback = await session.interact("apartment_laptop");
+
+    expect(feedback.error).toBeNull();
+    expect(feedback.toast?.text).toBe("Nothing relevant was found on the Laptop.");
+    expect(feedback.record).toBeNull();
+    expect(services.readRecord).not.toHaveBeenCalled();
+  });
+
+  it("falls back to 'Nothing relevant was found here.' when the object has no label (Phase 19C)", async () => {
+    const services = makeServices({
+      getInvestigation: vi.fn(async () =>
+        makeBootstrap({
+          scene: {
+            ...makeBootstrap().scene,
+            worldObjects: [
+              ...makeBootstrap().scene.worldObjects,
+              // An unknown asset id -> label null -> the fallback copy is used.
+              makeWorldObject({
+                objectId: "mystery_whitebox",
+                assetId: "ASSET.THAT.DOES.NOT.EXIST",
+                assetType: "misc",
+                subtype: "misc",
+                anchor: "shelf_01",
+                interaction: "inspect",
+                evidenceId: null,
+              }),
+            ],
+          },
+        }) as never,
+      ),
+      interactObject: vi.fn(
+        async (): Promise<InteractionResultDTO> => ({
+          objectId: "mystery_whitebox",
+          interaction: "inspect",
+          evidenceId: null,
+          discovery: null,
+          result: "interacted",
+        }),
+      ),
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    const feedback = await session.interact("mystery_whitebox");
+
+    expect(feedback.error).toBeNull();
+    expect(feedback.toast?.text).toBe("Nothing relevant was found here.");
+    expect(feedback.record).toBeNull();
   });
 
   it("maps a 409 wrong-interaction response to a safe gameplay error", async () => {
@@ -275,6 +343,102 @@ describe("interaction dispatch", () => {
 
     expect(feedback.error?.message).toBe("That object is not part of this scene.");
     expect(services.interactObject).not.toHaveBeenCalled();
+  });
+});
+
+describe("Phase 19C — discovery opens the panel data, increments the counter and fills the strip (no reload)", () => {
+  it("a server-confirmed discovery returns the read record (panel) AND the summary + counter reflect the SAME knowledge without a reload", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+    expect(outcome.ok).toBe(true);
+
+    // Nothing discovered yet: strip empty, counter 0, object unmarked.
+    const before = summaryFromSession(session, session.sceneModel!);
+    expect(before.discoveredCount).toBe(0);
+    expect(before.entries).toEqual([]);
+    expect(session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!.discovered).toBe(false);
+
+    const feedback = await session.interact("kitchen_knife");
+
+    // THE PANEL: the auto-opened record (what the route feeds into
+    // EvidencePanel) is present immediately after the discovery.
+    expect(feedback.error).toBeNull();
+    expect(feedback.record).not.toBeNull();
+    expect(feedback.record!.evidenceId).toBe("email_thomas_01"); // canned read record
+    expect(services.readRecord).toHaveBeenCalledWith(PT_ID, "forensic_knife_match_01", TEST_TOKEN);
+
+    // THE STRIP + COUNTER: the "Discovered evidence" strip and the objective
+    // line ("Discovered X / Y evidence items") derive from the SAME
+    // server-authoritative knowledge snapshot — no reload involved.
+    const after = summaryFromSession(session, session.sceneModel!);
+    expect(after.discoveredCount).toBe(1);
+    expect(after.entries.map((entry) => entry.evidenceId)).toEqual(["forensic_knife_match_01"]);
+    expect(after.entries[0].title).toBeTruthy();
+    expect(objectiveText(after, true)).toBe(
+      "Discovered 1 / 4 evidence items — keep clicking objects in the scene to find more, then make your accusation when you are ready.",
+    );
+
+    // THE MARKING: the merged scene model (object-list markers + captions)
+    // flipped with the same knowledge — immediately, without a reload.
+    const knife = session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    expect(knife.discovered).toBe(true);
+    expect(knife.read).toBe(true);
+  });
+
+  it("repeated discovery is idempotent — same cached record, no duplicate panel data or counter growth", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+    await session.start(null);
+
+    const first = await session.interact("kitchen_knife");
+    const second = await session.interact("kitchen_knife");
+
+    expect(first.record).not.toBeNull();
+    expect(second.record).not.toBeNull();
+    expect(second.record!.evidenceId).toBe(first.record!.evidenceId);
+    expect(services.readRecord).toHaveBeenCalledTimes(1); // cached after the first read
+
+    const summary = summaryFromSession(session, session.sceneModel!);
+    expect(summary.discoveredCount).toBe(1);
+    expect(
+      summary.entries.filter((entry) => entry.evidenceId === "forensic_knife_match_01"),
+    ).toHaveLength(1);
+    expect(objectiveText(summary, true)).toContain("Discovered 1 / 4");
+  });
+
+  it("a NON-evidence interact marks nothing discovered and leaves the summary unchanged (Phase 19C §4)", async () => {
+    const services = makeServices({
+      interactObject: vi.fn(
+        async (): Promise<InteractionResultDTO> => ({
+          objectId: "kitchen_knife",
+          interaction: "inspect",
+          evidenceId: null,
+          discovery: null,
+          result: "interacted",
+        }),
+      ),
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    const feedback = await session.interact("kitchen_knife");
+
+    expect(feedback.toast?.text).toBe("Nothing relevant was found on the Kitchen knife.");
+    expect(feedback.record).toBeNull();
+
+    // No knowledge was merged: no flag flips, no strip growth, no counter,
+    // and no discovered caption appears for the object.
+    const knife = session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    expect(knife.discovered).toBe(false);
+    expect(knife.read).toBe(false);
+    expect(session.knowledgeSnapshot?.discoveredEvidenceIds).toEqual([]);
+    expect(session.knowledgeSnapshot?.readEvidenceIds).toEqual([]);
+    const summary = summaryFromSession(session, session.sceneModel!);
+    expect(summary.discoveredCount).toBe(0);
+    expect(summary.entries).toEqual([]);
+    expect(objectiveText(summary, true)).toContain("Discovered 0 / 4");
+    expect(discoveredCaptionsForWorld(session.sceneModel!.worldObjects, new Map())).toEqual([]);
   });
 });
 
