@@ -228,7 +228,14 @@ _GOLDEN_OBJECT_FACTS: Mapping[str, tuple[str, str, str | None]] = {
     "apartment_door": ("DOOR_APARTMENT_01", "", None),
     "apartment_lamp": ("PROP_LAMP_01", "", None),
     "apartment_laptop": ("PROP_LAPTOP_01", "read", "email_thomas_01"),
-    "victim_body_placeholder": ("PROP_BODY_PLACEHOLDER_01", "", None),
+    # ADV-222 (Phase 19C §5): the VICTIM BODY carries the canonical
+    # BODY_FIRST_FOUND_AT record (``body_found_01``) so the golden EASY world
+    # has at least one discoverable, time-bearing evidence fact a player can
+    # reach by interacting with a placed object (the body) — WHEN is then
+    # derivable from evidence alone, exactly like WHO/WHY/WEAPON. In driver
+    # worlds the id does not survive the canonical projection and the body
+    # degrades DECORATIVE (the driver's general rule, unchanged).
+    "victim_body_placeholder": ("PROP_BODY_PLACEHOLDER_01", "inspect", "body_found_01"),
 }
 
 

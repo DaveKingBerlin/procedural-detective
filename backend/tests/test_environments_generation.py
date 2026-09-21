@@ -265,7 +265,9 @@ def test_office_case_publishes_office_kit_placed_on_office_anchors(
         "apartment_table": ("", None),
         "apartment_door": ("", None),
         "apartment_lamp": ("", None),
-        "victim_body_placeholder": ("", None),
+        # ADV-222: the victim body is evidence-linked to the time-bearing
+        # body_found_01 record (discoverable WHEN fact on a placed object).
+        "victim_body_placeholder": ("inspect", "body_found_01"),
     }
     by_object = {p["object_id"]: p for p in wg["placements"]}
     assert set(by_object) == set(GOLDEN_OBJECT_IDS)

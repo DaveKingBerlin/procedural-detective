@@ -214,7 +214,10 @@ def test_bootstrap_world_objects_sorted_with_golden_scene(phase5_app):
     assert by_id[KNIFE_OBJECT]["read"] is False
     assert by_id[LAPTOP_OBJECT]["evidenceId"] == "email_thomas_01"
     assert by_id[LAPTOP_OBJECT]["interaction"] == "read"
-    assert by_id[BODY_OBJECT]["evidenceId"] is None
+    # ADV-222: the victim body is evidence-linked to the time-bearing
+    # body_found_01 record (discoverable WHEN fact on a placed object).
+    assert by_id[BODY_OBJECT]["evidenceId"] == "body_found_01"
+    assert by_id[BODY_OBJECT]["interaction"] == "inspect"
     # Scene location from the pinned payload (never "latest").
     assert body["scene"]["location"] == {
         "locationId": SCENE_LOCATION,
@@ -301,13 +304,14 @@ ENV_OBJECT_IDS = (
     "apartment_door",
     "apartment_lamp",
     "vase_01",
-    "victim_body_placeholder",
 )
 EVIDENCE_OBJECT_INTERACTIONS = {
     "kitchen_knife": "inspect",
     "letter_opener": "inspect",
     "scissors": "inspect",
     "apartment_laptop": "read",
+    # ADV-222: the victim body carries the time-bearing body_found_01 record.
+    "victim_body_placeholder": "inspect",
 }
 
 

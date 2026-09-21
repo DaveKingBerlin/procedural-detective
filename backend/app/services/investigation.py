@@ -215,6 +215,18 @@ class InvestigationService:
           (404 when not — the response never reveals whether the id exists);
         - idempotent: repeating returns state ``already-discovered``;
         - the linked placement's location is marked visited server-side.
+
+        ADV-225 (Phase 19C, accepted standing contract — DOC NOTE): direct
+        by-id discovery of a REACHABLE evidence record is intended behavior
+        matching the golden by-id discover contract (REQUIREMENTS 40.8). A
+        placement-linked evidence id — including the driver worlds'
+        deterministic canonical forensics (``d_ev_weapon_false_*`` /
+        ``d_ev_weapon_true`` / the time-bearing records) — IS reachable by a
+        player who knows the id without an object interaction. This is the
+        documented state: reachability is the gate; the DTO stays lean (kind +
+        title + interaction only, never content/descriptions/propositions), and
+        a FABRICATED or unreachable id (no valid placement) still answers the
+        generic 404 with zero state change. No action beyond this note.
         """
         payload = self._pinned_payload(playthrough)
         self._require_playing(playthrough)

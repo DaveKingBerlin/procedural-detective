@@ -145,7 +145,11 @@ def test_phase6_golden_scene_present_in_roundtrip_draft():
     assert by_object["kitchen_knife"].evidence_id == "forensic_knife_match_01"
     assert by_object["apartment_laptop"].evidence_id == "email_thomas_01"
     assert by_object["apartment_laptop"].interaction == "read"
-    assert by_object["victim_body_placeholder"].evidence_id is None
+    # ADV-222: the victim body is evidence-linked to the golden time-bearing
+    # BODY_FIRST_FOUND_AT record (body_found_01) so a player can discover a
+    # WHEN fact by interacting with a placed object.
+    assert by_object["victim_body_placeholder"].evidence_id == "body_found_01"
+    assert by_object["victim_body_placeholder"].interaction == "inspect"
     email = next(f for f in draft.evidence if f.id == "email_thomas_01")
     assert email.kind == "email"
     presentation = dict(email.presentation)

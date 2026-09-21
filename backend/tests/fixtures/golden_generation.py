@@ -259,8 +259,8 @@ _WORLD_GRAPH_DOC: dict[str, Any] = {
                 "assetId": "PROP_BODY_PLACEHOLDER_01",
                 "locationId": SCENE_LOCATION,
                 "anchor": "floor_body_position",
-                "interaction": "",
-                "evidenceId": None,
+                "interaction": "inspect",
+                "evidenceId": "body_found_01",
             },
         ],
     }

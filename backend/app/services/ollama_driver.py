@@ -2538,12 +2538,72 @@ def _reconcile_evidence_interaction(
     return out
 
 
+# ADV-222 (Phase 19C §5): the universally-placed DEVICE object of every kit
+# base world (the golden "laptop") whose authored association does not survive
+# into a driver world (the canonical algebra carries no email read) is re-bound
+# to the canonical scene activity-log record (``d_ev_when_obs``,
+# CRIME_SCENE_OBSERVATION_AT). This makes a TIME-BEARING fact PLAYER-REACHABLE
+# in every published driver world — WHEN becomes derivable from discoverable
+# evidence exactly like WHO/WHY/WEAPON. No showcase special-casing: the rule is
+# the general device-log anchor for the kit base world (laptop/terminal in
+# every kit), gated on the placement being AUTHORED as evidence-bearing.
+_WHEN_ACTIVITY_LOG_ANCHOR_OBJECTS: frozenset[str] = frozenset(
+    {"apartment_laptop"}
+)
+_CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID = "d_ev_when_obs"
+
+
+def _when_activity_log_evidence_id(evidence_spec: Any) -> str | None:
+    """The canonical scene activity-log evidence id when the published world
+    carries it (the driver's deterministic WHEN algebra always does), else
+    ``None`` (the device placement then stays decorative — never fabricated)."""
+    if evidence_spec is None:
+        return None
+    for item in getattr(evidence_spec, "evidence", ()) or ():
+        if str(getattr(item, "id", "")) == _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID:
+            return _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID
+    return None
+
+
+def _evidence_bind_rank(item: Any, needle: str) -> int:
+    """The SEMANTIC priority of ``item`` as the published evidence binding for
+    the object ``needle`` (ADV-223).
+
+    When TWO canonical facts reference the same object the resolve rule must
+    pick the fact whose KIND/ROLE matches the object's published role, not an
+    arbitrary id order. The documented priority list (lower wins):
+
+      0 — the evidence carries a ``FORENSIC_WEAPON_MATCH`` proposition for the
+          object (the weapon-match record — what a sharp weapon's published
+          "forensic comparison" role points at);
+      1 — the evidence carries an ``OBJECT_CONTAINS_FINGERPRINT`` proposition
+          for the object (the latent-print forensics role);
+      2 — any other FORENSIC-kind evidence referencing the object;
+      3 — any other evidence (generic cctv/witness/email extras).
+
+    Ties break by evidence id order (``_first_evidence_referencing_object``).
+    """
+    from app.generation.constraints import normalize_identity
+
+    for prop in getattr(item, "propositions", ()) or ():
+        if normalize_identity(getattr(prop, "object_id", None)) != needle:
+            continue
+        ptype = str(getattr(prop, "type", "") or "")
+        if ptype == "FORENSIC_WEAPON_MATCH":
+            return 0
+        if ptype == "OBJECT_CONTAINS_FINGERPRINT":
+            return 1
+    if str(getattr(item, "kind", "") or "") == "forensic":
+        return 2
+    return 3
+
+
 def _first_evidence_referencing_object(
     evidence_spec: Any, object_id: str
 ) -> str | None:
-    """The FIRST (id-sorted) real evidence id whose propositions reference
-    ``object_id`` (normalized comparison), or ``None`` when no published
-    evidence references the object.
+    """The ROLE-MATCHED (semantic) real evidence id whose propositions
+    reference ``object_id`` (normalized comparison), or ``None`` when no
+    published evidence references the object.
 
     Phase 19C: the driver's canonical evidence algebra always emits forensic
     comparison records for the kit base sharp weapons
@@ -2551,14 +2611,19 @@ def _first_evidence_referencing_object(
     placement whose composer evidence id (``forensic_knife_match_01`` ...)
     does not exist in the driver world is re-bound to that REAL record — the
     same experience the golden world gives (knife -> forensic comparison).
-    Deterministic by construction (sorted ids, first match); never fabricates.
+
+    ADV-223: the pick is SEMANTIC, not alphabetical — among the candidate
+    facts referencing the object the one whose kind/role best matches the
+    object's published role wins (see ``_evidence_bind_rank`` for the
+    documented priority list); ties break by evidence id. Deterministic and
+    stable across runs (evidence ORDER independent); never fabricates.
     """
     from app.generation.constraints import normalize_identity
 
     needle = normalize_identity(str(object_id or ""))
     if not needle:
         return None
-    matches: list[str] = []
+    matches: list[tuple[int, str]] = []
     for item in getattr(evidence_spec, "evidence", ()) or ():
         item_id = str(getattr(item, "id", ""))
         if not item_id:
@@ -2566,11 +2631,11 @@ def _first_evidence_referencing_object(
         for prop in getattr(item, "propositions", ()) or ():
             prop_id = normalize_identity(getattr(prop, "object_id", None))
             if prop_id and prop_id == needle:
-                matches.append(item_id)
+                matches.append((_evidence_bind_rank(item, needle), item_id))
                 break
     if not matches:
         return None
-    return sorted(set(matches))[0]
+    return sorted(matches)[0][1]
 
 
 def _project_placement_evidence(
@@ -2598,19 +2663,23 @@ def _project_placement_evidence(
     driver world. A placement whose composer evidence id is dropped must
     NEVER publish as an interactable-but-evidence-less dead-end. Resolution:
 
-    - the placement is re-bound to the FIRST real canonical evidence fact
-      whose propositions reference the object (``kitchen_knife`` ->
+    - the placement is re-bound to the ROLE-MATCHED real canonical evidence
+      fact whose propositions reference the object (``kitchen_knife`` ->
       ``d_ev_weapon_false_kitchenknife``, ``letter_opener`` ->
       ``d_ev_weapon_false_letteropener``, ``scissors`` ->
       ``d_ev_weapon_false_scissors``), exactly like the golden experience;
     - a placement that was AUTHORED as evidence-bearing (composer evidence id
       non-empty) but for which NO canonical evidence references the object
-      (e.g. a LAPTOP — a driver world carries no laptop email) is published
-      DECORATIVE (interaction "") so it never misleads the player into an
-      interaction with nothing to find;
+      (e.g. a LAPTOP — a driver world carries no laptop email) is bound to
+      the canonical scene activity-log record when one exists
+      (``d_ev_when_obs`` — ADV-222: the player can then derive WHEN from
+      discoverable evidence), otherwise it is published DECORATIVE
+      (interaction "") so it never misleads the player into an interaction
+      with nothing to find;
     - a placement that was NEVER authored as evidence-bearing (composer
       evidence id ``None``) and carries an explicit requested interaction is
-      an informational object: its interaction stays (the frontend renders the
+      an INFORMATIONAL object (ADV-224): it is NEVER rebound/upgraded to an
+      evidence object — its interaction stays (the frontend renders the
       Phase 19C "Nothing relevant was found on <X>." feedback for a 200
       ``discovery: null`` response), exactly as before.
     """
@@ -2645,17 +2714,41 @@ def _project_placement_evidence(
         interaction = getattr(placement, "interaction", "")
         if evidence_id is None and interaction:
             # Phase 19C resolution (see docstring): the composer's evidence
-            # association does not survive into the driver world. Try a real
-            # canonical fact referencing this object, else degrade.
-            rebound = _first_evidence_referencing_object(
-                evidence_spec, str(getattr(placement, "object_id", ""))
+            # association does not survive into the driver world.
+            #
+            # ADV-224: only placements AUTHORED as evidence-bearing (composer
+            # evidence id non-empty, dropped by the driver) — or the locked
+            # weapon object — may be rebound/upgraded. A NEVER-authored
+            # informational object that a canonical fact happens to reference
+            # MUST stay informational (interaction unchanged, discovery null).
+            is_locked_weapon_object = (
+                bool(weapon_evidence_id)
+                and weapon_evidence_id in valid_ids
+                and bool(locked_weapon_slug)
+                and normalize_identity(str(getattr(placement, "object_id", "")))
+                == locked_weapon_slug
             )
-            if rebound is not None:
-                evidence_id = rebound
-            elif existing is not None:
-                # Authored as evidence-bearing but no real association exists
-                # in THIS world -> decorative, never a misleading dead-end.
-                interaction = ""
+            if existing is not None or is_locked_weapon_object:
+                rebound = _first_evidence_referencing_object(
+                    evidence_spec, str(getattr(placement, "object_id", ""))
+                )
+                if rebound is not None:
+                    evidence_id = rebound
+                elif existing is not None:
+                    # ADV-222: an authored device placement with no referencing
+                    # fact keeps WHEN derivable from discoverable evidence by
+                    # binding the canonical scene activity-log record.
+                    if (
+                        str(getattr(placement, "object_id", ""))
+                        in _WHEN_ACTIVITY_LOG_ANCHOR_OBJECTS
+                        and _when_activity_log_evidence_id(evidence_spec)
+                    ):
+                        evidence_id = _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID
+                    else:
+                        # Authored as evidence-bearing but no real association
+                        # exists in THIS world -> decorative, never a
+                        # misleading dead-end.
+                        interaction = ""
         # An evidence-linked placement MUST be directly interactable (the
         # safety engine refuses an evidence-linked object with an empty
         # interaction). The locked weapon placement (and any other

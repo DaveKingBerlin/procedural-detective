@@ -458,8 +458,9 @@ def _driver_dead_end_report(payload: dict) -> list[tuple[str, str]]:
 
 def test_7_driver_world_never_publishes_dead_end_interactables():
     """The general root-cause fix: EVERY driver-generated kit publishes every
-    interactable placement with a real evidence association; the LAPTOP (no
-    email in the driver world) degrades to DECORATIVE (interaction "")."""
+    interactable placement with a real evidence association; the LAPTOP is
+    the world's activity-log device (ADV-222) and every unresolved evidence
+    placement publishes with a real record or DECORATIVE (interaction "")."""
     from app.services.ollama_driver import _first_evidence_referencing_object
 
     record, _transport = _run(_staged())
@@ -480,10 +481,16 @@ def test_7_driver_world_never_publishes_dead_end_interactables():
     # the LOCKED weapon keeps its sealed match record.
     assert placements["bronze_ceremonial_ice_pick"]["evidence_id"] == "d_ev_weapon_true"
     assert placements["kitchen_knife"]["interaction"] == "inspect"
-    # the laptop: NO canonical evidence references it in a driver world -> the
-    # general rule publishes it DECORATIVE (never an interactable dead-end).
-    assert placements["apartment_laptop"]["interaction"] == ""
-    assert placements["apartment_laptop"]["evidence_id"] is None
+    # ADV-222: the laptop is the driver world's DEVICE / activity-log anchor.
+    # Its golden email association (email_thomas_01) does not survive into any
+    # driver world, so the general rule re-binds it to the canonical scene
+    # activity-log record (d_ev_when_obs, CRIME_SCENE_OBSERVATION_AT) — a
+    # TIME-BEARING fact a player can discover by reading the laptop. WHEN is
+    # thus derivable from discoverable evidence in every driver world (the
+    # defensive fallback INTERACTS with the never-a-dead-end rule: the
+    # laptop never publishes as an interactable-but-evidence-less placement).
+    assert placements["apartment_laptop"]["interaction"] == "read"
+    assert placements["apartment_laptop"]["evidence_id"] == "d_ev_when_obs"
     assert "apartment_laptop" in {o["object_id"] for o in payload["draft"]["objects"]}
 
 

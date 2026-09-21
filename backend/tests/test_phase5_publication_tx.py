@@ -332,7 +332,6 @@ def test_running_golden_publishes_decorative_env_interactions_as_empty(
         "apartment_table",
         "apartment_door",
         "apartment_lamp",
-        "victim_body_placeholder",
     )
     for object_id in env_ids:
         assert by_object[object_id].interaction == "", object_id
@@ -342,6 +341,9 @@ def test_running_golden_publishes_decorative_env_interactions_as_empty(
         "letter_opener": "inspect",
         "scissors": "inspect",
         "apartment_laptop": "read",
+        # ADV-222: the victim body is evidence-linked to the time-bearing
+        # body_found_01 record (discoverable WHEN fact on a placed object).
+        "victim_body_placeholder": "inspect",
     }
     for object_id, interaction in evidence_interactions.items():
         assert by_object[object_id].interaction == interaction, object_id
