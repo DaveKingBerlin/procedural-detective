@@ -26,9 +26,14 @@ from typing import Any
 
 from app.generation import pipeline
 from app.generation.admission import AdmissionController, AdmissionDenied
-from app.generation.budgets import BudgetTracker
+from app.generation.budgets import BudgetTracker, CORE_BUCKET
 from app.generation.clock import Clock
-from app.generation.failure_codes import GenerationFailureCode, infer_failure_code, public_failure_code
+from app.generation.failure_codes import (
+    GenerationFailureCode,
+    failure_code_for_budget_reason,
+    infer_failure_code,
+    public_failure_code,
+)
 from app.generation.ids import IdSource
 from app.generation.pipeline import AttemptRecord
 from app.generation.provider import (
@@ -109,6 +114,10 @@ class GenerationController:
         max_repair_passes: int,
         max_full_regenerations: int,
         max_prompt_chars: int,
+        max_core_llm_calls: int | None = None,
+        max_llm_calls_per_procedural_asset: int | None = None,
+        max_procedural_assets_per_generation: int | None = None,
+        max_failed_assets_per_generation: int | None = None,
         seed: int | None = None,
         hold_before_publish: bool = False,
         max_retained_attempts: int = 100,
@@ -126,6 +135,27 @@ class GenerationController:
         self._max_repair_passes = int(max_repair_passes)
         self._max_full_regenerations = int(max_full_regenerations)
         self._max_prompt_chars = int(max_prompt_chars)
+        # Phase 19 Fix C — hierarchical provider budgets (None keeps the legacy
+        # single-ceiling behavior for callers that only configure the global
+        # ceiling; the service passes the operator settings).
+        self._max_core_llm_calls = (
+            int(max_core_llm_calls) if max_core_llm_calls is not None else None
+        )
+        self._max_llm_calls_per_procedural_asset = (
+            int(max_llm_calls_per_procedural_asset)
+            if max_llm_calls_per_procedural_asset is not None
+            else None
+        )
+        self._max_procedural_assets = (
+            int(max_procedural_assets_per_generation)
+            if max_procedural_assets_per_generation is not None
+            else None
+        )
+        self._max_failed_assets = (
+            int(max_failed_assets_per_generation)
+            if max_failed_assets_per_generation is not None
+            else None
+        )
         self._seed = seed
         self._hold_before_publish = bool(hold_before_publish)
         # Phase 16_2: an optional OllamaStageDriver that owns the structured
@@ -209,6 +239,10 @@ class GenerationController:
             max_calls=self._max_llm_calls,
             max_repairs=self._max_repair_passes,
             max_regenerations=self._max_full_regenerations,
+            max_core_calls=self._max_core_llm_calls,
+            max_asset_calls=self._max_llm_calls_per_procedural_asset,
+            max_procedural_assets=self._max_procedural_assets,
+            max_failed_assets=self._max_failed_assets,
         )
         attempt = AttemptRecord(
             attempt_id=attempt_id,
@@ -559,11 +593,17 @@ class GenerationController:
                     code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
                 )
                 return False
-        if not attempt.budget.consume_call():
+        if not attempt.budget.consume_call(bucket=CORE_BUCKET):
+            # Phase 19 Fix C: narrow the code when the known cause is a CORE
+            # ceiling hit (vs the global ceiling) — never collapse a known
+            # narrower cause back into the generic code.
+            exhausted_reason = attempt.budget.exhausted_reason(CORE_BUCKET)
             self._fail(
                 attempt,
-                "model call budget exhausted",
-                code=GenerationFailureCode.PROVIDER_CALL_BUDGET_EXHAUSTED,
+                exhausted_reason or "model call budget exhausted",
+                code=failure_code_for_budget_reason(
+                    exhausted_reason or "model call budget exhausted"
+                ),
             )
             return False
         emit_event(
@@ -585,6 +625,10 @@ class GenerationController:
             providerCallCount=attempt.budget.calls,
             repairCount=attempt.budget.repair_passes,
             regenerationCount=attempt.budget.regenerations,
+            globalCallCount=attempt.budget.calls,
+            coreCallCount=attempt.budget.core_calls,
+            assetCallCount=attempt.budget.asset_calls,
+            remainingGlobalCalls=attempt.budget.remaining_global_calls(),
         )
         if _PD_DEV_TRACE:
             _dt(

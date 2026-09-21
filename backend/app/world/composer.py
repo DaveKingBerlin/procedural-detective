@@ -75,6 +75,7 @@ from app.assets.spec_provider import (
     AssetSpecResponse,
     BoundedSpecProvider,
 )
+from app.core.observability import emit_event
 from app.environments.manifests import EnvironmentKit, load_environment
 from app.environments.placer import (
     PlacementError,
@@ -95,6 +96,16 @@ from app.world.requirements import (
     WorldRequirements,
     safe_string_issues,
 )
+
+
+class SemanticObjectResolutionError(ValueError):
+    """Phase 19 Fix B.3 — a SEMANTIC object referenced by the crime/evidence
+    algebra could not be represented as a public/world object.
+
+    Raised fail-closed (sanitized message; never raw provider content) instead
+    of publishing a case whose weapon/evidence id is absent. Callers treat it
+    as a terminal attempt condition — the object is never silently dropped.
+    """
 
 # --------------------------------------------------------------------------- #
 # documented constants
@@ -661,6 +672,21 @@ def compose_world(
         """
         asset_request = _to_asset_request(request)
         criticality = str(getattr(request, "criticality", CRITICALITY_DECORATIVE))
+        semantic_name = str(getattr(request, "requested_name", ""))
+        resolve_started = 0.0
+        try:
+            import time
+
+            resolve_started = time.perf_counter()
+        except Exception:  # noqa: BLE001 - timing never changes resolution
+            pass
+        # Phase 19 §8/§13 — sanitized resolve events (structure only).
+        emit_event(
+            "asset.resolve.started",
+            semanticObjectId=semantic_name or None,
+            stage="world_compose",
+            elapsedMs=0,
+        )
         try:
             outcome = resolve_or_generate(
                 asset_request,
@@ -693,18 +719,46 @@ def compose_world(
             generated = outcome.generated
             if generated.definition is not None:
                 generated_definitions[generated.asset_id] = generated.definition
+            emit_event(
+                "asset.resolve.complete",
+                semanticObjectId=semantic_name or None,
+                stage="world_compose",
+                assetId=generated.asset_id,
+                provenance=Provenance.PROCEDURAL_GENERATED.value,
+                resolved=True,
+                elapsedMs=(
+                    int((time.perf_counter() - resolve_started) * 1000)
+                    if resolve_started else 0
+                ),
+            )
             return ResolvedObject(
                 asset_id=generated.asset_id,
                 provenance=Provenance.PROCEDURAL_GENERATED.value,
                 definition=generated.definition,
                 catalog_version=catalog.catalog_version,
-                requested_name=str(getattr(request, "requested_name", "")),
+                requested_name=semantic_name,
             )
         if (
             resolution is None
             or not resolution.resolved
             or resolution.provenance is Provenance.FALLBACK
         ):
+            emit_event(
+                "asset.resolve.complete",
+                semanticObjectId=semantic_name or None,
+                stage="world_compose",
+                assetId=None,
+                provenance=(
+                    resolution.provenance.value
+                    if resolution is not None
+                    else "UNRESOLVED"
+                ),
+                resolved=False,
+                elapsedMs=(
+                    int((time.perf_counter() - resolve_started) * 1000)
+                    if resolve_started else 0
+                ),
+            )
             return None
         # Phase 12 bounded parametric variant (optional; never fabricates).
         variant_params = dict(getattr(request, "variant_params", ()) or ())
@@ -720,12 +774,32 @@ def compose_world(
                 variant_note = "PARAMETRIC_VARIANT"
             except Exception:  # noqa: BLE001 - variant bad -> fall back to base
                 variant_note = None
+        emit_event(
+            "asset.resolve.complete",
+            semanticObjectId=semantic_name or None,
+            stage="world_compose",
+            assetId=resolution.asset_id,
+            provenance=resolution.provenance.value,
+            resolved=True,
+            elapsedMs=(
+                int((time.perf_counter() - resolve_started) * 1000)
+                if resolve_started else 0
+            ),
+        )
+        if resolution.provenance is Provenance.CATALOG_ALIAS:
+            emit_event(
+                "asset.alias.resolved",
+                semanticObjectId=semantic_name or None,
+                stage="world_compose",
+                assetId=resolution.asset_id,
+                matchedAlias=resolution.matched_alias or None,
+            )
         return ResolvedObject(
             asset_id=resolution.asset_id,
             provenance=resolution.provenance.value,
             definition=None,
             catalog_version=resolution.catalog_version,
-            requested_name=str(getattr(request, "requested_name", "")),
+            requested_name=semantic_name,
             variant=variant_note,
         )
 
@@ -1032,13 +1106,23 @@ def _new_object_id(
 ) -> str:
     """Deterministic object id for a NEW (prompt-specific) placement.
 
-    Prefers the catalog-derived slug (like ``place_objects``) and falls back
-    to a slug from the requested name; a trailing ``_2`` keeps ids unique.
+    Phase 19 Fix B — SEMANTIC OBJECT IDENTITY is authoritative: the object id
+    is derived from the SEMANTIC requested name (e.g. ``antique brass letter
+    opener`` -> ``antique_brass_letter_opener``), NEVER from the RENDER asset
+    identity (the resolver may map the request onto the catalog ``letter
+    opener`` — the render/asset layer — while the semantic public object keeps
+    its own id so CaseTruth / evidence / solver / accusation never lose it).
+    For requests whose semantic name IS the catalog canonical name the result
+    is byte-identical to the previous catalog-slug behavior; a trailing
+    ``_2`` keeps ids unique.
     """
     candidate = _slugify(requested_name)
-    descriptor = catalog.by_id.get(asset_id)
-    if descriptor is not None:
-        candidate = _slugify(descriptor.canonical_name)
+    if not candidate:
+        descriptor = catalog.by_id.get(asset_id)
+        if descriptor is not None:
+            candidate = _slugify(descriptor.canonical_name)
+        if not candidate:
+            candidate = "prop"
     if candidate not in used_ids:
         return candidate
     suffix = 2
@@ -1112,6 +1196,7 @@ __all__ = [
     "RELATION_PREFERENCE_TYPES",
     "ResolvedObject",
     "SPEC_PROVIDER_CALL_LIMIT",
+    "SemanticObjectResolutionError",
     "WorldComposition",
     "compose_world",
     "is_base_object_request",

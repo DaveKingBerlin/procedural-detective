@@ -152,7 +152,43 @@ class Settings(BaseSettings):
         description="CASE_GENERATION_DEADLINE_SECONDS.",
     )
     max_llm_calls_per_generation: int = Field(
-        default=8, gt=0, description="MAX_LLM_CALLS_PER_GENERATION."
+        default=128, gt=0, description="MAX_LLM_CALLS_PER_GENERATION."
+    )
+    # Phase 19 Fix C — scalable hierarchical provider budgeting. The GLOBAL
+    # ceiling (MAX_LLM_CALLS_PER_GENERATION=128) is a SAFETY CEILING for local
+    # Ollama (no per-call charge), never a target. Core stages (case_truth /
+    # evidence / world_requirements + global repair/regeneration calls) get
+    # their own hard ceiling; each procedural ASSET_SPEC object gets an
+    # independent per-asset allowance; the number of procedural assets and the
+    # number of failed assets per generation are separately bounded.
+    max_core_llm_calls_per_generation: int = Field(
+        default=12,
+        gt=0,
+        description="MAX_CORE_LLM_CALLS_PER_GENERATION.",
+    )
+    max_llm_calls_per_procedural_asset: int = Field(
+        default=5,
+        gt=0,
+        description="MAX_LLM_CALLS_PER_PROCEDURAL_ASSET.",
+    )
+    max_procedural_assets_per_generation: int = Field(
+        default=20,
+        gt=0,
+        description="MAX_PROCEDURAL_ASSETS_PER_GENERATION.",
+    )
+    max_failed_assets_per_generation: int = Field(
+        default=3,
+        gt=0,
+        description="MAX_FAILED_ASSETS_PER_GENERATION.",
+    )
+    max_parallel_asset_generations: int = Field(
+        default=2,
+        gt=0,
+        description=(
+            "MAX_PARALLEL_ASSET_GENERATIONS. Accepted now for forward "
+            "compatibility; the generation architecture stays STRICTLY "
+            "SEQUENTIAL — effective asset concurrency is always 1."
+        ),
     )
     max_repair_passes: int = Field(
         default=2, ge=0, description="MAX_REPAIR_PASSES."

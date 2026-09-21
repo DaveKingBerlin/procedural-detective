@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
-import { DEMO_FAILURE_MESSAGES, pollDelayMs, runDemo, type DemoFlowServices, type DemoProgress } from "./demoFlow";
+import { DEMO_FAILURE_MESSAGES, generationFailed, pollDelayMs, runDemo, type DemoFlowServices, type DemoProgress } from "./demoFlow";
 
 /**
  * runDemo state machine coverage (Phase 8 A) with fully injected fakes —
@@ -291,6 +291,189 @@ describe("runDemo — generation FAILED", () => {
     expect(providerBudget.failure.message).toBe(
       DEMO_FAILURE_MESSAGES.providerUnavailable,
     );
+  });
+});
+
+describe("runDemo — Phase 19 failure codes (budget / asset limits)", () => {
+  const PHASE_19_PROVIDER_BUDGET_CODES = [
+    "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED",
+    "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
+  ];
+  const PHASE_19_ASSET_LIMIT_CODES = [
+    "MAX_PROCEDURAL_ASSETS_EXCEEDED",
+    "MAX_FAILED_ASSETS_EXCEEDED",
+  ];
+
+  it.each(PHASE_19_PROVIDER_BUDGET_CODES)(
+    "maps %s (server-side FAILED on createCase) to the safe provider message, never the raw code",
+    async (failureCode) => {
+      const result = await runDemo("prompt", {
+        services: makeServices({
+          createCase: vi.fn(async () => ({
+            caseId: "CASE-demo-01",
+            generationId: "GEN-demo-01",
+            generationAttemptId: "ATT-demo-01",
+            creatorAccessToken: CREATOR,
+            status: "FAILED",
+            failureCode,
+          })),
+        }),
+        wait: NO_WAIT,
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected provider-budget failure");
+      expect(result.failure.kind).toBe("provider");
+      expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+      // The raw code must never reach a player-facing surface.
+      expect(result.failure.message).not.toContain(failureCode);
+    },
+  );
+
+  it.each(PHASE_19_ASSET_LIMIT_CODES)(
+    "maps %s (server-side FAILED on createCase) to the safe failed message, never the raw code",
+    async (failureCode) => {
+      const result = await runDemo("prompt", {
+        services: makeServices({
+          createCase: vi.fn(async () => ({
+            caseId: "CASE-demo-01",
+            generationId: "GEN-demo-01",
+            generationAttemptId: "ATT-demo-01",
+            creatorAccessToken: CREATOR,
+            status: "FAILED",
+            failureCode,
+          })),
+        }),
+        wait: NO_WAIT,
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected asset-limit failure");
+      expect(result.failure.kind).toBe("failed");
+      expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+      expect(result.failure.message).not.toContain(failureCode);
+    },
+  );
+
+  it.each(PHASE_19_PROVIDER_BUDGET_CODES)(
+    "maps %s from a polled FAILED status to the safe provider message",
+    async (failureCode) => {
+      const services = makeServices({
+        createCase: vi.fn(() => runningCase()),
+        pollGeneration: vi.fn(async () => ({
+          caseId: "CASE-demo-01",
+          generationId: "GEN-demo-01",
+          status: "FAILED",
+          progress: 100,
+          stage: null,
+          failureCode,
+        })),
+      });
+      const result = await runDemo("prompt", { services, wait: NO_WAIT });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected provider-budget failure");
+      expect(result.failure.kind).toBe("provider");
+      expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+    },
+  );
+
+  it.each([
+    "MAX_PROCEDURAL_ASSETS_EXCEEDED",
+    "MAX_FAILED_ASSETS_EXCEEDED",
+  ])("maps %s from a polled FAILED status to the safe failed message", async (failureCode) => {
+    const services = makeServices({
+      createCase: vi.fn(() => runningCase()),
+      pollGeneration: vi.fn(async () => ({
+        caseId: "CASE-demo-01",
+        generationId: "GEN-demo-01",
+        status: "FAILED",
+        progress: 100,
+        stage: null,
+        failureCode,
+      })),
+    });
+    const result = await runDemo("prompt", { services, wait: NO_WAIT });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected asset-limit failure");
+    expect(result.failure.kind).toBe("failed");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+  });
+
+  it("falls back to the generic failed message for an unknown/hostile code, never the raw code", async () => {
+    const hostile = "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED_AND_MORE";
+    const result = await runDemo("prompt", {
+      services: makeServices({
+        createCase: vi.fn(async () => ({
+          caseId: "CASE-demo-01",
+          generationId: "GEN-demo-01",
+          generationAttemptId: "ATT-demo-01",
+          creatorAccessToken: CREATOR,
+          status: "FAILED",
+          failureCode: hostile,
+        })),
+      }),
+      wait: NO_WAIT,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected unknown-code failure");
+    expect(result.failure.kind).toBe("failed");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+    expect(result.failure.message).not.toContain(hostile);
+  });
+});
+
+describe("generationFailed — direct mapping (Phase 19 codes)", () => {
+  it("maps each new provider-budget code to the safe provider message class", () => {
+    for (const failureCode of [
+      "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED",
+      "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
+    ]) {
+      const failure = generationFailed(failureCode);
+      expect(failure.kind).toBe("provider");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+    }
+  });
+
+  it("maps each new asset-limit code to the safe failed message class", () => {
+    for (const failureCode of [
+      "MAX_PROCEDURAL_ASSETS_EXCEEDED",
+      "MAX_FAILED_ASSETS_EXCEEDED",
+    ]) {
+      const failure = generationFailed(failureCode);
+      expect(failure.kind).toBe("failed");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+    }
+  });
+
+  it("matches exact strings only — a prefix/substring variant never narrows into the new buckets", () => {
+    for (const hostile of [
+      "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED_EXTRA",
+      "X_ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
+      "MAX_PROCEDURAL_ASSETS_EXCEEDED_NOW",
+      "TOO_MANY_MAX_FAILED_ASSETS_EXCEEDED",
+    ]) {
+      const failure = generationFailed(hostile);
+      expect(failure.kind).toBe("failed");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+      expect(failure.message).not.toContain(hostile);
+    }
+    // Same for the pre-existing buckets: no prefix narrowing regressions.
+    expect(generationFailed("PROVIDER_TIMEOUT_x").kind).toBe("failed");
+    expect(generationFailed("PROVIDER_UNAVAILABLE_2").kind).toBe("failed");
+  });
+
+  it("keeps the existing code mappings intact", () => {
+    expect(generationFailed("GENERATION_DEADLINE_EXCEEDED").kind).toBe("deadline");
+    expect(generationFailed("PROVIDER_TIMEOUT").kind).toBe("provider");
+    expect(generationFailed("PROVIDER_UNAVAILABLE").kind).toBe("provider");
+    expect(generationFailed("PROVIDER_INVALID_RESPONSE").kind).toBe("provider");
+    expect(generationFailed("PROVIDER_CALL_BUDGET_EXHAUSTED").kind).toBe("provider");
+  });
+
+  it("keeps the DEFAULT fallback unchanged (null/undefined/unknown)", () => {
+    for (const failureCode of [null, undefined, "SOME_FUTURE_CODE"]) {
+      const failure = generationFailed(failureCode);
+      expect(failure.kind).toBe("failed");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+    }
   });
 });
 

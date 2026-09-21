@@ -20,6 +20,14 @@ class GenerationFailureCode(str, Enum):
     VALIDATION_FAILED = "VALIDATION_FAILED"
     PUBLICATION_FAILED = "PUBLICATION_FAILED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # Phase 19 Fix C — the narrower hierarchical budget codes. The system
+    # emits these instead of the generic PROVIDER_CALL_BUDGET_EXHAUSTED when
+    # the narrower cause is known (the global code stays for a GLOBAL ceiling
+    # hit with no narrower attribution).
+    CORE_PROVIDER_CALL_BUDGET_EXHAUSTED = "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED"
+    ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED = "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED"
+    MAX_PROCEDURAL_ASSETS_EXCEEDED = "MAX_PROCEDURAL_ASSETS_EXCEEDED"
+    MAX_FAILED_ASSETS_EXCEEDED = "MAX_FAILED_ASSETS_EXCEEDED"
 
 
 PUBLIC_FAILURE_CODES = frozenset(code.value for code in GenerationFailureCode)
@@ -43,6 +51,17 @@ def infer_failure_code(reason: str | None) -> GenerationFailureCode:
         return GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
     if "timed out" in text or "timeout" in text:
         return GenerationFailureCode.PROVIDER_TIMEOUT
+    # Phase 19 Fix C: the narrower hierarchical budget causes are detected
+    # BEFORE the generic "call budget" fallback so a narrowly-attributed
+    # exhaustion never collapses back into PROVIDER_CALL_BUDGET_EXHAUSTED.
+    if "core model call budget" in text or "core call budget" in text:
+        return GenerationFailureCode.CORE_PROVIDER_CALL_BUDGET_EXHAUSTED
+    if "asset model call budget" in text or "asset call budget" in text:
+        return GenerationFailureCode.ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED
+    if "procedural asset" in text and ("ceiling" in text or "exceeded" in text or "max" in text):
+        return GenerationFailureCode.MAX_PROCEDURAL_ASSETS_EXCEEDED
+    if "failed asset" in text and ("threshold" in text or "ceiling" in text or "exceeded" in text):
+        return GenerationFailureCode.MAX_FAILED_ASSETS_EXCEEDED
     if "call budget" in text or "model call budget" in text:
         return GenerationFailureCode.PROVIDER_CALL_BUDGET_EXHAUSTED
     if "repair budget" in text:
@@ -68,9 +87,21 @@ def infer_failure_code(reason: str | None) -> GenerationFailureCode:
     return GenerationFailureCode.INTERNAL_ERROR
 
 
+def failure_code_for_budget_reason(reason: str | None) -> GenerationFailureCode:
+    """Map a ``BudgetTracker.exhausted_reason`` text to the narrowest code.
+
+    The BudgetTracker's reason strings already carry the narrowed phrases
+    (``"core model call budget exhausted"`` / ``"asset model call budget
+    exhausted for <id>"``); the generic global reason maps back to the plain
+    PROVIDER_CALL_BUDGET_EXHAUSTED exactly as before.
+    """
+    return infer_failure_code(reason)
+
+
 __all__ = [
     "GenerationFailureCode",
     "PUBLIC_FAILURE_CODES",
+    "failure_code_for_budget_reason",
     "infer_failure_code",
     "public_failure_code",
 ]

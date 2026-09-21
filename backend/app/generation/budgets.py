@@ -6,6 +6,31 @@ deadline, model-call count, repair-pass count and regeneration count. A new
 attempt always gets a fresh tracker, so recovery counters can never leak
 across attempts (REQUIREMENTS 32.5: "All recovery counters belong to one
 generationAttemptId").
+
+Phase 19 Fix C adds HIERARCHICAL provider-call accounting on top of the
+single global ceiling:
+
+- ``calls``            — the GLOBAL ceiling (``MAX_LLM_CALLS_PER_GENERATION``).
+  Every real provider call counts toward it (hard, unforgiving).
+- ``core_calls``       — core-bucket calls (case_truth / evidence /
+  world_requirements / global repair / regeneration), capped by
+  ``max_core_calls`` (``MAX_CORE_LLM_CALLS_PER_GENERATION``).
+- ``asset_calls``      — procedural ASSET_SPEC/ASSET_SPEC_REPAIR calls, each
+  attributed to ONE semantic object id (``asset_calls_by_object``); per-asset
+  cap ``max_asset_calls`` (``MAX_LLM_CALLS_PER_PROCEDURAL_ASSET``).
+- ``procedural_assets`` — distinct semantic objects that entered the
+  procedural-asset path, capped by ``max_procedural_assets``
+  (``MAX_PROCEDURAL_ASSETS_PER_GENERATION``).
+- ``failed_assets``    — distinct semantic objects whose procedural
+  generation failed, capped by ``max_failed_assets``
+  (``MAX_FAILED_ASSETS_PER_GENERATION``).
+
+Every counter is MONOTONIC: consumption reservations are one-way (a failed
+provider result never returns a reservation; a new attempt gets a fresh
+tracker). Deterministic LOCAL repairs (environmentHint canonicalization,
+semantic-id normalization, evidence projection, catalog alias resolution,
+safe deterministic fallback selection) never touch these counters — only
+actual model calls do.
 """
 
 from __future__ import annotations
@@ -16,8 +41,24 @@ from app.generation.clock import Clock
 
 PROVIDER_CALL_SAFETY_MARGIN_SECONDS = 0.1
 
+# Canonical bucket token for the CORE bucket (None is accepted synonymously so
+# legacy callers that never pass a bucket keep their exact behavior).
+CORE_BUCKET = "core"
+
+
+def _non_negative_int(value: Any, name: str) -> int | None:
+    """Validate an optional budget ceiling int (None is allowed)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int or None")
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return int(value)
+
+
 class BudgetTracker:
-    """Deadline + model-call + repair/regeneration budgets for one attempt."""
+    """Deadline + hierarchical model-call + repair/regeneration budgets."""
 
     def __init__(
         self,
@@ -27,6 +68,10 @@ class BudgetTracker:
         max_calls: int,
         max_repairs: int,
         max_regenerations: int,
+        max_core_calls: int | None = None,
+        max_asset_calls: int | None = None,
+        max_procedural_assets: int | None = None,
+        max_failed_assets: int | None = None,
         started_at: float | None = None,
     ) -> None:
         if isinstance(deadline_seconds, bool) or not isinstance(deadline_seconds, int):
@@ -48,6 +93,14 @@ class BudgetTracker:
         self._clock = clock
         self._deadline_seconds = int(deadline_seconds)
         self._max_calls = int(max_calls)
+        self._max_core_calls = _non_negative_int(max_core_calls, "max_core_calls")
+        self._max_asset_calls = _non_negative_int(max_asset_calls, "max_asset_calls")
+        self._max_procedural_assets = _non_negative_int(
+            max_procedural_assets, "max_procedural_assets"
+        )
+        self._max_failed_assets = _non_negative_int(
+            max_failed_assets, "max_failed_assets"
+        )
         self._max_repairs = int(max_repairs)
         self._max_regenerations = int(max_regenerations)
         self._started_at = (
@@ -55,6 +108,11 @@ class BudgetTracker:
         )
         # Public counters (readable for tests/inspection).
         self.calls = 0
+        self.core_calls = 0
+        self.asset_calls = 0
+        self.asset_calls_by_object: dict[str, int] = {}
+        self.procedural_assets: set[str] = set()
+        self.failed_assets: set[str] = set()
         self.repair_passes = 0
         self.regenerations = 0
 
@@ -67,6 +125,50 @@ class BudgetTracker:
     @property
     def deadline_seconds(self) -> int:
         return self._deadline_seconds
+
+    def remaining_global_calls(self) -> int:
+        """Calls still available under the GLOBAL ceiling."""
+        return max(0, self._max_calls - self.calls)
+
+    def remaining_core_calls(self) -> int | None:
+        """Core calls still available (None = no core ceiling configured)."""
+        if self._max_core_calls is None:
+            return None
+        return max(0, self._max_core_calls - self.core_calls)
+
+    def remaining_asset_calls(self, object_id: str) -> int | None:
+        """Asset calls still available for ONE semantic object (None = none)."""
+        if self._max_asset_calls is None:
+            return None
+        return max(0, self._max_asset_calls - self.asset_call_count(object_id))
+
+    @property
+    def procedural_asset_count(self) -> int:
+        return len(self.procedural_assets)
+
+    @property
+    def failed_asset_count(self) -> int:
+        return len(self.failed_assets)
+
+    @property
+    def max_procedural_assets(self) -> int | None:
+        return self._max_procedural_assets
+
+    @property
+    def max_failed_assets(self) -> int | None:
+        return self._max_failed_assets
+
+    @property
+    def max_asset_calls(self) -> int | None:
+        return self._max_asset_calls
+
+    @property
+    def max_core_calls(self) -> int | None:
+        return self._max_core_calls
+
+    def asset_call_count(self, object_id: str) -> int:
+        """Asset-bucket calls attributed to ONE semantic object id."""
+        return self.asset_calls_by_object.get(object_id, 0)
 
     # -- budget checks -------------------------------------------------------
 
@@ -101,19 +203,73 @@ class BudgetTracker:
             return 0.0
         return min(configured, remaining - margin)
 
-    def consume_call(self) -> bool:
-        """Reserve one model call.
+    def consume_call(self, bucket: str | None = None) -> bool:
+        """Reserve one REAL model call in a budget bucket.
 
-        Returns False (with NO reservation) when the call budget is already
-        exhausted OR the deadline has passed — the caller must treat False as
-        a terminal condition for the attempt.
+        ``bucket`` is ``None`` or ``"core"`` (the CORE bucket: case/evidence/
+        world stage calls plus global repair/regeneration calls) or a
+        non-empty semantic object id (the ASSET:<objectId> bucket: procedural
+        ASSET_SPEC / ASSET_SPEC_REPAIR / geometry calls for that object).
+
+        Enforces (simultaneously): the GLOBAL ceiling (hard), the CORE ceiling
+        for core-bucket calls (hard when configured) and the per-asset ceiling
+        for asset-bucket calls (hard when configured). Returns False (with NO
+        reservation) when ANY applicable ceiling is exhausted OR the deadline
+        has passed — the caller must treat False as terminal for the attempt
+        (or a failed asset when only its sub-budget is spent). Deterministic
+        local repairs NEVER call this method.
         """
         if self.deadline_passed():
             return False
         if self.calls >= self._max_calls:
             return False
+        if bucket is None or bucket == CORE_BUCKET:
+            if self._max_core_calls is not None and self.core_calls >= self._max_core_calls:
+                return False
+            self.core_calls += 1
+        else:
+            if not isinstance(bucket, str) or not bucket:
+                raise ValueError(
+                    "consume_call bucket must be None, 'core' or a non-empty "
+                    "semantic object id"
+                )
+            if self._max_asset_calls is not None and self.asset_call_count(bucket) >= self._max_asset_calls:
+                return False
+            self.asset_calls += 1
+            self.asset_calls_by_object[bucket] = self.asset_call_count(bucket) + 1
         self.calls += 1
         return True
+
+    def consume_core_call(self) -> bool:
+        """New-style alias for ``consume_call(bucket=CORE_BUCKET)``."""
+        return self.consume_call(bucket=CORE_BUCKET)
+
+    def consume_asset_call(self, object_id: str) -> bool:
+        """New-style alias for ``consume_call(bucket=<object_id>)``."""
+        return self.consume_call(bucket=object_id)
+
+    def exhausted_reason(self, bucket: str | None = None) -> str:
+        """The deterministic narrowest exhaustion reason, or ``""``.
+
+        Never raises and never mutates. The reason text carries the
+        ``"model call budget"`` prefix so legacy ``infer_failure_code`` still
+        classifies it, while the more specific phrases (``"core model call
+        budget"`` / ``"asset model call budget"``) let the lifecycle emit the
+        narrower Phase 19 failure codes.
+        """
+        if self.calls >= self._max_calls:
+            return "model call budget exhausted"
+        if bucket is None or bucket == CORE_BUCKET:
+            if self._max_core_calls is not None and self.core_calls >= self._max_core_calls:
+                return "core model call budget exhausted"
+            return ""
+        if (
+            self._max_asset_calls is not None
+            and isinstance(bucket, str)
+            and self.asset_call_count(bucket) >= self._max_asset_calls
+        ):
+            return f"asset model call budget exhausted for {bucket}"
+        return ""
 
     def consume_repair_pass(self) -> bool:
         """Reserve one repair pass; False when exhausted (with no reservation)."""
@@ -129,9 +285,62 @@ class BudgetTracker:
         self.regenerations += 1
         return True
 
+    def consume_procedural_asset(self, object_id: str) -> bool:
+        """Reserve procedural-asset entry for ONE semantic object.
+
+        Each DISTINCT semantic object that enters the procedural ASSET_SPEC
+        path counts once. Returns False (with no reservation) when the
+        procedural-asset ceiling (``MAX_PROCEDURAL_ASSETS_PER_GENERATION``) is
+        already reached. Never consumes a model call — this is a per-object
+        count guard, not a provider call.
+        """
+        if not isinstance(object_id, str) or not object_id:
+            raise ValueError("procedural asset id must be a non-empty string")
+        if object_id in self.procedural_assets:
+            return True
+        if self._max_procedural_assets is not None and len(self.procedural_assets) >= self._max_procedural_assets:
+            return False
+        self.procedural_assets.add(object_id)
+        return True
+
+    def mark_failed_asset(self, object_id: str) -> bool:
+        """Record ONE procedural asset that could not be safely produced.
+
+        Returns False when the failed-asset ceiling
+        (``MAX_FAILED_ASSETS_PER_GENERATION``) would be exceeded by recording
+        this NEW failure — the caller then knows the attempt must fail closed
+        (``MAX_FAILED_ASSETS_EXCEEDED``). Re-recording the same object id is a
+        no-op returning True. Never consumes a model call.
+        """
+        if not isinstance(object_id, str) or not object_id:
+            raise ValueError("failed asset id must be a non-empty string")
+        if object_id in self.failed_assets:
+            return True
+        if (
+            self._max_failed_assets is not None
+            and len(self.failed_assets) >= self._max_failed_assets
+        ):
+            return False
+        self.failed_assets.add(object_id)
+        return True
+
+    def snapshot(self) -> dict[str, Any]:
+        """Sanitized monotonic accounting snapshot (never raw content)."""
+        return {
+            "globalCallCount": self.calls,
+            "coreCallCount": self.core_calls,
+            "assetCallCount": self.asset_calls,
+            "remainingGlobalCalls": self.remaining_global_calls(),
+            "remainingCoreCalls": self.remaining_core_calls(),
+            "proceduralAssetCount": self.procedural_asset_count,
+            "failedAssetCount": self.failed_asset_count,
+        }
+
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"BudgetTracker(calls={self.calls}/{self._max_calls}, "
+            f"core={self.core_calls}/{self._max_core_calls}, "
+            f"assets={self.asset_calls}, "
             f"repairs={self.repair_passes}/{self._max_repairs}, "
             f"regenerations={self.regenerations}/{self._max_regenerations})"
         )

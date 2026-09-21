@@ -684,12 +684,35 @@ class GenerationService:
           request degrades: the payload keeps the golden composition.
         """
         settings = self._settings
+        from app.world.environment import canonicalize_environment_hint
+
         # Local input validation: zero reservations, zero provider calls.
+        # Phase 19 Fix A: an explicit ``environment`` body field is
+        # deterministically CANONICALIZED (trim/lowercase/space->underscore/
+        # alias map) before any resolution; a REJECTED value (path-like /
+        # ``..`` / absolute / URL scheme / unsupported token) raises the same
+        # sanitized EnvironmentHintError as before — never a provider call,
+        # never a file-lookup.
+        canonical_environment: str | None = None
         if environment is not None:
             issues = environment_hint_safety(environment)
             if issues:
                 raise EnvironmentHintError(
                     "environment hint is invalid or exceeds the configured limit"
+                )
+            canonical_environment, _canonical_issues = canonicalize_environment_hint(
+                environment
+            )
+            if canonical_environment is None:
+                # Safe-but-unknown hint (e.g. "greenhouse by the lake"): the
+                # documented safe-unknown behavior is the FALLBACK kit — keep
+                # the original value for the resolver (never a provider call).
+                canonical_environment = environment
+            elif canonical_environment != environment:
+                emit_event(
+                    "environment.canonicalized",
+                    environmentId=canonical_environment,
+                    reasonCode="ENVIRONMENT_HINT_CANONICALIZED",
                 )
         # Phase 14 — deterministic prompt -> WorldRequirements. The explicit
         # Phase 11 ``environment`` body field takes precedence over the prompt
@@ -705,9 +728,15 @@ class GenerationService:
         from app.world.extract import extract_world_requirements
 
         world_reqs = extract_world_requirements(prompt_text, locked)
+        prompt_hint = world_reqs.environment_hint
+        prompt_canonical, _prompt_canonical_issues = canonicalize_environment_hint(
+            prompt_hint
+        )
         hint = (
-            environment
-            if environment is not None
+            canonical_environment
+            if canonical_environment is not None
+            else prompt_canonical
+            if prompt_canonical is not None
             else world_reqs.environment_hint
         )
         environment_id, environment_diagnostics = _resolve_environment_for_generation(
@@ -1189,10 +1218,14 @@ class GenerationService:
         # Phase 14 — prompt-to-world for the re-publication (v2+): extract the
         # WorldRequirements from the NEW prompt and resolve the environment.
         from app.world.extract import extract_world_requirements
+        from app.world.environment import canonicalize_environment_hint
 
         world_reqs = extract_world_requirements(prompt_text, locked)
         self._last_world_requirements = world_reqs
-        hint = world_reqs.environment_hint
+        canonical, _canonical_issues = canonicalize_environment_hint(
+            world_reqs.environment_hint
+        )
+        hint = canonical if canonical is not None else world_reqs.environment_hint
         environment_id, environment_diagnostics = _resolve_environment_for_generation(
             hint
         )
@@ -1281,6 +1314,17 @@ class GenerationService:
             max_repair_passes=settings.max_repair_passes,
             max_full_regenerations=settings.max_full_regenerations,
             max_prompt_chars=settings.max_prompt_chars,
+            # Phase 19 Fix C — hierarchical provider budgets from config.
+            max_core_llm_calls=settings.max_core_llm_calls_per_generation,
+            max_llm_calls_per_procedural_asset=(
+                settings.max_llm_calls_per_procedural_asset
+            ),
+            max_procedural_assets_per_generation=(
+                settings.max_procedural_assets_per_generation
+            ),
+            max_failed_assets_per_generation=(
+                settings.max_failed_assets_per_generation
+            ),
             seed=None,  # per-controller auto seed (deterministic per controller)
             stage_driver=driver,
             provider_timeout_seconds=(

@@ -52,6 +52,7 @@ from app.assets.specs import (
     PRIMITIVE_ALLOWLIST,
 )
 from app.domain.evidence import PROPOSITION_TYPES
+from app.world.environment import ENVIRONMENT_IDS
 
 # --- schema-contract builder (deterministic, authoritative) ----------------
 #
@@ -62,6 +63,16 @@ from app.domain.evidence import PROPOSITION_TYPES
 # value (interpolated, never a copy).
 
 _PROPOSITION_TYPE_HINT_PREFIX = "use EXACTLY one of the proposition type tokens:"
+
+# The closed ``environmentHint`` enum (Phase 19 Fix A). The hint text carries
+# this exact ``enum <tokens>`` marker so the derived transport JSON Schema
+# constrains ``environmentHint`` to the five canonical ids (the model can never
+# suggest a path-like or free-text location).
+_ENVIRONMENT_ENUM_HINT = (
+    "canonical environment token; enum " + ",".join(ENVIRONMENT_IDS) +
+    " (use EXACTLY one of those EXACT tokens — never a path, never a location "
+    "phrase like 'hotel suite', never a free text word or null)"
+)
 
 
 def _canonical_concept_sentence(concept: str | None) -> str:
@@ -208,9 +219,7 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
         }
     elif stage == "world_requirements":
         contract = {
-            "environmentHint": "a location word from: apartment/flat/condo, "
-            "office/company/workplace, hotel/room/suite, warehouse/depot/storage, "
-            "mansion/villa/manor",
+            "environmentHint": _ENVIRONMENT_ENUM_HINT,
             "locationTokens": ["matched location token strings"],
             "objects": [
                 {
@@ -391,6 +400,34 @@ def _hint_nullable(hint: str) -> bool:
     return "null" in hint.casefold()
 
 
+def _enum_token_list(hint: str) -> list[str]:
+    """Deterministic closed-enum token list of a contract hint.
+
+    A hint carrying the marker ``enum token1,token2,...`` (e.g. the Phase 19
+    ``environmentHint`` vocabulary) contributes exactly those tokens to the
+    derived transport JSON Schema ``{"type": "string", "enum": [...]}``. The
+    token list is everything after ``enum`` up to the first ``(`` (prose
+    parentheticals are cut); tokens are split on commas/whitespace and
+    deduplicated while preserving order. No other hint text matches the
+    marker, so no unrelated schema changes.
+    """
+    lowered = hint.casefold()
+    marker = "enum "
+    index = lowered.find(marker)
+    if index < 0:
+        return []
+    rest = hint[index + len(marker):]
+    paren = rest.find("(")
+    if paren != -1:
+        rest = rest[:paren]
+    tokens: list[str] = []
+    for token in rest.replace(",", " ").split():
+        token = token.strip()
+        if token:
+            tokens.append(token)
+    return tokens
+
+
 def _key_required(value: Any) -> bool:
     """Requiredness rule for the derived JSON Schema: containers and scalars are
     always required; a string hint is optional only when it mentions ``null``
@@ -491,6 +528,15 @@ def _contract_to_json_schema(node: Any) -> dict[str, Any]:
         # The strict evidence parser owns this vocabulary. Give Ollama's JSON
         # Schema grammar that exact enum instead of merely accepting a string.
         return {"type": "string", "enum": sorted(PROPOSITION_TYPES)}
+    enum_tokens = _enum_token_list(hint)
+    if enum_tokens:
+        # Phase 19 Fix A: a contract hint carrying the ``enum a,b,c`` marker
+        # derives a CLOSED string enum in the transport JSON Schema (the
+        # ``environmentHint`` vocabulary is the canonical five ids). Sorted
+        # like every other derived enum (the evidence proposition vocabulary)
+        # so the grammar is deterministic. The strict parsers stay the sole
+        # acceptance authority.
+        return {"type": "string", "enum": sorted(set(enum_tokens))}
     if "[x,y,z]" in hint:
         return {
             "type": "object",
@@ -750,9 +796,13 @@ _WORLD_FIELD_RULES = (
     "\n\nFIELD RULES (strict):\n"
     "- The document uses EXACTLY: environmentHint, locationTokens, objects, "
     "relations, unsafeUnsupported.\n"
-    "- environmentHint is one exact location word from the schema list "
-    "(apartment/flat/condo, office/company/workplace, hotel/room/suite, "
-    "warehouse/depot/storage, mansion/villa/manor).\n"
+    "- environmentHint is ONE EXACT canonical token from this closed vocabulary: "
+    "apartment, office, hotel_suite, warehouse, mansion. NEVER write a "
+    "location phrase ('hotel suite', 'the office'), NEVER a path ('hotel/"
+    "suite'), NEVER a synonym or free text — pick the exact canonical token "
+    "for the prompt's location (hotel suite -> hotel_suite, company office -> "
+    "office). If the prompt names no supported location, still output one "
+    "canonical token from the vocabulary (the closest match).\n"
     "- objects entries use EXACTLY: name, categoryHint, subtypeHint, tags, "
     "requiredInteraction, evidenceId, criticality.\n"
     "- MAPPING OF THE PROMPT LINES: Victim/Murderer/Witness are PERSONS, the "

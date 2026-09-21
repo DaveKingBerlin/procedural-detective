@@ -25,6 +25,13 @@ _SAFE_FIELDS = frozenset(
         "requestBytes", "responseBytes", "structuredOutput", "success", "published",
         "failureCode", "validationOutcome", "assetRequestCount", "assetRepairCount",
         "reasonCode", "originalStage", "projectionValid",
+        # Phase 19 Fix C — sanitized hierarchical provider-accounting fields
+        # (§8/§13). Never raw prompts, truth, provider URLs/IPs, tokens,
+        # credentials or repair prompt text.
+        "semanticObjectId", "globalCallCount", "coreCallCount", "assetCallCount",
+        "remainingGlobalCalls", "remainingCoreCalls", "remainingAssetCalls",
+        "proceduralAssetCount", "failedAssetCount", "environmentId",
+        "fallbackSource", "assetId", "matchedAlias", "provenance", "resolved",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

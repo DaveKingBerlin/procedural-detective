@@ -48,8 +48,15 @@ from app.generation.provider import (
     GenerationStage,
     ProviderResult,
 )
-from app.generation.budgets import PROVIDER_CALL_SAFETY_MARGIN_SECONDS
-from app.generation.failure_codes import GenerationFailureCode, infer_failure_code
+from app.generation.budgets import (
+    CORE_BUCKET,
+    PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
+)
+from app.generation.failure_codes import (
+    GenerationFailureCode,
+    failure_code_for_budget_reason,
+    infer_failure_code,
+)
 from app.core.observability import emit_event
 from app.generation import prompts
 from app.generation import parser as stage_parser
@@ -57,6 +64,8 @@ from app.domain.time_interval import (
     epoch_to_iso,
     parse_iso8601,
 )
+from app.world.composer import SemanticObjectResolutionError
+from app.world.environment import canonicalize_environment_hint
 from app.world.requirements import (
     CRITICALITY_DECORATIVE,
     CRITICALITY_REQUIRED,
@@ -127,6 +136,28 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise _DuplicateKeyError(key)
         result[key] = value
     return result
+
+
+def _consumer_accepts_bucket(consumer: Callable[..., Any]) -> bool:
+    """Whether a budget consumer accepts a positional bucket argument.
+
+    Phase 19 Fix C callers pass ``consumer(object_id)`` (ASSET:<objectId>
+    attribution); legacy zero-arg consumers (tests, older callers) still work
+    via the zero-arg invocation. Introspected once at construction.
+    """
+    import inspect
+
+    try:
+        signature = inspect.signature(consumer)
+    except (TypeError, ValueError):
+        return True  # flexible callable (partial/builtin): assume bucket-aware
+    for parameter in signature.parameters.values():
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            return True
+    return False
 
 
 def _parse_doc(content: str) -> dict[str, Any]:
@@ -376,6 +407,23 @@ def _weapon_evidence_id(attempt: Any, evidence_spec: Any) -> str:
 # The app-owned "other sharp weapon" candidates the weapon solver tests
 # against the locked weapon (mirror of the kit base objects in ``_BASE``).
 _BASE_SHARP_WEAPON_IDS: tuple[str, ...] = ("kitchen_knife", "letter_opener", "scissors")
+
+# The FULL golden base object id set carried by EVERY driver-assembled draft
+# (identical to the fake/live golden world's object set). Phase 19 Fix B
+# (§4.4): object IDENTITY exists independently of the per-kit PLACEMENT subset
+# (KIT_BASE_OBJECT_IDS) — a kit that cannot place letter_opener/scissors still
+# has them as world OBJECTS so weapon/evidence references stay valid.
+OBJECTS_BASE_ALL_KITS: tuple[str, ...] = (
+    "kitchen_knife",
+    "letter_opener",
+    "scissors",
+    "vase_01",
+    "apartment_table",
+    "apartment_door",
+    "apartment_lamp",
+    "apartment_laptop",
+    "victim_body_placeholder",
+)
 
 # Default distant-location travel rule the driver may deterministically add so
 # an alternative suspect's observation actually proves the scene unreachable.
@@ -874,9 +922,29 @@ def _evidence_set_summary(evidence_spec: Any) -> dict[str, Any]:
     }
 
 
-def parse_world_requirements(content: str) -> WorldRequirements:
+def parse_world_requirements(
+    content: str,
+    canonical_fallback: str | None = None,
+    *,
+    case_id: str | None = None,
+    attempt_id: str | None = None,
+) -> WorldRequirements:
     """Strict-parse a WORLD_REQUIREMENTS stage response into the typed
-    ``WorldRequirements`` (bounded ObjectRequests / PlacementRelations)."""
+    ``WorldRequirements`` (bounded ObjectRequests / PlacementRelations).
+
+    Phase 19 Fix A — canonical environment handling: the raw
+    ``environmentHint`` is canonicalized through ``app.world.environment``
+    (trim/lowercase/space->underscore/hyphen->underscore + the closed five-id
+    alias map). A REJECTED hint (path-like / ``..`` / absolute / URL scheme /
+    unsupported token) NEVER fails the stage and NEVER enters the remote-repair
+    path: the deterministic user/prompt-derived fallback
+    (``canonical_fallback``, e.g. "hotel_suite" from the prompt's "Location:
+    hotel suite" line) is used when available, otherwise the hint stays None
+    (the environment resolver falls back to the documented default kit). All
+    of this is LOCAL — zero provider calls, zero budget consumption. Only
+    genuine semantic content gaps (e.g. a malformed object/relation structure)
+    raise and route through the bounded retry.
+    """
     data = _parse_doc(content)
     if not isinstance(data, dict):
         raise ValueError("world_requirements root must be a JSON object")
@@ -924,9 +992,55 @@ def parse_world_requirements(content: str) -> WorldRequirements:
                 f"world_requirements.relations[{index}] invalid: {exc}"
             ) from None
 
+    # ---- Phase 19 Fix A: deterministic LOCAL environmentHint handling ------
+    # Canonicalize the raw hint. A rejected value is repaired locally (prompt
+    # fallback / default kit) and NEVER triggers a remote repair provider call.
+    raw_hint = data.get("environmentHint")
+    environment_hint, env_issues = canonicalize_environment_hint(raw_hint)
+    if environment_hint is None and raw_hint is not None and env_issues:
+        # Deterministic local recovery: the already-known canonical location
+        # extracted from the USER PROMPT is authoritative when available.
+        if canonical_fallback is not None:
+            fallback_hint, _fallback_issues = canonicalize_environment_hint(
+                canonical_fallback
+            )
+            if fallback_hint is not None:
+                environment_hint = fallback_hint
+                emit_event(
+                    "environment.fallback.used",
+                    caseId=case_id,
+                    generationAttemptId=attempt_id,
+                    stage=GenerationStage.WORLD_GRAPH.value,
+                    environmentId=fallback_hint,
+                    reasonCode="ENVIRONMENT_HINT_REJECTED",
+                    fallbackSource="USER_LOCATION",
+                )
+        if environment_hint is None:
+            # No authoritative recovery is available: the hint stays None and
+            # the environment resolver falls back to the default kit. Local,
+            # zero provider calls.
+            emit_event(
+                "environment.fallback.used",
+                caseId=case_id,
+                generationAttemptId=attempt_id,
+                stage=GenerationStage.WORLD_GRAPH.value,
+                environmentId="",
+                reasonCode="ENVIRONMENT_HINT_REJECTED",
+                fallbackSource="DEFAULT_KIT",
+            )
+    elif raw_hint is not None and environment_hint != raw_hint:
+        emit_event(
+            "environment.canonicalized",
+            caseId=case_id,
+            generationAttemptId=attempt_id,
+            stage=GenerationStage.WORLD_GRAPH.value,
+            environmentId=environment_hint or "",
+            reasonCode="ENVIRONMENT_HINT_CANONICALIZED",
+        )
+
     try:
         return WorldRequirements(
-            environment_hint=data.get("environmentHint"),
+            environment_hint=environment_hint,
             location_tokens=tuple(data.get("locationTokens") or ()),
             objects=tuple(objects),
             relations=tuple(sorted(set(relations), key=lambda r: (r.kind, r.target))),
@@ -990,7 +1104,7 @@ class OllamaAssetSpecProvider:
         *,
         provider: Any,
         attempt_id: str,
-        budget_consumer: Callable[[], bool],
+        budget_consumer: Callable[..., bool],
         locked: Any = None,
         seed: int | None = None,
         model_label: str = "",
@@ -1007,6 +1121,16 @@ class OllamaAssetSpecProvider:
         self._configured_timeout_seconds = configured_timeout_seconds
         self._timeout_provider = timeout_provider
         self._metrics_provider = metrics_provider
+        # Phase 19 Fix C: the budget consumer may be bucket-aware
+        # (``consumer(object_id)`` -> ASSET:<objectId> accounting) or a legacy
+        # zero-arg consumer (tests/older callers) — introspected once here.
+        self._bucket_aware = _consumer_accepts_bucket(budget_consumer)
+        # Phase 19 Fix C ceiling flags: a procedural-asset-count ceiling or a
+        # failed-asset ceiling hit is recorded here (the driver reads the flag
+        # AFTER composition and raises the specific typed code — the composer
+        # itself can never see the raw provider).
+        self.procedural_asset_ceiling_hit = False
+        self.failed_asset_threshold_hit = False
         # ``calls``: number of ``generate()`` invocations on THIS spec provider
         # (always 1 — the outer AssetSpec round-trip). ``request_calls``: the
         # number of REAL request-level provider calls (each ASSET_SPEC/REPAIR
@@ -1039,12 +1163,25 @@ class OllamaAssetSpecProvider:
         self.last_repair_trace = []
         concept = request.requested_name
         category_hint = request.category_hint or None
+        self._last_concept = concept
+
+        # Phase 19 Fix C: record this semantic object's entry into the
+        # procedural-asset path (a DISTINCT-object ceiling guard, never a
+        # model call). When the ceiling is already reached the object cannot
+        # enter the provider path — fail this asset, the driver sees the flag.
+        budget = self._metrics_provider() if self._metrics_provider is not None else None
+        if budget is not None and hasattr(budget, "consume_procedural_asset"):
+            if not budget.consume_procedural_asset(concept):
+                self.procedural_asset_ceiling_hit = True
+                return AssetSpecResponse(
+                    error="procedural asset count ceiling exceeded for this generation"
+                )
 
         # initial ASSET_SPEC call
         prompt = prompts.build_asset_spec_prompt(concept, category_hint)
         content = self._roundtrip(prompt, GenerationStage.ASSET_SPEC, concept)
         if content is None:
-            return AssetSpecResponse(error="asset spec generation unavailable")
+            return self._fail_asset("asset spec generation unavailable")
 
         candidate = content
         repair_attempts = 0
@@ -1100,7 +1237,7 @@ class OllamaAssetSpecProvider:
                 self._record_geometry_metrics(
                     issue_count_before_repair, repair_attempts, final_report
                 )
-                return AssetSpecResponse(error="asset spec repair unavailable")
+                return self._fail_asset("asset spec repair unavailable")
             repair_attempts += 1
             candidate = content
 
@@ -1108,13 +1245,52 @@ class OllamaAssetSpecProvider:
             self._record_geometry_metrics(
                 issue_count_before_repair, repair_attempts, final_report
             )
-            return AssetSpecResponse(
-                error="asset spec could not be made geometrically valid within the repair budget"
+            return self._fail_asset(
+                "asset spec could not be made geometrically valid within "
+                "the repair budget"
             )
         self._record_geometry_metrics(
             issue_count_before_repair, repair_attempts, final_report
         )
         return AssetSpecResponse(content=candidate)
+
+    def _fail_asset(self, message: str) -> Any:
+        """Record ONE failed procedural asset + emit the sanitized event.
+
+        ``budget.mark_failed_asset`` tracks DISTINCT failed semantic objects
+        against ``MAX_FAILED_ASSETS_PER_GENERATION``; when recording this NEW
+        failure would exceed the threshold, the flag is raised so the driver
+        fails the attempt with the narrow ``MAX_FAILED_ASSETS_EXCEEDED`` code
+        (an essential/evidence asset must never silently disappear). Determin-
+        istic local repairs never reach this path — only a failed PROVIDER
+        round-trip does.
+        """
+        from app.assets.spec_provider import AssetSpecResponse
+
+        concept = getattr(self, "_last_concept", "")
+        budget = self._metrics_provider() if self._metrics_provider is not None else None
+        exceeded = False
+        if budget is not None and hasattr(budget, "mark_failed_asset"):
+            exceeded = not budget.mark_failed_asset(concept)
+        if exceeded:
+            self.failed_asset_threshold_hit = True
+        emit_event(
+            "generation.asset.failed",
+            generationAttemptId=self._attempt_id,
+            semanticObjectId=concept,
+            reasonCode="ASSET_SPEC_FAILED",
+            failedAssetCount=(
+                budget.failed_asset_count
+                if budget is not None and hasattr(budget, "failed_asset_count")
+                else None
+            ),
+            assetCallCount=(
+                budget.asset_call_count(concept)
+                if budget is not None and hasattr(budget, "asset_call_count")
+                else None
+            ),
+        )
+        return AssetSpecResponse(error=message)
 
     def _repair_diagnostics(
         self, candidate: str, struct_issues: Any, geometry_report: Any
@@ -1230,9 +1406,12 @@ class OllamaAssetSpecProvider:
         """One bounded budgeted Ollama call; returns raw content or None.
 
         Every invocation consumes exactly one modeling request: consumed the
-        global per-attempt provider-call budget AND counted on
-        ``self.request_calls`` (Phase17C §8 — a repair attempt is a REAL
-        request-level provider call, never a free local reprocessing).
+        per-attempt provider-call budget (CORE or ASSET:<objectId> bucket —
+        Phase 19 Fix C) AND counted on ``self.request_calls`` (Phase17C §8 — a
+        repair attempt is a REAL request-level provider call, never a free
+        local reprocessing). A per-asset or global exhaustion surfaces the
+        narrowest failure code (ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED vs
+        PROVIDER_CALL_BUDGET_EXHAUSTED).
         """
         effective_timeout = self._effective_timeout()
         if effective_timeout <= 0:
@@ -1240,10 +1419,35 @@ class OllamaAssetSpecProvider:
                 "generation deadline exceeded",
                 code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
             )
-        if not self._budget_consumer():
+        if self._bucket_aware:
+            available = bool(self._budget_consumer(concept))
+        else:
+            available = bool(self._budget_consumer())
+        if not available:
+            reason = "model call budget exhausted"
+            budget = self._metrics_provider() if self._metrics_provider is not None else None
+            if budget is not None and hasattr(budget, "exhausted_reason"):
+                reason = budget.exhausted_reason(concept) or reason
+            if "asset model call budget" in (reason or ""):
+                emit_event(
+                    "provider.asset_budget.exhausted",
+                    generationAttemptId=self._attempt_id,
+                    semanticObjectId=concept,
+                    reasonCode="ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
+                    assetCallCount=(
+                        budget.asset_call_count(concept)
+                        if budget is not None and hasattr(budget, "asset_call_count")
+                        else None
+                    ),
+                    remainingGlobalCalls=(
+                        budget.remaining_global_calls()
+                        if budget is not None and hasattr(budget, "remaining_global_calls")
+                        else None
+                    ),
+                )
             raise StageDriverProviderFailure(
-                "model call budget exhausted",
-                code=GenerationFailureCode.PROVIDER_CALL_BUDGET_EXHAUSTED,
+                reason,
+                code=failure_code_for_budget_reason(reason),
             )
         self.request_calls += 1
         request = GenerateRequest(
@@ -1364,7 +1568,7 @@ class OllamaAssetSpecProvider:
             effectiveProviderTimeoutMs=int(effective_timeout * 1000),
             responseBytes=len(result.content.encode("utf-8")),
             structuredOutput=True,
-            deadlineRemainingMs=(
+deadlineRemainingMs=(
                 int(budget.remaining_seconds() * 1000)
                 if budget is not None and hasattr(budget, "remaining_seconds") else None
             ),
@@ -1543,6 +1747,23 @@ class OllamaStageDriver:
             id_sheet=id_sheet,
             weapon_evidence_id=weapon_evidence_id,
         )
+        # Phase 19 Fix A: the DETERMINISTIC prompt extractor is the
+        # authoritative fallback for a rejected LLM environmentHint (the user
+        # prompt's "Location: ..." line). This is LOCAL — zero provider calls.
+        from app.world.extract import extract_world_requirements
+
+        deterministic_hint = None
+        try:
+            deterministic_world = extract_world_requirements(
+                attempt.prompt, attempt.locked
+            )
+            deterministic_hint = (
+                deterministic_world.environment_hint
+                if deterministic_world is not None
+                else None
+            )
+        except Exception:  # noqa: BLE001 - extraction never breaks generation
+            deterministic_hint = None
         world_reqs = WorldRequirements()
         parsed_world = self._stage_parse(
             provider,
@@ -1550,7 +1771,12 @@ class OllamaStageDriver:
             GenerationStage.WORLD_GRAPH,
             world_prompt,
             budget_consumer,
-            parse_world_requirements,
+            lambda content: parse_world_requirements(
+                content,
+                canonical_fallback=deterministic_hint,
+                case_id=getattr(attempt, "case_id", None),
+                attempt_id=getattr(attempt, "attempt_id", None),
+            ),
             "world_requirements",
             deferred,
         )
@@ -1564,6 +1790,21 @@ class OllamaStageDriver:
             else self._spec_provider
         )
         composition = self._compose_world(attempt, world_reqs, spec_adapter, deferred)
+
+        # Phase 19 Fix C: a procedural-asset-count ceiling or the failed-asset
+        # threshold that was hit INSIDE the asset provider is a terminal,
+        # narrow cause (never repaired, never published). The provider records
+        # the flag because the composer must keep its degrade-safe contract.
+        if getattr(spec_adapter, "procedural_asset_ceiling_hit", False):
+            raise StageDriverProviderFailure(
+                "procedural asset count ceiling exceeded",
+                code=GenerationFailureCode.MAX_PROCEDURAL_ASSETS_EXCEEDED,
+            )
+        if getattr(spec_adapter, "failed_asset_threshold_hit", False):
+            raise StageDriverProviderFailure(
+                "maximum failed assets exceeded",
+                code=GenerationFailureCode.MAX_FAILED_ASSETS_EXCEEDED,
+            )
 
         # --- 4b. deterministic placement-evidence projection + reconciliation
         # The composer flags an evidence-linked placement with an empty
@@ -1582,17 +1823,43 @@ class OllamaStageDriver:
 
         # --- 5. assemble the GeneratedDraft -----------------------------------
         attempt.deferred_structural = tuple(sorted(set(deferred)))
-        attempt.draft = self._assemble(
-            attempt,
-            crime,
-            public,
-            evidence_spec,
-            world_reqs,
-            composition,
-            projected_placements=projected_placements,
-            extra_travel_rules=tuple(extra_rules),
-        )
+        try:
+            attempt.draft = self._assemble(
+                attempt,
+                crime,
+                public,
+                evidence_spec,
+                world_reqs,
+                composition,
+                projected_placements=projected_placements,
+                extra_travel_rules=tuple(extra_rules),
+            )
+        except SemanticObjectResolutionError as exc:
+            # Phase 19 Fix B.3 — fail closed with a SANITIZED typed message
+            # (public identifiers only) and a canonical code; never publish a
+            # case with a dangling weapon/evidence id.
+            raise StageDriverProviderFailure(
+                str(exc),
+                code=GenerationFailureCode.VALIDATION_FAILED,
+            ) from None
         attempt._phase3_cache = None
+        # Phase 19 Fix C §8/§13 — sanitized monotonic accounting snapshot
+        # (structure only; never raw prompts / truth / provider responses).
+        budget = getattr(attempt, "budget", None)
+        if budget is not None and hasattr(budget, "snapshot"):
+            snap = budget.snapshot()
+            emit_event(
+                "provider.budget.snapshot",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                globalCallCount=snap.get("globalCallCount"),
+                coreCallCount=snap.get("coreCallCount"),
+                assetCallCount=snap.get("assetCallCount"),
+                remainingGlobalCalls=snap.get("remainingGlobalCalls"),
+                remainingCoreCalls=snap.get("remainingCoreCalls"),
+                proceduralAssetCount=snap.get("proceduralAssetCount"),
+                failedAssetCount=snap.get("failedAssetCount"),
+            )
         if _PD_DEV_TRACE:
             _dt(
                 "driver.run_into.end elapsedMs=%d deferredStructural=%d "
@@ -1605,14 +1872,23 @@ class OllamaStageDriver:
                 )
             )
 
-    def _make_budget_consumer(self, attempt: Any) -> Callable[[], bool]:
-        def _consume() -> bool:
+    def _make_budget_consumer(self, attempt: Any) -> Callable[[str | None], bool]:
+        """Budget consumer with Phase 19 Fix C bucket attribution.
+
+        ``consumer(None)`` / ``consumer("core")`` reserves a CORE bucket call
+        (case/evidence/world + repair/regeneration); ``consumer(object_id)``
+        reserves an ASSET:<objectId> bucket call (procedural ASSET_SPEC /
+        ASSET_SPEC_REPAIR / geometry). Deterministic local repairs never touch
+        this consumer.
+        """
+
+        def _consume(bucket: str | None = None) -> bool:
             budget = attempt.budget
             if budget is None:
                 return False
             if budget.deadline_passed():
                 return False
-            return budget.consume_call()
+            return budget.consume_call(bucket=bucket)
 
         return _consume
 
@@ -1677,7 +1953,7 @@ class OllamaStageDriver:
                 getattr(self._settings, "ollama_timeout_seconds", 60.0)
             ),
             timeout_provider=lambda: self._effective_timeout(attempt),
-            metrics_provider=lambda: attempt.budget,
+metrics_provider=lambda: attempt.budget,
         )
 
     def _call(
@@ -1686,7 +1962,7 @@ class OllamaStageDriver:
         attempt: Any,
         stage: GenerationStage,
         prompt: str,
-        budget: Callable[[], bool],
+        budget: Callable[[str | None], bool],
     ) -> str | None:
         effective_timeout = self._effective_timeout(attempt)
         configured_timeout_ms = int(
@@ -1697,10 +1973,14 @@ class OllamaStageDriver:
                 "generation deadline exceeded",
                 code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
             )
-        if not budget():
+        if not budget(CORE_BUCKET):
             raise StageDriverProviderFailure(
                 "model call budget exhausted",
-                code=GenerationFailureCode.PROVIDER_CALL_BUDGET_EXHAUSTED,
+                code=failure_code_for_budget_reason(
+                    attempt.budget.exhausted_reason(CORE_BUCKET)
+                    if getattr(attempt, "budget", None) is not None
+                    else "model call budget exhausted"
+                ),
             )
         request = GenerateRequest(
             attempt_id=attempt.attempt_id,
@@ -1886,6 +2166,15 @@ class OllamaStageDriver:
 
         try:
             hint = world_reqs.environment_hint or FALLBACK_ENVIRONMENT_ID
+            # Phase 19 Fix A: an already-canonical value passes cleanly; a
+            # hand-built WorldRequirements with a path-like hint is rejected
+            # here deterministically (never a file path, never a provider
+            # call) and falls back to the default kit.
+            canonical, _env_issues = canonicalize_environment_hint(hint)
+            if canonical is not None:
+                hint = canonical
+            else:
+                hint = FALLBACK_ENVIRONMENT_ID
             kit = load_environment(str(hint))
         except Exception:  # noqa: BLE001 - environment failure degrades safe
             deferred.append("world_requirements stage: unsupported environment")
@@ -1943,7 +2232,6 @@ class OllamaStageDriver:
             WorldGraphLocationSpec,
             WorldGraphSpec,
         )
-        from app.world.composer import KIT_BASE_OBJECT_IDS
 
         if crime is None:
             # no case truth -> validate_draft reports "incomplete" (controller
@@ -1952,17 +2240,26 @@ class OllamaStageDriver:
 
         # Resolve the final kit for the scene + world graph.
         hint = (world_reqs.environment_hint if world_reqs else None) or FALLBACK_ENVIRONMENT_ID
+        canonical, _env_issues = canonicalize_environment_hint(hint)
+        if canonical is not None:
+            hint = canonical
+        else:
+            hint = FALLBACK_ENVIRONMENT_ID
         try:
             kit = load_environment(str(hint))
         except Exception:  # noqa: BLE001
             kit = None
 
-        # base public objects (kit base set) with golden affordances.
+        # base public objects (full golden base set). The OBJECTS list carries
+        # the complete golden base identity set on EVERY kit (the same set the
+        # fake/live golden world uses) so every evidence/identity reference —
+        # including the sharp-weapon forensics — stays valid on kits whose
+        # PLACEMENT subset omits a spare weapon (hotel_suite/warehouse). The
+        # per-kit placement subset (KIT_BASE_OBJECT_IDS) is a PLACEMENT concern
+        # (anchor capacity), the object identity set is not.
         objects: list[ObjectSpec] = []
         if kit is not None:
-            for object_id in KIT_BASE_OBJECT_IDS.get(
-                kit.environment_id, KIT_BASE_OBJECT_IDS["apartment"]
-            ):
+            for object_id in OBJECTS_BASE_ALL_KITS:
                 spec = _base_object_spec(object_id)
                 if spec is not None and not any(o.object_id == spec.object_id for o in objects):
                     objects.append(spec)
@@ -2010,6 +2307,35 @@ class OllamaStageDriver:
                 dict.fromkeys(merged_travel + tuple(extra_travel_rules))
             )
 
+        # ---- Phase 19 Fix B.3 — fail-closed OBJECT PRESENCE GUARANTEE ----
+        # Every semantic object the truth/evidence algebra references MUST be
+        # present as exactly one public object. The canonical evidence algebra
+        # is deterministic and complete by construction, so a missing reference
+        # is a genuine contract violation — never repairable, never silently
+        # dropped. Raise a TYPED sanitized error (the caller fails closed and
+        # nothing is published). Catalog alias / procedural resolution already
+        # ran above (in the composer), so this guard only fires when no safe
+        # representation could be produced.
+        semantic_object_ids: set[str] = {
+            o.object_id for o in objects if o.object_id
+        }
+        referenced: set[str] = set()
+        if getattr(crime, "weapon_id", None):
+            referenced.add(crime.weapon_id)
+        if evidence_spec is not None:
+            for item in getattr(evidence_spec, "evidence", ()) or ():
+                for proposition in getattr(item, "propositions", ()) or ():
+                    object_id = getattr(proposition, "object_id", None)
+                    if isinstance(object_id, str) and object_id:
+                        referenced.add(object_id)
+        missing = sorted(r for r in referenced if r not in semantic_object_ids)
+        if missing:
+            raise SemanticObjectResolutionError(
+                "essential semantic object(s) referenced by the crime/evidence "
+                "algebra could not be represented in the world: "
+                + ", ".join(missing)
+            )
+
         return GeneratedDraft(
             crime=crime,
             persons=tuple(public.persons) if public is not None and public.persons else (),
@@ -2024,6 +2350,14 @@ class OllamaStageDriver:
             scene=scene,
             evidence=tuple(evidence_spec.evidence) if evidence_spec is not None else (),
             world_graph=world_graph,
+            # ADV-153: the DECORATIVE-unresolved warnings are stored with the
+            # published draft (player-safe, bounded, sanitized) exactly like
+            # the fake/live composition path.
+            composition_notes=(
+                tuple(composition.composition_notes)
+                if composition is not None
+                else ()
+            ),
         )
 
 

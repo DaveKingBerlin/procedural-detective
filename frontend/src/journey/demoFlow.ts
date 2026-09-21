@@ -268,7 +268,23 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
   }
 }
 
-function generationFailed(failureCode?: string | null): DemoFlowFailure {
+/**
+ * Map a canonical generation failure code to a safe, player-facing failure.
+ *
+ * Every comparison is EXACT string equality — a longer, legacy or hostile
+ * variant containing one of these codes as a prefix/substring never matches
+ * (the same narrowing the pre-Phase-19 mapping already used) and falls through
+ * to the generic failed message. Raw failureCode text is never surfaced.
+ *
+ * Phase 19 notes (backend failure_codes.py, READ ONLY from the frontend):
+ *  - CORE_PROVIDER_CALL_BUDGET_EXHAUSTED / ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED
+ *    map to the SAME safe provider message class as PROVIDER_CALL_BUDGET_EXHAUSTED:
+ *    provider-neutral, no core/asset/internal budget wording.
+ *  - MAX_PROCEDURAL_ASSETS_EXCEEDED / MAX_FAILED_ASSETS_EXCEEDED map to the
+ *    SAME safe "could not be turned into a playable case" message class as the
+ *    generic failed fallback. No internal limits are ever shown.
+ */
+export function generationFailed(failureCode?: string | null): DemoFlowFailure {
   if (failureCode === "GENERATION_DEADLINE_EXCEEDED") {
     return { kind: "deadline", message: DEMO_FAILURE_MESSAGES.deadline };
   }
@@ -278,9 +294,21 @@ function generationFailed(failureCode?: string | null): DemoFlowFailure {
   if (
     failureCode === "PROVIDER_UNAVAILABLE" ||
     failureCode === "PROVIDER_INVALID_RESPONSE" ||
-    failureCode === "PROVIDER_CALL_BUDGET_EXHAUSTED"
+    // Phase 19 — hierarchical provider-budget exhaustion: same safe provider
+    // message class as PROVIDER_CALL_BUDGET_EXHAUSTED (exact match only).
+    failureCode === "PROVIDER_CALL_BUDGET_EXHAUSTED" ||
+    failureCode === "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED" ||
+    failureCode === "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED"
   ) {
     return { kind: "provider", message: DEMO_FAILURE_MESSAGES.providerUnavailable };
+  }
+  if (
+    // Phase 19 — asset-count limits: same safe "not playable" message class as
+    // the generic failed fallback (exact match only; internals never revealed).
+    failureCode === "MAX_PROCEDURAL_ASSETS_EXCEEDED" ||
+    failureCode === "MAX_FAILED_ASSETS_EXCEEDED"
+  ) {
+    return { kind: "failed", message: DEMO_FAILURE_MESSAGES.failed };
   }
   return { kind: "failed", message: DEMO_FAILURE_MESSAGES.failed };
 }
