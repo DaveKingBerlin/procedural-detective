@@ -6,9 +6,12 @@ import { getAsset } from "../catalog/assetCatalog";
 import { allKitIds, getKit, validateKit } from "./kitCatalog";
 import {
   APARTMENT_KIT_ID,
+  MAX_DECOR_PROPS_PER_KIT,
   anchorTransformFrom,
+  buildKitDecorProps,
   buildKitShell,
   cameraProfileFor,
+  evidenceClearanceOk,
   kitAnchorTransform,
   lightingFor,
   spawnTransformFor,
@@ -194,6 +197,21 @@ describe("spawn / lighting / camera profiles", () => {
       accentColor: "#c9d4e8",
     });
     expect(lightingFor("hotel_suite")?.profile).toBe("warm_flat");
+    // Phase 18D show-case values: office cools down (cool key, dim ambient),
+    // hotel warms up (amber key + stronger ambient) — both inside the bounds
+    // and vocabulary the validator enforces (profile, 0..1, #RRGGBB).
+    expect(lightingFor("office")).toEqual({
+      profile: "neutral",
+      keyIntensity: 0.95,
+      hemiIntensity: 0.3,
+      accentColor: "#b8ccd8",
+    });
+    expect(lightingFor("hotel_suite")).toEqual({
+      profile: "warm_flat",
+      keyIntensity: 0.85,
+      hemiIntensity: 0.45,
+      accentColor: "#f0c080",
+    });
     expect(lightingFor("apartment")).toBeNull();
     expect(lightingFor("no_such_kit")).toBeNull();
   });
@@ -209,10 +227,152 @@ describe("spawn / lighting / camera profiles", () => {
     expect(cameraProfileFor("no_such_kit")).toBeNull();
   });
 
-  it("camera distances are derived from the kit extents (large kits use larger orbits)", () => {
+it("camera distances are derived from the kit extents (large kits use larger orbits)", () => {
     const distances = NON_APARTMENT_KITS.map((kitId) => cameraProfileFor(kitId)!.distance);
     for (const distance of distances) {
       expect(distance).toBeGreaterThanOrEqual(12);
+    }
+  });
+
+  it("Phase 18D camera tuning: office + hotel default orbits are tighter for direct picking", () => {
+    // The flagship kits use a closer extents-derived orbit so evidence is
+    // immediately readable and direct 3D picking stays practical. The target
+    // stays the manifest spawn (+1.0 lift), exactly as before.
+    const officeCamera = cameraProfileFor("office");
+    expect(officeCamera!.target).toEqual({ x: 0.8, y: 1.0, z: 2.0 });
+    expect(officeCamera!.distance).toBeGreaterThanOrEqual(13);
+    expect(officeCamera!.distance).toBeLessThan(16);
+    const hotelCamera = cameraProfileFor("hotel_suite");
+    expect(hotelCamera!.target).toEqual({ x: 0.8, y: 1.0, z: 2.0 });
+    expect(hotelCamera!.distance).toBeGreaterThanOrEqual(12);
+    expect(hotelCamera!.distance).toBeLessThan(17);
+    // Untuned kits (warehouse/mansion) keep the Phase 11 formula (>= 12).
+    expect(cameraProfileFor("warehouse")!.distance).toBeGreaterThanOrEqual(12);
+  });
+});
+
+/* ======================================================================
+ * Phase 18D — showcase art direction (shell): warm desk pool, bounded
+ * evidence-safe decor props, stronger floor/wall contrast, measured
+ * deterministic placement.
+ * ==================================================================== */
+
+describe("Phase 18D — warm desk pool + decor props (office / hotel_suite)", () => {
+  it("places a warm desk-pool light above the DESK_EVIDENCE anchor centroid", () => {
+    for (const kitId of ["office", "hotel_suite"]) {
+      const shell = buildKitShell(kitId);
+      const pool = shell.find((p) => p.id === "light_desk_pool");
+      expect(pool, `${kitId} desk pool`).not.toBeUndefined();
+      expect(pool!.kind).toBe("light");
+      expect(pool!.color).toMatch(/^#[0-9A-Fa-f]{6}$/);
+      // Centroid of the sorted DESK_EVIDENCE anchors, at the overhead light Y.
+      const desks = getKit(kitId)!
+        .anchors.filter((a) => a.type === "DESK_EVIDENCE")
+        .sort((a, b) => (a.anchorId < b.anchorId ? -1 : 1));
+      expect(desks.length).toBeGreaterThan(0);
+      const cx = desks.reduce((sum, a) => sum + a.position.x, 0) / desks.length;
+      const cz = desks.reduce((sum, a) => sum + a.position.z, 0) / desks.length;
+      expect(pool!.position.x).toBeCloseTo(cx, 9);
+      expect(pool!.position.z).toBeCloseTo(cz, 9);
+      expect(pool!.position.y).toBe(2.7);
+    }
+    // The apartment kit keeps its golden shell: no kit-shell-only additions.
+    expect(buildKitShell("apartment").find((p) => p.id === "light_desk_pool")).toBeUndefined();
+  });
+
+  it("office decor props: bounded, deterministic, present in the shell", () => {
+    const shell = buildKitShell("office");
+    const decor = shell.filter((p) => p.id.startsWith("decor_"));
+    const kitsDecor = buildKitDecorProps(getKit("office")!);
+    // Bounded (task rule: <= 6, never overload) and identical two ways.
+    expect(decor.length).toBeGreaterThanOrEqual(1);
+    expect(decor.length).toBeLessThanOrEqual(MAX_DECOR_PROPS_PER_KIT);
+    expect(kitsDecor.map((p) => p.id).sort()).toEqual(decor.map((p) => p.id).sort());
+    // The manager office carries the desk cluster silhouette.
+    const ids = decor.map((p) => p.id);
+    for (const wanted of ["decor_desk_01", "decor_monitor_01", "decor_bookshelf_01"]) {
+      expect(ids, `office ${wanted}`).toContain(wanted);
+    }
+    // Decor is deterministic: two builds deep-equal.
+    expect(decor).toEqual(buildKitShell("office").filter((p) => p.id.startsWith("decor_")));
+  });
+
+  it("hotel decor props: bounded, deterministic, a distinct composition from office", () => {
+    const shell = buildKitShell("hotel_suite");
+    const decor = shell.filter((p) => p.id.startsWith("decor_"));
+    expect(decor.length).toBeGreaterThanOrEqual(1);
+    expect(decor.length).toBeLessThanOrEqual(MAX_DECOR_PROPS_PER_KIT);
+    const ids = decor.map((p) => p.id).sort();
+    expect(ids).toContain("decor_bed_01");
+    expect(ids).toContain("decor_sofa_01");
+    expect(ids).toContain("decor_coffeetable_01");
+    // Distinct silhouette set from the office (no shared decor ids).
+    const officeIds = buildKitShell("office").filter((p) => p.id.startsWith("decor_")).map((p) => p.id).sort();
+    expect(ids.filter((id) => officeIds.includes(id))).toEqual([]);
+    expect(decor).toEqual(buildKitShell("hotel_suite").filter((p) => p.id.startsWith("decor_")));
+  });
+
+  it("every accepted decor prop passes the evidence guard (never occludes evidence)", () => {
+    for (const kitId of ["office", "hotel_suite"]) {
+      const kit = getKit(kitId)!;
+      for (const prop of buildKitDecorProps(kit)) {
+        const halfX = (prop.scale?.x ?? 0) / 2;
+        const halfZ = (prop.scale?.z ?? 0) / 2;
+        expect(
+          evidenceClearanceOk(kit, prop.position, halfX, halfZ),
+          `${kitId} ${prop.id} must clear every evidence anchor + the spawn`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("evidenceClearanceOk rejects a box planted on an evidence anchor (guard is real)", () => {
+    const office = getKit("office")!;
+    const deskEvidence = office.anchors.find((a) => a.anchorId === "office_desk_a")!;
+    expect(
+      evidenceClearanceOk(office, { x: deskEvidence.position.x, y: 0.4, z: deskEvidence.position.z }, 0.1, 0.1),
+    ).toBe(false);
+    // ...and on the spawn.
+    expect(
+      evidenceClearanceOk(office, office.spawn.position, 0.05, 0.05),
+    ).toBe(false);
+    // ...but a far empty corner passes.
+    expect(evidenceClearanceOk(office, { x: 10.0, y: 0.0, z: 10.5 }, 0.5, 0.5)).toBe(true);
+  });
+
+  it("office + hotel shells use the Phase 18D floor/wall tones (stronger contrast)", () => {
+    const officeShell = buildKitShell("office");
+    expect(officeShell.find((p) => p.kind === "floor")!.color).toBe("#39454f");
+    for (const id of ["wall_north", "wall_south", "wall_east", "wall_west"]) {
+      expect(officeShell.find((p) => p.id === id)!.color).toBe("#e2e6ea");
+    }
+    const hotelShell = buildKitShell("hotel_suite");
+    expect(hotelShell.find((p) => p.kind === "floor")!.color).toBe("#6e4f38");
+    for (const id of ["wall_north", "wall_south", "wall_east", "wall_west"]) {
+      expect(hotelShell.find((p) => p.id === id)!.color).toBe("#f0e6d2");
+    }
+    // Untouched kits keep their Phase 11 palette.
+    expect(buildKitShell("warehouse").find((p) => p.kind === "floor")!.color).toBe("#4b4f55");
+  });
+
+  it("decor props are inches inside the shell (no prop pokes through a wall)", () => {
+    for (const kitId of ["office", "hotel_suite"]) {
+      const kit = getKit(kitId)!;
+      const xs = kit.anchors.map((a) => a.position.x);
+      const zs = kit.anchors.map((a) => a.position.z);
+      const x0 = Math.min(...xs) - 1.0;
+      const x1 = Math.max(...xs) + 1.0;
+      const z0 = Math.min(...zs) - 1.0;
+      const z1 = Math.max(...zs) + 1.0;
+      for (const prop of buildKitDecorProps(kit)) {
+        expect(prop.position.x, `${kitId} ${prop.id} x in room`).toBeGreaterThan(x0 + 0.05);
+        expect(prop.position.x).toBeLessThan(x1 - 0.05);
+        expect(prop.position.z).toBeGreaterThan(z0 + 0.05);
+        expect(prop.position.z).toBeLessThan(z1 - 0.05);
+        for (const value of [prop.position.x, prop.position.y, prop.position.z]) {
+          expect(Number.isFinite(value), `${kitId} ${prop.id} finite`).toBe(true);
+        }
+      }
     }
   });
 });

@@ -24,6 +24,7 @@ import {
   makeBootstrap,
   makeEmailRecord,
   makeIcePickDefinition,
+  makeHotelSuiteBootstrap,
   makeOfficeBootstrap,
   makeProcWorldObject,
   makeTrophyDefinition,
@@ -1429,5 +1430,194 @@ describe("Phase 18B — performance probe (transition + memory numbers)", () => 
     expect(result.scene.materials.length).toBe(materials);
     result.setObjectFocus(null);
     result.dispose();
+  });
+});
+
+/* ======================================================================
+ * Phase 18D — showcase art direction (renderer): decor props, warm desk
+ * pool, ambient-fill identity, evidence coexistence and bounded complexity.
+ * ==================================================================== */
+
+/** A hotel-suite model for the Phase 18D showcase extension. */
+function hotelSuiteModel(): InvestigationSceneModel {
+  return buildInvestigationScene(makeHotelSuiteBootstrap());
+}
+
+interface LightColorProbe {
+  diffuse?: { r: number; g: number; b: number };
+  intensity?: number;
+}
+
+describe("Phase 18D — decor props render as plain NON-interactable shell meshes", () => {
+  it("office decor meshes exist, carry no pd_ identity, rings or hover admission", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, buildInvestigationScene(makeOfficeBootstrap()), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    for (const name of ["decor_desk_01", "decor_monitor_01", "decor_bookshelf_01", "decor_desklamp_01"]) {
+      const mesh = scene.getNodeByName(name) as Mesh | null;
+      expect(mesh, `${name} shell mesh`).not.toBeNull();
+      expect(mesh!.name.startsWith("pd_"), `${name} is NOT a world object`).toBe(false);
+      // Decorative by construction: no hover ring and never a pick candidate.
+      expect(scene.getNodeByName(`pd_ring_${name}`), `${name} has no ring`).toBeNull();
+      expect(scene.pointerMovePredicate!(mesh!), `${name} not admitted on hover`).toBe(false);
+      expect(scene.pointerDownPredicate!(mesh!), `${name} not admitted on click`).toBe(false);
+      // No emissive affordance: the rest state carries no interactive glow.
+      const mat = mesh!.material as StandardMaterial;
+      expect(mat.emissiveColor.r).toBe(0);
+      expect(mat.emissiveColor.g).toBe(0);
+      expect(mat.emissiveColor.b).toBe(0);
+    }
+    // No world object with a decor-prefixed id either.
+    expect(objectIdFromMeshName("decor_desk_01")).toBeNull();
+    result.dispose();
+  });
+
+  it("hotel decor meshes render (bed + lounge composition) without interaction", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, hotelSuiteModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+    for (const name of ["decor_bed_01", "decor_sofa_01", "decor_coffeetable_01", "decor_tablelamp_01", "decor_armchair_01", "decor_handbag_01"]) {
+      const mesh = scene.getNodeByName(name) as Mesh | null;
+      expect(mesh, `${name} hotel shell mesh`).not.toBeNull();
+      expect(scene.pointerMovePredicate!(mesh!), `${name} decorative (no hover)`).toBe(false);
+    }
+    result.dispose();
+  });
+});
+
+describe("Phase 18D — warm desk pool + ambient-fill identity", () => {
+  it("office renders the warm desk-pool PointLight + emissive marker", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, buildInvestigationScene(makeOfficeBootstrap()), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+    const pool = scene.getNodeByName("light_desk_pool_point") as LightColorProbe | null;
+    expect(pool, "desk pool point light").not.toBeNull();
+    expect(pool!.intensity).toBe(0.6);
+    // Warm pool color (#f2c48a -> r > b).
+    expect(pool!.diffuse!.r).toBeGreaterThan(pool!.diffuse!.b);
+    const marker = scene.getNodeByName("light_desk_pool_marker");
+    expect(marker, "desk pool emissive marker").not.toBeNull();
+    result.dispose();
+  });
+
+  it("hemi ambient fill follows the kit accent: cool office, warm hotel, golden apartment", () => {
+    // Office: cool accent (#b8ccd8) -> the fill reads cooler (b > r).
+    const office = createInvestigationScene(NOOP_CANVAS, buildInvestigationScene(makeOfficeBootstrap()), nullEngineOptions());
+    expect(office.ok).toBe(true);
+    if (!office.ok) throw new Error("expected ok");
+    const officeHemi = office.scene.getNodeByName("investigation_hemi") as LightColorProbe | null;
+    expect(officeHemi).not.toBeNull();
+    expect(officeHemi!.diffuse!.b).toBeGreaterThan(officeHemi!.diffuse!.r);
+
+    // Hotel: warm accent (#f0c080) -> the fill reads warm (r > b).
+    const hotel = createInvestigationScene(NOOP_CANVAS, hotelSuiteModel(), nullEngineOptions());
+    expect(hotel.ok).toBe(true);
+    if (!hotel.ok) throw new Error("expected ok");
+    const hotelHemi = hotel.scene.getNodeByName("investigation_hemi") as LightColorProbe | null;
+    expect(hotelHemi).not.toBeNull();
+    expect(hotelHemi!.diffuse!.r).toBeGreaterThan(hotelHemi!.diffuse!.b);
+
+    // Apartment golden: the hard-coded warm fill is byte-identical.
+    const apartment = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
+    expect(apartment.ok).toBe(true);
+    if (!apartment.ok) throw new Error("expected ok");
+    const apartmentHemi = apartment.scene.getNodeByName("investigation_hemi") as LightColorProbe | null;
+    expect(apartmentHemi).not.toBeNull();
+    expect(apartmentHemi!.diffuse!.r).toBeCloseTo(1.0, 6);
+    expect(apartmentHemi!.diffuse!.g).toBeCloseTo(0.93, 6);
+    expect(apartmentHemi!.diffuse!.b).toBeCloseTo(0.84, 6);
+    office.dispose();
+    hotel.dispose();
+    apartment.dispose();
+  });
+
+  it("focus mode works in the hotel suite (Phase 18D showcase extension)", () => {
+    const result = createInvestigationScene(NOOP_CANVAS, hotelSuiteModel(), nullEngineOptions());
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const camera = cameraOf(result);
+    const initialRadius = camera.radius;
+
+    result.setObjectFocus("hotel_desk_knife");
+    const snapshot = result.getFocusSnapshot()!;
+    // Small knife evidence -> safe min close-up, tighter than the world camera.
+    expect(snapshot.framing.radius).toBe(1.5);
+    expect(snapshot.framing.radius).toBeLessThan(initialRadius);
+    for (let step = 0; step < focusTransitionTickCount(18); step += 1) result.tickFocus(18);
+    expect(cameraVec(result.getFocusSnapshot()!.live)).toEqual(cameraVec(snapshot.framing));
+
+    // The inspected hotel knife is centered near its desk anchor (4, 10).
+    const knife = hotelSuiteModel().worldObjects.find((o) => o.objectId === "hotel_desk_knife")!;
+    expect(Math.abs(camera.target.x - knife.position.x)).toBeLessThan(0.6);
+    expect(Math.abs(camera.target.z - knife.position.z)).toBeLessThan(0.6);
+    const saved = cameraVec(snapshot.saved);
+    result.setObjectFocus(null);
+    expect(cameraVec({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target })).toEqual(saved);
+    result.dispose();
+  });
+});
+
+describe("Phase 18D — evidence coexistence + bounded scene complexity", () => {
+  it("the hard-case ice pick stays visible and pickable WITH the office decor present", () => {
+    const picked: string[] = [];
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      icePickOfficeModel(),
+      nullEngineOptions({ onPick: (id) => picked.push(id) }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+    // Both the decor shell and the procedural evidence coexist in one scene.
+    expect(scene.getNodeByName("decor_desk_01")).not.toBeNull();
+    expect(scene.getNodeByName("decor_bookshelf_01")).not.toBeNull();
+    const pickRoot = scene.getNodeByName("pd_obj_bronze_ceremonial_ice_pick") as Mesh | null;
+    expect(pickRoot, "ice pick still visible").not.toBeNull();
+    expect(pickRoot!.isVisible).toBe(true);
+
+    result.scene.onPointerDown?.(
+      pointerMove(0, 0) as never,
+      pickInfo(scene.getNodeByName("pd_part_bronze_ceremonial_ice_pick_1")) as never,
+      POINTER_TYPES,
+    );
+    expect(picked).toEqual(["bronze_ceremonial_ice_pick"]);
+    result.dispose();
+  });
+
+  it("office + hotel scenes stay within the documented mesh/material/light budget", () => {
+    for (const makeModel of [() => buildInvestigationScene(makeOfficeBootstrap()), hotelSuiteModel]) {
+      const result = createInvestigationScene(NOOP_CANVAS, makeModel(), nullEngineOptions());
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      // Phase 18D documented budget (bounded decor + one extra point light):
+      //  - meshes/materials <= 64 (the v1 kit shell + decor + golden objects)
+      //  - lights <= 4 (key + hemi + overhead + desk pool)
+      expect(result.scene.meshes.length, "meshes bounded").toBeLessThanOrEqual(64);
+      expect(result.scene.materials.length, "materials bounded").toBeLessThanOrEqual(64);
+      expect(result.scene.lights.length, "lights bounded").toBeLessThanOrEqual(4);
+      expect(result.scene.lights.length, "at least the two lights").toBeGreaterThanOrEqual(3);
+      result.dispose();
+    }
+  });
+
+  it("rebuilding the same showcase scene is deterministic and leak-free across cycles", () => {
+    const counts: number[] = [];
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const result = createInvestigationScene(NOOP_CANVAS, hotelSuiteModel(), nullEngineOptions());
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      if (cycle > 0) {
+        expect(result.scene.meshes.length).toBe(counts[0]);
+        expect(result.scene.materials.length).toBe(counts[1]);
+        expect(result.scene.lights.length).toBe(counts[2]);
+      } else {
+        counts.push(result.scene.meshes.length, result.scene.materials.length, result.scene.lights.length);
+      }
+      result.dispose();
+    }
   });
 });

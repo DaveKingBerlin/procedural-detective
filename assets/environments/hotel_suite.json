@@ -29,7 +29,7 @@
     {"anchorId": "hotel_spawn_01", "type": "PLAYER_SPAWN", "zoneId": "hotel_entrance", "position": {"x": 0.8, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": [], "exclusive": true, "required": true}
   ],
   "spawn": {"anchorId": "hotel_spawn_01", "position": {"x": 0.8, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}},
-  "lighting": {"profile": "warm_flat", "keyIntensity": 0.8, "hemiIntensity": 0.4, "accentColor": "#e5b07a"},
+  "lighting": {"profile": "warm_flat", "keyIntensity": 0.85, "hemiIntensity": 0.45, "accentColor": "#f0c080"},
   "structuralAssets": ["DOOR_APARTMENT_01", "PROP_WINDOW_01", "PROP_WALL_01", "PROP_HOTEL_BED_01", "PROP_DESK_01", "PROP_LAMP_01", "PROP_TABLE_01", "PROP_VASE_01"],
   "styleHint": "boutique_hotel",
   "defaultAnchorCoverage": {

@@ -383,6 +383,63 @@ export function makeOfficeBootstrap(): InvestigationBootstrapResponse {
 }
 
 /**
+ * Phase 18D showcase fixture: the SAME golden asset set re-anchored on HOTEL
+ * SUITE manifest anchors (the backend placer re-anchors per kit). Deliberately
+ * avoids the Phase 18D decor anchors (hotel_generic_01 hosts the lounge
+ * composition) — world objects here park on the study/desk/bedroom anchors so
+ * scene-integration tests exercise a full hotel scene without overlapping the
+ * deterministic shell decor.
+ */
+export function makeHotelSuiteBootstrap(): InvestigationBootstrapResponse {
+  const bootstrap = makeBootstrap();
+  bootstrap.scene.environmentId = "hotel_suite";
+  bootstrap.scene.location = { locationId: "hotel_study", name: "Hotel Suite - Study Nook" };
+  bootstrap.scene.worldObjects = [
+    makeWorldObject({
+      objectId: "hotel_desk_knife",
+      assetId: "PROP_KITCHEN_KNIFE_01",
+      assetType: "sharp_weapon",
+      subtype: "sharp_weapon",
+      locationId: "hotel_study",
+      anchor: "hotel_desk_01",
+      interaction: "inspect",
+      evidenceId: "forensic_knife_match_01",
+    }),
+    makeWorldObject({
+      objectId: "hotel_laptop",
+      assetId: "PROP_LAPTOP_01",
+      assetType: "electronics",
+      subtype: "electronics",
+      locationId: "hotel_study",
+      anchor: "hotel_computer_01",
+      interaction: "read",
+      evidenceId: "email_thomas_01",
+    }),
+    makeWorldObject({
+      objectId: "hotel_table",
+      assetId: "PROP_TABLE_01",
+      assetType: "furniture",
+      subtype: "furniture",
+      locationId: "hotel_study",
+      anchor: "hotel_desk_02",
+      interaction: "",
+      evidenceId: null,
+    }),
+    makeWorldObject({
+      objectId: "hotel_body",
+      assetId: "PROP_BODY_PLACEHOLDER_01",
+      assetType: "victim_body",
+      subtype: "victim_body",
+      locationId: "hotel_bedroom",
+      anchor: "hotel_body_01",
+      interaction: "",
+      evidenceId: null,
+    }),
+  ];
+  return bootstrap;
+}
+
+/**
  * Canned player-safe candidate universes (the shape the backend publishes in
  * the bootstrap `candidates` block). Deliberately generic and winner-free:
  * no `correct`/`winner` fields exist (see phase-7 leak boundary), and the

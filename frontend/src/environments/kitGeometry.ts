@@ -58,18 +58,26 @@ const FLOOR_SLAB_Y = 0.2;
 /** Overhead light height (mirrors the apartment light_01). */
 const LIGHT_Y = 2.7;
 
-/** Application-owned deterministic shell palettes per kit (primitives only). */
+/**
+ * Application-owned deterministic shell palettes per kit (primitives only).
+ *
+ * Phase 18D — showcase art direction: the two flagship kits get a stronger
+ * floor/wall luminance contrast while keeping their identity. OFFICE is a
+ * dark clinical slate floor under a pale cool wall (late-night, research
+ * focused); HOTEL_SUITE is a deep warm walnut floor under a creamy wall
+ * (private, upscale, quiet). The other kits are untouched.
+ */
 const FLOOR_TONES: Readonly<Record<string, string>> = {
-  office: "#5a6472", // cool corporate gray-blue
-  hotel_suite: "#7a5a44", // warm timber
+  office: "#39454f", // Phase 18D: dark clinical slate (was #5a6472)
+  hotel_suite: "#6e4f38", // Phase 18D: deep warm walnut (was #7a5a44)
   warehouse: "#4b4f55", // raw concrete
   mansion: "#6b563e", // dark hardwood
 };
 
 /** Application-owned deterministic wall palettes per kit (primitives only). */
 const WALL_TONES: Readonly<Record<string, string>> = {
-  office: "#d8dce2",
-  hotel_suite: "#e8dcc8",
+  office: "#e2e6ea", // Phase 18D: pale cool wall (was #d8dce2) — stronger contrast
+  hotel_suite: "#f0e6d2", // Phase 18D: creamy wall (was #e8dcc8) — warmer
   warehouse: "#c8ccd2",
   mansion: "#cfb394",
 };
@@ -93,6 +101,248 @@ function byAnchorId(a: KitAnchor, b: KitAnchor): number {
   if (a.anchorId < b.anchorId) return -1;
   if (a.anchorId > b.anchorId) return 1;
   return 0;
+}
+
+/* ======================================================================
+ * Phase 18D — showcase art direction (deterministic shell decoration).
+ *
+ * Two bounded, purely-declarative extensions of the kit shell:
+ *  1. A warm DESK POOL point light above the DESK_EVIDENCE anchor centroid
+ *     (a warm pendant pool over the investigation workspace). This uses the
+ *     EXISTING "light" primitive kind — zero renderer changes — and gives the
+ *     cool office a warm local accent WITHOUT enabling any global shadows.
+ *  2. A bounded set of decorative non-interactable props, placed strictly at
+ *     existing manifest anchors (plus deterministic offsets), using existing
+ *     catalog ASSET descriptors for geometry/color (same pattern as the
+ *     existing lamp pedestal). Every prop passes a deterministic EVIDENCE
+ *     GUARD so a decor box can never overlap an evidence anchor; the guard is
+ *     exported so tests can prove it independently.
+ * ==================================================================== */
+
+/** Warm pendant pool color per kit (kit-id -> hex). Absent = no pool. */
+const WARM_POOL_COLORS: Readonly<Record<string, string>> = {
+  office: "#f2c48a", // warm amber pool over the evidence desks (cool room)
+  hotel_suite: "#f7d4a2", // soft honey pool over the study nook desks
+};
+
+/**
+ * Phase 18D camera tuning: how tightly the default orbit frames the room.
+ * The distance formula stays "extents-derived" (radius * scale + 2), but the
+ * flagship kits use a closer multiplier so evidence reads immediately and
+ * direct picking stays practical. Untuned kits keep the Phase 11 formula.
+ */
+interface KitCameraTuning {
+  distanceScale: number;
+  minDistance: number;
+}
+const CAMERA_TUNING: Readonly<Record<string, KitCameraTuning>> = {
+  office: { distanceScale: 1.55, minDistance: 13 },
+  hotel_suite: { distanceScale: 1.8, minDistance: 12 },
+};
+
+/** Hard bound on decor props per kit (bounded scene cost, task contract). */
+export const MAX_DECOR_PROPS_PER_KIT = 6;
+
+/** The anchor classes that may host evidence (decor must NEVER touch these). */
+const EVIDENCE_ANCHOR_TYPES: readonly string[] = [
+  "DESK_EVIDENCE",
+  "FLOOR_EVIDENCE",
+  "BODY",
+  "DOCUMENT",
+  "COMPUTER",
+  "WALL_EVIDENCE",
+];
+
+/** Evidence visual footprint radius at its anchor (world meters). */
+const EVIDENCE_ANCHOR_RADIUS = 0.45;
+/** Decor prop padding around its catalog footprint (world meters). */
+const DECOR_PADDING = 0.15;
+/** Spawn point clearance radius (decor must keep the player spawn clear). */
+const SPAWN_CLEARANCE = 0.4;
+/** Vertical gap below which two boxes are considered "same level". */
+const DECOR_SAME_LEVEL_EPS = 0.05;
+
+/** One deterministic decor prop plan (Phase 18D). */
+export interface KitDecorPlan {
+  /** Deterministic shell primitive id (prefix "decor_"). */
+  id: string;
+  /** An EXISTING catalog asset id (geometry source only — never a world object). */
+  assetId: string;
+  /** An EXISTING manifest anchor the prop is placed at (must be a kit anchor). */
+  hostAnchorId: string;
+  /**
+   * World-space offset from the host anchor's manifest position. `offset.y`
+   * is the DESIRED ABSOLUTE center height (world meters) — host anchors have
+   * differing y (tables vs floors), so absolute Y is the deterministic norm.
+   */
+  offset: KitVec3;
+  /** Optional explicit diffuse hex; defaults to the asset's first color. */
+  color?: string;
+  /**
+   * When set, horizontal overlap with this prop id is INTENTIONAL (a stack —
+   * e.g. a monitor on a desk) and is exempt from the decor-vs-decor guard.
+   */
+  stackOn?: string;
+}
+
+/**
+ * The authored Phase 18D decor plans, keyed by kit id. Every plan host anchor
+ * must exist in the kit manifest (plans referencing a missing anchor are
+ * dropped deterministically — the shell can never break on a plan edit).
+ */
+const DECOR_PLANS: Readonly<Record<string, readonly KitDecorPlan[]>> = {
+  // OFFICE — the manager's office becomes a desk cluster (desk + chair +
+  // monitor + warm task lamp) and the storage room gets a bookshelf with a
+  // folder. All placements stay clear of the office evidence anchors.
+  office: [
+    { id: "decor_desk_01", assetId: "PROP_DESK_01", hostAnchorId: "office_generic_01", offset: { x: 0.0, y: 0.375, z: 0.0 } },
+    { id: "decor_chair_01", assetId: "PROP_OFFICE_CHAIR_01", hostAnchorId: "office_generic_01", offset: { x: 1.6, y: 0.55, z: 0.3 } },
+    { id: "decor_monitor_01", assetId: "PROP_DESKTOP_MONITOR_01", hostAnchorId: "office_generic_01", offset: { x: 0.55, y: 0.95, z: 0.0 }, stackOn: "decor_desk_01" },
+    { id: "decor_desklamp_01", assetId: "PROP_DESK_LAMP_01", hostAnchorId: "office_generic_01", offset: { x: -0.45, y: 0.95, z: 0.3 }, color: "#e8d9a8", stackOn: "decor_desk_01" },
+    { id: "decor_bookshelf_01", assetId: "PROP_BOOKSHELF_01", hostAnchorId: "office_shelf_01", offset: { x: 0.0, y: 0.95, z: 0.0 } },
+    { id: "decor_folder_01", assetId: "PROP_FOLDER_01", hostAnchorId: "office_shelf_01", offset: { x: 0.35, y: 1.05, z: 0.0 }, stackOn: "decor_bookshelf_01" },
+  ],
+  // HOTEL SUITE — a bed against the bedroom's north wall (clear of the body
+  // and the bedside anchor), and a lounge composition of sofa + coffee table
+  // + table lamp + armchair + handbag around the lounge generic anchor.
+  hotel_suite: [
+    { id: "decor_bed_01", assetId: "PROP_HOTEL_BED_01", hostAnchorId: "hotel_bedside_01", offset: { x: -1.2, y: 0.3, z: -0.85 } },
+    { id: "decor_sofa_01", assetId: "PROP_SOFA_01", hostAnchorId: "hotel_generic_01", offset: { x: 0.0, y: 0.425, z: 0.7 } },
+    { id: "decor_coffeetable_01", assetId: "PROP_COFFEE_TABLE_01", hostAnchorId: "hotel_generic_01", offset: { x: 0.0, y: 0.225, z: -0.8 } },
+    { id: "decor_tablelamp_01", assetId: "PROP_TABLE_LAMP_01", hostAnchorId: "hotel_generic_01", offset: { x: 0.35, y: 0.625, z: -0.7 }, color: "#e8d9a8", stackOn: "decor_coffeetable_01" },
+    { id: "decor_armchair_01", assetId: "PROP_ARMCHAIR_01", hostAnchorId: "hotel_generic_01", offset: { x: 1.35, y: 0.475, z: -0.9 } },
+    { id: "decor_handbag_01", assetId: "PROP_HANDBAG_01", hostAnchorId: "hotel_generic_01", offset: { x: 0.25, y: 0.96, z: 0.7 }, stackOn: "decor_sofa_01" },
+  ],
+};
+
+/** Horizontal AABB overlap test (world XZ plane). */
+function rectsOverlap(
+  ax: number,
+  az: number,
+  ahx: number,
+  ahz: number,
+  bx: number,
+  bz: number,
+  bhx: number,
+  bhz: number,
+): boolean {
+  return Math.abs(ax - bx) < ahx + bhx && Math.abs(az - bz) < ahz + bhz;
+}
+
+/**
+ * The deterministic Phase 18D evidence guard: true when a box of half-extents
+ * `halfX`/`halfZ` at `position` does NOT overlap ANY evidence-capable anchor
+ * of the kit (DESK_EVIDENCE / FLOOR_EVIDENCE / BODY / DOCUMENT / COMPUTER /
+ * WALL_EVIDENCE) nor the kit's spawn point. Exported so tests can prove every
+ * accepted decor prop passes it (and that a deliberately-colliding box fails).
+ */
+export function evidenceClearanceOk(
+  kit: EnvironmentKitDocument,
+  position: KitVec3,
+  halfX: number,
+  halfZ: number,
+): boolean {
+  for (const anchor of kit.anchors) {
+    if (!EVIDENCE_ANCHOR_TYPES.includes(anchor.type)) continue;
+    if (
+      rectsOverlap(
+        position.x,
+        position.z,
+        halfX,
+        halfZ,
+        anchor.position.x,
+        anchor.position.z,
+        EVIDENCE_ANCHOR_RADIUS,
+        EVIDENCE_ANCHOR_RADIUS,
+      )
+    ) {
+      return false;
+    }
+  }
+  return !rectsOverlap(
+    position.x,
+    position.z,
+    halfX,
+    halfZ,
+    kit.spawn.position.x,
+    kit.spawn.position.z,
+    SPAWN_CLEARANCE,
+    SPAWN_CLEARANCE,
+  );
+}
+
+/**
+ * Build the deterministic Phase 18D decor props for a non-apartment kit.
+ * Pure function of the manifest + catalog: every plan is snapped to its host
+ * anchor (missing anchors/assets are dropped), sorted by plan id, bounded by
+ * {@link MAX_DECOR_PROPS_PER_KIT}, and each accepted prop must pass:
+ *   - {@link evidenceClearanceOk} (never occlude evidence or the spawn);
+ *   - the decor-vs-decor guard (no overlapping boxes at the same level,
+ *     intentional `stackOn` bases exempt);
+ *   - the interior-bounds check (the prop center stays inside the room).
+ */
+export function buildKitDecorProps(
+  kit: EnvironmentKitDocument,
+  interior: { x0: number; x1: number; z0: number; z1: number } | null = null,
+): ScenePrimitive[] {
+  const plans = (DECOR_PLANS[kit.environmentId] ?? [])
+    .filter((plan) => getAsset(plan.assetId) !== undefined)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .slice(0, MAX_DECOR_PROPS_PER_KIT);
+  const anchorsById = new Map<string, KitAnchor>(kit.anchors.map((anchor) => [anchor.anchorId, anchor] as const));
+  const accepted: Array<{ plan: KitDecorPlan; position: KitVec3; halfX: number; halfZ: number; height: number }> = [];
+  const props: ScenePrimitive[] = [];
+
+  for (const plan of plans) {
+    const asset = getAsset(plan.assetId);
+    if (asset === undefined) continue;
+    const host = anchorsById.get(plan.hostAnchorId);
+    if (host === undefined) continue;
+    const position: KitVec3 = {
+      x: host.position.x + plan.offset.x,
+      y: plan.offset.y, // absolute desired center height (documented norm)
+      z: host.position.z + plan.offset.z,
+    };
+    const halfX = asset.dimensions.x / 2 + DECOR_PADDING;
+    const halfZ = asset.dimensions.z / 2 + DECOR_PADDING;
+    if (!evidenceClearanceOk(kit, position, halfX, halfZ)) continue;
+    if (
+      interior !== null &&
+      (position.x < interior.x0 || position.x > interior.x1 || position.z < interior.z0 || position.z > interior.z1)
+    ) {
+      continue;
+    }
+    const collidesWith = accepted.find((entry) => {
+      // Intentional stacks are exempt BOTH ways: this prop declared `entry` as
+      // its base (monitor on desk) OR `entry` declared THIS prop as its base
+      // (the sofa must not be dropped just because a handbag rests on it).
+      if (entry.plan.id === plan.stackOn) return false;
+      if (entry.plan.stackOn === plan.id) return false;
+      const gapY = Math.abs(entry.position.y - position.y) - (entry.height / 2 + asset.dimensions.y / 2);
+      if (gapY >= DECOR_SAME_LEVEL_EPS) return false; // vertically separated = no collision
+      return rectsOverlap(
+        position.x,
+        position.z,
+        halfX,
+        halfZ,
+        entry.position.x,
+        entry.position.z,
+        entry.halfX,
+        entry.halfZ,
+      );
+    });
+    if (collidesWith !== undefined) continue;
+    accepted.push({ plan, position, halfX, halfZ, height: asset.dimensions.y });
+    props.push({
+      id: plan.id,
+      kind: "table",
+      position,
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: asset.dimensions.x, y: asset.dimensions.y, z: asset.dimensions.z },
+      color: plan.color ?? firstHexColor(asset.colors, DEFAULT_FLOOR_TONE),
+    });
+  }
+  return props;
 }
 
 /* ======================================================================
@@ -243,6 +493,35 @@ function buildKitShellFromManifest(kit: EnvironmentKitDocument): ScenePrimitive[
     });
   }
 
+  // Phase 18D — warm pendant pool above the DESK_EVIDENCE anchor centroid
+  // (a warm local accent pool over the investigation workspace). Uses the
+  // existing "light" primitive kind: the renderer already turns it into a
+  // PointLight + small emissive marker. Deterministic (sorted + averaged).
+  const poolHex = WARM_POOL_COLORS[kit.environmentId];
+  if (poolHex !== undefined) {
+    const desks = kit.anchors.filter((anchor) => anchor.type === "DESK_EVIDENCE").sort(byAnchorId);
+    if (desks.length > 0) {
+      const poolX = desks.reduce((sum, anchor) => sum + anchor.position.x, 0.0) / desks.length;
+      const poolZ = desks.reduce((sum, anchor) => sum + anchor.position.z, 0.0) / desks.length;
+      primitives.push({
+        id: "light_desk_pool",
+        kind: "light",
+        position: { x: poolX, y: LIGHT_Y, z: poolZ },
+        color: poolHex,
+      });
+    }
+  }
+
+  // Phase 18D — deterministic decorative (non-interactable) props: bounded,
+  // evidence-guarded, catalog-sourced, snapped to existing manifest anchors.
+  const interior = {
+    x0: x0 + wallThickness / 2,
+    x1: x1 - wallThickness / 2,
+    z0: z0 + wallThickness / 2,
+    z1: z1 - wallThickness / 2,
+  };
+  primitives.push(...buildKitDecorProps(kit, interior));
+
   return primitives;
 }
 
@@ -370,8 +649,11 @@ export interface KitCameraProfile {
  * Deterministic camera framing for a non-apartment kit: the target is the
  * manifest SPAWN (lifted slightly above floor level); the orbit distance is
  * derived from the kit's anchor extents so the whole room fits in view.
- * Returns null for the apartment kit (which keeps its golden camera) and for
- * unknown kits.
+ * Phase 18D: the flagship kits (office / hotel_suite) use a tighter camera
+ * tuning (closer orbit) so evidence reads immediately and direct picking is
+ * practical — the distance stays extents-derived (larger room -> larger
+ * orbit). Returns null for the apartment kit (which keeps its golden camera)
+ * and for unknown kits.
  */
 export function cameraProfileFor(kitId: string): KitCameraProfile | null {
   if (kitId === APARTMENT_KIT_ID || !hasKit(kitId)) return null;
@@ -382,7 +664,11 @@ export function cameraProfileFor(kitId: string): KitCameraProfile | null {
   const halfWidth = (Math.max(...xs) - Math.min(...xs)) / 2;
   const halfDepth = (Math.max(...zs) - Math.min(...zs)) / 2;
   const radius = Math.hypot(halfWidth, halfDepth);
-  const distance = Math.max(12, radius * 2.4 + 2);
+  const tuning = CAMERA_TUNING[kit.environmentId];
+  const distance =
+    tuning !== undefined
+      ? Math.max(tuning.minDistance, radius * tuning.distanceScale + 2)
+      : Math.max(12, radius * 2.4 + 2);
   return {
     target: { x: kit.spawn.position.x, y: kit.spawn.position.y + 1.0, z: kit.spawn.position.z },
     distance,

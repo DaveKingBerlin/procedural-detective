@@ -31,7 +31,7 @@
     {"anchorId": "office_spawn_01", "type": "PLAYER_SPAWN", "zoneId": "office_reception", "position": {"x": 0.8, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "allowedCategories": [], "exclusive": true, "required": true}
   ],
   "spawn": {"anchorId": "office_spawn_01", "position": {"x": 0.8, "y": 0.0, "z": 2.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}},
-  "lighting": {"profile": "neutral", "keyIntensity": 1.0, "hemiIntensity": 0.6, "accentColor": "#c8d0dc"},
+  "lighting": {"profile": "neutral", "keyIntensity": 0.95, "hemiIntensity": 0.3, "accentColor": "#b8ccd8"},
   "structuralAssets": ["DOOR_APARTMENT_01", "PROP_WINDOW_01", "PROP_WALL_01", "PROP_DESK_01", "PROP_OFFICE_CHAIR_01", "PROP_LAMP_01", "PROP_TABLE_01"],
   "styleHint": "corporate_modern",
   "defaultAnchorCoverage": {

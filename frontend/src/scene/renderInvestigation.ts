@@ -316,7 +316,12 @@ export function createInvestigationScene(
     key.intensity = keyIntensity;
 
     const hemi = new HemisphericLight("investigation_hemi", new Vector3(0.35, 1, -0.25), scene);
-    hemi.diffuse = new Color3(1, 0.93, 0.84);
+    // Phase 18D: for kit-lit scenes the ambient FILL follows the kit's accent
+    // (cool office = cool gray-blue fill; warm hotel = warm amber fill) so the
+    // key/fill pair carries each room's warm-or-cool identity. The apartment
+    // kit keeps its golden warm fill byte-identical (kitLighting is null).
+    hemi.diffuse =
+      kitLighting !== null ? accentToneOf(kitLighting.accentColor) : new Color3(1, 0.93, 0.84);
     hemi.intensity = hemiIntensity;
 
     // Phase 18B: prefers-reduced-motion detection (injectable for tests).
