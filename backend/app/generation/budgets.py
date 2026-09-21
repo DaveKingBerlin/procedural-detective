@@ -41,9 +41,30 @@ from app.generation.clock import Clock
 
 PROVIDER_CALL_SAFETY_MARGIN_SECONDS = 0.1
 
-# Canonical bucket token for the CORE bucket (None is accepted synonymously so
-# legacy callers that never pass a bucket keep their exact behavior).
-CORE_BUCKET = "core"
+# Canonical CORE bucket token (``None`` is accepted synonymously so legacy
+# callers that never pass a bucket keep their exact behavior).
+#
+# Phase 19B ADV-216: the CORE bucket is a dedicated NON-STRING sentinel, never
+# the literal string ``"core"``. A semantic asset id is always a string, so a
+# procedural object whose requested_name is literally ``"core"`` can never
+# alias the CORE bucket — it is charged to its OWN per-asset bucket exactly
+# like every other object (per-asset ceiling + asset-call attribution apply).
+class _CoreBucket:
+    """Unique sentinel for the CORE budget bucket (never a semantic asset id)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return "<CORE_BUCKET>"
+
+    def __copy__(self) -> "_CoreBucket":  # pragma: no cover - defensive
+        return self
+
+    def __deepcopy__(self, _memo: Any) -> "_CoreBucket":  # pragma: no cover - defensive
+        return self
+
+
+CORE_BUCKET = _CoreBucket()
 
 
 def _non_negative_int(value: Any, name: str) -> int | None:
@@ -206,10 +227,13 @@ class BudgetTracker:
     def consume_call(self, bucket: str | None = None) -> bool:
         """Reserve one REAL model call in a budget bucket.
 
-        ``bucket`` is ``None`` or ``"core"`` (the CORE bucket: case/evidence/
-        world stage calls plus global repair/regeneration calls) or a
+        ``bucket`` is ``None`` or ``CORE_BUCKET`` (the CORE bucket: case/
+        evidence/world stage calls plus global repair/regeneration calls) or a
         non-empty semantic object id (the ASSET:<objectId> bucket: procedural
         ASSET_SPEC / ASSET_SPEC_REPAIR / geometry calls for that object).
+        ``CORE_BUCKET`` is a NON-STRING sentinel (ADV-216): ANY string — even
+        the literal ``"core"`` — is always interpreted as a semantic asset id,
+        so an asset id can never alias the CORE bucket.
 
         Enforces (simultaneously): the GLOBAL ceiling (hard), the CORE ceiling
         for core-bucket calls (hard when configured) and the per-asset ceiling
@@ -230,7 +254,7 @@ class BudgetTracker:
         else:
             if not isinstance(bucket, str) or not bucket:
                 raise ValueError(
-                    "consume_call bucket must be None, 'core' or a non-empty "
+                    "consume_call bucket must be None, CORE_BUCKET or a non-empty "
                     "semantic object id"
                 )
             if self._max_asset_calls is not None and self.asset_call_count(bucket) >= self._max_asset_calls:

@@ -86,6 +86,7 @@ from app.environments.placer import (
     validate_placement,
 )
 from app.environments.resolver import FALLBACK_ENVIRONMENT_ID
+from app.generation.provider import StageDriverProviderFailure
 from app.generation.schemas import ObjectSpec, PlacementSpec
 from app.world.extract import is_base_object_request
 from app.world.requirements import (
@@ -713,6 +714,14 @@ def compose_world(
                 if outcome.generated is None:
                     return None
                 resolution = outcome.resolution
+        except StageDriverProviderFailure:
+            # ADV-213: a TYPED provider failure (budget/deadline/timeout) is
+            # NEVER absorbed by the degrade-safe fallback — it must reach the
+            # driver/controller so the attempt fails with the narrow canonical
+            # cause (per-asset exhaustion attributable to this semantic
+            # object, global exhaustion terminal). Unknown exceptions still
+            # degrade safely (never a crash).
+            raise
         except Exception:  # noqa: BLE001 - degraded, never a crash
             return None
         if outcome.generated is not None:

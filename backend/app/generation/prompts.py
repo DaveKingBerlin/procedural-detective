@@ -68,10 +68,17 @@ _PROPOSITION_TYPE_HINT_PREFIX = "use EXACTLY one of the proposition type tokens:
 # this exact ``enum <tokens>`` marker so the derived transport JSON Schema
 # constrains ``environmentHint`` to the five canonical ids (the model can never
 # suggest a path-like or free-text location).
+#
+# Phase 19B ADV-214: the hint text deliberately NEVER contains the literal
+# word "null" — ``_key_required``/``_hint_nullable`` treat any hint mentioning
+# "null" as a nullable value-slot, which would demote ``environmentHint`` from
+# REQUIRED to OPTIONAL in the transport JSON Schema (letting structured-output
+# mode silently omit the location — the exact determinism loss Fix A removed).
+# The enum constraint AND the requiredness both stay authoritative.
 _ENVIRONMENT_ENUM_HINT = (
     "canonical environment token; enum " + ",".join(ENVIRONMENT_IDS) +
     " (use EXACTLY one of those EXACT tokens — never a path, never a location "
-    "phrase like 'hotel suite', never a free text word or null)"
+    "phrase like 'hotel suite', never a free text word)"
 )
 
 

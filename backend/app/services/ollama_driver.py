@@ -47,6 +47,7 @@ from app.generation.provider import (
     GenerateRequest,
     GenerationStage,
     ProviderResult,
+    StageDriverProviderFailure,
 )
 from app.generation.budgets import (
     CORE_BUCKET,
@@ -110,19 +111,6 @@ _DRIVER_STAGES = (
     GenerationStage.EVIDENCE,
     GenerationStage.WORLD_GRAPH,
 )
-
-
-class StageDriverProviderFailure(Exception):
-    """A provider-level failure inside the stage driver."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: GenerationFailureCode = GenerationFailureCode.PROVIDER_UNAVAILABLE,
-    ) -> None:
-        super().__init__(message)
-        self.code = code.value
 
 
 class _DuplicateKeyError(ValueError):
@@ -424,6 +412,13 @@ OBJECTS_BASE_ALL_KITS: tuple[str, ...] = (
     "apartment_laptop",
     "victim_body_placeholder",
 )
+
+# Phase 19B ADV-219: the spare sharp objects whose PLACEMENT is per-kit
+# optional (composer ``KIT_BASE_OBJECT_IDS`` omits them on hotel_suite /
+# warehouse). They remain WORLD identity objects everywhere so forensic/
+# evidence references stay valid, but they are only WEAPON CANDIDATES on kits
+# that actually place them (the candidate universe mirrors the placed scene).
+_PER_KIT_SHARP_WEAPON_IDS: tuple[str, ...] = ("letter_opener", "scissors")
 
 # Default distant-location travel rule the driver may deterministically add so
 # an alternative suspect's observation actually proves the scene unreachable.
@@ -1179,7 +1174,11 @@ class OllamaAssetSpecProvider:
 
         # initial ASSET_SPEC call
         prompt = prompts.build_asset_spec_prompt(concept, category_hint)
-        content = self._roundtrip(prompt, GenerationStage.ASSET_SPEC, concept)
+        try:
+            content = self._roundtrip(prompt, GenerationStage.ASSET_SPEC, concept)
+        except StageDriverProviderFailure as exc:
+            self._record_budget_failure(exc)
+            raise
         if content is None:
             return self._fail_asset("asset spec generation unavailable")
 
@@ -1230,9 +1229,13 @@ class OllamaAssetSpecProvider:
             repair_prompt = prompts.build_asset_spec_repair_prompt(
                 concept, candidate, diagnostics
             )
-            content = self._roundtrip(
-                repair_prompt, GenerationStage.ASSET_SPEC_REPAIR, concept
-            )
+            try:
+                content = self._roundtrip(
+                    repair_prompt, GenerationStage.ASSET_SPEC_REPAIR, concept
+                )
+            except StageDriverProviderFailure as exc:
+                self._record_budget_failure(exc)
+                raise
             if content is None:
                 self._record_geometry_metrics(
                     issue_count_before_repair, repair_attempts, final_report
@@ -1254,6 +1257,60 @@ class OllamaAssetSpecProvider:
         )
         return AssetSpecResponse(content=candidate)
 
+    def _record_failed_asset(self, reason_code: str) -> bool:
+        """Shared failed-asset accounting + sanitized event.
+
+        Used by BOTH the return path (``_fail_asset``) and the exception path
+        (ADV-213 ``_record_budget_failure``) so a per-asset budget exhaustion
+        counts toward ``MAX_FAILED_ASSETS_PER_GENERATION`` exactly like any
+        other failed procedural asset. Returns True when recording this NEW
+        failure exceeded the failed-asset threshold (the caller raises the
+        narrowed flag / code).
+        """
+        concept = getattr(self, "_last_concept", "")
+        budget = self._metrics_provider() if self._metrics_provider is not None else None
+        exceeded = False
+        if budget is not None and hasattr(budget, "mark_failed_asset"):
+            exceeded = not budget.mark_failed_asset(concept)
+        if exceeded:
+            self.failed_asset_threshold_hit = True
+        emit_event(
+            "generation.asset.failed",
+            generationAttemptId=self._attempt_id,
+            semanticObjectId=concept,
+            reasonCode=reason_code,
+            failedAssetCount=(
+                budget.failed_asset_count
+                if budget is not None and hasattr(budget, "failed_asset_count")
+                else None
+            ),
+            assetCallCount=(
+                budget.asset_call_count(concept)
+                if budget is not None and hasattr(budget, "asset_call_count")
+                else None
+            ),
+        )
+        return exceeded
+
+    def _record_budget_failure(self, exc: StageDriverProviderFailure) -> None:
+        """ADV-213 — classified failed-asset accounting for an exception-style
+        budget failure raised inside ``_roundtrip``.
+
+        A PER-ASSET exhaustion is attributable to THIS semantic object: record
+        the failed asset (mark_failed_asset + sanitized event) BEFORE the typed
+        failure propagates. GLOBAL exhaustion is a terminal attempt condition
+        never attributed to one object (no accounting). The typed failure then
+        continues to the driver/controller so the narrow canonical code is what
+        surfaces as the attempt failure code.
+        """
+        if (
+            getattr(exc, "code", None)
+            == GenerationFailureCode.ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED.value
+        ):
+            self._record_failed_asset(
+                GenerationFailureCode.ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED.value
+            )
+
     def _fail_asset(self, message: str) -> Any:
         """Record ONE failed procedural asset + emit the sanitized event.
 
@@ -1267,29 +1324,7 @@ class OllamaAssetSpecProvider:
         """
         from app.assets.spec_provider import AssetSpecResponse
 
-        concept = getattr(self, "_last_concept", "")
-        budget = self._metrics_provider() if self._metrics_provider is not None else None
-        exceeded = False
-        if budget is not None and hasattr(budget, "mark_failed_asset"):
-            exceeded = not budget.mark_failed_asset(concept)
-        if exceeded:
-            self.failed_asset_threshold_hit = True
-        emit_event(
-            "generation.asset.failed",
-            generationAttemptId=self._attempt_id,
-            semanticObjectId=concept,
-            reasonCode="ASSET_SPEC_FAILED",
-            failedAssetCount=(
-                budget.failed_asset_count
-                if budget is not None and hasattr(budget, "failed_asset_count")
-                else None
-            ),
-            assetCallCount=(
-                budget.asset_call_count(concept)
-                if budget is not None and hasattr(budget, "asset_call_count")
-                else None
-            ),
-        )
+        self._record_failed_asset("ASSET_SPEC_FAILED")
         return AssetSpecResponse(error=message)
 
     def _repair_diagnostics(
@@ -1582,6 +1617,73 @@ deadlineRemainingMs=(
         if self._timeout_provider is None:
             return max(0.0, float(self._configured_timeout_seconds or 60.0))
         return max(0.0, float(self._timeout_provider()))
+
+
+# --------------------------------------------------------------------------- #
+# ADV-218 — sanitized semantic-object-id rendering for internal validation
+# messages. Ids are only length-bounded upstream (``_str_field``), so hostile
+# weaponId / evidence object_id values (URLs, control characters) are scrubbed
+# before they are embedded in exception/log text. Failure-code semantics are
+# untouched — only the message text is sanitized and bounded.
+# --------------------------------------------------------------------------- #
+
+_SAFE_MESSAGE_ID_CHARS: frozenset[str] = frozenset(
+    "abcdefghijklmnopqrstuvwxyz0123456789_-."
+)
+# URL-scheme tokens never echoed into an internal validation message.
+_FORBIDDEN_URL_TOKENS_IN_MESSAGE: tuple[str, ...] = (
+    "http:",
+    "https:",
+    "ftp:",
+    "data:",
+    "file:",
+    "javascript:",
+    "//",
+)
+_MAX_MESSAGE_IDS = 4
+_MAX_MESSAGE_ID_LENGTH = 48
+
+
+def _sanitize_object_id_for_message(
+    raw: Any, *, max_len: int = _MAX_MESSAGE_ID_LENGTH
+) -> str:
+    """ADV-218 — sanitize ONE semantic object id before embedding it in an
+    internal validation/log message.
+
+    The sanitizer never echoes control characters or URL-scheme / scheme-slash
+    tokens (a hostile URL-bearing id degrades to the deterministic
+    ``"<url-suppressed>"`` placeholder), projects the remainder onto the safe
+    id alphabet, bounds length, and returns a deterministic placeholder when
+    nothing safe survives. The failure-code semantics (VALIDATION_FAILED) are
+    unchanged — only the message text is scrubbed.
+    """
+    if not isinstance(raw, str) or not raw:
+        return "<unknown>"
+    raw_lowered = raw.casefold()
+    if any(token in raw_lowered for token in _FORBIDDEN_URL_TOKENS_IN_MESSAGE):
+        return "<url-suppressed>"
+    scrubbed: list[str] = []
+    for ch in raw:
+        codepoint = ord(ch)
+        if codepoint < 0x20 or codepoint == 0x7F:
+            # control characters are never echoed
+            continue
+        scrubbed.append(ch if ch in _SAFE_MESSAGE_ID_CHARS else "_")
+    text = "".join(scrubbed)
+    text = "_".join(part for part in text.split("_") if part)
+    if not text:
+        return "<unprintable>"
+    return text[:max_len]
+
+
+def _sanitize_object_ids_for_message(missing: Iterable[Any]) -> str:
+    """ADV-218 — join the sanitized missing ids (bounded count + length)."""
+    rendered = ", ".join(
+        _sanitize_object_id_for_message(oid) for oid in missing[:_MAX_MESSAGE_IDS]
+    )
+    if len(missing) > _MAX_MESSAGE_IDS:
+        rendered += ", ..."
+    return rendered
 
 
 # --------------------------------------------------------------------------- #
@@ -2190,6 +2292,11 @@ metrics_provider=lambda: attempt.budget,
                 catalog=self._catalog,
                 kit=kit,
             )
+        except StageDriverProviderFailure:
+            # ADV-213: a TYPED provider failure (per-asset/global budget
+            # exhaustion, deadline, timeout) is the attempt's narrow cause —
+            # never absorbed into a generic "world composition failed" deferral.
+            raise
         except Exception:  # noqa: BLE001 - compose degrades safe
             deferred.append("world composition failed for the requested world")
             return None
@@ -2250,20 +2357,6 @@ metrics_provider=lambda: attempt.budget,
         except Exception:  # noqa: BLE001
             kit = None
 
-        # base public objects (full golden base set). The OBJECTS list carries
-        # the complete golden base identity set on EVERY kit (the same set the
-        # fake/live golden world uses) so every evidence/identity reference —
-        # including the sharp-weapon forensics — stays valid on kits whose
-        # PLACEMENT subset omits a spare weapon (hotel_suite/warehouse). The
-        # per-kit placement subset (KIT_BASE_OBJECT_IDS) is a PLACEMENT concern
-        # (anchor capacity), the object identity set is not.
-        objects: list[ObjectSpec] = []
-        if kit is not None:
-            for object_id in OBJECTS_BASE_ALL_KITS:
-                spec = _base_object_spec(object_id)
-                if spec is not None and not any(o.object_id == spec.object_id for o in objects):
-                    objects.append(spec)
-
         # composition placements -> world graph + new public objects.
         placements: list[Any] = []
         new_objects: list[ObjectSpec] = []
@@ -2279,6 +2372,34 @@ metrics_provider=lambda: attempt.budget,
                         weapon_evidence_id,
                     )
                 )
+
+        # base public objects (full golden base set). The OBJECTS list carries
+        # the complete golden base identity set on EVERY kit (the same set the
+        # fake/live golden world uses) so every evidence/identity reference —
+        # including the sharp-weapon forensics — stays valid on kits whose
+        # PLACEMENT subset omits a spare weapon (hotel_suite/warehouse). The
+        # per-kit placement subset (KIT_BASE_OBJECT_IDS) is a PLACEMENT concern
+        # (anchor capacity), the object identity set is not.
+        #
+        # ADV-219 (Phase 19B): the player-visible WEAPON CANDIDATE universe is
+        # derived from the PUBLIC world objects actually PLACED in the scene.
+        # A spare sharp object (letter_opener / scissors) that this kit cannot
+        # place stays a WORLD identity object (forensic/evidence references on
+        # those kits keep resolving, the presence guard stays clean) BUT is
+        # demoted to INSPECTABLE-only — it can never be a POTENTIAL_WEAPON
+        # candidate the player could not find in the scene. Kits that DO place
+        # them (apartment/office/mansion) keep them as weapon candidates.
+        placed_object_ids = {p.object_id for p in placements if getattr(p, "object_id", None)}
+        objects: list[ObjectSpec] = []
+        if kit is not None:
+            for object_id in OBJECTS_BASE_ALL_KITS:
+                spec = _base_object_spec(object_id)
+                if spec is None or any(o.object_id == spec.object_id for o in objects):
+                    continue
+                if object_id in _PER_KIT_SHARP_WEAPON_IDS and object_id not in placed_object_ids:
+                    spec = dataclasses.replace(spec, affordances=("INSPECTABLE",))
+                objects.append(spec)
+        if composition is not None:
             for obj in composition.new_objects:
                 if not any(o.object_id == obj.object_id for o in objects):
                     new_objects.append(_enhance_weapon(attempt, obj))
@@ -2330,10 +2451,15 @@ metrics_provider=lambda: attempt.budget,
                         referenced.add(object_id)
         missing = sorted(r for r in referenced if r not in semantic_object_ids)
         if missing:
+            # ADV-218: the referenced ids are only length-bounded upstream
+            # (``_str_field``), so they are SANITIZED before embedding in this
+            # internal validation message — never a raw hostile URL / control
+            # character in the typed error text. The failure-code semantics
+            # (VALIDATION_FAILED, fail closed, nothing published) are unchanged.
             raise SemanticObjectResolutionError(
                 "essential semantic object(s) referenced by the crime/evidence "
                 "algebra could not be represented in the world: "
-                + ", ".join(missing)
+                + _sanitize_object_ids_for_message(missing)
             )
 
         return GeneratedDraft(

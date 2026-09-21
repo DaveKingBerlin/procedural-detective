@@ -142,3 +142,26 @@ class ProviderError(Exception):
 
 class ProviderTimeout(ProviderError):
     """A provider call exceeded its time budget."""
+
+
+class StageDriverProviderFailure(Exception):
+    """A typed provider-level failure inside a stage driver (Phase 16_2).
+
+    Carries a canonical player-safe failure code (``GenerationFailureCode``
+    value string) so the generation controller can classify the attempt
+    without ever parsing provider internals. The class lives HERE (the
+    neutral provider boundary) so both the Ollama stage driver AND the Asset
+    Oracle (``app.assets.oracle``) can agree on the typed failure without
+    creating an assets -> services import — Phase 19B ADV-213: the Oracle
+    re-raises this type instead of swallowing it into a generic sanitized
+    string, so budget-style failures surface narrow codes end to end.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | "GenerationFailureCode" = "PROVIDER_UNAVAILABLE",
+    ) -> None:
+        super().__init__(message)
+        self.code = getattr(code, "value", None) or str(code)

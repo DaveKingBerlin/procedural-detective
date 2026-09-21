@@ -350,11 +350,26 @@ class GeneratedAssetOracle:
         self, spec_provider: AssetSpecProvider, spec_request: AssetSpecRequest
     ) -> str | None:
         """Call the provider once; return a sanitized error message or None on a
-        usable content response (stored on ``self._last_response``)."""
+        usable content response (stored on ``self._last_response``).
+
+        ADV-213 (Phase 19B): a TYPED provider failure
+        (``StageDriverProviderFailure`` — the Ollama stage driver's budget/
+        deadline/timeout signals) is RE-RAISED so the driver/generation
+        controller can classify it (per-asset exhaustion attributable to the
+        semantic asset, global exhaustion terminal, essential evidence fail
+        closed, decorative per the bounded fallback policy). UNKNOWN
+        exceptions keep the generic sanitized message — never a raw leak.
+        """
+        from app.generation.provider import StageDriverProviderFailure
+
         self._last_response = None
         try:
             response = spec_provider.generate(spec_request)
-        except Exception as exc:  # noqa: BLE001 - sanitize any provider failure
+        except StageDriverProviderFailure:
+            # Typed driver/classification failure: propagate unchanged.
+            self._last_response = None
+            raise
+        except Exception as exc:  # noqa: BLE001 - sanitize any OTHER failure
             self._last_response = None
             return f"spec provider failed: {type(exc).__name__}"
         if not isinstance(response, AssetSpecResponse):

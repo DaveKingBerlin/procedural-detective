@@ -71,6 +71,21 @@ def _underscore_token(value: str) -> str:
     )
 
 
+def _strip_leading_trailing_whitespace(value: str) -> str:
+    """Deterministic canonical-whitespace pre-normalization (Phase 19B
+    ADV-217).
+
+    Harmless leading/trailing whitespace — spaces, tabs, newlines, carriage
+    returns and OTHER Unicode whitespace (``str.strip`` semantics) — is
+    removed BEFORE the safety gate so a model-emitted trailing newline/tab
+    (e.g. ``"hotel_suite\\n"``) is canonicalized instead of rejected as a
+    spurious "contains a control character". Only LEADING/TRAILING whitespace
+    is stripped: INTERIOR control characters (e.g. ``"hotel_\\nsuite"``,
+    ``"hotel\\x00suite"``) are untouched and still rejected by the safety gate.
+    """
+    return unicodedata.normalize("NFKC", value).strip()
+
+
 def canonicalize_environment_hint(raw: Any) -> tuple[str | None, tuple[str, ...]]:
     """Deterministically canonicalize one raw ``environmentHint`` value.
 
@@ -94,7 +109,14 @@ def canonicalize_environment_hint(raw: Any) -> tuple[str | None, tuple[str, ...]
         return (None, ())
     if not isinstance(raw, str):
         return (None, ("environmentHint: must be a string",))
-    value = raw
+    # ADV-217: harmless leading/trailing whitespace (incl. newline/tab and
+    # other Unicode whitespace) is canonical whitespace — strip it BEFORE the
+    # safety gate so a trailing model newline never becomes a spurious
+    # "control character" rejection. Interior control characters are NOT
+    # touched here and keep being rejected below.
+    value = _strip_leading_trailing_whitespace(raw)
+    if not value:
+        return (None, ("environmentHint: must be a non-empty string",))
     safety = safe_string_issues(value, "environmentHint")
     if safety:
         return (None, tuple(sorted(set(safety))))
