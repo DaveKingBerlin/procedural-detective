@@ -140,27 +140,34 @@ def test_adv213b_global_exhaustion_remains_terminal():
     assert record.budget.calls == 4
 
 
-def test_adv213c_decorative_budget_exhaustion_never_installs_partial_world():
-    """A DECORATIVE object exhausting its per-asset budget does NOT install a
-    partial world silently: the attempt fails closed with the narrow
-    attributable code and NOTHING is published (the budget cause is never
-    absorbed into the silent skip path)."""
+def test_adv213c_decorative_budget_exhaustion_follows_bounded_fallback():
+    """A DECORATIVE object exhausting its per-asset budget does NOT fail the
+    attempt on the FIRST occurrence (ADV-220): the failed asset is counted
+    (mark_failed_asset, exactly once), the object is left OUT with the
+    player-safe composition note exactly like the return-style fallback path
+    (``test_decorative_asset_failure_falls_back_safely``), and nothing is
+    published SILENTLY — the terminal condition is
+    MAX_FAILED_ASSETS_PER_GENERATION, not the first decorative failure."""
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
         _j(_world_with("unusual trinket", criticality="decorative")),
-        "<not-json>",  # ASSET_SPEC (invalid -> repair needed)
+        "<not-json>",  # ASSET_SPEC (invalid -> repair -> per-asset budget)
         "<not-json>",
     ]
     record, _transport = _run(
         posts,
-        prompt=PROMPT,
+        prompt=_KITCHEN_KNIFE_PROMPT,
         **_budgeted_controller_kwargs(),
     )
-    assert record.state is GenerationState.FAILED
-    assert record.published is None
-    assert record.failure_code == "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED"
-    assert record.failure_code in PUBLIC_FAILURE_CODES
+    assert record.state is GenerationState.PUBLISHED
+    published = record.published.draft if record.published else record.draft
+    assert all(o.object_id != "unusual_trinket" for o in published.objects)
+    assert any(
+        "unusual trinket" in note for note in (published.composition_notes or ())
+    )
+    assert record.budget.failed_asset_count == 1
+    assert "unusual trinket" in record.budget.failed_assets
 
 
 def test_adv213d_essential_evidence_fails_closed_sanitized():
@@ -251,6 +258,203 @@ def test_adv213_oracle_reraises_typed_failure_keeps_generic_sanitization():
     assert outcome.error is not None
     assert outcome.error.startswith("spec provider failed: RuntimeError")
     assert "boom" not in outcome.error
+
+
+# --------------------------------------------------------------------------- #
+# ADV-220 — DECORATIVE per-asset budget exhaustion follows the bounded fallback
+# (skip + player-safe note + MAX_FAILED_ASSETS_PER_GENERATION ceiling); a
+# REQUIRED/essential budget failure stays fail-closed with the narrow code;
+# GLOBAL exhaustion is always terminal regardless of criticality.
+# --------------------------------------------------------------------------- #
+
+def _decor_world(*names):
+    return {
+        "environmentHint": "office", "locationTokens": ["office"],
+        "objects": [
+            {"name": name, "categoryHint": "decor", "criticality": "decorative"}
+            for name in names
+        ],
+        "relations": [], "unsafeUnsupported": [],
+    }
+
+
+def test_adv220a_decorative_budget_exhaustion_below_ceiling_publishes():
+    """(a) ONE decorative object exhausting its per-asset budget below the
+    failed-asset ceiling does NOT fail the attempt: the case publishes without
+    that object, per the bounded fallback policy (round-trip skip by the
+    composer, identical to the return-style fallback path)."""
+    posts = [
+        _j(_case_people(weapon="kitchen_knife")),
+        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        _j(_decor_world("unusual trinket")),
+        "<not-json>",  # ASSET_SPEC (invalid -> repair -> per-asset budget)
+        "<not-json>",
+    ]
+    record, _transport = _run(
+        posts,
+        prompt=_KITCHEN_KNIFE_PROMPT,
+        **_budgeted_controller_kwargs(),
+    )
+    assert record.state is GenerationState.PUBLISHED
+    assert record.failure_code is None
+    published = record.published.draft if record.published else record.draft
+    assert all(o.object_id != "unusual_trinket" for o in published.objects)
+    assert any(
+        "unusual trinket" in note for note in (published.composition_notes or ())
+    )
+
+
+def test_adv220b_budget_decorative_over_ceiling_fails_with_max_failed():
+    """(b) More than MAX_FAILED_ASSETS_PER_GENERATION (3) DECORATIVE objects
+    exhausting their per-asset budgets fails the attempt with the CEILING code
+    (MAX_FAILED_ASSETS_EXCEEDED) — now REACHABLE via exception-style budget
+    failures — never the narrow per-asset code, never a silent publish."""
+    posts = [
+        _j(_case_people(weapon="kitchen_knife")),
+        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        _j(
+            _decor_world(
+                "trinket one", "trinket two", "trinket three", "trinket four"
+            )
+        ),
+    ]
+    record, _transport = _run(
+        posts,
+        prompt=_KITCHEN_KNIFE_PROMPT,
+        **_budgeted_controller_kwargs(max_failed_assets_per_generation=3),
+    )
+    assert record.state is GenerationState.FAILED
+    assert record.published is None
+    assert record.failure_code == "MAX_FAILED_ASSETS_EXCEEDED"
+    assert record.failure_code != "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED"
+    assert record.budget.failed_asset_count == 3
+    assert record.budget.failed_assets == {
+        "trinket one", "trinket two", "trinket three",
+    }
+
+
+def test_adv220c_required_budget_exhaustion_still_fails_closed_narrow():
+    """(c) A DECORATIVE sibling never weakens the ESSENTIAL path: a REQUIRED
+    procedural asset whose per-asset budget is exhausted STILL fails the
+    attempt closed with the narrow ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED code
+    and no partial publish, even when other decorative objects were skipped
+    below their own ceiling first."""
+    posts = [
+        _j(_case_people(weapon="mystery_weapon")),
+        _j(_evidence(weapon_obj="mystery_weapon", murderer="paul_becker")),
+        _j(
+            {
+                "environmentHint": "office", "locationTokens": ["office"],
+                "objects": [
+                    {"name": "unusual trinket", "categoryHint": "decor", "criticality": "decorative"},
+                    {"name": "mystery weapon", "categoryHint": "decor", "criticality": "required"},
+                ],
+                "relations": [], "unsafeUnsupported": [],
+            }
+        ),
+        "<not-json>",  # ASSET_SPEC (decorative trinket -> exhausted, skipped)
+        "<not-json>",  # ASSET_SPEC for the REQUIRED mystery weapon
+        "<not-json>",  # its repair -> per-asset budget exhausted
+    ]
+    record, _transport = _run(
+        posts,
+        prompt=(
+            "Victim: Dr. Anna Weiss\nMurderer: Paul Becker\n"
+            "Motive: stolen research data\nWeapon: mystery weapon\nTime: 23:42\n"
+            "Witness: Lisa K\u00f6nig\nLocation: office\n"
+        ),
+        **_budgeted_controller_kwargs(),
+    )
+    assert record.state is GenerationState.FAILED
+    assert record.published is None
+    assert record.failure_code == "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED"
+    assert record.reason == "provider failure: generator unavailable"
+    # the decorative trinket was ALSO counted (once) before the essential fail.
+    assert record.budget.failed_asset_count == 2
+    assert "unusual trinket" in record.budget.failed_assets
+    assert "mystery weapon" in record.budget.failed_assets
+
+
+def test_adv220d_global_exhaustion_still_terminal_for_decorative_objects():
+    """(d) GLOBAL ceiling exhaustion during a DECORATIVE object's asset path
+    stays the generic terminal PROVIDER_CALL_BUDGET_EXHAUSTED — never
+    attributed to one asset, never skipped/absorbed by the decorative tolerance
+    regardless of criticality."""
+    posts = [
+        _j(_case_people(weapon="kitchen_knife")),
+        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        _j(_decor_world("unusual trinket")),
+        "<not-json>",  # ASSET_SPEC (would be the 4th call -- global ceiling 4)
+        "<not-json>",
+    ]
+    record, _transport = _run(
+        posts,
+        prompt=_KITCHEN_KNIFE_PROMPT,
+        **_budgeted_controller_kwargs(
+            max_llm_calls_per_generation=4,
+            max_core_llm_calls=12,
+        ),
+    )
+    assert record.state is GenerationState.FAILED
+    assert record.published is None
+    assert record.failure_code == "PROVIDER_CALL_BUDGET_EXHAUSTED"
+    # never attributed to the decorative object (no failed-asset accounting).
+    assert record.budget.failed_asset_count == 0
+    assert record.budget.calls == 4
+
+
+def test_adv220e_failed_asset_accounting_exactly_once_per_decorative_asset():
+    """(e) Failed-asset accounting is monotonic on the budget-exception path:
+    each distinct DECORATIVE failing asset is recorded exactly once (count ==
+    number of distinct failed objects; the tracker's set-membership no-op never
+    double counts), and below the ceiling the attempt still publishes."""
+    posts = [
+        _j(_case_people(weapon="kitchen_knife")),
+        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        _j(_decor_world("trinket one", "trinket two")),
+    ]
+    record, _transport = _run(
+        posts,
+        prompt=_KITCHEN_KNIFE_PROMPT,
+        **_budgeted_controller_kwargs(),
+    )
+    assert record.state is GenerationState.PUBLISHED
+    assert record.budget.failed_asset_count == 2
+    assert record.budget.failed_assets == {"trinket one", "trinket two"}
+    # every decorative failure consumed exactly its own per-asset allowance.
+    assert record.budget.asset_call_count("trinket one") == 1
+    assert record.budget.asset_call_count("trinket two") == 1
+
+
+def test_adv220_failed_asset_flag_gates_exception_style_failures_at_oracle():
+    """The ceiling flag the provider records for an exception-style failure is
+    what the composer reads to convert the per-asset code into
+    MAX_FAILED_ASSETS_EXCEEDED — the converted typed failure propagates through
+    the Oracle+dependency chain un-mangled (probe at the oracle boundary)."""
+    from app.assets.oracle import GeneratedAssetOracle, resolve_or_generate
+    from app.assets.resolver import AssetRequest
+    from app.generation.provider import StageDriverProviderFailure
+
+    class CeilingHitProvider:
+        """Claims the driver adapter raised the ceiling flag while raising the
+        narrow per-asset code — the typed propagation must stay intact."""
+        failed_asset_threshold_hit = True
+
+        def generate(self, request):
+            raise StageDriverProviderFailure(
+                "asset model call budget exhausted for trinket four",
+                code=GenerationFailureCode.ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED,
+            )
+
+    with pytest.raises(StageDriverProviderFailure) as excinfo:
+        resolve_or_generate(
+            AssetRequest(requested_name="trinket four"),
+            spec_provider=CeilingHitProvider(),
+            cache=GeneratedAssetOracle().cache,
+        )
+    # the narrow code itself still reaches the boundary unchanged (the
+    # composer is what classifies); this probe only guards the propagation.
+    assert excinfo.value.code == "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED"
 
 
 # --------------------------------------------------------------------------- #

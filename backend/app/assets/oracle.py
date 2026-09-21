@@ -352,13 +352,17 @@ class GeneratedAssetOracle:
         """Call the provider once; return a sanitized error message or None on a
         usable content response (stored on ``self._last_response``).
 
-        ADV-213 (Phase 19B): a TYPED provider failure
+        ADV-213/ADV-220 (Phase 19B): a TYPED provider failure
         (``StageDriverProviderFailure`` — the Ollama stage driver's budget/
-        deadline/timeout signals) is RE-RAISED so the driver/generation
-        controller can classify it (per-asset exhaustion attributable to the
-        semantic asset, global exhaustion terminal, essential evidence fail
-        closed, decorative per the bounded fallback policy). UNKNOWN
-        exceptions keep the generic sanitized message — never a raw leak.
+        deadline/timeout signals) is RE-RAISED so the composer can classify it
+        BY OBJECT CRITICALITY: per-asset exhaustion of a REQUIRED/essential
+        object fails closed with the narrow attributable code, per-asset
+        exhaustion of a DECORATIVE object follows the bounded fallback policy
+        (the failed asset is counted, the object is skipped with a player-safe
+        note; MAX_FAILED_ASSETS_PER_GENERATION is the terminal ceiling code),
+        and GLOBAL exhaustion is always terminal regardless of criticality.
+        UNKNOWN exceptions keep the generic sanitized message — never a raw
+        leak.
         """
         from app.generation.provider import StageDriverProviderFailure
 

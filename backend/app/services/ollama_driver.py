@@ -1293,15 +1293,21 @@ class OllamaAssetSpecProvider:
         return exceeded
 
     def _record_budget_failure(self, exc: StageDriverProviderFailure) -> None:
-        """ADV-213 — classified failed-asset accounting for an exception-style
-        budget failure raised inside ``_roundtrip``.
+        """ADV-213/ADV-220 — classified failed-asset accounting for an
+        exception-style budget failure raised inside ``_roundtrip``.
 
         A PER-ASSET exhaustion is attributable to THIS semantic object: record
         the failed asset (mark_failed_asset + sanitized event) BEFORE the typed
-        failure propagates. GLOBAL exhaustion is a terminal attempt condition
-        never attributed to one object (no accounting). The typed failure then
-        continues to the driver/controller so the narrow canonical code is what
-        surfaces as the attempt failure code.
+        failure propagates — exactly once per failed object (the tracker's
+        set-membership no-op prevents double counting). GLOBAL exhaustion is a
+        terminal attempt condition never attributed to one object (no
+        accounting). The typed failure then continues to the composer, which
+        classifies it BY OBJECT CRITICALITY (ADV-220): a DECORATIVE object
+        below the failed-asset ceiling follows the bounded fallback (skip with
+        a player-safe note; never a silent partial world), a DECORATIVE object
+        at/over the ceiling surfaces the terminal ``MAX_FAILED_ASSETS_EXCEEDED``
+        code, and a REQUIRED/essential object keeps the narrow
+        ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED code.
         """
         if (
             getattr(exc, "code", None)
@@ -1977,11 +1983,12 @@ class OllamaStageDriver:
     def _make_budget_consumer(self, attempt: Any) -> Callable[[str | None], bool]:
         """Budget consumer with Phase 19 Fix C bucket attribution.
 
-        ``consumer(None)`` / ``consumer("core")`` reserves a CORE bucket call
-        (case/evidence/world + repair/regeneration); ``consumer(object_id)``
-        reserves an ASSET:<objectId> bucket call (procedural ASSET_SPEC /
-        ASSET_SPEC_REPAIR / geometry). Deterministic local repairs never touch
-        this consumer.
+        ``consumer(None)`` / ``consumer(CORE_BUCKET)`` reserves a CORE bucket
+        call (case/evidence/world + repair/regeneration). The CORE bucket is
+        the NON-STRING sentinel ONLY (ADV-216): ``consumer(object_id)`` with
+        ANY string — even the literal ``"core"`` — reserves an ASSET:<objectId>
+        bucket call (procedural ASSET_SPEC / ASSET_SPEC_REPAIR / geometry).
+        Deterministic local repairs never touch this consumer.
         """
 
         def _consume(bucket: str | None = None) -> bool:

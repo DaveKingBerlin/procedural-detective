@@ -86,6 +86,7 @@ from app.environments.placer import (
     validate_placement,
 )
 from app.environments.resolver import FALLBACK_ENVIRONMENT_ID
+from app.generation.failure_codes import GenerationFailureCode
 from app.generation.provider import StageDriverProviderFailure
 from app.generation.schemas import ObjectSpec, PlacementSpec
 from app.world.extract import is_base_object_request
@@ -573,6 +574,21 @@ def _decorative_unresolved_note(requested_name: str) -> str:
     return f"the '{label}' you described is not currently available - it was left out"
 
 
+def _spec_adapter_flag(provider: Any, name: str) -> bool:
+    """Read a flag attribute off a (possibly wrapped) asset spec provider.
+
+    ``compose_world`` wraps the caller's provider in ``BoundedSpecProvider``,
+    so a ceiling flag recorded on the underlying driver spec adapter
+    (``OllamaAssetSpecProvider.failed_asset_threshold_hit``) must be read
+    through the wrapper's ``inner`` reference. Absent providers/flags read
+    False (no ceiling state recorded -> the bounded fallback may skip).
+    """
+    if provider is None:
+        return False
+    target = getattr(provider, "inner", provider)
+    return bool(getattr(target, name, False))
+
+
 # --------------------------------------------------------------------------- #
 # compose_world
 # --------------------------------------------------------------------------- #
@@ -714,13 +730,45 @@ def compose_world(
                 if outcome.generated is None:
                     return None
                 resolution = outcome.resolution
-        except StageDriverProviderFailure:
+        except StageDriverProviderFailure as exc:
             # ADV-213: a TYPED provider failure (budget/deadline/timeout) is
             # NEVER absorbed by the degrade-safe fallback — it must reach the
             # driver/controller so the attempt fails with the narrow canonical
             # cause (per-asset exhaustion attributable to this semantic
             # object, global exhaustion terminal). Unknown exceptions still
             # degrade safely (never a crash).
+            # ADV-220: a DECORATIVE object whose PER-ASSET call budget is
+            # exhausted follows the bounded fallback policy instead of being
+            # terminal on the FIRST occurrence. The provider already counted
+            # the failed asset (mark_failed_asset, exactly once, monotonic),
+            # so the object is SKIPPED with the player-safe composition note
+            # exactly like the return-style (content-invalid) decorative
+            # fallback path; NOTHING is published silently and evidence
+            # integrity is never weakened. The terminal condition for the
+            # decorative path is MAX_FAILED_ASSETS_PER_GENERATION: when
+            # recording this NEW failure exceeds the ceiling the provider
+            # raises the driver's ``failed_asset_threshold_hit`` flag, and the
+            # attempt fails with the CEILING code (MAX_FAILED_ASSETS_EXCEEDED)
+            # — never the per-asset budget code, never a partial publish.
+            # REQUIRED/essential assets, GLOBAL exhaustion and every other
+            # typed failure stay terminal exactly as before (the narrow
+            # per-asset code for essential evidence, the generic code for a
+            # global ceiling hit, regardless of criticality).
+            if (
+                criticality == CRITICALITY_DECORATIVE
+                and getattr(exc, "code", None)
+                == GenerationFailureCode.ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED.value
+            ):
+                if _spec_adapter_flag(spec_provider, "failed_asset_threshold_hit"):
+                    raise StageDriverProviderFailure(
+                        "maximum failed assets exceeded",
+                        code=GenerationFailureCode.MAX_FAILED_ASSETS_EXCEEDED,
+                    ) from None
+                # bounded fallback: left out with a player-safe note — the
+                # caller below records it exactly like an unresolvable
+                # decorative object (never a blocking issue, never a silent
+                # wrong substitution).
+                return None
             raise
         except Exception:  # noqa: BLE001 - degraded, never a crash
             return None
