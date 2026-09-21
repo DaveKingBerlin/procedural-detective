@@ -143,7 +143,19 @@ const CAMERA_TUNING: Readonly<Record<string, KitCameraTuning>> = {
 /** Hard bound on decor props per kit (bounded scene cost, task contract). */
 export const MAX_DECOR_PROPS_PER_KIT = 6;
 
-/** The anchor classes that may host evidence (decor must NEVER touch these). */
+/**
+ * The anchor classes that may host evidence (decor must NEVER touch these).
+ *
+ * ADV-211: the vocabulary now MATCHES the backend placer's evidence-capable
+ * types (``backend/app/environments/placer.py`` ``EVIDENCE_CAPABLE_TYPES``) —
+ * ``TABLE_PROP`` and ``GENERIC_PROP`` were missing, so a TABLE_PROP anchor
+ * such as the hotel's only bedside could host a generated clue WHILE the
+ * authored bed decor sat inside its clearance radius. The actual guard
+ * (``anchorIsEvidenceCapable``) additionally requires the MANIFEST to mark an
+ * anchor of the two new classes evidence-allowed (``"evidence"`` in its
+ * ``allowedCategories``) — the same effective rule the backend placer enforces
+ * before any evidence-bearing object may be placed.
+ */
 const EVIDENCE_ANCHOR_TYPES: readonly string[] = [
   "DESK_EVIDENCE",
   "FLOOR_EVIDENCE",
@@ -151,12 +163,34 @@ const EVIDENCE_ANCHOR_TYPES: readonly string[] = [
   "DOCUMENT",
   "COMPUTER",
   "WALL_EVIDENCE",
+  "TABLE_PROP",
+  "GENERIC_PROP",
 ];
+
+/**
+ * True when ``anchor`` may host evidence in the CURRENT manifests.
+ *
+ * The type must be evidence-capable (the extended {@link EVIDENCE_ANCHOR_TYPES}
+ * vocabulary). For the two types ADV-211 added (TABLE_PROP / GENERIC_PROP) the
+ * MANIFEST must also mark the anchor evidence-allowed (``"evidence"`` in
+ * ``allowedCategories``) — matching the backend placer: an evidence asset can
+ * only land on an anchor whose allowed categories include its category. The
+ * pre-existing anchor classes (DESK_EVIDENCE / FLOOR_EVIDENCE / DOCUMENT /
+ * COMPUTER / WALL_EVIDENCE and the always-guarded BODY) behave exactly as
+ * before.
+ */
+function anchorIsEvidenceCapable(anchor: KitAnchor): boolean {
+  if (!EVIDENCE_ANCHOR_TYPES.includes(anchor.type)) return false;
+  if (anchor.type === "TABLE_PROP" || anchor.type === "GENERIC_PROP") {
+    return (anchor.allowedCategories ?? []).includes("evidence");
+  }
+  return true;
+}
 
 /** Evidence visual footprint radius at its anchor (world meters). */
 const EVIDENCE_ANCHOR_RADIUS = 0.45;
 /** Decor prop padding around its catalog footprint (world meters). */
-const DECOR_PADDING = 0.15;
+export const DECOR_PADDING = 0.15;
 /** Spawn point clearance radius (decor must keep the player spawn clear). */
 const SPAWN_CLEARANCE = 0.4;
 /** Vertical gap below which two boxes are considered "same level". */
@@ -203,10 +237,14 @@ const DECOR_PLANS: Readonly<Record<string, readonly KitDecorPlan[]>> = {
     { id: "decor_folder_01", assetId: "PROP_FOLDER_01", hostAnchorId: "office_shelf_01", offset: { x: 0.35, y: 1.05, z: 0.0 }, stackOn: "decor_bookshelf_01" },
   ],
   // HOTEL SUITE — a bed against the bedroom's north wall (clear of the body
-  // and the bedside anchor), and a lounge composition of sofa + coffee table
-  // + table lamp + armchair + handbag around the lounge generic anchor.
+  // AND the bedside anchor — ADV-211: hotel_bedside_01 is a manifest-marked
+  // TABLE_PROP evidence anchor, so the bed's box must stay out of its
+  // clearance radius; the bed sits 0.4 m further west than the original
+  // Phase 18D plan, keeping the same y/z composition), and a lounge
+  // composition of sofa + coffee table + table lamp + armchair + handbag
+  // around the lounge generic anchor.
   hotel_suite: [
-    { id: "decor_bed_01", assetId: "PROP_HOTEL_BED_01", hostAnchorId: "hotel_bedside_01", offset: { x: -1.2, y: 0.3, z: -0.85 } },
+    { id: "decor_bed_01", assetId: "PROP_HOTEL_BED_01", hostAnchorId: "hotel_bedside_01", offset: { x: -1.6, y: 0.3, z: -0.85 } },
     { id: "decor_sofa_01", assetId: "PROP_SOFA_01", hostAnchorId: "hotel_generic_01", offset: { x: 0.0, y: 0.425, z: 0.7 } },
     { id: "decor_coffeetable_01", assetId: "PROP_COFFEE_TABLE_01", hostAnchorId: "hotel_generic_01", offset: { x: 0.0, y: 0.225, z: -0.8 } },
     { id: "decor_tablelamp_01", assetId: "PROP_TABLE_LAMP_01", hostAnchorId: "hotel_generic_01", offset: { x: 0.35, y: 0.625, z: -0.7 }, color: "#e8d9a8", stackOn: "decor_coffeetable_01" },
@@ -233,8 +271,10 @@ function rectsOverlap(
  * The deterministic Phase 18D evidence guard: true when a box of half-extents
  * `halfX`/`halfZ` at `position` does NOT overlap ANY evidence-capable anchor
  * of the kit (DESK_EVIDENCE / FLOOR_EVIDENCE / BODY / DOCUMENT / COMPUTER /
- * WALL_EVIDENCE) nor the kit's spawn point. Exported so tests can prove every
- * accepted decor prop passes it (and that a deliberately-colliding box fails).
+ * WALL_EVIDENCE plus manifest-marked TABLE_PROP / GENERIC_PROP anchors — the
+ * backend placer vocabulary, ADV-211) nor the kit's spawn point. Exported so
+ * tests can prove every accepted decor prop passes it (and that a
+ * deliberately-colliding box fails).
  */
 export function evidenceClearanceOk(
   kit: EnvironmentKitDocument,
@@ -243,7 +283,7 @@ export function evidenceClearanceOk(
   halfZ: number,
 ): boolean {
   for (const anchor of kit.anchors) {
-    if (!EVIDENCE_ANCHOR_TYPES.includes(anchor.type)) continue;
+    if (!anchorIsEvidenceCapable(anchor)) continue;
     if (
       rectsOverlap(
         position.x,

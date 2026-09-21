@@ -43,6 +43,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import re
 import subprocess
 from dataclasses import dataclass
@@ -140,22 +141,165 @@ _PROVIDER_ENV_NAMES = (
 _DEBUG_AID_TOKENS = ("pd-debug-pick", "__pdDebugScene", "PD_DEV_TRACE")
 
 
+# --------------------------------------------------------------------------- #
+# private-host detection (ADV-207): dotted IPv4 in ANY numeral base, integer
+# IPv4 spellings, bracket IPv6 (ULA / link-local), userinfo-stripping, and
+# embedded private literals inside longer host tokens.
+# --------------------------------------------------------------------------- #
+
+# A dotted-quad candidate whose octets may be decimal, octal (leading 0) or
+# hex (0x...) — the spellings browsers/curl accept for the SAME private host.
+_OCT_OR_HEX_GROUP = r"(?:0[xX][0-9a-fA-F]+|[0-9]+)"
+_DOTTED_ANY_BASE_RE = re.compile(
+    _OCT_OR_HEX_GROUP + r"(?:\." + _OCT_OR_HEX_GROUP + r"){3}"
+)
+
+# An integer IPv4 spelling (decimal 3232235777 / hex 0xC0A80101 / octal
+# 030000001004001). Only meaningful as a URL HOST, so it is only examined by
+# ``_host_is_private`` (never as a bare line literal — a bare number in a doc
+# is not an IP and would only add false positives).
+_INT_IPV4_RE = re.compile(r"(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{6,13})")
+
+# Unique-local IPv6 (fc00::/7; fd00::/8 is the lower half) — RFC 4193 ULA.
+_ULA_V6_NET = ipaddress.ip_network("fc00::/7")
+
+
+def _octet_value(token: str) -> int | None:
+    """One dotted-quad octet token -> 0..255, or None when not a number.
+
+    C-style base inference: ``0x``/``0X`` -> hex; a leading ``0`` -> octal
+    (falling back to decimal when the octal parse fails, matching common
+    parsers); otherwise decimal.
+    """
+    lowered = token.lower()
+    try:
+        if lowered.startswith("0x"):
+            value = int(token, 16)
+        elif len(token) > 1 and token.startswith("0"):
+            try:
+                value = int(token, 8)
+            except ValueError:
+                value = int(token, 10)
+        else:
+            value = int(token, 10)
+    except ValueError:
+        return None
+    return value if 0 <= value <= 255 else None
+
+
+def _ipv4_dotted_windows(hostname: str) -> list[tuple[int, int, int, int]]:
+    """Every 4-octet window of dot-separated numeric groups in ``hostname``.
+
+    Split on dots and slide a 4-window over the groups: this finds a private
+    dotted literal EMBEDDED anywhere inside a longer dotted token
+    (``0xC0.0xA8.0x01.0x05.evil.com`` — the hex spelling of the private
+    192.168.* quad — and ``sub.<dotted-private-quad>.example.com``) as well as
+    the plain dotted form, evaluating each decimal/octal/hex spelling.
+    """
+    parts = hostname.split(".")
+    windows: list[tuple[int, int, int, int]] = []
+    for start in range(0, len(parts) - 3):
+        octets: list[int] = []
+        for token in parts[start:start + 4]:
+            value = _octet_value(token)
+            if value is None:
+                octets = []
+                break
+            octets.append(value)
+        if len(octets) == 4:
+            windows.append(tuple(octets))  # type: ignore[arg-type]
+    return windows
+
+
+def _ipv4_candidates_from(hostname: str) -> list[ipaddress.IPv4Address]:
+    """Every IPv4 literal a browser/HTTP stack could resolve inside ``hostname``.
+
+    - every dotted-quad spelling (decimal/octal/hex per octet), INCLUDING
+      embedded inside a longer token (``0xC0.0xA8.0x01.0x05.evil.com`` -> the
+      embedded private quad is found and evaluated);
+    - every single-integer spelling (``3232235777`` / ``0xC0A80101``), which
+      only makes sense when the integer is (part of) the HOST — but it is
+      evaluated the same way for safety.
+    """
+    candidates: list[ipaddress.IPv4Address] = []
+    for octets in _ipv4_dotted_windows(hostname):
+        try:
+            candidates.append(ipaddress.IPv4Address(bytes(octets)))
+        except ValueError:
+            continue
+    for match in _INT_IPV4_RE.finditer(hostname):
+        token = match.group(0)
+        try:
+            if token.lower().startswith("0x"):
+                value = int(token, 16)
+            elif len(token) > 1 and token.startswith("0"):
+                try:
+                    value = int(token, 8)
+                except ValueError:
+                    value = int(token, 10)
+            else:
+                value = int(token, 10)
+        except ValueError:
+            continue
+        if 0 <= value < 2**32:
+            try:
+                candidates.append(ipaddress.IPv4Address(value))
+            except ValueError:
+                continue
+    return candidates
+
+
+def _ipv6_is_private(addr: ipaddress.IPv6Address) -> bool:
+    """True for private/link-local IPv6: ULA (fc00::/7) or link-local (fe80::/10).
+
+    Loopback (``::1``) is deliberately NOT private — it is a sanctioned
+    loopback host in ``_ALLOWED_URL_HOSTS``.
+    """
+    return addr in _ULA_V6_NET or addr.is_link_local
+
+
 def _host_is_private(host: str) -> bool:
-    """True for a URL host that is an RFC1918 private address.
+    """True for a URL host that resolves to a private address.
 
     ``host`` is the raw netloc captured by ``_URL_RE`` (may carry userinfo
-    and/or a port). Bracketed IPv6 literals (``[::1]``) and the sanctioned
-    loopback/docker names are allowed everywhere.
+    and/or a port). Coverage (ADV-207):
+
+    - RFC1918 dotted-decimal IPv4 (the ``10.*`` / ``172.16-31.*`` /
+      ``192.168.*`` quads);
+    - DECIMAL / HEX / OCTAL spellings of private IPv4 ranges
+      (``3232235777`` / ``0xC0A80101`` / ``0300.0250.0001.0001`` all resolve
+      to the SAME private quad);
+    - private / link-local IPv6 (``[fc00::1]``, ``[fd00::1]``, ``[fe80::1]``,
+      ``[fd00::abcd]:11434``);
+    - ``user:pass@host`` credentials wrapping any of the above;
+    - an embedded private literal inside a longer host token
+      (``0xC0.0xA8.0x01.0x05.evil.com``).
+
+    The sanctioned loopback/docker names (``localhost``, ``127.0.0.1``,
+    ``::1``, ``host.docker.internal``, ``0.0.0.0``) and ``.env.example``
+    (handled by ``_is_sanctioned``) stay allowed everywhere.
     """
     netloc = host.split("@")[-1]  # strip any embedded userinfo
-    if netloc.startswith("["):
+    bracketed = netloc.startswith("[")
+    if bracketed:
         hostname = netloc.split("]", 1)[0].strip("[]")
     else:
-        hostname = netloc.split(":", 1)[0]
+        hostname = netloc.split(":", 1)[0] if ":" in netloc else netloc
     lowered = hostname.lower()
-    if lowered in _ALLOWED_URL_HOSTS or lowered == "::1":
+    if lowered in _ALLOWED_URL_HOSTS:
         return False
-    return bool(_PRIVATE_V4_RE.search(lowered))
+    if ":" in hostname or bracketed:
+        # IPv6 literal (bracketed or bare colons): evaluate the whole host.
+        try:
+            addr = ipaddress.ip_address(hostname)
+        except ValueError:
+            addr = None
+        if addr is not None and addr.version == 6 and _ipv6_is_private(addr):
+            return True
+    for candidate in _ipv4_candidates_from(lowered):
+        if candidate.is_private:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -165,17 +309,18 @@ def _host_is_private(host: str) -> bool:
 _TRACKED_SECRET_NAMES = (".env",)
 _TRACKED_SECRET_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".log")
 _TRACKED_SECRET_DIRS = ("logs",)
+# The exact basename that stays SANCTIONED as an example (never a real secret
+# file; the private-endpoint scan also exempts it via _is_sanctioned).
+_SANCTIONED_ENV_EXAMPLE = ".env.example"
 
 
-def git_tracked_files(repo_root: Path) -> list[str] | None:
-    """``git ls-files`` relative paths, or None when git/the repo is unusable.
-
-    Only TRACKED files are ever scanned: the working-tree ``.env`` (operator
-    secret) is untracked and intentionally never read.
-    """
+def _git(
+    repo_root: Path, *args: str
+) -> subprocess.CompletedProcess[str] | None:
+    """One ``git`` subprocess over ``repo_root``; None when git cannot run."""
     try:
-        result = subprocess.run(
-            ["git", "ls-files"],
+        return subprocess.run(
+            ["git", *args],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
@@ -183,26 +328,74 @@ def git_tracked_files(repo_root: Path) -> list[str] | None:
             errors="replace",
             timeout=60,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode != 0:
+
+
+def git_tracked_files(repo_root: Path) -> list[str] | None:
+    """``git ls-files`` relative paths, or None when git/the repo is unusable.
+
+    FAIL-CLOSED (ADV-205): an empty ``git ls-files`` output is NOT assumed to
+    mean "empty repo". A missing/corrupt ``.git/index`` makes ``ls-files``
+    exit 0 with empty stdout (indistinguishable from a truly empty repo), which
+    would silently disable BOTH the secret scan and the private-endpoint scan.
+    When ``ls-files`` is empty, ``git status --porcelain`` is consulted: if it
+    reports ANY file, the index is unusable -> None (fail closed). Only a
+    genuinely empty tree (no files at all) returns the empty list.
+
+    Only TRACKED files are ever scanned: the working-tree ``.env`` (operator
+    secret) is untracked and intentionally never read.
+    """
+    inside = _git(repo_root, "rev-parse", "--is-inside-work-tree")
+    if (
+        inside is None
+        or inside.returncode != 0
+        or inside.stdout.strip().lower() != "true"
+    ):
+        return None  # not inside a usable work tree -> cannot enumerate
+    result = _git(repo_root, "ls-files")
+    if result is None or result.returncode != 0:
         return None
-    return [line for line in result.stdout.splitlines() if line.strip()]
+    tracked = [line for line in result.stdout.splitlines() if line.strip()]
+    if tracked:
+        return tracked
+    # Empty ls-files: prove it is REALLY an empty repo (no working-tree files
+    # at all). With a missing/corrupt index, git status is non-empty -> fail
+    # closed (ADV-205).
+    status = _git(repo_root, "status", "--porcelain")
+    if status is None or status.returncode != 0:
+        return None
+    if status.stdout.strip():
+        return None
+    return tracked
 
 
 def tracked_secret_entries(tracked: list[str]) -> list[str]:
-    """Tracked entries that must never exist: .env / logs/ / *.db / *.sqlite / *.log."""
+    """Tracked entries that must never exist: .env family / logs/ / *.db / *.sqlite / *.log.
+
+    The whole dotenv family is banned (ADV-206): ``.env`` AND every
+    ``.env.<suffix>`` variant (``.env.production``, ``.env.local``,
+    ``.env.development``, ``.env.test``, ...) — Vite/dotenv load those at build
+    time, so a tracked ``.env.production`` with a secret is the same class of
+    leak as a tracked ``.env``. The single sanctioned exception is the
+    ``.env.example`` basename (documented example file everywhere).
+    """
     bad: list[str] = []
     for rel in tracked:
         name = rel.rsplit("/", 1)[-1]
         if name in _TRACKED_SECRET_NAMES:
             bad.append(rel)
             continue
+        lower = name.lower()
+        if lower == _SANCTIONED_ENV_EXAMPLE:
+            continue  # sanctioned example file, never a secret
+        if lower == ".env" or lower.startswith(".env."):
+            bad.append(rel)
+            continue
         parts = rel.split("/")
         if any(part in _TRACKED_SECRET_DIRS for part in parts):
             bad.append(rel)
             continue
-        lower = name.lower()
         if lower.endswith(_TRACKED_SECRET_SUFFIXES):
             bad.append(rel)
     return sorted(bad)

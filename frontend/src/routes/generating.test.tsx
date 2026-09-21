@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
-import { GenerationJourneyView, stageFromProgress } from "./generating";
+import { GenerationJourneyView, resolveJourneyMode, stageFromProgress } from "./generating";
 import type { DemoProgress } from "../journey/demoFlow";
+import type { GenerationCapabilitiesResponse } from "../api/types";
 
 /**
  * Generation progress route states (Phase 8 C) rendered statically: no
@@ -130,5 +131,38 @@ describe("stageFromProgress — Phase 16.2 §21 mode-aware label wiring", () => 
     });
     expect(html).not.toContain("crime scene");
     expect(html).not.toContain("Understanding the case");
+  });
+});
+
+describe("resolveJourneyMode — ADV-212 the journey mode is validated against LIVE capabilities", () => {
+  const demoOnly: () => Promise<GenerationCapabilitiesResponse> = async () => ({
+    modes: [{ id: "demo", available: true }],
+  });
+  const localReady: () => Promise<GenerationCapabilitiesResponse> = async () => ({
+    modes: [
+      { id: "demo", available: true },
+      { id: "local", available: true, label: "Local AI", model: "llama3.2:3b" },
+    ],
+  });
+  const failing: () => Promise<GenerationCapabilitiesResponse> = async () => {
+    throw new Error("probe unreachable");
+  };
+
+  it("stale localStorage local + demo-only capabilities -> generic (null)", async () => {
+    expect(await resolveJourneyMode(demoOnly, "local")).toBeNull();
+  });
+
+  it("local + capabilities confirm local ready -> local labels", async () => {
+    expect(await resolveJourneyMode(localReady, "local")).toBe("local");
+  });
+
+  it("capabilities fetch failure -> generic (never a local pipeline claim)", async () => {
+    expect(await resolveJourneyMode(failing, "local")).toBeNull();
+  });
+
+  it("well-formed flow unchanged: demo stays demo, live stays live, unset stays null", async () => {
+    expect(await resolveJourneyMode(demoOnly, "demo")).toBe("demo");
+    expect(await resolveJourneyMode(localReady, "live")).toBe("live");
+    expect(await resolveJourneyMode(localReady, null)).toBeNull();
   });
 });

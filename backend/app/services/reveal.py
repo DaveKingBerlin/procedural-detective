@@ -304,19 +304,59 @@ def _solver_proof_of(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return proof if isinstance(proof, Mapping) else {}
 
 
+def _string_ref_id(value: Any, *, what: str) -> str:
+    """One proof-reference element -> its string id.
+
+    Only strings and numbers are usable evidence ids. ANY other element type
+    (dict/list/bool/None/object) is corrupt proof material (ADV-210 "garbage
+    types") -> ``RevealProjectionError`` -> the sanitized 500: a
+    ``str(dict)`` id could never match a published evidence fact and silently
+    producing one would only mask an inconsistent payload.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        raise RevealProjectionError(
+            f"solver proof {what} carries a boolean ref element"
+        )
+    if isinstance(value, (int, float)):
+        return str(value)
+    raise RevealProjectionError(
+        f"solver proof {what} carries a non-id element ({type(value).__name__})"
+    )
+
+
+def _clean_ref_list(values: Any, *, what: str) -> tuple[str, ...]:
+    """Stringified, SORTED, DEDUPLICATED evidence-ref tuple (fail-closed).
+
+    ADV-210 (a): duplicate ids inside one reference list are DEDUPED (a
+    dimension list may never carry the same evidence point twice). ``values``
+    must be a list/tuple of strings/numbers; anything else is corrupt.
+    """
+    if not isinstance(values, (list, tuple)):
+        raise RevealProjectionError(
+            f"solver proof {what} must be a list of evidence ids"
+        )
+    return tuple(sorted({_string_ref_id(v, what=what) for v in values}))
+
+
 def evidence_ids_used_of(payload: Mapping[str, Any]) -> tuple[str, ...]:
     """The published proof's usable evidence ids: the solver's
     ``evidence_ids_used`` (the sorted union of proof.when.critical_evidence_ids
     and every rule-outcome evidence id — see app.domain.proof.build_proof),
-    falling back to the WHEN-critical ids for crafted payloads."""
+    falling back to the WHEN-critical ids for crafted payloads.
+
+    IDs are stringified, SORTED and DEDUPLICATED; corrupt element types raise
+    (fail closed, ADV-210).
+    """
     proof = _solver_proof_of(payload)
     used = proof.get("evidence_ids_used")
     if isinstance(used, list) and used:
-        return tuple(sorted(str(i) for i in used))
+        return _clean_ref_list(used, what="evidence_ids_used")
     when = proof.get("time")
     critical = when.get("critical_evidence_ids") if isinstance(when, Mapping) else None
-    if isinstance(critical, list) and critical:
-        return tuple(sorted(str(i) for i in critical))
+    if isinstance(critical, (list, tuple)) and critical:
+        return _clean_ref_list(critical, what="time.critical_evidence_ids")
     return ()
 
 
@@ -380,33 +420,35 @@ def _dimension_refs_of(payload: Mapping[str, Any]) -> dict[str, tuple[str, ...]]
 
     WHO/WHY/WEAPON read the per-dimension refs serialized at publish time from
     the deduction proof's rule-outcome evidence ids; WHEN reuses
-    ``time.critical_evidence_ids``. Every list is sorted + stringified. A
-    missing/corrupt ref key degrades to an empty tuple (the empty-proof
-    resilience contract: empty refs -> empty dimension lists, reveal still
-    200s).
+    ``time.critical_evidence_ids``. Every list is sorted, stringified and
+    DEDUPLICATED (ADV-210). A MISSING per-dimension key degrades to an empty
+    tuple (the empty-proof resilience contract AND the pre-18C shape: a payload
+    published before Phase 18C carries ``solverProof`` + ``evidence_ids_used``
+    but none of the new per-dimension keys). A per-dimension key whose VALUE is
+    not a list, or ``time`` whose value is not a mapping, is garbage proof
+    material -> fail closed (ADV-210).
     """
     proof = _solver_proof_of(payload)
 
     def _ids(key: str) -> tuple[str, ...]:
         value = proof.get(key)
-        if isinstance(value, (list, tuple)):
-            return tuple(sorted(str(i) for i in value))
-        return ()
+        if value is None:
+            return ()
+        return _clean_ref_list(value, what=key)
 
     refs = {
         name: _ids(key) for name, key in _DIMENSION_REF_KEYS.items()
     }
     when_block = proof.get("time")
-    critical = (
-        when_block.get("critical_evidence_ids")
-        if isinstance(when_block, Mapping)
-        else None
-    )
-    refs["when"] = (
-        tuple(sorted(str(i) for i in critical))
-        if isinstance(critical, (list, tuple))
-        else ()
-    )
+    if when_block is None:
+        refs["when"] = ()
+    elif isinstance(when_block, Mapping):
+        refs["when"] = _clean_ref_list(
+            when_block.get("critical_evidence_ids") or (),
+            what="time.critical_evidence_ids",
+        )
+    else:
+        raise RevealProjectionError("solver proof time section is not an object")
     return refs
 
 
@@ -443,21 +485,55 @@ def dimensions_of(payload: Mapping[str, Any]) -> dict[str, list[dict[str, str]]]
     discovered evidence), built ONLY from the server-side proof references.
 
     Each dimension maps its usable evidence ids through the SAME public filter
-    and frozen ``point`` vocabulary as the flat explainer. The invariant
-    ``union(dimension ids) == flat evidence ids`` is enforced fail-closed (a
-    corrupt payload answers the sanitized 500, never a partial map).
+    and frozen ``point`` vocabulary as the flat explainer. Fail-closed guards
+    (ADV-210):
 
-    DEF-053 fail-closed: a payload whose ``solverProof`` block is MISSING or
-    not a mapping is a corrupt reveal (the dimension refs cannot be derived) ->
-    ``RevealProjectionError`` -> the sanitized ``500 INTERNAL_ERROR`` envelope.
-    A PRESENT block with EMPTY per-dimension refs is the documented
-    empty-proof-resilience case: empty dimension lists, reveal still 200s.
+    - duplicates inside one dimension list are DEDUPED (never the same point
+      twice);
+    - a dimension ref list that exceeds the published evidence universe size
+      (``len(refs) > len(evidence_by_id)``) is an impossible/corrupt proof ->
+      ``RevealProjectionError`` -> the sanitized 500 (no unbounded response
+      amplification);
+    - garbage element types and mismatched id sets fail closed to the sanitized
+      500, never a partial map;
+    - PRE-18C compatibility: a payload published before Phase 18C carries
+      ``solverProof`` + ``evidence_ids_used`` but NONE of the new per-dimension
+      keys (WHO/WHY/WEAPON absent; WHEN reuses ``time.critical_evidence_ids``,
+      a subset of the flat list). Such a payload previously raised (union of
+      the when-only refs can never equal the larger flat list) and reveal
+      answered a sanitized 500 for ANY old case. Now, when the new per-dimension
+      refs are entirely absent/empty while ``evidence_ids_used`` is non-empty,
+      the flat list is deterministically distributed to ALL FOUR dimensions
+      (every usable id is shown under every dimension — there is no
+      per-dimension attribution left in an 18C-less proof) so the reveal still
+      200s with a populated board and the flat evidence list intact.
     """
     if not isinstance(payload.get("solverProof"), Mapping):
         raise RevealProjectionError("payload carries no solver proof section")
-    refs = _dimension_refs_of(payload)
-    _assert_dimension_flat_consistency(refs, evidence_ids_used_of(payload))
     facts = evidence_by_id(payload)
+    universe_size = len(facts)
+    refs = _dimension_refs_of(payload)
+    flat = evidence_ids_used_of(payload)
+    # ADV-210 (b): bounded output — a ref list larger than the whole published
+    # evidence universe can never describe a real proof (any referenced id must
+    # exist in the published evidence set, enforced at publish time).
+    if len(flat) > universe_size:
+        raise RevealProjectionError(
+            "solver proof evidence_ids_used exceed the published evidence universe"
+        )
+    if any(len(ids) > universe_size for ids in refs.values()):
+        raise RevealProjectionError(
+            "solver proof dimension refs exceed the published evidence universe"
+        )
+    if flat and not (refs["who"] or refs["why"] or refs["weapon"]):
+        # Pre-18C shape: none of the Phase-18C per-dimension keys carry any
+        # ids -> no per-dimension attribution exists. Deterministic fallback:
+        # every usable evidence id goes to ALL FOUR dimensions (documented in
+        # the docstring). When the when-only refs already cover the flat list
+        # this is harmless; when they don't (the normal 18C-less case) it is
+        # what keeps the reveal on a populated board instead of a 500.
+        refs = {name: flat for name in _DIMENSION_NAMES}
+    _assert_dimension_flat_consistency(refs, flat)
     return {
         name: [
             point

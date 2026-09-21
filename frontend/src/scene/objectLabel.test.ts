@@ -123,6 +123,58 @@ describe("evidenceLabelFor — the semantic label path (Phase 18B)", () => {
   });
 });
 
+describe("ADV-209 — proc.* tokens never survive, controls stripped, ALL branches capped", () => {
+  it("a canonicalName that IS a proc.* token sanitizes to the safe fallback", () => {
+    expect(humanizeCanonicalName("proc.decor.abc123")).toBe(FALLBACK_EVIDENCE_LABEL);
+    expect(humanizeCanonicalName("proc.decor.abc123")).not.toContain("proc.");
+  });
+
+  it("any proc. token class inside a name is replaced, never echoed", () => {
+    expect(humanizeCanonicalName("bronze proc.decor.4551660f4a46b2eb ice pick")).toBe(
+      "bronze Evidence Object ice pick",
+    );
+    expect(humanizeCanonicalName("PROC.DECOR.X badge")).toBe("Evidence Object badge");
+    expect(humanizeCanonicalName("proc.decor.abc123")).not.toMatch(/proc\./i);
+  });
+
+  it("strips C1 controls, unicode line/paragraph separators and zero-width/format chars", () => {
+    expect(humanizeCanonicalName("A\u2028B\u0085C\u200bD\u200eE\u2029F\u2060G\ufeffH")).toBe(
+      "A B C D E F G H",
+    );
+    for (const input of [
+      "a\u0085b", // C1 NEL
+      "a\u2028b", // unicode line separator
+      "a\u2029b", // unicode paragraph separator
+      "a\u200bb\u200cc\u200dd", // zero-width space / ZWNJ / ZWJ
+      "a\u2066b\u2069c", // bidi isolate markers
+    ]) {
+      expect(humanizeCanonicalName(input)).not.toMatch(/[\u0085\u2028\u2029\u200b-\u200f\u2060-\u206f\ufeff]/);
+    }
+  });
+
+  it("caps the catalog-label branch at 80 chars — a 2400-char label never escapes", () => {
+    const obj = procWorldObject();
+    obj.label = "x".repeat(2400);
+    const label = evidenceLabelFor(obj);
+    expect(label.length).toBe(80);
+    expect(label.length).toBeLessThanOrEqual(80);
+  });
+
+  it("bounds a 2400-char hostile-wrapping label to the cap (no unbounded aria-label)", () => {
+    const obj = procWorldObject({ generated: null as never });
+    obj.label = `<script>${"a".repeat(2400)}</script>`;
+    const label = evidenceLabelFor(obj);
+    expect(label.length).toBeLessThanOrEqual(80);
+    expect(label.length).toBe(80);
+  });
+
+  it("keeps well-formed catalog labels byte-identical (no regression)", () => {
+    expect(evidenceLabelFor(catalogWorldObject("kitchen_knife"))).toBe("Kitchen knife");
+    expect(evidenceLabelFor(catalogWorldObject("apartment_laptop"))).toBe("Laptop");
+    expect(humanizeCanonicalName("Bronze Ceremonial Ice Pick")).toBe("Bronze Ceremonial Ice Pick");
+  });
+});
+
 describe("isProceduralArtifact — the ONE honest procedural condition", () => {
   it("is true for a proc.* asset with a valid generated definition", () => {
     const pick = procWorldObject({

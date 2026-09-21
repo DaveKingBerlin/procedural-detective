@@ -53,10 +53,29 @@ const FORBIDDEN_URL_TOKENS: readonly string[] = [
   "javascript:",
 ];
 
-/** True when a DTO-provided display string contains a forbidden URL token. */
-function containsForbiddenUrlToken(value: string): boolean {
+/**
+ * ADV-208 — any IPv4 dotted literal (covers private/link-local/loopback
+ * RFC1918-range addresses alike). A model name such as `llama3@<private-host>`
+ * or a label like `net <private-ip>` must never reach the DOM/tooltip.
+ */
+const IPV4_DOTTED_LITERAL = /\d{1,3}(?:\.\d{1,3}){3}/;
+
+/**
+ * True when a DTO-provided display string must never be rendered:
+ *  - the classic URL/data/file/javascript scheme tokens (DEF-068 parity);
+ *  - ADV-208: any IPv4 dotted literal, any `@`-joined host token and any raw
+ *    HTML angle bracket (`<`/`>`) — so a model/label string that reaches the
+ *    DOM/tooltip can never carry a host/IP or raw markup.
+ * The rule is deliberately conservative: a legitimate model/label never
+ * needs `@`, a dotted IP or a raw angle bracket, so dropping is safe and
+ * deterministic (labels fall back to the frozen public copy, models to null).
+ */
+function isUnsafeDisplayString(value: string): boolean {
   const lowered = value.toLowerCase();
-  return FORBIDDEN_URL_TOKENS.some((token) => lowered.includes(token));
+  if (FORBIDDEN_URL_TOKENS.some((token) => lowered.includes(token))) return true;
+  if (IPV4_DOTTED_LITERAL.test(value)) return true;
+  if (value.includes("@") || value.includes("<") || value.includes(">")) return true;
+  return false;
 }
 
 /** Minimal storage surface used here (localStorage-compatible). */
@@ -138,6 +157,10 @@ export const DEMO_ONLY_CAPABILITIES: GenerationCapabilitiesResponse = Object.fre
  * Re-parse the trust-boundary payload into the typed contract. Only the three
  * frozen ids survive; unknown mode objects/fields are dropped; `available` is
  * a strict boolean (anything else reads as false — never favours an option).
+ * ADV-208: duplicate mode ids are DEDUPED with ONE deterministic rule (the
+ * FIRST occurrence wins; later duplicates are ignored), so every consumer
+ * (`effectiveProviderMode`, `selectableGenerationModes`, `isLocalModeAvailable`,
+ * ...) sees the identical mode set from the same parsed payload.
  * Never throws: a malformed reply resolves to an empty allowlist.
  */
 export function parseGenerationCapabilities(raw: unknown): GenerationCapabilitiesResponse {
@@ -145,21 +168,24 @@ export function parseGenerationCapabilities(raw: unknown): GenerationCapabilitie
   if (typeof raw !== "object" || raw === null) return { modes };
   const list = (raw as { modes?: unknown }).modes;
   if (!Array.isArray(list)) return { modes };
+  const seen = new Set<GenerationModeId>();
   for (const entry of list) {
     if (typeof entry !== "object" || entry === null) continue;
     const id = (entry as { id?: unknown }).id;
     if (typeof id !== "string" || !MODE_IDS.includes(id as GenerationModeId)) continue;
+    if (seen.has(id as GenerationModeId)) continue; // ADV-208: first occurrence wins
+    seen.add(id as GenerationModeId);
     const availableRaw = (entry as { available?: unknown }).available;
     const dto: GenerationModeDTO = {
       id,
       available: typeof availableRaw === "boolean" ? availableRaw : false,
     };
     const label = (entry as { label?: unknown }).label;
-    if (typeof label === "string" && label !== "" && !containsForbiddenUrlToken(label)) {
+    if (typeof label === "string" && label !== "" && !isUnsafeDisplayString(label)) {
       dto.label = label;
     }
     const model = (entry as { model?: unknown }).model;
-    if (typeof model === "string" && model !== "" && !containsForbiddenUrlToken(model)) {
+    if (typeof model === "string" && model !== "" && !isUnsafeDisplayString(model)) {
       dto.model = model;
     }
     modes.push(dto);
@@ -202,6 +228,26 @@ export function isLocalModeAvailable(capabilities: GenerationCapabilitiesRespons
   return entry?.available === true;
 }
 
+/**
+ * ADV-212 — the ONLY journey-mode value that may drive the Local-AI label
+ * sequence on /generating. The stored `pd_generation_mode` (localStorage) is
+ * NOT trusted by itself: the `local` claim survives ONLY when the LIVE
+ * capability DTO confirms the local pipeline is actually available
+ * (first-wins-parsed — see {@link parseGenerationCapabilities}). Any other
+ * stored value (demo/live/unset) and every unavailable/unknown/local-less
+ * capability set resolves to the mode-independent value, so the generic/demo
+ * label sequence is shown. A capabilities fetch failure surfaces as
+ * demo-only/`null` here, so the journey can never claim a local pipeline the
+ * backend has not confirmed.
+ */
+export function validatedJourneyMode(
+  storedMode: GenerationModeId | null,
+  capabilities: GenerationCapabilitiesResponse | null,
+): GenerationModeId | null {
+  if (storedMode !== "local") return storedMode; // demo/live/unset keep generic labels
+  return isLocalModeAvailable(capabilities) ? "local" : null;
+}
+
 /** One mode the selector may actually offer (never an unavailable local/live). */
 export interface SelectableGenerationMode {
   id: GenerationModeId;
@@ -227,7 +273,9 @@ export function selectableGenerationModes(
 ): SelectableGenerationMode[] {
   const found = new Map<GenerationModeId, GenerationModeDTO>();
   for (const mode of capabilities?.modes ?? []) {
-    if (MODE_IDS.includes(mode.id as GenerationModeId)) {
+    if (MODE_IDS.includes(mode.id as GenerationModeId) && !found.has(mode.id as GenerationModeId)) {
+      // ADV-208: first occurrence wins here too — even a hand-constructed
+      // (non-parse) capabilities object can never split the consumers.
       found.set(mode.id as GenerationModeId, mode);
     }
   }
@@ -235,7 +283,7 @@ export function selectableGenerationModes(
   const list: SelectableGenerationMode[] = [
     {
       id: "demo",
-      label: demo?.label && !containsForbiddenUrlToken(demo.label) ? demo.label : "Demo",
+      label: demo?.label && !isUnsafeDisplayString(demo.label) ? demo.label : "Demo",
       model: null,
       // The deterministic provider backs every journey when no other mode is
       // available, so the demo offer is always honest.
@@ -248,16 +296,16 @@ export function selectableGenerationModes(
     list.push({
       id,
       label:
-        mode.label && !containsForbiddenUrlToken(mode.label)
+        mode.label && !isUnsafeDisplayString(mode.label)
           ? mode.label
           : id === "local"
             ? "Local AI"
             : "Cloud AI",
       // The display model name is copied verbatim ONLY when it carries no
-      // forbidden URL token (parse already guarantees this; kept here so even
+      // unsafe token (parse already guarantees this; kept here so even
       // a hand-constructed capabilities object cannot smuggle a URL through).
       model:
-        mode.model && !containsForbiddenUrlToken(mode.model)
+        mode.model && !isUnsafeDisplayString(mode.model)
           ? mode.model
           : null,
       ready: true,
@@ -275,10 +323,11 @@ export function generationModeOptionLabel(mode: SelectableGenerationMode): strin
   if (mode.id === "demo") return mode.label;
   if (mode.id === "local") {
     const tag = availabilityTag(mode.ready);
-    // Last-line guard: never render a token that would smuggle a URL/data URI.
-    const model = !containsForbiddenUrlToken(mode.model ?? "") ? mode.model : null;
-    const label = !containsForbiddenUrlToken(mode.label) ? mode.label : "Local AI";
+    // Last-line guard: never render a token that would smuggle a URL/IP/host
+    // or raw markup into the DOM.
+    const model = !isUnsafeDisplayString(mode.model ?? "") ? mode.model : null;
+    const label = !isUnsafeDisplayString(mode.label) ? mode.label : "Local AI";
     return model ? `${label} — ${model} — ${tag}` : `${label} — ${tag}`;
   }
-  return !containsForbiddenUrlToken(mode.label) ? mode.label : "Cloud AI";
+  return !isUnsafeDisplayString(mode.label) ? mode.label : "Cloud AI";
 }

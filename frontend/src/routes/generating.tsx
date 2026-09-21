@@ -6,9 +6,14 @@ import {
   createPlaythrough,
   getGenerationProgress,
 } from "../api/client";
+import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { setPlaythroughId, setPlaythroughToken } from "../api/playthroughToken";
 import { clearJourneyParams, getJourneyParams, type JourneyParams } from "../journey/context";
-import { getGenerationMode } from "../journey/generationMode";
+import {
+  getGenerationMode,
+  validatedJourneyMode,
+} from "../journey/generationMode";
+import { loadGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import {
   runDemo,
   type DemoFlowResult,
@@ -29,11 +34,19 @@ import { stageInfoFromPhase, type StageInfo } from "../journey/generationProgres
  * PUBLISHED/FAILED status — never a fabricated success.
  *
  * Phase 16.2 §21 — the stored generation mode (`pd_generation_mode`, written
- * by the /new selector) travels through the flow inside every progress
- * snapshot, and (via {@link stageFromProgress}) switches the label sequence:
- * `local` uses the seven Local-AI labels (Understanding the case… →
- * … → Preparing the investigation…); demo/unset keeps the generic labels
- * above, unchanged.
+ * by the /new selector) would travel through the flow inside every progress
+ * snapshot and switch the label sequence: `local` uses the seven Local-AI
+ * labels (Understanding the case… → … → Preparing the investigation…);
+ * demo/unset keeps the generic labels above.
+ *
+ * ADV-212 — the stored mode is NEVER trusted by itself: before any Local-AI
+ * label can be claimed the journey validates the mode against the LIVE
+ * generation-capabilities DTO (fetched here in runJourney / the journey
+ * effect). The `local` sequence is used ONLY when the capability report
+ * confirms the local pipeline is actually available; an unavailable mode, a
+ * stale/tampered storage value or a fetch failure all fall back to the
+ * generic/demo label sequence — the selection on /new remains the source for
+ * the labels ONLY when capabilities confirm it.
  *
  * On PUBLISHED the journey stores {pd_playthrough_token, pd_playthrough_id}
  * (reuse playthroughToken.ts) and navigates to /scene (automatic after a
@@ -51,34 +64,60 @@ const DEMO_SERVICES: DemoFlowServices = {
   createPlaythrough,
 };
 
-/** Stable across renders so the journey effect never re-fires. */
+/** Injectable live capability probe (real route: GET /generation-capabilities). */
+export type CapabilityLoader = () => Promise<GenerationCapabilitiesResponse>;
+
+export const DEFAULT_CAPABILITY_LOADER: CapabilityLoader = loadGenerationCapabilities;
+
+/**
+ * ADV-212 — resolve the label-driving journey mode against the LIVE
+ * capability DTO. A fetch failure (loader rejection / endpoint down) always
+ * degrades to the mode-independent value, so the generic/demo sequence is
+ * shown and no local pipeline is ever claimed without backend confirmation.
+ */
+export async function resolveJourneyMode(
+  loader: CapabilityLoader = DEFAULT_CAPABILITY_LOADER,
+  storedMode: GenerationModeId | null = getGenerationMode(),
+): Promise<GenerationModeId | null> {
+  try {
+    const capabilities: GenerationCapabilitiesResponse = await loader();
+    return validatedJourneyMode(storedMode, capabilities);
+  } catch {
+    return null; // generic labels — never a local claim on a probe failure
+  }
+}
+
+/**
+ * Run the demo journey with the ADV-212 VALIDATED mode (computed against the
+ * live capability report) — never the raw storage value.
+ */
 function runJourney(
   prompt: string,
   difficulty: string,
   onProgress: (progress: DemoProgress) => void,
+  mode: GenerationModeId | null,
 ): Promise<DemoFlowResult> {
-  // Phase 16 Track B — the player-selected generation mode (stored under
-  // `pd_generation_mode` by the landing//new selector) travels into the flow
-  // as a note; the request-body contract is a backend-owned followup.
   return runDemo(prompt, {
     services: DEMO_SERVICES,
     difficulty,
-    mode: getGenerationMode(),
+    mode,
     onProgress,
   });
 }
 
-type RunFn = (
+export type RunFn = (
   prompt: string,
   difficulty: string,
   onProgress: (progress: DemoProgress) => void,
+  /** ADV-212 — the mode validated against live capabilities (never raw storage). */
+  mode: GenerationModeId | null,
 ) => Promise<DemoFlowResult>;
 
 /**
  * Phase 16.2 §21 — pure, mode-aware stage model for one journey progress
- * snapshot. The mode travels inside {@link DemoProgress.mode} (fed from the
- * `pd_generation_mode` storage key when the journey was launched); demo/unset
- * resolves to the generic staged labels exactly as before.
+ * snapshot. The mode travels inside {@link DemoProgress.mode} (the ADV-212
+ * validated mode from `runJourney`); demo/unset resolves to the generic
+ * staged labels exactly as before.
  */
 export function stageFromProgress(progress: DemoProgress): StageInfo {
   return stageInfoFromPhase(
@@ -115,6 +154,11 @@ export interface GenerationJourneyProps {
   run: RunFn;
   /** Called with the new credentials — stores them and navigates to /scene. */
   onSuccess: (result: Extract<DemoFlowResult, { ok: true }>) => void;
+  /**
+   * ADV-212 — injectable live capability probe used to VALIDATE the stored
+   * journey mode before any label is chosen (defaults to the real endpoint).
+   */
+  loadCapabilities?: CapabilityLoader;
 }
 
 type JourneyView =
@@ -123,39 +167,52 @@ type JourneyView =
   | { status: "done"; result: Extract<DemoFlowResult, { ok: true }> }
   | { status: "error"; kind: string; message: string };
 
-export function GenerationJourney({ params, run, onSuccess }: GenerationJourneyProps) {
+export function GenerationJourney({
+  params,
+  run,
+  onSuccess,
+  loadCapabilities = DEFAULT_CAPABILITY_LOADER,
+}: GenerationJourneyProps) {
   const [view, setView] = useState<JourneyView>(() =>
     params === null
       ? { status: "no-session" }
-      // Phase 16.2 §21 — read the stored mode up-front so even the pre-poll
-      // animation uses the Local-AI labels when local mode is active.
-      : { status: "running", stage: stageInfoFromPhase("session", null, null, null, getGenerationMode()) },
+      // ADV-212: the pre-poll animation starts with the GENERIC label — a
+      // local label appears only after the live capability report confirms
+      // the local pipeline is actually available (see the effect below).
+      : { status: "running", stage: stageInfoFromPhase("session", null, null, null, null) },
   );
   const [runId, setRunId] = useState(0);
 
   useEffect(() => {
     if (params === null) return;
     let cancelled = false;
-    const mode = getGenerationMode();
-    setView({ status: "running", stage: stageInfoFromPhase("session", null, null, null, mode) });
-    void run(params.prompt, params.difficulty, (progress) => {
+    // ADV-212: the stored mode (pd_generation_mode) is NEVER trusted raw. The
+    // label-driving mode is resolved against the LIVE capability DTO first;
+    // an unavailable mode, a stale/tampered value or a probe failure all fall
+    // back to the generic/demo label sequence. The same validated mode drives
+    // both the pre-poll animation and every progress snapshot in the run.
+    void resolveJourneyMode(loadCapabilities).then((mode) => {
       if (cancelled) return;
-      setView({
-        status: "running",
-        stage: stageFromProgress(progress),
+      setView({ status: "running", stage: stageInfoFromPhase("session", null, null, null, mode) });
+      void run(params.prompt, params.difficulty, (progress) => {
+        if (cancelled) return;
+        setView({
+          status: "running",
+          stage: stageFromProgress(progress),
+        });
+      }, mode).then((result) => {
+        if (cancelled) return;
+        if (result.ok) {
+          setView({ status: "done", result });
+        } else {
+          setView({ status: "error", kind: result.failure.kind, message: result.failure.message });
+        }
       });
-    }).then((result) => {
-      if (cancelled) return;
-      if (result.ok) {
-        setView({ status: "done", result });
-      } else {
-        setView({ status: "error", kind: result.failure.kind, message: result.failure.message });
-      }
     });
     return () => {
       cancelled = true;
     };
-  }, [params, run, runId]);
+  }, [params, run, runId, loadCapabilities]);
 
   // Automatic entry into the investigation shortly after PUBLISHED.
   useEffect(() => {

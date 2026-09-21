@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationCapabilitiesResponse } from "../api/types";
+import { parseGenerationCapabilities, selectableGenerationModes } from "./generationMode";
 import {
   effectiveProviderMode,
   parseAppProvider,
@@ -161,6 +162,35 @@ describe("effectiveProviderMode — the capability report is the ONLY authority"
     ).toBe("fake");
     expect(effectiveProviderMode("olalam" as unknown as GenerationCapabilitiesResponse)).toBe("fake");
     expect(effectiveProviderMode({ modes: "not-an-array" } as unknown as GenerationCapabilitiesResponse)).toBe("fake");
+  });
+
+  it("ADV-208 — duplicate mode ids resolve identically for EVERY consumer (no Demo/local split)", () => {
+    // The Phase 18A contradiction: first-wins (find) vs last-wins (Map) on
+    // duplicate `local` entries. The PARSER dedupes first-wins, so both
+    // consumers must agree on the SAME unavailable local.
+    const parsed = parseGenerationCapabilities({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: false, label: "Local AI", model: "qwen2.5:7b" },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+      ],
+    });
+    expect(effectiveProviderMode(parsed)).toBe("fake");
+    expect(providerPathNoteFromCapabilities(parsed)).toBe(providerPathNote("fake"));
+    expect(selectableGenerationModes(parsed).map((m) => m.id)).toEqual(["demo"]);
+  });
+
+  it("ADV-208 — the selector and the provider note agree when local IS the first (deduped) entry", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+        { id: "local", available: false },
+      ],
+    });
+    expect(effectiveProviderMode(parsed)).toBe("local");
+    expect(selectableGenerationModes(parsed).map((m) => m.id)).toEqual(["demo", "local"]);
+    expect(providerPathNoteFromCapabilities(parsed)).toBe(providerPathNote("local"));
   });
 });
 

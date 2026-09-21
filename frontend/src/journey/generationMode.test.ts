@@ -10,8 +10,10 @@ import {
   parseGenerationCapabilities,
   selectableGenerationModes,
   setGenerationMode,
+  validatedJourneyMode,
   type GenerationModeStorage,
 } from "./generationMode";
+import { effectiveProviderMode } from "./providerMode";
 
 /**
  * Phase 16 Track B — generation-mode capabilities allowlist parsing, the
@@ -121,6 +123,114 @@ describe("parseGenerationCapabilities — trust-boundary allowlist", () => {
       ],
     });
   });
+
+  it("ADV-208 — drops a model name carrying an `@`-joined IP literal", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [{ id: "local", available: true, label: "Local AI", model: "llama3@10.0.0.7" }],
+    });
+    expect(parsed.modes).toEqual([{ id: "local", available: true, label: "Local AI" }]);
+  });
+
+  it("ADV-208 — drops a label containing an RFC1918/link-local/loopback dotted IP", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [
+        { id: "local", available: true, label: "net 192.168.1.77", model: "qwen2.5:7b" },
+        { id: "live", available: true, label: "probe on 127.0.0.1", model: "169.254.10.1" },
+      ],
+    });
+    expect(parsed.modes).toEqual([
+      { id: "local", available: true, model: "qwen2.5:7b" },
+      { id: "live", available: true },
+    ]);
+  });
+
+  it("ADV-208 — drops raw HTML angle brackets from label/model (no markup can reach the DOM)", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [
+        { id: "local", available: true, label: "<script>alert(1)</script>" },
+        { id: "live", available: true, label: "Cloud AI", model: "<img src=x onerror=alert(1)>" },
+      ],
+    });
+    expect(parsed.modes).toEqual([
+      { id: "local", available: true },
+      { id: "live", available: true, label: "Cloud AI" },
+    ]);
+  });
+
+  it("ADV-208 — well-formed labels/models stay byte-identical (no sanitizer regression)", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true, label: "Local AI", model: "llama3.2:3b" },
+        { id: "live", available: true, label: "Cloud AI" },
+      ],
+    });
+    expect(parsed).toEqual({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true, label: "Local AI", model: "llama3.2:3b" },
+        { id: "live", available: true, label: "Cloud AI" },
+      ],
+    });
+    const modes = selectableGenerationModes(parsed);
+    expect(modes[1].label).toBe("Local AI");
+    expect(modes[1].model).toBe("llama3.2:3b");
+    expect(generationModeOptionLabel(modes[1])).toBe("Local AI — llama3.2:3b — Ready");
+  });
+});
+
+describe("ADV-208 — duplicate mode ids are deduped FIRST-WINS for every consumer", () => {
+  it("first occurrence wins: available:false then true stays unavailable", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: false, label: "Local AI", model: "qwen2.5:7b" },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+      ],
+    });
+    expect(parsed.modes.filter((m) => m.id === "local")).toEqual([
+      { id: "local", available: false, label: "Local AI", model: "qwen2.5:7b" },
+    ]);
+    expect(isLocalModeAvailable(parsed)).toBe(false);
+  });
+
+  it("later duplicates are ignored even when the first was available", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true },
+        { id: "local", available: false },
+      ],
+    });
+    expect(parsed.modes.filter((m) => m.id === "local")).toHaveLength(1);
+    expect(parsed.modes[0].available).toBe(true);
+  });
+
+  it("every consumer agrees — no truthful-provider contradiction on one page", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: false, label: "Local AI", model: "qwen2.5:7b" },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+      ],
+    });
+    // effectiveProviderMode (first-wins via find) and selectableGenerationModes
+    // (Map) MUST see the SAME deduped, unavailable local — never a "Demo
+    // build" qualifier sitting next to a ready Local-AI option.
+    expect(effectiveProviderMode(parsed)).toBe("fake");
+    expect(selectableGenerationModes(parsed).map((m) => m.id)).toEqual(["demo"]);
+    expect(isLocalModeAvailable(parsed)).toBe(false);
+  });
+
+  it("first-wins even for hand-constructed capabilities (parse bypassed)", () => {
+    const modes = selectableGenerationModes({
+      modes: [
+        { id: "local", available: false },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+      ],
+    });
+    expect(modes.map((m) => m.id)).toEqual(["demo"]);
+  });
 });
 
 describe("selectableGenerationModes — Demo always, Local/Live only when available", () => {
@@ -186,6 +296,17 @@ describe("selectableGenerationModes — Demo always, Local/Live only when availa
 
   it("resolves null (unknown/loading) to the demo-only offer", () => {
     expect(selectableGenerationModes(null).map((m) => m.id)).toEqual(["demo"]);
+  });
+
+  it("ADV-208 — last-line guard: a hand-constructed capabilities object cannot offer an IP model either", () => {
+    const modes = selectableGenerationModes({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true, label: "Local AI", model: "meta-llama@203.0.113.7:11434" },
+      ],
+    });
+    expect(modes[1].model).toBeNull();
+    expect(generationModeOptionLabel(modes[1])).toBe("Local AI — Ready");
   });
 });
 
@@ -303,6 +424,50 @@ describe("isLocalModeAvailable — §20 honesty probe over the parsed allowlist"
     expect(isLocalModeAvailable(caps({ modes: [{ id: "local", available: "yes" }] }))).toBe(false);
     expect(isLocalModeAvailable(caps(null))).toBe(false);
     expect(isLocalModeAvailable(null)).toBe(false);
+  });
+});
+
+describe("validatedJourneyMode — ADV-212 the /generating mode is validated against LIVE capabilities", () => {
+  const caps = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("keeps local ONLY when the live capability report confirms local available", () => {
+    expect(validatedJourneyMode("local", caps({ modes: [{ id: "local", available: true }] }))).toBe(
+      "local",
+    );
+    expect(
+      validatedJourneyMode("local", caps({ modes: [{ id: "local", available: false }] })),
+    ).toBeNull();
+    expect(validatedJourneyMode("local", caps({ modes: [] }))).toBeNull();
+    expect(validatedJourneyMode("local", null)).toBeNull();
+  });
+
+  it("a stored local on a demo-only backend falls back to generic (no local claim)", () => {
+    expect(
+      validatedJourneyMode("local", caps({ modes: [{ id: "demo", available: true }] })),
+    ).toBeNull();
+  });
+
+  it("a stale/tampered local with unknown capabilities resolves to generic", () => {
+    expect(validatedJourneyMode("local", caps({ modes: [{ id: "live", available: true }] }))).toBeNull();
+    // The duplicate-id parse above also feeds this rule: a dup'd local that
+    // resolved first-wins to unavailable can never confirm a local claim.
+    const duplicate = caps({
+      modes: [
+        { id: "local", available: false },
+        { id: "local", available: true },
+      ],
+    });
+    expect(validatedJourneyMode("local", duplicate)).toBeNull();
+  });
+
+  it("demo/live/unset are mode-independent (generic labels either way)", () => {
+    for (const stored of [null, "demo", "live"] as const) {
+      expect(
+        validatedJourneyMode(stored, caps({ modes: [{ id: "local", available: true }] })),
+      ).toBe(stored);
+      expect(validatedJourneyMode(stored, caps({ modes: [] }))).toBe(stored);
+      expect(validatedJourneyMode(stored, null)).toBe(stored);
+    }
   });
 });
 

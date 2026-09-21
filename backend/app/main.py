@@ -325,9 +325,12 @@ _SECURITY_HEADERS = (
 class SecurityHeadersMiddleware:
     """ASGI middleware: minimal security headers on every HTTP response.
 
-    Added as the OUTERMOST middleware so the headers are present on every
-    response — API success + error envelopes, static/SPA files and CORS
-    preflights alike. Header values are appended only when absent (an explicit
+    Applied at the TRANSPORT BOUNDARY — wrapped around the entire built
+    middleware stack (``ServerErrorMiddleware`` included) — so the headers are
+    present on every response: API success + error envelopes (the unhandled
+    ``/boom``-class 500 envelopes included), static/SPA files, CORS preflights
+    and Starlette's structurally-outermost ``ServerErrorMiddleware`` responses
+    alike (ADV-204). Header values are appended only when absent (an explicit
     route-level header is never overwritten).
     """
 
@@ -348,6 +351,26 @@ class SecurityHeadersMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_security_headers)
+
+
+class SecurityHeadersFastAPI(FastAPI):
+    """FastAPI variant that applies the security headers at the transport edge.
+
+    ADV-204: an UNHANDLED route exception is caught by Starlette's
+    ``ServerErrorMiddleware``, which ALWAYS sits above every ``add_middleware``
+    registration in ``build_middleware_stack`` and emits its sanitized 500
+    envelope directly to the transport — the response never flows back through
+    middleware registered on the app. Wrapping the ENTIRE built stack (the
+    ``ServerErrorMiddleware`` included) with ``SecurityHeadersMiddleware``
+    guarantees EVERY response — the pure-exception 500 envelopes included —
+    carries the same minimal security headers as every other path, while the
+    sanitized ``INTERNAL_ERROR`` envelope behavior (DEF-053) is untouched (the
+    wrapper only adds headers, never touches the body).
+    """
+
+    def build_middleware_stack(self):
+        stack = super().build_middleware_stack()
+        return SecurityHeadersMiddleware(stack)
 
 
 # --------------------------------------------------------------------------- #
@@ -545,7 +568,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings if settings is not None else Settings()
     configure_logging(settings)
 
-    app = FastAPI(
+    app = SecurityHeadersFastAPI(
         title="Procedural Detective API",
         description="Backend API for the Procedural Detective hackathon application.",
         version=SERVICE_VERSION,
@@ -580,12 +603,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         RequestBodySizeMiddleware,
         max_body_bytes=settings.max_request_body_size,
     )
-    # Phase 8 H1: no-store on every private/authenticated response (outermost,
-    # so it also covers error envelopes and never blocks CORS header flow).
+    # Phase 8 H1: no-store on every private/authenticated response (so it also
+    # covers error envelopes and never blocks CORS header flow).
     app.add_middleware(CacheControlMiddleware)
-    # Phase 18A: minimal security headers on EVERY response (outermost — also
-    # covers error envelopes, CORS preflights and static/SPA responses).
-    app.add_middleware(SecurityHeadersMiddleware)
+    # Phase 18A: minimal security headers are applied at the TRANSPORT BOUNDARY
+    # via ``SecurityHeadersFastAPI.build_middleware_stack`` (the wrapper sits
+    # OUTSIDE Starlette's ``ServerErrorMiddleware``, so even the sanitized
+    # unhandled-exception 500 envelopes carry them — ADV-204). Nothing is
+    # registered here: ``add_middleware`` would land INSIDE
+    # ``ServerErrorMiddleware`` and miss exactly those responses.
 
     app.include_router(api_router)
     _configure_static_serving(app, settings)

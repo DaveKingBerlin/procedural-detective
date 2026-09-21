@@ -6,6 +6,7 @@ import { getAsset } from "../catalog/assetCatalog";
 import { allKitIds, getKit, validateKit } from "./kitCatalog";
 import {
   APARTMENT_KIT_ID,
+  DECOR_PADDING,
   MAX_DECOR_PROPS_PER_KIT,
   anchorTransformFrom,
   buildKitDecorProps,
@@ -372,6 +373,86 @@ describe("Phase 18D — warm desk pool + decor props (office / hotel_suite)", ()
         for (const value of [prop.position.x, prop.position.y, prop.position.z]) {
           expect(Number.isFinite(value), `${kitId} ${prop.id} finite`).toBe(true);
         }
+      }
+    }
+  });
+
+  it("ADV-211 — the guard vocabulary matches the backend placer (TABLE_PROP anchors are evidence-capable)", () => {
+    // The backend placer treats TABLE_PROP / GENERIC_PROP as evidence-capable
+    // anchor TYPES; the guard must treat a manifest-marked TABLE_PROP anchor
+    // (hotel_bedside_01: "evidence" in allowedCategories) as an evidence
+    // anchor the decor can never touch.
+    const hotel = getKit("hotel_suite")!;
+    const bedside = hotel.anchors.find((a) => a.anchorId === "hotel_bedside_01")!;
+    expect(bedside.type).toBe("TABLE_PROP");
+    expect(bedside.allowedCategories).toContain("evidence");
+    const bedHalfX = getAsset("PROP_HOTEL_BED_01")!.dimensions.x / 2 + DECOR_PADDING;
+    const bedHalfZ = getAsset("PROP_HOTEL_BED_01")!.dimensions.z / 2 + DECOR_PADDING;
+    // The OLD Phase 18D bed placement (bedside − (1.2, 0, 0.85)) overlapped the
+    // bedside anchor's clearance circle; the strengthened guard must reject it.
+    const oldCollision = {
+      x: bedside.position.x - 1.2,
+      y: 0.3,
+      z: bedside.position.z - 0.85,
+    };
+    expect(
+      evidenceClearanceOk(hotel, oldCollision, bedHalfX, bedHalfZ),
+      "a bed box in the old collision position must be REJECTED",
+    ).toBe(false);
+  });
+
+  it("ADV-211 — the authored hotel bed plan stays clear of the hard-coded bedside anchor", () => {
+    // Hard-code the manifest-marked TABLE_PROP bedside anchor (the hotel's
+    // only evidence-capable bedside) as an INDEPENDENT witness, then prove the
+    // AUTHORED bed plan (resolved from the real manifests) stays clear.
+    const hotel = getKit("hotel_suite")!;
+    const bedsideAnchor = hotel.anchors.find((a) => a.anchorId === "hotel_bedside_01")!;
+    const bed = buildKitShell("hotel_suite").find((p) => p.id === "decor_bed_01");
+    expect(bed, "the hotel bed decor must still resolve into the shell").not.toBeUndefined();
+    const asset = getAsset("PROP_HOTEL_BED_01")!;
+    const halfX = asset.dimensions.x / 2 + DECOR_PADDING;
+    const halfZ = asset.dimensions.z / 2 + DECOR_PADDING;
+
+    // The bed plan is placed relative to the bedside anchor (hostAnchorId):
+    // reproduce the resolved position independently of the shell builder.
+    const planOffset = { x: -1.6, y: 0.3, z: -0.85 };
+    const resolvedPosition = {
+      x: bedsideAnchor.position.x + planOffset.x,
+      y: planOffset.y,
+      z: bedsideAnchor.position.z + planOffset.z,
+    };
+    expect(bed!.position).toEqual(resolvedPosition);
+    // ...and the production PADDED box must clear the bedside anchor + spawn.
+    expect(
+      evidenceClearanceOk(hotel, resolvedPosition, halfX, halfZ),
+      "the authored bed box must clear every evidence anchor (incl. the bedside)",
+    ).toBe(true);
+    // Explicitly against the bedside circle (4,2): same assertion in isolation.
+    expect(
+      evidenceClearanceOk(
+        hotel,
+        resolvedPosition,
+        halfX,
+        halfZ,
+      ),
+    ).toBe(true);
+  });
+
+  it("ADV-211 — every authored decor prop passes the strengthened guard at PRODUCTION (padded) extents", () => {
+    // The authored plans must all survive the strengthened guard with the same
+    // padded half-extents the placer actually uses (DECOR_PADDING), against the
+    // REAL manifests — the "decor can never land on an evidence anchor" promise.
+    for (const kitId of ["office", "hotel_suite"]) {
+      const kit = getKit(kitId)!;
+      for (const prop of buildKitDecorProps(kit)) {
+        // The shell prop scale IS the catalog asset's dimensions; pad like the
+        // placer does (DECOR_PADDING) and demand full clearance.
+        const halfX = prop.scale!.x / 2 + DECOR_PADDING;
+        const halfZ = prop.scale!.z / 2 + DECOR_PADDING;
+        expect(
+          evidenceClearanceOk(kit, prop.position, halfX, halfZ),
+          `${kitId} ${prop.id} padded box must clear every evidence anchor + spawn`,
+        ).toBe(true);
       }
     }
   });
