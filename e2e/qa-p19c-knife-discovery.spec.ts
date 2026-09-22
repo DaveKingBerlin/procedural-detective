@@ -18,9 +18,11 @@ import { createPlaythroughViaApi, seedPlaythroughCredentials } from "./helpers";
  * browser AND pins the Phase 19C UX contract:
  *
  *  1  click kitchen knife      -> discovery toast + evidence panel with the
- *     forensic comparison text + objective counter "Discovered 1 / 2" + the
- *     "Discovered evidence" strip gains the knife entry (read marker once
- *     the record is open)
+ *     forensic comparison text + objective copy "Discovered 1 evidence items
+ *     — keep clicking objects in the scene…" (Phase 20: the /Y denominator is
+ *     structurally unknowable pre-reveal, so the honest copy carries no
+ *     denominator) + the "Discovered evidence" strip gains the knife entry
+ *     (read marker once the record is open)
  *  2  no undiscovered evidence ids/titles in the DOM (email + the office
  *     sharp weapons stay absent)
  *  3  discovered object is marked in the scene (object-discovered-knife)
@@ -114,11 +116,11 @@ test("Phase 19C: knife click -> forensic panel + toast + counter + strip, no lea
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await expect(panel).toContainText("Blood on the kitchen knife matches the victim");
 
-  // Counter increments: the golden world has exactly 4 evidence-linked
-  // interactables (laptop, knife, letter opener, scissors — the scene model
-  // carries the whole pinned world, both locations).
+  // Counter copy: Phase 20 replaced the "/Y" denominator (structurally
+  // unknowable once undiscovered evidence ids are withheld pre-reveal) with
+  // the honest "keep clicking objects in the scene" guidance.
   await expect(page.getByTestId("objective-text")).toContainText(
-    "Discovered 1 / 4 evidence items",
+    "Discovered 1 evidence items — keep clicking objects in the scene, then make your accusation when you are ready.",
   );
 
   // The "Discovered evidence" strip gains the knife entry (with read marker).
@@ -142,7 +144,9 @@ test("Phase 19C: knife click -> forensic panel + toast + counter + strip, no lea
   // (4) Reload deterministic: discovered state persists.
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("scene-ready")).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 / 4 evidence items");
+  await expect(page.getByTestId("objective-text")).toContainText(
+    "Discovered 1 evidence items — keep clicking objects in the scene, then make your accusation when you are ready.",
+  );
   await expect(page.getByTestId(`discovered-entry-${KNIFE_EVIDENCE}`)).toBeVisible();
   await expect(page.getByTestId(`object-discovered-${KNIFE}`)).toBeVisible();
   expect(await scanDomForForbidden(page), "reload: still no undiscovered material").toEqual([]);

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+﻿import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { createPlaythroughViaApi, seedPlaythroughCredentials } from "./helpers";
 
@@ -312,7 +312,7 @@ test("Phase 8 P golden journey: prompt(/new) -> generate -> investigate -> accus
   await expect(panel).not.toBeVisible();
 
   // (6) objective + discovered summary update after the knife.
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 /", { timeout: 15_000 });
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 evidence items", { timeout: 15_000 });
 
   // (7) discover the LAPTOP -> read the EMAIL (subject/body).
   const laptop = page.getByTestId("object-apartment_laptop");
@@ -327,7 +327,7 @@ test("Phase 8 P golden journey: prompt(/new) -> generate -> investigate -> accus
   await page.getByTestId("evidence-close").click().catch(() => {});
   await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
   await expect(emailPanel).not.toBeVisible();
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 2 /", { timeout: 15_000 });
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 2 evidence items", { timeout: 15_000 });
 
   // (8) open the accusation route from the scene.
   const accuseOpen = page.getByTestId("accusation-open");
@@ -442,12 +442,12 @@ test("Phase 8 P second fresh run: reload /scene mid-investigation keeps discover
   await expect(page.getByTestId("evidence-panel")).toContainText("Re: the missing funds");
   await page.getByTestId("evidence-close").click().catch(() => {});
   await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 2 /");
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 2 evidence items");
 
   // RELOAD mid-investigation -> discovered/read persist from the server.
   await page.reload({ waitUntil: "domcontentloaded" });
   await awaitSceneReady(page, "journey-test2-reload");
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 2 /");
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 2 evidence items");
   const entries = page.locator('[data-testid^="discovered-entry-"]');
   expect(await entries.count(), "both discovered evidence entries survive the reload").toBe(2);
   for (const text of await entries.allTextContents()) {

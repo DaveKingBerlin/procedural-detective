@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+﻿import { expect, test } from "@playwright/test";
 import type { Page, APIRequestContext } from "@playwright/test";
 import { installLeakListener, scanJsonBody, seedPlaythroughCredentials } from "./helpers";
 
@@ -333,7 +333,7 @@ async function showcaseKit(
     await expect(panel).toContainText("Re: the missing funds", { timeout: 15_000 });
   }
   transcript.clicked = { label: clicked!.label, x: clicked!.x, y: clicked!.y };
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 /", { timeout: 15_000 });
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 evidence items", { timeout: 15_000 });
 
   // ---- leak + hygiene ------------------------------------------------------
   const leakMatched: Array<{ url: string; paths: string[] }> = [];

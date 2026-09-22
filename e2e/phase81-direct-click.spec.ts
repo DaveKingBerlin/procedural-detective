@@ -390,7 +390,7 @@ test("Phase 8_1 direct click: real-browser mesh picking -> server-authentic disc
   await page.keyboard.press("Escape");
   await expect(panel).not.toBeVisible();
   await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 /", { timeout: 15_000 });
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 evidence items", { timeout: 15_000 });
 
   // ---- (3c) CLICK the laptop ------------------------------------------------
   await page.mouse.move(laptop.x, laptop.y);
@@ -408,7 +408,7 @@ test("Phase 8_1 direct click: real-browser mesh picking -> server-authentic disc
   await page.keyboard.press("Escape");
   await expect(laptopPanel).not.toBeVisible();
   await page.getByTestId("discovery-toast-dismiss").click().catch(() => {});
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 2 /", { timeout: 15_000 });
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 2 evidence items", { timeout: 15_000 });
 
   // ---- (3d) CLICK the letter opener (third object when pickable) -----------
   let openerClicked = false;

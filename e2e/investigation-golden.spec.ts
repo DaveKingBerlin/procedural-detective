@@ -74,7 +74,7 @@ test("golden investigation: knife discovery, panel, persistence, leak scan, no t
   await expect(page.getByTestId("scene-ready")).toBeVisible({ timeout: 30_000 });
   // Phase 8 F scene: the discovered-summary strip + objective text carry the
   // server-restored counts; the discovered knife entry keeps its read marker.
-  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 /");
+  await expect(page.getByTestId("objective-text")).toContainText("Discovered 1 evidence items");
   await expect(
     page.locator(`[data-testid="discovered-entry-${KNIFE_EVIDENCE}"]`),
   ).toContainText("· read");
