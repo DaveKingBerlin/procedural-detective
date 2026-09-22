@@ -51,9 +51,13 @@ Clarifications:
   removes all of the above local browser state.
 
 None of the server-side database contents (§1) are stored in the browser — the
-three items above are the complete local browser state this build writes. Do
-not overstate what the backend stores: the browser copy is local to the device
-and profile, while the database keeps the server-side records described in §1.
+three items above are the complete local browser state this build writes. A
+legacy `pd_generation_mode` key may persist in a browser that once used an
+older build (or a QA seam); it is only read and re-validated for backwards
+compatibility — it never drives the provider — and it is removed by the same
+"clear site data" action. Do not overstate what the backend stores: the browser
+copy is local to the device and profile, while the database keeps the
+server-side records described in §1.
 
 ## 2. Retention period
 
