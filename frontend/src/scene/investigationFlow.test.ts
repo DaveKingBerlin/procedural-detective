@@ -729,6 +729,138 @@ describe("Phase 18C — Detective Notebook session access (record cache + hydrat
   });
 });
 
+describe("DEF-095 — post-accusation/reveal /scene reload never dispatches record reads (hydration is PLAYING-gated)", () => {
+  /** A bootstrap whose playthrough already left PLAYING but still carries
+   *  server-confirmed discovered+read ids (exactly what a reloaded ACCUSED /
+   *  REVEALED playthrough publishes). */
+  function readStateBootstrap(state: "ACCUSED" | "REVEALED") {
+    return makeBootstrap({
+      state,
+      playerKnowledge: {
+        discoveredEvidenceIds: ["record_witness_hall_01", "forensic_knife_match_01"],
+        readEvidenceIds: ["record_witness_hall_01", "forensic_knife_match_01"],
+        visitedLocationIds: ["miller_apartment_kitchen"],
+      },
+    });
+  }
+
+  function playingReadBootstrap() {
+    return makeBootstrap({
+      state: "PLAYING",
+      playerKnowledge: {
+        discoveredEvidenceIds: ["record_witness_hall_01"],
+        readEvidenceIds: ["record_witness_hall_01"],
+        visitedLocationIds: ["miller_apartment_kitchen"],
+      },
+    });
+  }
+
+  it("reload while ACCUSED fires NO GET /records/* — the scene still loads the world + discovered flags from the bootstrap", async () => {
+    const readRecordMock = vi.fn(async (): Promise<EvidenceReadResultDTO> => makeWitnessRecord());
+    const services = makeServices({
+      getInvestigation: vi.fn(async () => readStateBootstrap("ACCUSED") as never),
+      readRecord: readRecordMock,
+    });
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected ok start");
+    expect(session.bootstrapState).toBe("ACCUSED");
+    // The WORLD still loads and the server-authoritative discovered/read flags
+    // come straight from the bootstrap (the normal /scene restore path).
+    expect(session.sceneModel!.worldObjects.map((o) => o.objectId)).toContain("kitchen_knife");
+    const knife = session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    expect(knife.discovered).toBe(true);
+    expect(knife.read).toBe(true);
+    expect(session.discoveredEvidenceIdsSnapshot()).toEqual([
+      // The server publishes already-sorted knowledge; the snapshot preserves it.
+      "record_witness_hall_01",
+      "forensic_knife_match_01",
+    ]);
+    expect(session.readEvidenceIdsSnapshot()).toEqual([
+      "record_witness_hall_01",
+      "forensic_knife_match_01",
+    ]);
+
+    // The reload-only notebook hydration must NOT dispatch a single record read.
+    await session.hydrateNotebookRecords();
+    expect(readRecordMock).not.toHaveBeenCalled();
+    expect(session.recordCacheSnapshot()).toEqual([]);
+  });
+
+  it("reload while REVEALED fires NO GET /records/* — same gate, same restore (world + flags only)", async () => {
+    const readRecordMock = vi.fn(async (): Promise<EvidenceReadResultDTO> => makeWitnessRecord());
+    const services = makeServices({
+      getInvestigation: vi.fn(async () => readStateBootstrap("REVEALED") as never),
+      readRecord: readRecordMock,
+    });
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected ok start");
+    expect(session.bootstrapState).toBe("REVEALED");
+    expect(session.discoveredEvidenceIdsSnapshot().length).toBe(2);
+
+    await session.hydrateNotebookRecords();
+
+    expect(readRecordMock).not.toHaveBeenCalled();
+    expect(session.recordCacheSnapshot()).toEqual([]);
+  });
+
+  it("reload while PLAYING hydrates read records exactly as before (Phase 18C behavior preserved)", async () => {
+    const readRecordMock = vi.fn(async (): Promise<EvidenceReadResultDTO> => makeWitnessRecord());
+    const services = makeServices({
+      getInvestigation: vi.fn(async () => playingReadBootstrap() as never),
+      readRecord: readRecordMock,
+    });
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+    expect(outcome.ok).toBe(true);
+    expect(session.bootstrapState).toBe("PLAYING");
+
+    await session.hydrateNotebookRecords();
+
+    expect(readRecordMock).toHaveBeenCalledTimes(1);
+    expect(readRecordMock).toHaveBeenCalledWith(PT_ID, "record_witness_hall_01", TEST_TOKEN);
+    expect(session.recordCacheSnapshot().map((record) => record.evidenceId)).toEqual([
+      "record_witness_hall_01",
+    ]);
+  });
+
+  it("a 409 NOT_PLAYING from a record read is a silent no-op (no toast, no crash, no further reads)", async () => {
+    // Throwaway edge: the bootstrap said PLAYING, but the playthrough left
+    // PLAYING before the reads landed (tab race). Every read answers 409; the
+    // hydration must stop quietly and never surface a player-facing failure.
+    const readRecordMock = vi.fn(async () => {
+      throw new ApiError(409, "NOT_PLAYING", "gameplay ends at accusation", null);
+    });
+    const services = makeServices({
+      getInvestigation: vi.fn(async () =>
+        makeBootstrap({
+          state: "PLAYING",
+          playerKnowledge: {
+            discoveredEvidenceIds: ["record_witness_hall_01", "record_financial_04"],
+            readEvidenceIds: ["record_witness_hall_01", "record_financial_04"],
+            visitedLocationIds: ["miller_apartment_kitchen"],
+          },
+        }) as never,
+      ),
+      readRecord: readRecordMock,
+    });
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+    expect(outcome.ok).toBe(true);
+
+    await session.hydrateNotebookRecords(); // must NOT throw
+
+    expect(readRecordMock).toHaveBeenCalledTimes(1); // stop at the first 409
+    expect(session.recordCacheSnapshot()).toEqual([]);
+    expect(session.currentToast).toBeNull(); // silent — no error toast
+  });
+});
+
 describe("PD-SEC-01 — pre-reveal evidence ids stripped from the bootstrap (Phase 20)", () => {
   it("parses a bootstrap whose undiscovered objects OMIT evidenceId entirely (missing key tolerated)", async () => {
     const services = makeServices({

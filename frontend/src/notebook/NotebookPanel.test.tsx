@@ -136,6 +136,51 @@ describe("Phase 18C notebook panel — structure", () => {
   });
 });
 
+describe("DEF-095 — the notebook drawer has no record-read surface (opening in ACCUSED/REVEALED cannot fetch GET /records/*)", () => {
+  it("open/toggle renders ONLY the passed model and fires exactly the given callbacks — never a record read", () => {
+    // The scene route mounts the drawer with a PRE-DERIVED server model; the
+    // drawer itself has no service/callback that could read records (the only
+    // notebook read path is the session's hydrateNotebookRecords, which is
+    // PLAYING-gated — pinned in investigationFlow.test.ts). Opening or toggling
+    // the drawer in ACCUSED/REVEALED therefore cannot dispatch GET /records/*.
+    const { model } = makeModel(DISCOVERED, READ);
+    const onToggle = vi.fn();
+    const onPinsChanged = vi.fn();
+
+    // Closed render: no side effect at all.
+    renderToStaticMarkup(
+      <NotebookPanel
+        model={model}
+        candidates={makeCandidates()}
+        pins={EMPTY_PINS}
+        open={false}
+        onToggle={onToggle}
+        onPinsChanged={onPinsChanged}
+      />,
+    );
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(onPinsChanged).not.toHaveBeenCalled();
+
+    // Open render: identical model-driven markup — the read entries are EXACTLY
+    // the cached records passed in; nothing is fetched or invented on open.
+    const openHtml = renderToStaticMarkup(
+      <NotebookPanel
+        model={model}
+        candidates={makeCandidates()}
+        pins={EMPTY_PINS}
+        open
+        onToggle={onToggle}
+        onPinsChanged={onPinsChanged}
+      />,
+    );
+    expect(openHtml).toContain('data-testid="notebook-group-people"');
+    expect(openHtml).toContain("Sofia Lindgren"); // the cached READ witness record
+    expect(openHtml).toContain("Kitchen knife"); // the discovered world object
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(onPinsChanged).not.toHaveBeenCalled();
+  });
+});
+
 describe("Phase 18C notebook panel — pre-reveal safety (reqs 3,4,5,8,13)", () => {
   it("the pre-reveal markup contains NO proof board (req 8)", () => {
     const html = markupFor(DISCOVERED, READ);

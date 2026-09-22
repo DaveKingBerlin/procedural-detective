@@ -11,6 +11,15 @@ Two building blocks live here:
 Trusted-proxy client-IP resolution (``resolve_client_ip``) is also here so the
 rate-limit identity rules live next to the limits themselves.
 
+Launch-path authority (DEF-094): the app is the SOLE authority over forwarded-
+header trust, but only when uvicorn never rewrites ``request.client`` first.
+uvicorn's platform default ``--proxy-headers`` (trusting loopback) replaces
+``scope["client"]`` from ``X-Forwarded-For`` BEFORE the ASGI app runs — so
+every documented launch path (scripts/start-demo.ps1, docker/entrypoint.sh,
+README/docs) passes ``--no-proxy-headers``. ``resolve_client_ip`` warns once
+per process if a forwarded header still reaches it while ``TRUST_PROXY=false``
+(an operator has likely left uvicorn's proxy-header rewriting on).
+
 Deployment mode (§8.1): hackathon hosting is a SINGLE-PROCESS deployment. The
 rate state below is in-process memory (which the phase explicitly accepts:
 "single-process durable in-memory or SQLite-backed rate state may be
@@ -27,8 +36,21 @@ requests can NEVER double-spend a window slot (no TOCTOU).
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
+
+# DEF-094: when ``TRUST_PROXY=false`` but a forwarded header still reached the
+# app, the only way it could have changed the identity is uvicorn double-
+# processing (uvicorn's platform default ``--proxy-headers`` rewrites
+# ``request.client`` from ``X-Forwarded-For`` BEFORE the ASGI app runs). The
+# app cannot recover the true peer at that point, so the fix is the launcher
+# flag; the operator warning below makes the misconfiguration LOUD exactly
+# once per process (never per-request log spam).
+_forwarded_header_warned = False
+_forwarded_header_warn_lock = threading.Lock()
 
 _TRUSTED_FORWARDED_HEADER = "x-forwarded-for"
 
@@ -185,10 +207,25 @@ def resolve_client_ip(request: Any, *, trust_proxy: bool) -> str:
       TLS edge rewrites the header; a deployment with multiple untrusted hops
       must keep ``TRUST_PROXY=false`` (the peer address of the trusted edge);
     - a missing/malformed header falls back to the direct peer address.
+
+    Launch-path authority (DEF-094): this function can only be authoritative
+    if nothing BELOW the app rewrote ``request.client`` first. uvicorn's
+    platform default is ``--proxy-headers`` (trusting loopback ``127.0.0.1``),
+    which replaces ``scope["client"]`` from a hostile ``X-Forwarded-For``
+    before the ASGI app is invoked — by the time the route runs, the true peer
+    is unrecoverable (the app never sees the pre-rewrite scope). Every
+    DOCUMENTED launch path therefore runs uvicorn with ``--no-proxy-headers``
+    (scripts/start-demo.ps1, docker/entrypoint.sh, README/docs); the app-level
+    trust decision then always sees the true socket peer. When
+    ``TRUST_PROXY=false`` and a forwarded header is still observed here, a
+    one-time operator warning is emitted (the deployment is likely leaving
+    uvicorn's proxy-header rewriting on).
     """
     peer = request.client.host if getattr(request, "client", None) is not None else ""
     peer = str(peer) if peer else "<unknown>"
     if not trust_proxy:
+        if _request_carries_forwarded_header(request):
+            _warn_forwarded_header_while_trust_off()
         return peer
     forwarded = request.headers.get(_TRUSTED_FORWARDED_HEADER) if request.headers else None
     if forwarded:
@@ -196,6 +233,47 @@ def resolve_client_ip(request: Any, *, trust_proxy: bool) -> str:
         if first:
             return first
     return peer
+
+
+def _request_carries_forwarded_header(request: Any) -> bool:
+    """True when the request carries an ``X-Forwarded-For`` header.
+
+    Deliberately minimal (DEF-094 vector): ``Forwarded`` / ``X-Real-IP`` are
+    equally ignored by this module while ``TRUST_PROXY=false``, but only
+    ``X-Forwarded-For`` is what uvicorn's ``--proxy-headers`` reads to rewrite
+    ``request.client`` — that is the header whose presence signals the risky
+    launcher configuration.
+    """
+    headers = getattr(request, "headers", None)
+    if not headers:
+        return False
+    try:
+        return bool(headers.get(_TRUSTED_FORWARDED_HEADER))
+    except (AttributeError, TypeError):
+        return False
+
+
+def _warn_forwarded_header_while_trust_off() -> None:
+    """Emit ONE process-wide operator warning about the DEF-094 hazard.
+
+    Behavior is never changed by the warning: while ``TRUST_PROXY=false`` the
+    direct peer is used regardless. The flag exists so log output can never be
+    spammed by an attacker rotating ``X-Forwarded-For`` values.
+    """
+    global _forwarded_header_warned
+    with _forwarded_header_warn_lock:
+        if _forwarded_header_warned:
+            return
+        _forwarded_header_warned = True
+    logger.warning(
+        "TRUST_PROXY=false but an X-Forwarded-For header reached the app; the "
+        "rate-limit identity is the direct socket peer (forwarded headers are "
+        "ignored). If uvicorn is running with --proxy-headers (its platform "
+        "default trusts loopback) it rewrites request.client from that header "
+        "BEFORE the app's identity gate, letting hostile headers mint fresh "
+        "per-IP budgets. Every documented launch path runs uvicorn with "
+        "--no-proxy-headers — keep it that way whenever TRUST_PROXY=false."
+    )
 
 
 __all__ = [

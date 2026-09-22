@@ -701,6 +701,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
 
 # Module-level instance so the documented run command works as-is:
-#   python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+#   python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+# The --no-proxy-headers flag is load-bearing (DEF-094): uvicorn's platform
+# default --proxy-headers trusts loopback and rewrites request.client from a
+# hostile X-Forwarded-For BEFORE the app's TRUST_PROXY=false identity gate.
 # Tests inject their own settings and never rely on this instance.
 app = create_app()

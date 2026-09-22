@@ -16,6 +16,12 @@
 # block on the backend service, so browsers/curl on the host cannot reach
 # :8000 directly. Only the Caddy edge publishes ports 80/443.
 #
+# Forwarded-header authority (DEF-094): uvicorn runs with --no-proxy-headers
+# in the image entrypoint (docker/entrypoint.sh), so it NEVER rewrites
+# request.client from X-Forwarded-For. The app is the sole authority that
+# honors the LEFT-MOST X-Forwarded-For entry, and only when TRUST_PROXY=true
+# (below). The Caddy edge remains the single trusted reverse proxy.
+#
 # Dev flow is unchanged — plain `docker compose up --build` still publishes
 # :8000 for local development (see docker-compose.yml).
 #
@@ -46,6 +52,12 @@ services:
       PD_DEV_TRACE: ${PD_DEV_TRACE:-false}
       GENERATION_PROVIDER: ${GENERATION_PROVIDER:-fake}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      # TRUST_PROXY=true is honored ONLY by the app's own forwarded-header
+      # authority (resolve_client_ip). uvicorn runs with --no-proxy-headers
+      # (image entrypoint), so it NEVER double-processes X-Forwarded-For: the
+      # app reads the LEFT-MOST value the Caddy edge set for the original
+      # client. Keep the Caddy edge as the single trusted reverse proxy
+      # (docs/DEPLOYMENT.md §7); a different ingress must keep TRUST_PROXY=false.
       TRUST_PROXY: ${TRUST_PROXY:-true}
       STATIC_DIR: ${STATIC_DIR:-/app/static}
     # Operator/provider configuration (LLM_API_KEY, LLM_MODEL,

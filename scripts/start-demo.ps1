@@ -187,6 +187,9 @@ try {
     # --- launch via the repository lifecycle guard ----------------------
     # The SPA is served by the SAME uvicorn when STATIC_DIR (absolute path to
     # the frontend production build) is set - single origin, no CORS needed.
+    # --no-proxy-headers is load-bearing (DEF-094): uvicorn's platform default
+    # --proxy-headers trusts loopback and rewrites request.client from a
+    # hostile X-Forwarded-For BEFORE the app's TRUST_PROXY=false identity gate.
     $distAbs = (Resolve-Path -LiteralPath (Join-Path $frontendDir "dist")).Path
     if (-not $env:STATIC_DIR) { $env:STATIC_DIR = $distAbs }
     if (-not $env:PD_FILE_LOGS) { $env:PD_FILE_LOGS = "true" }
@@ -210,7 +213,7 @@ try {
             --port $Port `
             --meta $metaPath `
             $logArgs `
-            --args -m uvicorn app.main:app --host 127.0.0.1 --port $Port
+            --args -m uvicorn app.main:app --host 127.0.0.1 --port $Port --no-proxy-headers
         if ($LASTEXITCODE -ne 0) { throw "launch failed (see output above)" }
     } finally {
         Pop-Location

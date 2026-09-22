@@ -68,7 +68,7 @@ defaults: `.env.example`.
 | `DATABASE_URL` | SQLAlchemy URL. Production points at the durable volume: `sqlite:////data/procedural_detective.db`. | `sqlite:////data/procedural_detective.db` |
 | `ENVIRONMENT` | Deployment mode. `production` is the prod-profile default; dev defaults to `development`. | `production` (prod compose) / `development` (dev) |
 | `PD_DEV_TRACE` | Developer trace. **Must be `false` in production** — the prod profile forces it `false` (see §12). | `false` |
-| `TRUST_PROXY` | Honor proxy-forwarded client IPs (`X-Forwarded-For` etc.) ONLY when `true` and the TLS edge is the defined trusted proxy (§7). | `false` (dev) / `true` (prod compose with Caddy) |
+| `TRUST_PROXY` | Honor proxy-forwarded client IPs (`X-Forwarded-For` etc.) ONLY when `true` and the TLS edge is the defined trusted proxy (§7). The APP is the sole authority — uvicorn itself always runs with `--no-proxy-headers`, so forwarded headers are never double-processed. | `false` (dev) / `true` (prod compose with Caddy) |
 | `GENERATION_PROVIDER` | `fake` (deterministic demo, default) or `live` / `ollama` (opt-in). | `fake` |
 | `LLM_API_KEY` | Live-mode credential. **Never committed.** | unset |
 | `LLM_MODEL` | Live-mode model name (e.g. `gpt-4.1`). Required for live. | unset |
@@ -126,12 +126,33 @@ starting values: session per-window budget, global per-window quota, and
 
 - **Anonymous-session admission** and **generation** are rate-limited with
   rolling windows that recover without a process restart.
-- **Forwarded-client-IP spoof resistance:** `X-Forwarded-For` / `Forwarded` /
-  `X-Real-IP` are **ignored unless `TRUST_PROXY=true`**. When false (default
-  in dev) the direct socket peer address is used. The prod profile ships
-  `TRUST_PROXY=true` **only because** the Caddy edge sets the forwarded
-  headers and is the defined trusted proxy; if you swap the edge, keep
-  `TRUST_PROXY=false` unless you can name the trusted reverse proxy exactly.
+
+**Forwarded-header authority — the app is the SOLE authority.** uvicorn is
+launched with `--no-proxy-headers` on every shipped launch path (the documented
+dev command, `scripts/start-demo.ps1`, and `docker/entrypoint.sh` inside the
+container image), so uvicorn NEVER rewrites `request.client` from forwarded
+headers before the app runs. This is load-bearing (DEF-094): uvicorn's platform
+default is `--proxy-headers` (trusting loopback `127.0.0.1`), which replaces
+`request.client` from a spoofed `X-Forwarded-For` BEFORE the ASGI app is
+invoked — with `TRUST_PROXY=false` each spoofed value would then mint its own
+per-IP budget. Keep `--no-proxy-headers` on every uvicorn launch line whenever
+`TRUST_PROXY=false`; the app additionally logs a one-time operator warning when
+it still sees an `X-Forwarded-For` header while proxy trust is off.
+
+- **`TRUST_PROXY=false` (the default, and every dev/private launch):**
+  `X-Forwarded-For` / `Forwarded` / `X-Real-IP` are **ignored** — the rate-limit
+  identity is always the direct socket peer. A hostile forwarded header can
+  never change the identity (the DEF-094 spoof-rotation vector is closed).
+- **`TRUST_PROXY=true` (prod profile default, and ONLY behind the Caddy edge):**
+  the app honors the **left-most** entry of `X-Forwarded-For` as the original
+  client — a single trusted-proxy chain where each hop appends the previous hop
+  (left = original client). Caddy sets the header on its private-network hop to
+  the backend; uvicorn (`--no-proxy-headers`) does not double-process it. The
+  shipped `docker/Caddyfile` is unchanged.
+- If you swap the edge for a different ingress or add untrusted hops, keep
+  `TRUST_PROXY=false` unless you can name the single trusted reverse proxy
+  exactly (a deployment with multiple untrusted hops must keep it false — the
+  peer address of the trusted edge is the only safe identity).
 
 ## 8. Privacy & retention
 

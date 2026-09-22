@@ -172,13 +172,19 @@ differently from that directory).
 # Backend (all from the REPO ROOT)
 python -m pip install -e "./backend[dev]"
 python -m alembic -c backend/alembic.ini upgrade head
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 
 # Frontend (second terminal, also from the REPO ROOT)
 cd frontend
 npm install
 npm run dev        # http://localhost:5173
 ```
+
+`--no-proxy-headers` is load-bearing: uvicorn's platform default trusts
+loopback and would rewrite `request.client` from a spoofed `X-Forwarded-For`
+before the app's rate-limit identity gate runs (DEF-094). The backend is the
+only component that honors forwarded headers — and only when `TRUST_PROXY=true`
+(see `docs/DEPLOYMENT.md` §7).
 
 ### Troubleshooting — "Demo errors" / "Try Demo Case fails"
 

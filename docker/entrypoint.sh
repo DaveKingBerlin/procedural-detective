@@ -18,4 +18,9 @@ chown -R app:app /data 2>/dev/null || true
 su -s /bin/sh -c "python -m alembic -c /app/backend/alembic.ini upgrade head" app
 
 # Serve. `--app-dir` + WORKDIR make the import CWD-independent.
-exec su -s /bin/sh -c "exec uvicorn --app-dir /app app.main:app --host 0.0.0.0 --port 8000" app
+# `--no-proxy-headers` is load-bearing (DEF-094): uvicorn's platform default
+# `--proxy-headers` trusts loopback and would rewrite request.client from a
+# hostile X-Forwarded-For before the app's TRUST_PROXY-gated identity decision.
+# Forwarded headers are honored ONLY by the app (the Caddy edge sets them and
+# TRUST_PROXY=true in production); uvicorn must never double-process them.
+exec su -s /bin/sh -c "exec uvicorn --app-dir /app app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers" app

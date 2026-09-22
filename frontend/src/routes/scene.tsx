@@ -235,7 +235,18 @@ export default function ScenePage() {
         // Phase 18C: after a reload the read-record cache is empty; lazily
         // hydrate ONLY ids the server confirmed READ (the notebook re-derives
         // from world-object labels until the records land — never blocks).
-        if (session.knowledgeSnapshot && session.knowledgeSnapshot.readEvidenceIds.length > 0) {
+        // DEF-095: record reads are a PLAYING-only gameplay action. The
+        // backend's frozen "gameplay ends at accusation" gate answers
+        // GET /records/* with 409 NOT_PLAYING once the playthrough left
+        // PLAYING, so an ACCUSED/REVEALED reload must NOT dispatch the
+        // hydration at all (the scene is only restored as the player-visible
+        // world; the reveal uses its own DTO). The session enforces the same
+        // gate inside hydrateNotebookRecords (the authoritative source).
+        if (
+          session.bootstrapState === "PLAYING" &&
+          session.knowledgeSnapshot &&
+          session.knowledgeSnapshot.readEvidenceIds.length > 0
+        ) {
           void session.hydrateNotebookRecords().then(() => {
             if (!cancelled) setNotebookRev((n) => n + 1);
           });

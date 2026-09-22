@@ -165,15 +165,33 @@ export class InvestigationSession {
    * id the knowledge snapshot does not carry. A failed fetch degrades
    * gracefully (the notebook keeps deriving from world-object labels and
    * whatever DID load). Idempotent: cached records are never re-fetched.
+   *
+   * DEF-095 (Phase 20): this hydration is a PLAYING-state action. After an
+   * accusation the backend's frozen Phase 7 "gameplay ends at accusation"
+   * gate answers record reads with 409 NOT_PLAYING, and the scene in
+   * ACCUSED/REVEALED is only restored as the player-visible world (the
+   * reveal carries its own DTO) — so a post-accusation reload of /scene
+   * must NEVER dispatch GET /records/*. The evidence stays player-known via
+   * `readEvidenceIds`, so the notebook still renders the discovered/read
+   * entries on redisplay.
    */
   async hydrateNotebookRecords(): Promise<void> {
     if (this.knowledge === null) return;
+    // DEF-095: record reads are gameplay (PLAYING-only). The session knows
+    // the authoritative lifecycle state from the bootstrap — do not dispatch
+    // a single GET /records/* from ACCUSED/REVEALED.
+    if (this.lifecycleStateValue !== "PLAYING") return;
     for (const recordId of this.knowledge.readEvidenceIds) {
       if (this.records.has(recordId)) continue;
       try {
         const record = await this.services.readRecord(this.playthroughId, recordId, this.token);
         this.records.set(recordId, record);
-      } catch {
+      } catch (error) {
+        // DEF-095 (state-race edge): a 409 NOT_PLAYING means the playthrough
+        // left PLAYING between the bootstrap and this fetch — the remaining
+        // reads would answer the same way, so stop quietly. It is a silent
+        // no-op: never a player-facing toast or failure.
+        if (error instanceof ApiError && error.status === 409) return;
         // Safe degrade: a failed lazy fetch never blocks the notebook.
       }
     }
