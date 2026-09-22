@@ -49,6 +49,7 @@ class DurableAdmissionController(AdmissionController):
         anonymous_quota_session_ttl_seconds: int,
         global_window_end: float | None = None,
         global_window_seconds: int = 60,
+        max_sessions: int = 10_000,
         lock: threading.RLock | None = None,
     ) -> None:
         super().__init__(
@@ -61,6 +62,7 @@ class DurableAdmissionController(AdmissionController):
             anonymous_quota_session_ttl_seconds=anonymous_quota_session_ttl_seconds,
             global_window_end=global_window_end,
             global_window_seconds=global_window_seconds,
+            max_sessions=max_sessions,
         )
         self._lock = lock if lock is not None else threading.RLock()
 
@@ -113,3 +115,7 @@ class DurableAdmissionController(AdmissionController):
                 ),
                 generations_count=int(generations_count),
             )
+            # ADV-229: keep the creation-order deque consistent so the lazy
+            # eviction pass sees rehydrated sessions too (they stay live until
+            # their persisted window is past the grace cutoff).
+            self._session_order.append(session_id)

@@ -632,8 +632,17 @@ class GenerationService:
     # ------------------------------------------------------------------ #
 
     def create_anonymous_quota_session(self) -> CreatedAnonymousSession:
-        """Create one durable quota session (DB row + admission registration)."""
-        session = self._admission.create_anonymous_quota_session()
+        """Create one durable quota session (DB row + admission registration).
+
+        ADV-229: when the bounded in-memory session store is at ``max_sessions``
+        the controller denies admission; the denial is translated here into the
+        API-facing ``AdmissionDeniedError`` so the boundary yields the sanitized
+        429 ADMISSION_DENIED envelope (fail closed, no internal detail).
+        """
+        try:
+            session = self._admission.create_anonymous_quota_session()
+        except AdmissionDenied:
+            raise AdmissionDeniedError("anonymous session store at capacity") from None
         token = issue_anonymous_session_token()
         self._store.create_session(
             session_id=session.session_id,

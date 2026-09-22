@@ -18,10 +18,20 @@ Semantics per REQUIREMENTS 32.10/32.11:
   (``window_end = now + global_window_seconds``) and the rolled counters are
   reset atomically. The window can NEVER reject-forever after an expiry.
   Deterministic with a ``ManualClock``.
+- ADV-229 (PD-SEC-02 "bounded state"): the in-memory ``_sessions`` map is
+  BOUNDED. Every session create and every ``admit_generation`` lazily evicts
+  sessions whose ``quota_window_end`` is older than one TTL past expiry
+  (``quota_window_end < now - ttl`` — a small, deterministic grace), and a
+  session with ACTIVE concurrency is never evicted. Eviction is O(1)-amortized
+  (a creation-order deque pops each entry at most once). A ``max_sessions``
+  hard bound closes the door: beyond it, anonymous session creation fails
+  closed with ``AdmissionDenied`` (sanitized 429 ADMISSION_DENIED at the API
+  boundary). Live-session quota/window/concurrency semantics are unchanged.
 """
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 from app.generation.clock import Clock
@@ -72,6 +82,12 @@ class _SessionState:
     active_concurrency: int = 0
 
 
+# ADV-229: hard bound on the in-memory session store. Stands in for an
+# operator-configurable ceiling in every deployment mode (the shipped default
+# is far above any demo or sustained-distinct-peer scenario).
+DEFAULT_MAX_SESSIONS = 10_000
+
+
 class AdmissionController:
     """Per-session + global admission gates; reserves and releases concurrency."""
 
@@ -87,6 +103,7 @@ class AdmissionController:
         anonymous_quota_session_ttl_seconds: int,
         global_window_end: float | None = None,
         global_window_seconds: int = 60,
+        max_sessions: int = DEFAULT_MAX_SESSIONS,
     ) -> None:
         if isinstance(max_concurrent_generations, bool) or not isinstance(
             max_concurrent_generations, int
@@ -129,6 +146,10 @@ class AdmissionController:
             or not isinstance(global_window_end, (int, float))
         ):
             raise TypeError("global_window_end must be a number or None")
+        if isinstance(max_sessions, bool) or not isinstance(max_sessions, int):
+            raise TypeError("max_sessions must be an int")
+        if max_sessions <= 0:
+            raise ValueError("max_sessions must be > 0")
         self._clock = clock
         self._ids = ids
         self._max_session_concurrency = int(max_concurrent_generations)
@@ -136,6 +157,13 @@ class AdmissionController:
         self._max_session_window = int(max_generations_per_session_per_window)
         self._max_global_window = int(max_generations_global_per_window)
         self._ttl_seconds = float(anonymous_quota_session_ttl_seconds)
+        # ADV-229: bounded session store. ``max_sessions`` is the hard ceiling;
+        # ``_eviction_grace_seconds`` (one TTL past expiry) sets the lazy
+        # eviction cutoff; ``_session_order`` (creation order) makes eviction
+        # O(1)-amortized and deterministic.
+        self._max_sessions = int(max_sessions)
+        self._eviction_grace_seconds = self._ttl_seconds
+        self._session_order: deque[str] = deque()
         # PD-SEC-02: the ROLLING global generation window. It starts at
         # controller construction (or the injected end) and RENEWS forever:
         # when ``now >= window_end`` the admission step starts a fresh window
@@ -156,15 +184,53 @@ class AdmissionController:
     # -- session management --------------------------------------------------
 
     def create_anonymous_quota_session(self) -> AnonymousQuotaSession:
-        """Create a fresh quota session valid for ``anonymous_quota_session_ttl``."""
+        """Create a fresh quota session valid for ``anonymous_quota_session_ttl``.
+
+        ADV-229: lazily evicts expired sessions first, then FAILS CLOSED with
+        ``AdmissionDenied`` when the bounded session store is at
+        ``max_sessions`` (never unbounded growth).
+        """
         now = float(self._clock.now())
+        self._evict_expired(now)
+        if len(self._sessions) >= self._max_sessions:
+            raise AdmissionDenied(
+                AdmissionDecision(
+                    False,
+                    "admission denied: anonymous quota session store at capacity",
+                )
+            )
         session = AnonymousQuotaSession(
             session_id=self._ids.session_id(),
             created_at=now,
             quota_window_end=now + self._ttl_seconds,
         )
         self._sessions[session.session_id] = _SessionState(session=session)
+        self._session_order.append(session.session_id)
         return session
+
+    def _evict_expired(self, now: float) -> None:
+        """Lazily evict stored sessions that expired beyond the bounded grace.
+
+        A session is evicted only when its window ended more than one TTL ago
+        (``quota_window_end < now - ttl``) AND it has no active concurrency —
+        an in-flight generation's session is NEVER removed. The creation-order
+        deque makes this O(1)-amortized: every enqueued id is dequeued at most
+        once, and once the oldest session is not yet expired there is nothing
+        older to evict.
+        """
+        cutoff = now - self._eviction_grace_seconds
+        while self._session_order:
+            oldest_id = self._session_order[0]
+            state = self._sessions.get(oldest_id)
+            if state is None:
+                self._session_order.popleft()
+                continue
+            if state.session.quota_window_end >= cutoff:
+                break  # the oldest is still within the grace window
+            if state.active_concurrency > 0:
+                break  # never evict an active-concurrency session
+            del self._sessions[oldest_id]
+            self._session_order.popleft()
 
     # -- admission -----------------------------------------------------------
 
@@ -177,12 +243,13 @@ class AdmissionController:
         Order: session exists & within its window; per-session window count;
         per-session concurrency; global concurrency; global window count.
         """
+        now = float(self._clock.now())
+        self._evict_expired(now)
         state = self._sessions.get(session_id)
         if state is None:
             raise AdmissionDenied(
                 AdmissionDecision(False, "admission denied: unknown anonymous quota session")
             )
-        now = float(self._clock.now())
         if now >= state.session.quota_window_end:
             raise AdmissionDenied(
                 AdmissionDecision(
@@ -273,3 +340,13 @@ class AdmissionController:
     @property
     def global_window_generations(self) -> int:
         return self._global_generations_in_window
+
+    @property
+    def session_count(self) -> int:
+        """Sessions currently held in memory (ADV-229: bounded <= max_sessions)."""
+        return len(self._sessions)
+
+    @property
+    def max_sessions(self) -> int:
+        """The hard bound on the in-memory session store (ADV-229)."""
+        return self._max_sessions

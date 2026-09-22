@@ -56,12 +56,12 @@ Design rules (locked for this module):
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Mapping, Protocol
 
 import httpx
 
+from app.assets.depthguard import bounded_json_loads
 from app.core.config import DEFAULT_OLLAMA_BASE_URL
 from app.generation import prompts
 from app.generation.provider import GenerateRequest, ProviderResult
@@ -290,8 +290,13 @@ class OllamaProvider:
 
     def _extract_content(self, raw: bytes) -> str | None:
         """The textual provider payload of one 2xx /api/chat envelope."""
+        # ADV-228 (PD-SEC-09 parity): the transport ENVELOPE parse goes through
+        # the SAME ``bounded_json_loads`` as the content parser, so a depth-bomb
+        # envelope (JSON nested past ``MAX_STRUCT_NESTING`` inside the 256 KiB
+        # cap) raises the typed ``BoundedJsonError`` (a ValueError) — caught
+        # below — NEVER an uncaught ``RecursionError`` escaping generate().
         try:
-            data = json.loads(raw.decode("utf-8", errors="replace"))
+            data = bounded_json_loads(raw.decode("utf-8", errors="replace"))
         except (ValueError, TypeError):
             return None
         if not isinstance(data, dict):
@@ -359,8 +364,9 @@ def ollama_available(settings: Any, transport: Any = None) -> tuple[bool, str]:
         return False, "not available"
     if raw is None or len(raw) > MAX_OLLAMA_RESPONSE_BYTES:
         return False, "not available"
+    # ADV-228 (PD-SEC-09 parity): bounded envelope parse (see _extract_content).
     try:
-        data = json.loads(raw.decode("utf-8", errors="replace"))
+        data = bounded_json_loads(raw.decode("utf-8", errors="replace"))
     except (ValueError, TypeError):
         return False, "not available"
     if not isinstance(data, dict) or not isinstance(data.get("models"), list):
@@ -379,8 +385,9 @@ def _parse_ollama_version(raw: bytes) -> tuple[int, int, int] | None:
     version (never raises). A non-numeric suffix (e.g. ``0.8.0-dev``) is
     ignored for the comparison (the leading numeric triple decides).
     """
+    # ADV-228 (PD-SEC-09 parity): bounded envelope parse (see _extract_content).
     try:
-        data = json.loads(raw.decode("utf-8", errors="replace"))
+        data = bounded_json_loads(raw.decode("utf-8", errors="replace"))
     except (ValueError, TypeError):
         return None
     if not isinstance(data, dict):
