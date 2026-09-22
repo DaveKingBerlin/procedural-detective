@@ -424,12 +424,18 @@ test("Phase 17: geometry-gate-repaired proc.* object renders visibly, silhouette
   );
   expect(localMode?.available, "local mode available (REAL probe over the QA seam)").toBe(true);
 
-  // select Local AI so the /new showcase sentence + driver path are active
+  // Phase 21 F-03 — the interactive provider <select> was REMOVED; the
+  // generation-mode area is the READ-ONLY backend-authoritative line (the
+  // provider is process-global — nothing implies a switch). The legacy
+  // `pd_generation_mode=local` key is injected via the QA seam so the /new
+  // showcase sentence + driver path stay active.
   const selector = page.getByTestId("generation-mode-selector");
   await expect(selector).toBeVisible({ timeout: 30_000 });
-  const select = page.getByTestId("generation-mode-select");
-  await select.selectOption("local");
-  await page.waitForTimeout(200);
+  await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
+  const line = page.getByTestId("generation-mode-line");
+  await expect(line).toBeVisible({ timeout: 30_000 });
+  await expect(line).toContainText("Generation mode: Local AI");
+  await page.evaluate(() => localStorage.setItem("pd_generation_mode", "local"));
 
   // ---- 1. driver chain with the geometry-gate repair through the REAL UI -----
   await page.goto("/new", { waitUntil: "domcontentloaded" });

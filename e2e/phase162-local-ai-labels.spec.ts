@@ -24,12 +24,15 @@ import { installLeakListener } from "./helpers";
  *     shown);
  *  2. the §36 showcase sentence NEVER appears while local is unavailable
  *     (no claim of an active local pipeline); no host/IP/port/URL rendered;
- *  3. the generating screen WOULD use the LOCAL progress labels when the mode
- *     is local — asserted deterministically via the pure frontend module
- *     (unit-level import of `localProgressLabels` / `LOCAL_AI_STAGE_LABELS` /
- *     `stageInfoFromPhase`, the exact module the /generating route consumes)
- *     AND by intercepting the demo journey in the browser so the REAL
- *     /generating route renders a local-mode snapshot with the LOCAL label.
+ *  3. the generating screen label sequence is pinned BOTH ways: the pure
+ *     module `localProgressLabels` maps to the seven §21 Local-AI labels (the
+ *     labels the journey uses when the backend CONFIRMS local available) AND
+ *     the REAL /generating route with a stored `local` value on the FAKE
+ *     backend renders the TRUTHFUL GENERIC label — Phase 21 F-03 / ADV-212:
+ *     validatedJourneyMode never claims the local pipeline from storage alone;
+ *     the live capability DTO must confirm it first (the local label sequence
+ *     itself is exercised E2E by the ollama-seam specs, phase16-modes P16B and
+ *     phase162-ollama-driver).
  *
  *  Every session: leak scan 0, no console/page errors, no failed resources,
  *  no external traffic, no host/IP/port/URL in the DOM.
@@ -189,12 +192,13 @@ test("P16_2-LABELS: local mode drives the seven §21 Local-AI progress labels (u
   const errors: string[] = [];
   sessionPage.on("pageerror", (err) => errors.push(String(err)));
 
-  // Storage injection: local mode.
+  // Storage injection: a stored `local` contract key (Phase 21 F-03: no user
+  // action writes it anymore — only the QA seam / older app versions do).
   await sessionPage.goto("/", { waitUntil: "domcontentloaded" });
   await sessionPage.evaluate(() => localStorage.setItem("pd_generation_mode", "local"));
 
   // Intercept the demo journey so /generating holds a RUNNING world_generation
-  // snapshot long enough for the DOM to render the LOCAL label deterministically.
+  // snapshot long enough for the DOM to render the label deterministically.
   let seenCases = 0;
   let seenPolls = 0;
   await sessionPage.route("**/api/v1/cases", async (route) => {
@@ -214,8 +218,11 @@ test("P16_2-LABELS: local mode drives the seven §21 Local-AI progress labels (u
   });
   await sessionPage.route("**/api/v1/generations/*", async (route) => {
     seenPolls += 1;
-    // Hold RUNNING at stage world_generation progress 50 -> "Building the
-    // crime scene…" in local mode (never PUBLISHED on the first polls).
+    // Hold RUNNING at stage world_generation progress 50 -> "Building world"
+    // in the generic sequence on this FAKE backend (Phase 21 F-03/ADV-212:
+    // a stored `local` value NEVER claims the Local-AI label sequence unless
+    // the LIVE capability DTO confirms the local pipeline is available — on a
+    // demo-only backend the truthful generic label is shown).
     if (seenPolls <= 3) {
       await route.fulfill({
         status: 200,
@@ -233,19 +240,24 @@ test("P16_2-LABELS: local mode drives the seven §21 Local-AI progress labels (u
     }
   });
 
-  // Start a journey in local mode from /generating (the demo link is demo-
-  // branded but the stored mode is what the labels consume).
+  // Start a journey from /new (the demo link is demo-branded; the stored mode
+  // is what the labels consume — and on a demo-only backend it must resolve to
+  // the GENERIC sequence, never a pretend-local claim).
   await sessionPage.goto("/new", { waitUntil: "domcontentloaded" });
   await expect(sessionPage.getByTestId("local-ai-unavailable")).toBeVisible({ timeout: 30_000 });
   await sessionPage.getByTestId("try-demo-from-new").click();
 
-  // The /generating route reads pd_generation_mode=local and must render the
-  // LOCAL label for the intercepted RUNNING world_generation snapshot.
+  // Phase 21 F-03/ADV-212 — validatedJourneyMode: a stored `local` against a
+  // backend that does NOT report local available resolves to the GENERIC label
+  // sequence (honesty: never claim a local pipeline the backend has not
+  // confirmed). The LOCAL label sequence is asserted at unit level above — it
+  // is proven to exist and is reached ONLY when the live capability DTO
+  // confirms local availability (the P16B/phase162 ollama-seam specs).
   await expect(sessionPage).toHaveURL(/\/generating/, { timeout: 15_000 });
   const label = sessionPage.getByTestId("generation-stage-label");
   await expect(label).toBeVisible({ timeout: 20_000 });
-  await expect(label, "local-mode label on the intercepted world stage").toHaveText(
-    "Building the crime scene…",
+  await expect(label, "stored local on a FAKE backend resolves to the truthful generic label").toHaveText(
+    "Building world",
   );
   await sessionPage.screenshot({ path: "artifacts/screenshots/phase162-local-progress.png", fullPage: false });
 

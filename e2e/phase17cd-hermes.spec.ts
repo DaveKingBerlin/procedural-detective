@@ -22,8 +22,9 @@ import {
  * with the Phase17C §11 non-golden prompt -> playthrough) and the REAL browser
  * for the interactive proof, asserting exactly the Phase17C §12 mandate:
  *
- *   - Local-AI selector appears after the REAL capability probe with the honest
- *     label "Local AI — hermes3:8b — Ready" and the selection persists;
+ *   - the READ-ONLY "Generation mode: Local AI — hermes3:8b — Ready" line
+ *     appears after the REAL capability probe (Phase 21 F-03 — no provider
+ *     <select>);
  *   - generation is the REAL remote provider (the published world differs from
  *     the golden fixture: office environment + a generated `proc.*` object);
  *   - office environment rendered (environment notice) + the bronze ceremonial
@@ -328,29 +329,32 @@ test("Phase17C/17D Wave 3 — REAL hermes3:8b prompt-to-world journey (office + 
 
   // ---------------------------------------------------------------------------
   // (1) Landing: the REAL capability probe (the real provider answers /api/tags)
-  //     -> selector "Local AI — hermes3:8b — Ready"; selection persists.
+  //     -> the READ-ONLY line "Generation mode: Local AI — hermes3:8b — Ready"
+  //     (Phase 21 F-03 — the interactive <select> was REMOVED: the backend
+  //     provider is process-global and nothing implies a switch).
   // ---------------------------------------------------------------------------
   await page.goto("/", { waitUntil: "domcontentloaded" });
   const selector = page.getByTestId("generation-mode-selector");
   await expect(selector).toBeVisible({ timeout: 60_000 });
-  const select = page.getByTestId("generation-mode-select");
-  await expect(select).toBeVisible();
-  const options = await select.locator("option").allTextContents();
-  expect(
-    options.join(" | "),
-    "Local AI offered with the honest label + hermes3:8b + Ready tag",
-  ).toContain(`Local AI — ${EXPECTED_MODEL} — Ready`);
-  expect(options.join(" | "), "Demo option always offered").toContain("Demo");
-  await page.screenshot({ path: evidence("phase17cd-hermes-selector.png"), fullPage: false });
+  await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
+  const line = page.getByTestId("generation-mode-line");
+  await expect(line).toBeVisible({ timeout: 60_000 });
+  await expect(
+    line,
+    "Local AI read-only line with the honest label + hermes3:8b + Ready tag",
+  ).toContainText(`Generation mode: Local AI — ${EXPECTED_MODEL} — Ready`);
+  await page.screenshot({ path: evidence("phase17cd-hermes-mode-line.png"), fullPage: false });
 
-  await select.selectOption("local");
+  // Legacy storage seam (Phase 21 F-03): no user action writes
+  // `pd_generation_mode` anymore; the QA seam injects it for the honesty
+  // notes. The read-only line is unchanged by any stored value.
+  await page.evaluate(() => localStorage.setItem("pd_generation_mode", "local"));
   await page.waitForTimeout(150);
-  const stored = await page.evaluate(() => localStorage.getItem("pd_generation_mode"));
-  expect(stored, "selection persisted under pd_generation_mode").toBe("local");
   await page.reload({ waitUntil: "domcontentloaded" });
-  const selectAfter = page.getByTestId("generation-mode-select");
-  await expect(selectAfter).toBeVisible({ timeout: 60_000 });
-  await expect(selectAfter).toHaveValue("local");
+  const lineAfter = page.getByTestId("generation-mode-line");
+  await expect(lineAfter).toBeVisible({ timeout: 60_000 });
+  await expect(lineAfter).toContainText(`Generation mode: Local AI — ${EXPECTED_MODEL} — Ready`);
+  await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
 
   // The capability DTO (public allowlist — Phase16 J) is allowlist-scanned.
   const capability = await page.evaluate(async () => {

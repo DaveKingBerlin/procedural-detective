@@ -21,10 +21,15 @@ import type { Page } from "@playwright/test";
  *  B1  the production SPA loads against the REAL local backend;
  *  B2  GET /api/v1/generation-capabilities (browser-fetched) reports
  *      local available:true with model llama3.2:3b (honest local claim);
- *  B3  the home selector shows "Local AI — llama3.2:3b — Ready";
+ *  B3  the home page shows the READ-ONLY backend-authoritative line
+ *      "Generation mode: Local AI — llama3.2:3b — Ready"
+ *      (Phase 21 F-03 — the interactive provider <select> was REMOVED, so the
+ *      read-only `generation-mode-line` is the ONLY mode surface and
+ *      `generation-mode-select` has count 0);
  *  B4  /new shows NO "Local AI is unavailable" note and surfaces the
- *      Local-AI showcase note once the user selects Local mode
- *      (capability-driven honesty, ADV-208/ADV-212 surface);
+ *      Local-AI showcase note once the legacy contract key `pd_generation_mode`
+ *      is injected via the QA seam (capability-driven honesty, ADV-208/ADV-212
+ *      surface — Phase 21 F-03: no user action writes the key anymore);
  *  B5  FULL-DOM audit: no LAN/loopback host, no provider URL, no port
  *      token, no proc.*, no internal technical ids rendered as UI text;
  *  B6  0 page errors / 0 console errors / 0 failed resources / 0 external
@@ -98,34 +103,41 @@ test("P19B-REAL: production SPA + real local backend - honest Local AI ready UI,
   expect(local!.available, "local available on the real 127.0.0.1 Ollama").toBe(true);
   expect(local!.model, "local model is llama3.2:3b").toBe("llama3.2:3b");
 
-  // ---- B1/B3: home page renders the ready selector ---------------------------
+  // ---- B1/B3: home page renders the READ-ONLY backend-authoritative line ----
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  const localOption = page.locator('option[value="local"]');
-  await expect(localOption).toHaveText("Local AI — llama3.2:3b — Ready", { timeout: 30_000 });
+  // Phase 21 F-03 — the provider <select> was REMOVED; only the read-only line.
+  await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
+  const homeLine = page.getByTestId("generation-mode-line");
+  await expect(homeLine).toHaveText("Generation mode: Local AI — llama3.2:3b — Ready", {
+    timeout: 30_000,
+  });
   const homeBody = await page.evaluate(() => document.body?.innerText ?? "");
-  expect(homeBody, "home shows the ready Local AI entry").toContain(
-    "Local AI — llama3.2:3b — Ready",
+  expect(homeBody, "home shows the ready Local AI line").toContain(
+    "Generation mode: Local AI — llama3.2:3b — Ready",
   );
 
   // ---- B4: /new surfaces the honest capability-driven Local-AI UI ------------
   await page.goto("/new", { waitUntil: "domcontentloaded" });
   // Local IS available on the real backend, so the explicit unavailable note
-  // must be ABSENT and the shared Local-AI selector must offer the model.
+  // must be ABSENT; the same READ-ONLY line is the mode surface.
   await expect(page.getByTestId("local-ai-unavailable")).toHaveCount(0, { timeout: 30_000 });
-  const newLocalOption = page.locator('option[value="local"]');
-  await expect(newLocalOption).toHaveText("Local AI — llama3.2:3b — Ready", {
+  const newLine = page.getByTestId("generation-mode-line");
+  await expect(newLine).toHaveText("Generation mode: Local AI — llama3.2:3b — Ready", {
     timeout: 30_000,
   });
   const newText = await page.evaluate(() => document.body?.innerText ?? "");
   expect(newText, "/new mentions Local AI availability, not unavailability").not.toContain(
     "Local AI is unavailable right now",
   );
-  // The showcase note is legitimate here (capability-driven), so if rendered
-  // it must carry the accurate "available" phrasing.
+  // The showcase note is legitimate here (capability-driven): inject the
+  // legacy contract key via the QA seam (Phase 21 F-03 — no user action
+  // writes it anymore), reload, and the accurate "available" phrasing must
+  // surface.
+  await page.evaluate(() => localStorage.setItem("pd_generation_mode", "local"));
+  await page.reload({ waitUntil: "domcontentloaded" });
   const showcase = page.getByTestId("local-ai-showcase-note");
-  if ((await showcase.count()) > 0) {
-    await expect(showcase.first()).toContainText("Local AI is available");
-  }
+  await expect(showcase).toBeVisible({ timeout: 30_000 });
+  await expect(showcase.first()).toContainText("local Llama 3.2 model");
 
   // ---- B5: DOM hygiene --------------------------------------------------------
   await expectNoHostInDom(page);

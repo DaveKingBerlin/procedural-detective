@@ -14,21 +14,27 @@ import { installLeakListener, scanJsonBody } from "./helpers";
  *
  *  TEST A ("demo-only notice") — backend with provider DEFAULTS (fake).
  *    The landing must show the honest static notice "Demo mode active"
- *    (`generation-mode-demo-notice`) and MUST NOT offer Local AI / Cloud AI
- *    (`generation-mode-selector` absent; `Local AI` / `Cloud AI` absent from
- *    the landing DOM). No URL/host/IP ever rendered.
+ *    (`generation-mode-demo-notice`) plus the truthful read-only line
+ *    "Generation mode: Deterministic demo" (`generation-mode-line`) and MUST
+ *    NOT offer Local AI / Cloud AI (`generation-mode-selector` absent;
+ *    `Local AI` / `Cloud AI` absent from the landing DOM). No URL/host/IP
+ *    ever rendered.
  *
- *  TEST B ("ollama-available selector") — backend relaunched with
+ *  TEST B ("ollama-available backend") — backend relaunched with
  *    GENERATION_PROVIDER=ollama + OLLAMA_BASE_URL pointed at the QA-owned
  *    fake Ollama server (e2e/qa-phase16-fake-ollama.py on 127.0.0.1:11499,
  *    answered /api/tags + /api/chat with scripted golden JSON), so the REAL
  *    probe + REAL endpoint work end-to-end over real HTTP. The landing must
- *    then offer the selector with the honest Local option label
- *    "Local AI — llama3.2:3b — Ready" (`generation-mode-selector` +
- *    `generation-mode-select`), selecting it persists under the contract key
- *    `pd_generation_mode=local`, a reload keeps the selection, AND the Demo
- *    flow still runs (the one-click demo case publishes through the REAL
- *    ollama provider over the fake server -> /scene boots).
+ *    then show the READ-ONLY backend-authoritative line
+ *    "Generation mode: Local AI — llama3.2:3b — Ready"
+ *    (`generation-mode-selector` + `generation-mode-line`; Phase 21 F-03 —
+ *    the interactive <select> was REMOVED, so `generation-mode-select` must
+ *    have count 0 and NOTHING implies a switch). The legacy storage key
+ *    `pd_generation_mode=local` is injected ONLY via the QA seam (no user
+ *    action writes it anymore) for the honesty-note paths, a reload keeps the
+ *    backend-authoritative line, AND the Demo flow still runs (the one-click
+ *    demo case publishes through the REAL ollama provider over the fake
+ *    server -> /scene boots).
  *
  *  EVERY test: leak listener scans every /api response body (forbidden
  *  pre-reveal key paths MUST be 0); the capability response + scene responses
@@ -133,6 +139,10 @@ test("P16A: demo-default backend — honest 'Demo mode active' notice, no Local/
   const notice = page.getByTestId("generation-mode-demo-notice");
   await expect(notice).toBeVisible({ timeout: 30_000 });
   await expect(notice).toHaveText("Demo mode active");
+  // Phase 21 F-03 — the truthful read-only line accompanies the notice.
+  const line = page.getByTestId("generation-mode-line");
+  await expect(line).toBeVisible({ timeout: 10_000 });
+  await expect(line).toHaveText("Generation mode: Deterministic demo");
   await page.screenshot({ path: "artifacts/screenshots/phase16-demo-notice.png", fullPage: false });
   await expect(page.getByTestId("generation-mode-selector")).toHaveCount(0);
   await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
@@ -174,6 +184,11 @@ test("P16C: demo-default backend — a stale stored 'local' selection NEVER clai
   const notice = page.getByTestId("generation-mode-demo-notice");
   await expect(notice).toBeVisible({ timeout: 30_000 });
   await expect(notice).toHaveText("Demo mode active");
+  // Phase 21 F-03 — the read-only line stays truthful even with a stale stored
+  // `local` value: the demo-only backend reports the deterministic story.
+  const line = page.getByTestId("generation-mode-line");
+  await expect(line).toBeVisible({ timeout: 10_000 });
+  await expect(line).toHaveText("Generation mode: Deterministic demo");
   await expect(page.getByTestId("generation-mode-selector")).toHaveCount(0);
   await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
 
@@ -185,39 +200,38 @@ test("P16C: demo-default backend — a stale stored 'local' selection NEVER clai
   expect(pageErrors, "no uncaught page errors").toEqual([]);
 });
 
-test("P16B: ollama-available backend — selector 'Local AI — llama3.2:3b — Ready', persistence, Demo flow still runs", async ({ page, request }) => {
+test("P16B: ollama-available backend — read-only 'Generation mode: Local AI — llama3.2:3b — Ready' line, no selector, Demo flow still runs", async ({ page, request }) => {
   const leak = installLeakListener(page);
   const session = installSessionObservers(page);
 
   // --- 1. the live capability probe (REAL /api/tags against the fake server)
   await page.goto("/", { waitUntil: "domcontentloaded" });
 
+  // Phase 21 F-03 — the interactive <select> was REMOVED: the backend runs ONE
+  // process-global provider, so the UI shows the single READ-ONLY line and
+  // NOTHING implies that a click can switch the provider.
   const selector = page.getByTestId("generation-mode-selector");
   await expect(selector).toBeVisible({ timeout: 30_000 });
-  const select = page.getByTestId("generation-mode-select");
-  await expect(select).toBeVisible();
-
-  const options = await select.locator("option").allTextContents();
-  expect(options.join(" | "), "Local AI offered with the honest label+model+Ready tag").toContain(
-    "Local AI — llama3.2:3b — Ready",
-  );
-  expect(options.join(" | "), "Demo option always present").toContain("Demo");
-  await page.screenshot({ path: "artifacts/screenshots/phase16-ollama-selector.png", fullPage: false });
+  await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
+  const line = page.getByTestId("generation-mode-line");
+  await expect(line).toBeVisible({ timeout: 30_000 });
+  await expect(line).toHaveText("Generation mode: Local AI — llama3.2:3b — Ready");
+  await page.screenshot({ path: "artifacts/screenshots/phase16-ollama-mode-line.png", fullPage: false });
 
   // the honest demo notice must NOT be shown when local is available
   await expect(page.getByTestId("generation-mode-demo-notice")).toHaveCount(0);
 
-  // --- 2. select Local AI -> persisted under the contract key
-  await select.selectOption("local");
-  await page.waitForTimeout(200);
-  const stored = await page.evaluate(() => localStorage.getItem("pd_generation_mode"));
-  expect(stored, "selection persisted under pd_generation_mode").toBe("local");
+  // --- 2. legacy storage seam only (Phase 21 F-03: no user action writes
+  //        pd_generation_mode anymore) — the read-only line is unchanged.
+  await page.evaluate(() => localStorage.setItem("pd_generation_mode", "local"));
+  await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
 
-  // --- 3. a reload keeps the selection (persisted mode drives the selector)
+  // --- 3. a reload keeps the backend-authoritative read-only line (there is
+  //        no persisted client selection to survive).
   await page.reload({ waitUntil: "domcontentloaded" });
-  const selectAfter = page.getByTestId("generation-mode-select");
-  await expect(selectAfter).toBeVisible({ timeout: 30_000 });
-  await expect(selectAfter).toHaveValue("local");
+  const lineAfter = page.getByTestId("generation-mode-line");
+  await expect(lineAfter).toBeVisible({ timeout: 30_000 });
+  await expect(lineAfter).toHaveText("Generation mode: Local AI — llama3.2:3b — Ready");
 
   // --- 4. the Demo flow still runs: one-click demo publishes through the REAL
   //        ollama provider (fake server -> real endpoint -> PUBLISHED) and the

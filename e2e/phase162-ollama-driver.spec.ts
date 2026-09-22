@@ -20,9 +20,12 @@ import { installLeakListener } from "./helpers";
  *
  * ASSERTIONS:
  *  1. capability probe reports local AVAILABLE (the /api/tags answers
- *     llama3.2:3b); the selector renders "Local AI — llama3.2:3b — Ready"
- *     (Demo always present; the demo notice count 0);
- *  2. selecting Local AI persists `pd_generation_mode=local`;
+ *     llama3.2:3b); the landing shows the READ-ONLY backend-authoritative line
+ *     "Generation mode: Local AI — llama3.2:3b — Ready" (`generation-mode-line`;
+ *     Phase 21 F-03 — the interactive <select> was REMOVED, so
+ *     `generation-mode-select` has count 0 and the demo notice count 0);
+ *  2. the legacy storage key `pd_generation_mode=local` is injected via the QA
+ *     seam (Phase 21 F-03: no user action writes it anymore);
  *  3. the /new showcase sentence (`local-ai-showcase-note`) appears while
  *     local is the ACTIVE mode (selected AND backend-available);
  *  4. a REAL scripted stage chain runs through the OllamaStageDriver to
@@ -81,20 +84,19 @@ test("P16_2-OLLAMA: local AVAILABLE selector + showcase sentence + REAL driver c
   const session = installSessionObservers(page);
   const bookmark: Record<string, unknown> = {};
 
-  // ---- 1. capability probe available + selector label -----------------------
+  // ---- 1. capability probe available + read-only generation-mode line -------
   await page.goto("/", { waitUntil: "domcontentloaded" });
 
   const selector = page.getByTestId("generation-mode-selector");
   await expect(selector).toBeVisible({ timeout: 30_000 });
-  const select = page.getByTestId("generation-mode-select");
-  await expect(select).toBeVisible();
-  const options = await select.locator("option").allTextContents();
-  expect(options.join(" | "), "Local AI offered with model + Ready").toContain(
-    "Local AI — llama3.2:3b — Ready",
-  );
-  expect(options.join(" | "), "Demo option always present").toContain("Demo");
+  // Phase 21 F-03 — the provider <select> was REMOVED; only the read-only
+  // backend-authoritative line exists.
+  await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
+  const line = page.getByTestId("generation-mode-line");
+  await expect(line).toBeVisible({ timeout: 30_000 });
+  await expect(line).toContainText("Generation mode: Local AI — llama3.2:3b — Ready");
   await expect(page.getByTestId("generation-mode-demo-notice")).toHaveCount(0);
-  bookmark.selector = options.join(" | ");
+  bookmark.selector = (await line.textContent()) ?? "";
 
   // the capability DTO proves available and leaks nothing (allowlist keys).
   const caps = await page.evaluate(async () => {
@@ -112,11 +114,11 @@ test("P16_2-OLLAMA: local AVAILABLE selector + showcase sentence + REAL driver c
   }
   bookmark.capability = caps.body;
 
-  // ---- 2. select local -> persists + /new showcase sentence -----------------
-  await select.selectOption("local");
-  await page.waitForTimeout(200);
-  const stored = await page.evaluate(() => localStorage.getItem("pd_generation_mode"));
-  expect(stored, "selection persisted under pd_generation_mode").toBe("local");
+  // ---- 2. legacy storage seam -> /new showcase sentence ---------------------
+  // Phase 21 F-03: no user action writes `pd_generation_mode` anymore (the
+  // provider is process-global and the <select> was REMOVED); the QA seam
+  // injects the legacy contract key so the honesty notes can be pinned.
+  await page.evaluate(() => localStorage.setItem("pd_generation_mode", "local"));
 
   await page.goto("/new", { waitUntil: "domcontentloaded" });
   const showcase = page.getByTestId("local-ai-showcase-note");

@@ -20,7 +20,9 @@ import {
  * This spec proves the REST of the Phase17C §12/§14 browser contract against
  * the REAL remote Hermes3:8b (one real full-case generation):
  *
- *   - Local-AI selector with the real probe + durable selection;
+ *   - the READ-ONLY "Generation mode: Local AI — hermes3:8b — Ready" line
+ *     after the real probe (Phase 21 F-03 — the provider <select> was REMOVED);
+ *     the legacy `pd_generation_mode=local` key is injected via the QA seam;
  *   - generation published through the real chain (office environment, world
  *     differs from the golden fixture);
  *   - the `proc.*` bronze ceremonial ice pick exists in the published scene
@@ -136,15 +138,16 @@ test("Phase17C/17D Wave 3 — real Hermes journey remainder: proc.* interaction,
   const leak = installLeakListener(page);
   const evidence = (name: string) => path.join(EVIDENCE_DIR, name);
 
-  // (1) Real capability probe -> selector "Local AI — hermes3:8b — Ready".
+  // (1) Real capability probe -> the READ-ONLY line "Generation mode: Local
+  // AI — hermes3:8b — Ready" (Phase 21 F-03 — the interactive <select> was
+  // REMOVED; the provider is process-global).
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  const select = page.getByTestId("generation-mode-select");
-  await expect(select).toBeVisible({ timeout: 60_000 });
-  const options = await select.locator("option").allTextContents();
-  expect(options.join(" | ")).toContain(`Local AI — ${EXPECTED_MODEL} — Ready`);
-  await select.selectOption("local");
+  const line = page.getByTestId("generation-mode-line");
+  await expect(line).toBeVisible({ timeout: 60_000 });
+  await expect(line).toContainText(`Generation mode: Local AI — ${EXPECTED_MODEL} — Ready`);
+  await expect(page.getByTestId("generation-mode-select")).toHaveCount(0);
+  await page.evaluate(() => localStorage.setItem("pd_generation_mode", "local"));
   await page.waitForTimeout(150);
-  expect(await page.evaluate(() => localStorage.getItem("pd_generation_mode"))).toBe("local");
 
   // (2) One REAL full-case generation through the PUBLIC API.
   const sessionRes = await request.post(`${BACKEND_BASE}/api/v1/sessions/anonymous`);
