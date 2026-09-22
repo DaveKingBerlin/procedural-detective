@@ -259,10 +259,19 @@ def test_de047_playthrough_ids_are_unique(phase5_app):
         session_token, _ = create_session(client)
         case = create_case(client, session_token)
         creator = case["creatorAccessToken"]
-        for _ in range(5):
+        # MAX_ACTIVE_PLAYTHROUGHS_PER_CASE defaults to 4 (Phase 21 F-02), so
+        # the 5th playthrough below uses a SECOND case — the uniqueness claim
+        # stays just as strong without weakening the admission cap.
+        for _ in range(4):
             _status, body = create_playthrough(client, creator, case["caseId"], 1)
             assert body["playthroughId"] not in ids
             ids.add(body["playthroughId"])
+        second = create_case(client, session_token)
+        _status, body = create_playthrough(
+            client, second["creatorAccessToken"], second["caseId"], 1
+        )
+        assert body["playthroughId"] not in ids
+        ids.add(body["playthroughId"])
     assert len(ids) == 5
 
 

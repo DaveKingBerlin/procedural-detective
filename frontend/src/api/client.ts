@@ -77,7 +77,15 @@ export function apiUrl(path: string): string {
   return `${normalized}${path}`;
 }
 
-const REQUEST_TIMEOUT_MS = 300000;
+/**
+ * P-02 timeout envelope (Phase 21): 360s = 60s ABOVE the maximum supported
+ * backend generation deadline (CASE_GENERATION_DEADLINE_SECONDS, 300s
+ * showcase) so the browser NEVER aborts a request the backend still
+ * legitimately allows, and 60s BELOW the Caddy upstream
+ * response_header_timeout (420s) so the TLS edge never aborts before the
+ * browser. Keep in sync with backend/app/core/timeout_envelope.py.
+ */
+const REQUEST_TIMEOUT_MS = 360000;
 
 /** Structured error produced for non-2xx responses and transport failures. */
 export class ApiError extends Error {

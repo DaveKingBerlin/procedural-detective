@@ -136,7 +136,7 @@ describe("Phase 17E PART K — /new UI cleanup regression (static render)", () =
   });
 
   it("K10 — Generation mode remains present", () => {
-    // Render with capabilities that expose the generation-mode selector.
+    // Render with capabilities that expose the generation-mode display.
     const markup = renderToStaticMarkup(
       <MemoryRouter initialEntries={["/new"]}>
         <NewCasePage
@@ -144,9 +144,11 @@ describe("Phase 17E PART K — /new UI cleanup regression (static render)", () =
         />
       </MemoryRouter>,
     );
-    // Demo-only caps render the "Demo mode active" notice (no selector).
+    // Demo-only caps render the "Demo mode active" notice + the deterministic
+    // line (Phase 21 F-03 — no selector, no provider switch).
     expect(markup).toContain('data-testid="generation-mode-demo-notice"');
     expect(markup).toContain("Demo mode active");
+    expect(markup).toContain("Generation mode: Deterministic demo");
   });
 
   it("K11 — the deterministic demo link remains unchanged", () => {
@@ -266,7 +268,7 @@ describe("/new form rendering", () => {
   });
 });
 
-describe("/new — Phase 16 Track B generation-mode selector", () => {
+describe("/new — Phase 21 F-03 read-only generation-mode display", () => {
   const renderWithCaps = (capabilities: GenerationCapabilitiesResponse | null): string =>
     renderToStaticMarkup(
       <MemoryRouter initialEntries={["/new"]}>
@@ -274,24 +276,57 @@ describe("/new — Phase 16 Track B generation-mode selector", () => {
       </MemoryRouter>,
     );
 
-  it("renders the selector with the available modes", () => {
+  it("renders the read-only authoritative line with the available mode's label", () => {
     const markup = renderWithCaps({
       modes: [
         { id: "demo", available: true },
         { id: "live", available: true, label: "Cloud AI" },
       ],
     });
+    // Phase 21 F-03: the container testid stays but holds a single read-only
+    // line — no provider <select>, no provider options (the DIFFICULTY select
+    // on this page is a legitimately different, non-provider control).
     expect(markup).toContain('data-testid="generation-mode-selector"');
-    expect(markup).toContain("Cloud AI");
+    expect(markup).toContain("Generation mode: Cloud AI");
+    expect(markup).not.toContain('data-testid="generation-mode-select"');
+    expect(markup).not.toContain('<option value="local"');
+    expect(markup).not.toContain('<option value="live"');
   });
 
-  it("shows the static demo notice instead of a selector when only demo is available", () => {
+  it("local available -> the read-only 'Local AI — <model> — Ready' line", () => {
+    const markup = renderWithCaps({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+      ],
+    });
+    expect(markup).toContain("Generation mode: Local AI — qwen2.5:7b — Ready");
+    expect(markup).not.toContain('data-testid="generation-mode-demo-notice"');
+  });
+
+  it("shows the static demo notice + deterministic line when only demo is available", () => {
     const markup = renderWithCaps({
       modes: [{ id: "demo", available: true }],
     });
     expect(markup).not.toContain('data-testid="generation-mode-selector"');
     expect(markup).toContain('data-testid="generation-mode-demo-notice"');
     expect(markup).toContain("Demo mode active");
+    expect(markup).toContain("Generation mode: Deterministic demo");
+  });
+
+  it("contains NO interactive provider selection control (no testid implies a switch)", () => {
+    const markup = renderWithCaps({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+      ],
+    });
+    // NOTE: the page legitimately has a DIFFICULTY select (not a provider
+    // control); the provider-mode area must never host one.
+    expect(markup).not.toContain('data-testid="generation-mode-select"');
+    expect(markup).not.toContain('<select id="generation-mode-select"');
+    expect(markup).not.toContain('value="local"');
+    expect(markup).not.toContain('value="live"');
   });
 });
 

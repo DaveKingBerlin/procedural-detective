@@ -256,6 +256,53 @@ class Settings(BaseSettings):
         description="TRUST_PROXY (honor forwarded client IPs only when true "
         "and behind the documented trusted proxy).",
     )
+    # -- Phase 21 F-02 — bounded playthrough admission (durable-table DoS) ---
+    # A valid creator credential can call POST .../playthroughs UNBOUNDED,
+    # minting unlimited durable rows. Bounded admission is enforced ATOMICALLY
+    # inside the create transaction (per (case_id, case_version)):
+    #
+    #   MAX_ACTIVE_PLAYTHROUGHS_PER_CASE  — ACTIVE means the state column is
+    #       one of the non-terminal vocabulary values {CREATED, PLAYING}
+    #       (REQUIREMENTS 40.6 / Phase7 A). Above this cap a new create is
+    #       REJECTED (429 PLAYTHROUGH_LIMIT_EXCEEDED): no row, no token, all
+    #       existing playthroughs preserved.
+    #   MAX_RETAINED_PLAYTHROUGHS_PER_CASE — total rows kept for the pinned
+    #       tuple (all states). Above this ceiling the create path first tries
+    #       bounded retention: the OLDEST COMPLETED ({ACCUSED, REVEALED})
+    #       rows are garbage-collected (governed trigger carve-out, see
+    #       Store) until the new row fits; when there are not enough completed
+    #       rows to prune, the create is REJECTED (the case is at capacity).
+    #       ACTIVE rows are NEVER deleted by retention.
+    #
+    # Optional creation budgets (cheap in-memory rolling ~1h windows, keyed on
+    # the Phase 20 SlidingWindowRateLimiter; single-process — same documented
+    # deployment mode as the Phase 20 rate state):
+    #
+    #   PLAYTHROUGH_CREATE_LIMIT_PER_CREATOR — per creator credential (SHA-256
+    #       verifier — the raw token/identity is never stored or exposed)
+    #       across ALL cases in the window.
+    #   PLAYTHROUGH_CREATE_LIMIT_PER_IP — per TRUST_PROXY-aware resolved
+    #       client IP (resolve_client_ip), like the Phase 20 per-IP budgets.
+    max_active_playthroughs_per_case: int = Field(
+        default=4,
+        gt=0,
+        description="MAX_ACTIVE_PLAYTHROUGHS_PER_CASE.",
+    )
+    max_retained_playthroughs_per_case: int = Field(
+        default=12,
+        gt=0,
+        description="MAX_RETAINED_PLAYTHROUGHS_PER_CASE.",
+    )
+    playthrough_create_limit_per_creator: int = Field(
+        default=25,
+        gt=0,
+        description="PLAYTHROUGH_CREATE_LIMIT_PER_CREATOR.",
+    )
+    playthrough_create_limit_per_ip: int = Field(
+        default=50,
+        gt=0,
+        description="PLAYTHROUGH_CREATE_LIMIT_PER_IP.",
+    )
     max_prompt_chars: int = Field(
         default=4000, gt=0, description="MAX_PROMPT_CHARS."
     )

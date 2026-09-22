@@ -56,8 +56,13 @@ services:
       # authority (resolve_client_ip). uvicorn runs with --no-proxy-headers
       # (image entrypoint), so it NEVER double-processes X-Forwarded-For: the
       # app reads the LEFT-MOST value the Caddy edge set for the original
-      # client. Keep the Caddy edge as the single trusted reverse proxy
-      # (docs/DEPLOYMENT.md §7); a different ingress must keep TRUST_PROXY=false.
+      # client. The shipped Caddy-first profile is the AUTHORITATIVE supported
+      # production path for TRUST_PROXY=true. An alternate platform ingress
+      # MUST keep TRUST_PROXY=false by default and only enable it after the
+      # ingress is verified to strip/overwrite hostile X-Forwarded-For, provide
+      # a known hop structure and preserve the client IP — TRUST_PROXY=true is
+      # NOT portable between ingress providers. Keep the Caddy edge as the
+      # single trusted reverse proxy (docs/DEPLOYMENT.md §7; P-01).
       TRUST_PROXY: ${TRUST_PROXY:-true}
       STATIC_DIR: ${STATIC_DIR:-/app/static}
     # Operator/provider configuration (LLM_API_KEY, LLM_MODEL,
@@ -69,6 +74,16 @@ services:
       - path: .env
         required: false
     restart: unless-stopped
+    # F-04: BOUNDED container stdout — uvicorn access logs go to stdout and
+    # must not grow without limit. json-file driver rotates them: 10 MB per
+    # file, 5 files. The backend's OWN file logs (logs/procedural-detective.log,
+    # RotatingFileHandler 5 MB x 3) are application-level and remain rotated
+    # separately (docs/DEPLOYMENT.md §15).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     # Private network ONLY: `expose` documents :8000 for the edge; nothing
     # is published to the host. There is deliberately NO `ports:` block.
     expose:
@@ -89,6 +104,14 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    # F-04: Caddy access/error logs write to stdout — bounded by the SAME
+    # json-file rotation policy as the backend (10 MB x 5). The browser-facing
+    # path carries no tokens/secrets, so nothing sensitive is ever recorded.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     depends_on:
       - procedural-detective
     ports:

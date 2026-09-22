@@ -148,7 +148,12 @@ def get_case(
         "(caseId, caseVersion) tuple inside one transaction; the version must "
         "exist and be PUBLISHED (404 otherwise / 409 VERSION_NOT_PUBLISHED). "
         "The playthrough is permanently pinned to that tuple. The "
-        "playthroughAccessToken appears exactly once at creation."
+        "playthroughAccessToken appears exactly once at creation. Phase 21 "
+        "F-02: creation is BOUNDED — per-case ACTIVE ({CREATED,PLAYING}) and "
+        "RETAINED (total) caps are enforced atomically inside the create "
+        "transaction, plus optional per-IP / per-creator creation budgets; a "
+        "cap- or budget-limited request answers the sanitized 429 envelope, "
+        "creates NO row and issues NO token."
     ),
 )
 def create_playthrough(
@@ -160,13 +165,36 @@ def create_playthrough(
     store = request.app.state.store
     settings = request.app.state.settings
     clock = request.app.state.clock
-    token = issue_playthrough_access_token()
+    # Phase 21 F-02 — bounded playthrough admission. The in-memory creation
+    # budgets (per-IP + per-creator) are checked BEFORE any DB work and BEFORE
+    # a token is ever minted; denial is the sanitized 429 envelope with no
+    # counters/window internals (same policy as the Phase 20 generation
+    # budgets). The per-creator identity is the stored SHA-256 token verifier —
+    # the raw token/identity is never part of the limiter map and never
+    # exposed. A denied request creates NO row and gets NO token.
+    ip_limiter = request.app.state.playthrough_ip_limiter
     now = float(clock.now())
+    if not ip_limiter.allow(
+        resolve_client_ip(request, trust_proxy=bool(settings.trust_proxy)), now
+    ):
+        raise http_error(
+            429, "TOO_MANY_REQUESTS", "Too many playthroughs; please try again later"
+        )
+    creator_limiter = request.app.state.playthrough_creator_limiter
+    if not creator_limiter.allow(credential.token_verifier, now):
+        raise http_error(
+            429, "TOO_MANY_REQUESTS", "Too many playthroughs; please try again later"
+        )
+    token = issue_playthrough_access_token()
     # DEF-047: the playthrough id is an independent opaque random value —
     # it shares ZERO characters with the credential and can never be used to
     # infer the playthroughAccessToken.
     playthrough_id = f"PT-{secrets.token_urlsafe(16)}"
     try:
+        # The durable per-case caps run ATOMICALLY inside the create
+        # transaction (``max_active`` / ``max_retained``): a concurrent burst
+        # can never exceed them, and a rejection creates NO row and issues NO
+        # token (the never-persisted token value is simply dropped).
         row = store.create_playthrough_if_published(
             playthrough_id=playthrough_id,
             case_id=case_id,
@@ -175,6 +203,8 @@ def create_playthrough(
             state="PLAYING",
             created_at=now,
             expires_at=now + settings.playthrough_token_ttl_seconds,
+            max_active=int(settings.max_active_playthroughs_per_case),
+            max_retained=int(settings.max_retained_playthroughs_per_case),
         )
     except HTTPException:
         raise

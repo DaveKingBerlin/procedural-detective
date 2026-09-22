@@ -32,11 +32,16 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
      of ``localhost:8000`` (the audited HTTP fallback base) and any bare
      ``127.0.0.1`` — a production build must reference the API same-origin
      (relative ``/api/v1``) only.
-  6. DOCKER BUILD-CONTEXT HYGIENE (Phase20 PD-SEC-07) — ``.dockerignore`` at
-     the repo root must exist and exclude ``.env`` / ``.env.*`` (while keeping
-     ``.env.example``), ``logs/``, ``*.db`` / ``*.sqlite*`` runtime databases,
-     ``tmp/``/``temp/`` and local Ollama config (``.ollama/``) so operator
-     secrets never reach a Docker daemon/builder/build cache.
+6. DOCKER BUILD-CONTEXT HYGIENE (Phase20 PD-SEC-07) — ``.dockerignore`` at
+      the repo root must exist and exclude ``.env`` / ``.env.*`` (while keeping
+      ``.env.example``), ``logs/``, ``*.db`` / ``*.sqlite*`` runtime databases,
+      ``tmp/``/``temp/`` and local Ollama config (``.ollama/``) so operator
+      secrets never reach a Docker daemon/builder/build cache.
+   7. PROD COMPOSE LOGGING BOUNDS (Phase21 F-04) — every public service in
+      ``docker-compose.prod.yml`` (``procedural-detective`` and ``caddy``) must
+      carry a ``logging.driver: json-file`` block with ``max-size`` /
+      ``max-file`` so container stdout logs (uvicorn/Caddy access logs) are
+      rotated by the runtime instead of growing without limit.
 
 Exit code: 0 ONLY when every non-optional check passes (with
 ``--allow-hosted-placeholders``, hosting/video-only placeholders and
@@ -854,6 +859,128 @@ def check_dockerignore(repo_root: Path) -> list[Finding]:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 21 F-04 — bounded container stdout logs in the PROD compose profile
+# --------------------------------------------------------------------------- #
+
+# The public services in ``docker-compose.prod.yml`` that write access logs to
+# stdout (uvicorn access logs; Caddy access/error logs). Both MUST carry a
+# bounded json-file rotation policy so container stdout never grows without
+# limit. The backend's OWN application file logs (RotatingFileHandler,
+# 5 MB x 3) are separate and stay as-is — this gate pins the container envelope.
+#
+# The parsing below is STDLIB-ONLY (the tool deliberately adds no undeclared
+# dependency): the compose file is structurally scanned by indentation, and the
+# logging block's option values are matched exactly (quoted or unquoted).
+_COMPOSE_PROD_FILE = "docker-compose.prod.yml"
+_BOUNDED_COMPOSE_SERVICES = ("procedural-detective", "caddy")
+_BOUNDED_LOG_DRIVER = "json-file"
+_BOUNDED_LOG_MAX_SIZE = "10m"
+_BOUNDED_LOG_MAX_FILE = "5"
+
+# The canonical bounded logging block, matched relative to a service block:
+#   logging:
+#     driver: json-file
+#     options:
+#       max-size: "10m"
+#       max-file: "5"
+# Values may appear quoted or unquoted (compose renderers normalize to unquoted).
+_COMPOSE_LOGGING_BLOCK_RE = re.compile(
+    r"^\s*logging:\s*$"
+    r"\n\s+driver:\s+json-file\s*$"
+    r"\n\s+options:\s*$"
+    r"\n\s+max-size:\s+(?:\"10m\"|10m)\s*$"
+    r"\n\s+max-file:\s+(?:\"5\"|5)\s*$",
+    re.MULTILINE,
+)
+
+
+def _compose_service_blocks(text: str) -> dict[str, list[str]]:
+    """``{service name: raw lines}`` of every top-level ``services.`` block.
+
+    A minimal, dependency-free YAML-subset scanner: top-level keys sit at
+    column 0; ``services`` at column 0 opens the map; service names are the
+    column-2 keys (``  <name>:``); everything more-indented belongs to the
+    current service until a column-2 key (or end of ``services``). Comments
+    and blank lines are kept (harmless) so block boundaries stay reliable.
+    """
+    services: dict[str, list[str]] = {}
+    in_services = False
+    current: str | None = None
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        content = raw.strip()
+        if not in_services:
+            if content == "services:":
+                in_services = True
+            continue
+        if indent == 0 and not content.startswith("#"):
+            break  # services map ended (next top-level key / end of file)
+        if indent == 2 and content.endswith(":") and not content.startswith(("#", "-", "&", "*")):
+            current = content[:-1]
+            services.setdefault(current, [])
+            continue
+        if current is not None:
+            services.setdefault(current, []).append(raw.rstrip())
+    return services
+
+
+def check_compose_logging_bounds(repo_root: Path) -> list[Finding]:
+    """F-04: the PROD compose services carry a container logging bound.
+
+    Asserts every public service (``procedural-detective`` and ``caddy``) in
+    ``docker-compose.prod.yml`` declares ``logging.driver: json-file`` with
+    ``max-size: "10m"`` / ``max-file: "5"`` options, so the container runtime
+    rotates their stdout immediately instead of letting them grow unbounded.
+    """
+    compose = repo_root / _COMPOSE_PROD_FILE
+    if not compose.is_file():
+        return [
+            Finding(
+                "compose-logging-bounds", "ok",
+                f"{_COMPOSE_PROD_FILE} not present in this document tree — "
+                "nothing to bound (the tracked repo always ships it)",
+            )
+        ]
+    try:
+        text = compose.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [
+            Finding(
+                "compose-logging-bounds", "fail",
+                f"{_COMPOSE_PROD_FILE} cannot be read: {exc}",
+            )
+        ]
+    services = _compose_service_blocks(text)
+    problems: list[str] = []
+    for name in _BOUNDED_COMPOSE_SERVICES:
+        block = services.get(name)
+        if block is None:
+            problems.append(f"service {name!r} is missing from {_COMPOSE_PROD_FILE}")
+            continue
+        body = "\n".join(block)
+        if not _COMPOSE_LOGGING_BLOCK_RE.search(body):
+            problems.append(
+                f"service {name!r} must carry logging.driver: "
+                f"{_BOUNDED_LOG_DRIVER!r} with max-size "
+                f"{_BOUNDED_LOG_MAX_SIZE!r} / max-file {_BOUNDED_LOG_MAX_FILE!r}"
+            )
+    if problems:
+        return [
+            Finding("compose-logging-bounds", "fail", "; ".join(problems))
+        ]
+    return [
+        Finding(
+            "compose-logging-bounds", "ok",
+            f"{_COMPOSE_PROD_FILE}: procedural-detective + caddy bound stdout via "
+            f"{_BOUNDED_LOG_DRIVER} ({_BOUNDED_LOG_MAX_SIZE} x {_BOUNDED_LOG_MAX_FILE} "
+            "rotating files)",
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # orchestration
 # --------------------------------------------------------------------------- #
 
@@ -872,6 +999,7 @@ def run_all(
     findings.extend(check_tracked_secrets(tracked))
     findings.extend(scan_private_endpoints(repo_root, tracked))
     findings.extend(check_dockerignore(repo_root))
+    findings.extend(check_compose_logging_bounds(repo_root))
     findings.extend(scan_frontend_build(frontend_dir))
     return findings
 
@@ -887,7 +1015,8 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Release-hygiene check: placeholders, THIRD_PARTY.md, tracked "
             ".env/logs/dbs, private endpoint leakage, Docker build-context "
-            "hygiene (.dockerignore) and the frontend build."
+            "hygiene (.dockerignore), PROD compose logging bounds (F-04) and "
+            "the frontend build."
         ),
     )
     parser.add_argument(

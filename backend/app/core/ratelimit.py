@@ -32,6 +32,23 @@ hackathon; the global key adds one entry).
 Concurrency/atomicity guarantee: every mutation runs under a single
 ``threading.Lock`` per limiter, so ``allow`` is atomic — a burst of concurrent
 requests can NEVER double-spend a window slot (no TOCTOU).
+
+Phase 21 F-05 (LOW — bounded key cardinality): the per-key map is now bounded
+by ``max_keys`` (``DEFAULT_RATELIMIT_MAX_KEYS``, 10 000). Three mechanisms
+keep memory bounded WITHOUT ever evicting an active window to make room:
+
+- **Lazy per-key eviction** on ``allow()``: a key whose latest hits have fully
+  aged out of its window is removed from the map on its own next ``allow()``
+  (an expired identity is immediately reusable — a fresh empty window).
+- **Bounded periodic sweep**: at most every ``cleanup_cadence_seconds``
+  (default 60s) a full sweep removes every fully-expired key, so identities
+  that NEVER return cannot accumulate (never an O(n) pass per request).
+- **Hard key ceiling, fail closed**: a NEW key beyond ``max_keys`` is denied
+  (the same sanitized 429-style denial as a full window) until a sweep frees a
+  slot — an ACTIVE window is never evicted to admit a new identity. This is a
+  documented policy: under sustained distinct-identity pressure the LIMITER
+  denies new peers (no map growth), and existing in-window peers keep their
+  exact Phase 20 behavior.
 """
 
 from __future__ import annotations
@@ -59,6 +76,24 @@ _TRUSTED_FORWARDED_HEADER = "x-forwarded-for"
 # (peer IPs are validated ASCII; this is a control byte).
 _GLOBAL_KEY = "\x00global"
 
+# Phase 21 F-05 — bounded identity-map cardinality. ``SlidingWindowRateLimiter``
+# keeps one in-memory bucket per key; without a bound a hostile peer rotation
+# (fresh per-IP identities) could grow the dict without limit. 10 000 distinct
+# concurrent identities is far beyond any legitimate hackathon/demo peer set
+# while comfortably bounded for a single-process deployment (Phase 20 §8.1
+# explicitly accepts in-process rate state for the single-process deployment
+# mode). The ceiling is fail-closed: a new identity beyond it is DENIED (the
+# route maps the denial to the same sanitized 429 envelope), never recorded,
+# and never admitted by evicting an ACTIVE window.
+DEFAULT_RATELIMIT_MAX_KEYS = 10_000
+
+# Bounded cleanup cadence (seconds): the full stale-key sweep runs at most this
+# often per limiter instance (default 60s), never on every ``allow()``. The
+# per-key lazy eviction still frees a key the moment its own window has fully
+# expired on its own next use, so in-window correctness never depends on the
+# sweep.
+DEFAULT_RATELIMIT_CLEANUP_CADENCE_SECONDS = 60.0
+
 
 class Clock(Protocol):
     """The only time source the rate limiters may read (test seam)."""
@@ -73,6 +108,17 @@ class SlidingWindowRateLimiter:
     ``limit`` hits inside ``(now - window_seconds, now]``; otherwise it denies
     WITHOUT recording. Older timestamps are evicted on every call so a window
     always rolls forward — a key recovers as soon as its oldest hits age out.
+
+    Phase 21 F-05 bounding (see the module docstring for the full policy):
+
+    - ``max_keys`` (default ``DEFAULT_RATELIMIT_MAX_KEYS``, 10 000): the hard
+      ceiling on distinct keys. A NEW key beyond it is denied fail-closed until
+      a sweep frees a slot.
+    - ``cleanup_cadence_seconds`` (default 60): a full stale-key sweep runs at
+      most this often per instance (never an O(n) pass on every request).
+    - Lazy eviction on ``allow()`` removes a key as soon as ITS OWN window has
+      fully expired (expired identities are immediately reusable).
+    - An ACTIVE window is NEVER evicted to make room for a new key.
     """
 
     def __init__(
@@ -81,6 +127,8 @@ class SlidingWindowRateLimiter:
         clock: Clock,
         limit: int,
         window_seconds: float,
+        max_keys: int = DEFAULT_RATELIMIT_MAX_KEYS,
+        cleanup_cadence_seconds: float = DEFAULT_RATELIMIT_CLEANUP_CADENCE_SECONDS,
     ) -> None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("rate limiter limit must be an int > 0")
@@ -88,9 +136,20 @@ class SlidingWindowRateLimiter:
             window_seconds, (int, float)
         ) or float(window_seconds) <= 0:
             raise ValueError("rate limiter window_seconds must be a number > 0")
+        if isinstance(max_keys, bool) or not isinstance(max_keys, int) or max_keys <= 0:
+            raise ValueError("rate limiter max_keys must be an int > 0")
+        if isinstance(cleanup_cadence_seconds, bool) or not isinstance(
+            cleanup_cadence_seconds, (int, float)
+        ) or float(cleanup_cadence_seconds) <= 0:
+            raise ValueError(
+                "rate limiter cleanup_cadence_seconds must be a number > 0"
+            )
         self._clock = clock
         self._limit = int(limit)
         self._window = float(window_seconds)
+        self._max_keys = int(max_keys)
+        self._cadence = float(cleanup_cadence_seconds)
+        self._last_sweep_at = 0.0
         self._lock = threading.Lock()
         self._hits: dict[str, list[float]] = {}
 
@@ -102,21 +161,105 @@ class SlidingWindowRateLimiter:
     def window_seconds(self) -> float:
         return self._window
 
+    @property
+    def max_keys(self) -> int:
+        """Hard ceiling on distinct live keys (F-05)."""
+        return self._max_keys
+
+    @property
+    def cleanup_cadence_seconds(self) -> float:
+        """How often the full stale-key sweep may run (F-05)."""
+        return self._cadence
+
+    @property
+    def key_count(self) -> int:
+        """Number of distinct keys currently tracked (F-05 inspection/tests)."""
+        with self._lock:
+            return len(self._hits)
+
+    def _prune_key(self, key: str, current: float) -> None:
+        """Drop one key's aged-out hits; remove the key when its window has
+        fully expired (lazy eviction — the F-05 stale-key path)."""
+        bucket = self._hits.get(key)
+        if not bucket:
+            return
+        cutoff = current - self._window
+        # The bucket is append-only FIFO with monotonic timestamps, so every
+        # aged-out hit sits at the front; scanning from the front is enough.
+        while bucket and bucket[0] < cutoff:
+            bucket.pop(0)
+        if not bucket:
+            del self._hits[key]
+
+    def _full_sweep(self, current: float) -> int:
+        """Unconditional stale-key eviction (the F-05 full map pass).
+
+        Removes every key whose latest window has fully expired. An ACTIVE
+        window is never touched. Returns the number of evicted keys.
+        """
+        evicted = 0
+        cutoff = current - self._window
+        for key in tuple(self._hits.keys()):
+            bucket = self._hits.get(key)
+            if not bucket:
+                del self._hits[key]
+                evicted += 1
+                continue
+            while bucket and bucket[0] < cutoff:
+                bucket.pop(0)
+            if not bucket:
+                del self._hits[key]
+                evicted += 1
+        return evicted
+
+    def _sweep_expired(self, current: float) -> int:
+        """Cadence-gated full sweep: runs at most every ``cleanup_cadence_seconds``."""
+        if current - self._last_sweep_at < self._cadence:
+            return 0
+        self._last_sweep_at = float(current)
+        return self._full_sweep(current)
+
+    def sweep_expired(self, now: float | None = None) -> int:
+        """Public deterministic stale-key eviction (F-05; tests/inspection).
+
+        Runs the full sweep unconditionally, records the sweep time, and
+        returns how many keys were evicted. Same atomicity/lock as ``allow``.
+        """
+        with self._lock:
+            current = float(self._clock.now() if now is None else now)
+            self._last_sweep_at = float(current)
+            return self._full_sweep(current)
+
     def allow(self, key: str, now: float | None = None) -> bool:
         """Atomically reserve one window slot for ``key`` when under the limit.
 
         Returns True (slot recorded) or False (denied, nothing recorded).
         ``now`` is the caller-provided time; the injected clock is used when
         None. Deterministic under concurrency: serialized by the internal lock.
+
+        F-05 denial surface: a FALSE return is either a full in-window bucket or
+        the hard key ceiling (a NEW identity beyond ``max_keys``). Both map to
+        the SAME sanitized 429 envelope at the route layer — the reason is never
+        exposed. An active window is never evicted to admit a new identity.
         """
         with self._lock:
             current = float(self._clock.now() if now is None else now)
-            bucket = self._hits.setdefault(str(key), [])
-            cutoff = current - self._window
-            # Rolling window: drop hits that have already aged out (the bucket
-            # is FIFO, so scanning from the front is enough).
-            while bucket and bucket[0] < cutoff:
-                bucket.pop(0)
+            key = str(key)
+            # Bounded cadence sweep first: frees slots for fully-expired keys at
+            # most every cleanup_cadence_seconds (never per-request O(n)).
+            self._sweep_expired(current)
+            # Lazy per-key eviction: an arriving key's expired hits are dropped;
+            # a fully-expired key is removed from the map (immediately reusable).
+            self._prune_key(key, current)
+            bucket = self._hits.get(key)
+            if bucket is None:
+                if len(self._hits) >= self._max_keys:
+                    # HARD key ceiling: fail closed for a NEW identity. Never
+                    # evict an active window to admit it; the bounded sweep (or
+                    # the key owner's own expiry) frees the slot.
+                    return False
+                bucket = []
+                self._hits[key] = bucket
             if len(bucket) >= self._limit:
                 return False
             bucket.append(current)

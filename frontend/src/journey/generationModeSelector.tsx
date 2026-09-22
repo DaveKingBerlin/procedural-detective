@@ -1,74 +1,73 @@
-import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
-import {
-  generationModeOptionLabel,
-  selectableGenerationModes,
-} from "./generationMode";
+import type { GenerationCapabilitiesResponse } from "../api/types";
+import { generationModeLine } from "./generationMode";
+import { effectiveProviderMode } from "./providerMode";
 
 /**
- * Phase 16 Track B — the generation-mode selector (landing + /new).
+ * Phase 21 F-03 — READ-ONLY generation-mode display (landing + /new).
  *
- * A PURE renderer: the caller (a route) owns the fetch (via
- * src/hooks/useGenerationCapabilities.ts — there is NO fetch or client call
- * in any component) and passes the parsed capabilities in, plus the current
- * selection and the select callback. Behaviour:
+ * The Phase 16 interactive selector was REMOVED because the selected mode was
+ * never sent to the backend: the backend provider is process-global
+ * (GENERATION_PROVIDER), so a client-side "choice" was a lie. The product now
+ * shows ONE truthful, backend-authoritative capability line driven solely by
+ * GET /api/v1/generation-capabilities — exactly what the running backend
+ * reports. There is NO <select>, NO option, NO onChange/onSelect and no
+ * persisted "selection": the browser never implies that a click changes the
+ * provider.
+ *
+ * The caller (a route) owns the fetch (src/hooks/useGenerationCapabilities.ts
+ * — there is NO fetch or client call in this component) and passes the parsed
+ * capabilities in. Behaviour:
  *
  *   - while capabilities are unknown (`null`) nothing is rendered — no claim
  *     is made until the backend has reported;
- *   - when only Demo is offerable the selector is replaced by the honest
- *     static notice "Demo mode active" (`data-testid=generation-mode-demo-notice`);
- *   - otherwise a small select (`data-testid=generation-mode-selector` with
- *     `data-testid=generation-mode-select`) offers exactly the modes the
- *     backend reported as available: Demo always, Local AI / Cloud AI only
- *     when `available: true` — never an unavailable mode as an option;
- *   - the Local option carries the honest label + verbatim model display name
- *     + the explicit Ready tag (unavailable modes are never rendered, so a
- *     rendered Local option is always honest about being Ready);
- *   - a stored selection that no longer matches an offered mode falls back to
- *     Demo (the select can never hold an unoffered value).
+ *   - when only the deterministic demo mode is offerable (`effectiveProviderMode
+ *     === "fake"`, which also covers unknown/unreachable payloads that resolve
+ *     to the demo-only allowlist) the static honest notice "Demo mode active"
+ *     (`data-testid=generation-mode-demo-notice`) is shown together with the
+ *     truthful read-only line "Generation mode: Deterministic demo"
+ *     (`data-testid=generation-mode-line`) — never a provider claim, never a
+ *     switch;
+ *   - otherwise the container (`data-testid=generation-mode-selector`) shows
+ *     the single read-only line: "Generation mode: Local AI — <model> — Ready"
+ *     when the backend reports the local pipeline available, or
+ *     "Generation mode: <capability label>" when the backend reports a live
+ *     provider. The DTO label/model pass verbatim ONLY after the allowlist +
+ *     last-line sanitizer guards (no host/IP/URL/raw markup ever rendered).
  */
-export interface GenerationModeSelectorProps {
+export interface GenerationModeDisplayProps {
   /** Parsed allowlist DTO; null while the backend has not reported yet. */
   capabilities: GenerationCapabilitiesResponse | null;
-  /** The current selection (falls back to Demo when not offerable). */
-  value: GenerationModeId;
-  /** Called with the player's chosen mode id. */
-  onSelect: (mode: GenerationModeId) => void;
 }
 
-export function GenerationModeSelector({
-  capabilities,
-  value,
-  onSelect,
-}: GenerationModeSelectorProps) {
+export function GenerationModeDisplay({ capabilities }: GenerationModeDisplayProps) {
   if (capabilities === null) return null; // unknown until the backend reports
 
-  const modes = selectableGenerationModes(capabilities);
-
-  if (modes.length <= 1) {
+  if (effectiveProviderMode(capabilities) === "fake") {
+    // Demo-only (or unknown/unreachable payloads resolved to the demo-only
+    // allowlist): the honest static notice plus the truthful deterministic
+    // line. No selector container, no options — nothing implies a switch.
+    // NOTE: `generation-mode-demo-notice` must keep its exact copy "Demo
+    // mode active" (QA-owned e2e asserts it verbatim).
     return (
-      <p className="generation-mode-demo-notice" data-testid="generation-mode-demo-notice">
-        Demo mode active
-      </p>
+      <div className="generation-mode generation-mode--demo">
+        <p className="generation-mode-demo-notice" data-testid="generation-mode-demo-notice">
+          Demo mode active
+        </p>
+        <p className="generation-mode-line" data-testid="generation-mode-line">
+          {generationModeLine(capabilities)}
+        </p>
+      </div>
     );
   }
 
-  const effective = modes.some((mode) => mode.id === value) ? value : "demo";
-
+  // A non-demo provider is configured AND available: the single read-only,
+  // backend-authoritative line. Deliberately NOT a <select>: the container
+  // testid is preserved (e2e relies on it) but it carries no control.
   return (
     <div className="generation-mode-selector" data-testid="generation-mode-selector">
-      <label htmlFor="generation-mode-select">Generation mode</label>
-      <select
-        id="generation-mode-select"
-        data-testid="generation-mode-select"
-        value={effective}
-        onChange={(event) => onSelect(event.target.value as GenerationModeId)}
-      >
-        {modes.map((mode) => (
-          <option key={mode.id} value={mode.id}>
-            {generationModeOptionLabel(mode)}
-          </option>
-        ))}
-      </select>
+      <p className="generation-mode-line" data-testid="generation-mode-line">
+        {generationModeLine(capabilities)}
+      </p>
     </div>
   );
 }

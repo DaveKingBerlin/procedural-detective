@@ -37,7 +37,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Sequence
 
-from sqlalchemy import event, select, text
+from sqlalchemy import bindparam, event, select, text
 from sqlalchemy.engine import Engine, create_engine
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -58,6 +58,16 @@ _WRITE_RETRIES = 5
 
 class StoreError(Exception):
     """Base class for store-level domain errors (never SQLAlchemy errors)."""
+
+
+class CaseNotFoundError(StoreError):
+    """The audited operator-deletion target case does not exist (F-07).
+
+    Raised by ``delete_case_cascade`` after a ROLLBACK of the deletion
+    transaction when ``case_id`` names no ``cases`` row — nothing is dropped,
+    nothing is deleted, and the immutability triggers are untouched (SQLite
+    DDL is transactional, so the whole attempt aborts atomically).
+    """
 
 
 class DuplicateSession(StoreError):
@@ -90,6 +100,23 @@ class DuplicateCredential(StoreError):
 
 class DuplicatePlaythrough(StoreError):
     """A playthrough_id already exists."""
+
+
+class PlaythroughCapacityError(StoreError):
+    """Per-case playthrough admission denied (Phase 21 F-02).
+
+    Raised inside the create transaction when the pinned (case_id,
+    case_version) is over one of the configured caps. ``kind`` is the
+    sanitized reason: ``"active"`` (too many non-terminal rows) or
+    ``"retained"`` (too many total rows and not enough completed rows to
+    prune). The API layer maps either kind to the SAME sanitized
+    ``429 PLAYTHROUGH_LIMIT_EXCEEDED`` envelope — the kind/counters are never
+    exposed to callers.
+    """
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class DuplicateAccusation(StoreError):
@@ -863,6 +890,8 @@ class Store:
         state: str,
         created_at: float,
         expires_at: float,
+        max_active: int | None = None,
+        max_retained: int | None = None,
     ) -> Playthrough:
         """Atomically resolve the EXACT version and pin a new playthrough.
 
@@ -873,6 +902,33 @@ class Store:
         playthrough creation (Phase5 G/N): the pin can never reference a
         version that becomes not-published, and resolution NEVER follows
         "latest".
+
+        Phase 21 F-02 — bounded admission (optional ``max_active`` /
+        ``max_retained``; None = unlimited, used by low-level seeding callers
+        that bypass the API caps on purpose). Enforcement is INSIDE this same
+        transaction, so a concurrent create burst can never exceed a cap:
+
+        - ``max_active`` (ACTIVE = state in {CREATED, PLAYING}): when the
+          non-terminal count is already at the cap the create raises
+          ``PlaythroughCapacityError("active", ...)`` with ZERO side effects
+          (no row, no prune) — existing playthroughs are preserved;
+        - ``max_retained`` (total rows, all states): when the retained count
+          is at the ceiling, the OLDEST COMPLETED ({ACCUSED, REVEALED}) rows
+          are pruned (governed trigger carve-out — NEVER an active row) until
+          the new row fits; when not enough completed rows exist, the create
+          raises ``PlaythroughCapacityError("retained", ...)`` (the case is
+          at capacity) AFTER a full rollback that also restores every dropped
+          immutability trigger.
+
+        Atomicity: every write transaction is serialized by the store's own
+        ``self._lock`` (RLock) and sits behind SQLite's exclusive write lock,
+        and the admission counts are SELECTed INSIDE the same transaction that
+        performs the INSERT — a concurrent burst through THIS store instance
+        can never both pass a cap (deployment mode is documented single-
+        process, Phase 20 §8.1; a multi-replica deployment must move the caps
+        to the shared database atomically, out of scope here). A rejected
+        create creates NO row and issues NO token (the caller simply drops the
+        never-persisted token value).
         """
         with self.transaction() as session:
             version_row = session.get(CaseVersion, (case_id, case_version))
@@ -884,6 +940,42 @@ class Store:
                 raise VersionNotPublishedError(
                     f"case version ({case_id!r}, v{case_version}) is not published"
                 )
+            if max_active is not None:
+                active = int(
+                    session.execute(
+                        text(
+                            "SELECT count(*) FROM playthroughs WHERE case_id = :cid "
+                            "AND case_version = :v "
+                            "AND state IN ('CREATED', 'PLAYING')"
+                        ),
+                        {"cid": case_id, "v": int(case_version)},
+                    ).scalar_one()
+                )
+                if active >= int(max_active):
+                    raise PlaythroughCapacityError(
+                        "active",
+                        f"case ({case_id!r}, v{int(case_version)}) has reached "
+                        f"its active playthrough cap ({active} >= {int(max_active)})",
+                    )
+            if max_retained is not None:
+                retained = int(
+                    session.execute(
+                        text(
+                            "SELECT count(*) FROM playthroughs WHERE case_id = :cid "
+                            "AND case_version = :v"
+                        ),
+                        {"cid": case_id, "v": int(case_version)},
+                    ).scalar_one()
+                )
+                if retained >= int(max_retained):
+                    # Rows needed to shrink so exactly one more insert fits.
+                    excess = retained - int(max_retained) + 1
+                    self._prune_oldest_completed_for_retention(
+                        session,
+                        case_id=case_id,
+                        case_version=int(case_version),
+                        needed=excess,
+                    )
             row = Playthrough(
                 playthrough_id=playthrough_id,
                 case_id=case_id,
@@ -908,6 +1000,105 @@ class Store:
                 state=row.state,
                 created_at=row.created_at,
                 expires_at=row.expires_at,
+            )
+
+    def _prune_oldest_completed_for_retention(
+        self,
+        session: Session,
+        *,
+        case_id: str,
+        case_version: int,
+        needed: int,
+    ) -> None:
+        """F-02 bounded retention: prune at most ``needed`` OLDEST COMPLETED
+        rows for the pinned tuple (with their player_knowledge / accusation
+        rows) so a new insert fits under ``max_retained``.
+
+        Only rows whose state is TERMINAL ({ACCUSED, REVEALED}) are ever
+        selected; CREATED/PLAYING rows are never deleted. When fewer than
+        ``needed`` completed rows exist, the whole create is rejected
+        (``PlaythroughCapacityError("retained")``) — the case is at capacity
+        and the retention returns the transaction to its original state.
+
+        The ``accusations`` table is protected by BEFORE UPDATE/DELETE
+        triggers (Phase 7 H / N4). Deleting a completed playthrough therefore
+        needs the SAME governed carve-out as the audited operator deletion
+        (F-07 / ``delete_case_cascade``): the two accusation triggers are
+        dropped, the rows are deleted child->parent in foreign-key order, the
+        triggers are re-created IDENTICALLY from the canonical DDL
+        (``app.persistence.triggers``), and their presence is VERIFIED before
+        committing. SQLite DDL is transactional, so ANY failure — including a
+        verification mismatch — rolls the whole transaction back, restoring
+        the dropped triggers and the deleted rows as if nothing happened.
+        """
+        if needed <= 0:
+            return
+        rows = list(
+            session.execute(
+                text(
+                    "SELECT playthrough_id, created_at FROM playthroughs "
+                    "WHERE case_id = :cid AND case_version = :v "
+                    "AND state IN ('ACCUSED', 'REVEALED') "
+                    "ORDER BY created_at ASC, playthrough_id ASC LIMIT :n"
+                ),
+                {"cid": case_id, "v": int(case_version), "n": int(needed)},
+            )
+        )
+        if len(rows) < needed:
+            raise PlaythroughCapacityError(
+                "retained",
+                f"case ({case_id!r}, v{case_version}) is at its retained "
+                "playthrough capacity and no completed rows could be pruned",
+            )
+        ids: tuple[str, ...] = tuple(str(row[0]) for row in rows)
+        from app.persistence.triggers import IMMUTABILITY_TRIGGERS
+
+        for name, _event, table, _message in IMMUTABILITY_TRIGGERS:
+            if table == "accusations":
+                session.execute(text(f"DROP TRIGGER IF EXISTS {name}"))
+        try:
+            # Child -> parent delete order (foreign-key order; the accusation
+            # and knowledge rows are removed explicitly so retention never
+            # depends on cascade timing).
+            session.execute(
+                text(
+                    "DELETE FROM player_knowledge WHERE playthrough_id IN :ids"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"ids": ids},
+            )
+            session.execute(
+                text(
+                    "DELETE FROM accusations WHERE playthrough_id IN :ids"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"ids": ids},
+            )
+            session.execute(
+                text(
+                    "DELETE FROM playthroughs WHERE playthrough_id IN :ids"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"ids": ids},
+            )
+        finally:
+            for name, _event, table, _message in IMMUTABILITY_TRIGGERS:
+                if table == "accusations":
+                    session.execute(
+                        text(
+                            f"CREATE TRIGGER {name} BEFORE {_event} ON {table} "
+                            f"BEGIN SELECT RAISE(ABORT, '{_message}'); END"
+                        )
+                    )
+        present = int(
+            session.execute(
+                text(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' "
+                    "AND name IN ('accusations_no_delete', 'accusations_no_update')"
+                )
+            ).scalar_one()
+        )
+        if present != 2:
+            raise StoreError(
+                "playthrough retention aborted: accusation immutability "
+                "triggers were not fully re-registered"
             )
 
     def get_playthrough_by_id(self, playthrough_id: str) -> Playthrough | None:
@@ -1263,6 +1454,247 @@ class Store:
                 opened_at=opened,
                 updated_at=row.updated_at,
             )
+
+    # ------------------------------------------------------------------ #
+    # audited operator deletion (Phase 21 F-07) — tools/delete_case.py
+    # ------------------------------------------------------------------ #
+    # There was NO existing store delete/cascade path (searched Phase 21
+    # F-07): the store exposes only insert/read/transition units of work.
+    # ``delete_case_cascade`` is the single audited deletion unit, used by the
+    # maintenance command and the scratch-DB test. It performs the EXACT
+    # table set of the documented procedure (docs/PRIVACY.md §3.2) inside ONE
+    # transaction, re-registers the immutability triggers from the canonical
+    # DDL (app/persistence/triggers.py, mirroring migrations 0002/0004), and
+    # aborts (rolls back) on ANY mismatch.
+
+    def count_case_references(self, case_id: str) -> dict[str, int]:
+        """Row counts of one case across every table (F-07 preview/verification).
+
+        Keys: ``cases`` plus every child table that references ``case_id``
+        (``player_knowledge`` and ``accusations`` are counted through their
+        owning ``playthroughs``). Read-only; ``None`` per table when the case
+        does not exist is NOT special-cased — counts are simply zero.
+        """
+        with self._read_session() as session:
+            return self._count_case_references(session, case_id)
+
+    def missing_immutability_triggers(self) -> frozenset[str]:
+        """Subset of the canonical 4 immutability triggers NOT registered (F-07).
+
+        Read-only introspection for the operator command's post-cleanup check;
+        the application never relies on dropping them outside
+        ``delete_case_cascade``.
+        """
+        from app.persistence.triggers import missing_immutability_trigger_names
+
+        with self._read_session() as session:
+            return missing_immutability_trigger_names(session)
+
+    def _count_case_references(self, session: Session, case_id: str) -> dict[str, int]:
+        counts: dict[str, int] = {
+            "cases": self._table_count(session, "cases", "case_id", case_id),
+            "creator_credentials": self._table_count(
+                session, "creator_credentials", "case_id", case_id
+            ),
+            "case_versions": self._table_count(
+                session, "case_versions", "case_id", case_id
+            ),
+            "generation_attempts": self._table_count(
+                session, "generation_attempts", "case_id", case_id
+            ),
+            "published_versions": self._table_count(
+                session, "published_versions", "case_id", case_id
+            ),
+            "playthroughs": self._table_count(session, "playthroughs", "case_id", case_id),
+            "player_knowledge": self._table_count(
+                session,
+                "player_knowledge",
+                "playthrough_id",
+                None,
+                where="playthrough_id IN (SELECT playthrough_id FROM playthroughs "
+                "WHERE case_id = :cid)",
+                case_id=case_id,
+            ),
+            "accusations": self._table_count(
+                session,
+                "accusations",
+                "case_id",
+                case_id,
+            ),
+        }
+        return counts
+
+    def _table_count(
+        self,
+        session: Session,
+        table: str,
+        column: str,
+        value: str | None,
+        *,
+        where: str | None = None,
+        case_id: str | None = None,
+    ) -> int:
+        if column not in _COUNTABLE_COLUMNS:
+            raise ValueError(f"unexpected countable column {column!r}")
+        if table not in _COUNTABLE_TABLES:
+            raise ValueError(f"unexpected countable table {table!r}")
+        if value is not None:
+            sql = text(f"SELECT count(*) FROM {table} WHERE {column} = :v")
+            raw = session.execute(sql, {"v": value}).scalar_one()
+        else:
+            sql = text(f"SELECT count(*) FROM {table} WHERE {where}")
+            raw = session.execute(sql, {"cid": case_id}).scalar_one()
+        return int(raw)
+
+    def delete_case_cascade(
+        self,
+        case_id: str,
+        *,
+        verify_triggers: bool = True,
+    ) -> dict[str, int]:
+        """Atomically delete ONE case and every row referencing it (F-07).
+
+        ONE transaction does the concatenation of the documented raw-SQL
+        procedure (docs/PRIVACY.md §3.2) as an audited unit of work:
+
+          1. validates the ``cases`` row exists (else ``CaseNotFoundError``
+             after a full rollback — nothing dropped, triggers untouched);
+          2. drops the immutability triggers on ``published_versions`` and
+             ``accusations`` (they must be absent to delete those rows — the
+             documented caveat: the guarantee is temporarily suspended ONLY for
+             the rows being deleted);
+          3. deletes child -> parent in foreign-key order (player_knowledge,
+             accusations, playthroughs, creator_credentials,
+             generation_attempts, published_versions, case_versions, cases);
+          4. re-creates the immutability triggers IDENTICALLY from the
+             canonical DDL (migrations 0002/0004 via app/persistence/triggers);
+          5. verifies NO remnant row references the case and the case row is
+             gone, plus — when ``verify_triggers`` — that all 4 triggers are
+             registered; ANY mismatch raises ``StoreError`` and the WHOLE
+             transaction rolls back (SQLite DDL is transactional, so a failed
+             re-creation restores the original guard set too).
+
+        Returns ``{table: rows_deleted}`` for the deleted rows. Never raises
+        SQLAlchemy errors to callers; ``CaseNotFoundError`` / ``StoreError``
+        are the only exit shape for a mismatch.
+        """
+        from app.persistence.triggers import (
+            IMMUTABILITY_TRIGGERS,
+            missing_immutability_trigger_names,
+            registered_immutability_trigger_names,
+        )
+
+        with self.transaction() as session:
+            if session.get(Case, case_id) is None:
+                raise CaseNotFoundError(f"case {case_id!r} does not exist")
+            # 2) drop the two no_delete guards (and their update twins) so the
+            #    published payload / accusation rows of THIS case can be
+            #    removed; they are re-created identically in step 4.
+            for name, _event, _table, _message in IMMUTABILITY_TRIGGERS:
+                session.execute(
+                    text(f"DROP TRIGGER IF EXISTS {name}")
+                )
+            # 3) child -> parent delete order (one row of published_versions
+            #    is covered by the dropped trigger; PRAGMA foreign_keys=ON
+            #    would also block parent deletes while children remain).
+            deleted: dict[str, int] = {}
+            deleted["player_knowledge"] = session.execute(
+                text(
+                    "DELETE FROM player_knowledge WHERE playthrough_id IN "
+                    "(SELECT playthrough_id FROM playthroughs WHERE case_id = :cid)"
+                ),
+                {"cid": case_id},
+            ).rowcount
+            deleted["accusations"] = session.execute(
+                text("DELETE FROM accusations WHERE case_id = :cid"),
+                {"cid": case_id},
+            ).rowcount
+            deleted["playthroughs"] = session.execute(
+                text("DELETE FROM playthroughs WHERE case_id = :cid"),
+                {"cid": case_id},
+            ).rowcount
+            deleted["creator_credentials"] = session.execute(
+                text("DELETE FROM creator_credentials WHERE case_id = :cid"),
+                {"cid": case_id},
+            ).rowcount
+            deleted["generation_attempts"] = session.execute(
+                text("DELETE FROM generation_attempts WHERE case_id = :cid"),
+                {"cid": case_id},
+            ).rowcount
+            deleted["published_versions"] = session.execute(
+                text("DELETE FROM published_versions WHERE case_id = :cid"),
+                {"cid": case_id},
+            ).rowcount
+            deleted["case_versions"] = session.execute(
+                text("DELETE FROM case_versions WHERE case_id = :cid"),
+                {"cid": case_id},
+            ).rowcount
+            deleted["cases"] = session.execute(
+                text("DELETE FROM cases WHERE case_id = :cid"),
+                {"cid": case_id},
+            ).rowcount
+            # 4) recreate the immutability triggers IDENTICALLY (idempotent).
+            for name, event, table, message in IMMUTABILITY_TRIGGERS:
+                session.execute(
+                    text(
+                        f"CREATE TRIGGER {name} BEFORE {event} ON {table} "
+                        f"BEGIN SELECT RAISE(ABORT, '{message}'); END"
+                    )
+                )
+            # 5) abort on ANY mismatch: remnant rows or missing triggers.
+            remnants = self._count_case_references(session, case_id)
+            total = sum(remnants.values())
+            if total != 0:
+                present = {k: v for k, v in remnants.items() if v}
+                raise StoreError(
+                    "case deletion verification failed: foreign-key remnants "
+                    "remain: " + ", ".join(f"{k}={v}" for k, v in present.items())
+                )
+            if deleted["cases"] != 1:
+                raise StoreError(
+                    "case deletion verification failed: expected exactly one "
+                    "cases row deleted"
+                )
+            if verify_triggers:
+                missing = missing_immutability_trigger_names(session)
+                if missing:
+                    raise StoreError(
+                        "trigger re-creation verification failed; missing: "
+                        + ", ".join(sorted(missing))
+                    )
+                if len(registered_immutability_trigger_names(session)) < len(
+                    IMMUTABILITY_TRIGGERS
+                ):
+                    raise StoreError(
+                        "trigger re-creation verification failed: not every "
+                        "immutability trigger is registered"
+                    )
+            return deleted
+
+
+# The canonical trigger DDL lives in ``app.persistence.triggers`` (single
+# source of truth; mirrors migrations 0002/0004). ``delete_case_cascade`` and
+# the CLI reuse it so a deletion can never leave the guards missing.
+
+_COUNTABLE_TABLES = frozenset(
+    {
+        "cases",
+        "creator_credentials",
+        "case_versions",
+        "generation_attempts",
+        "published_versions",
+        "playthroughs",
+        "player_knowledge",
+        "accusations",
+    }
+)
+
+_COUNTABLE_COLUMNS = frozenset(
+    {
+        "case_id",
+        "playthrough_id",
+    }
+)
 
 
 def _copy_player_knowledge(row: PlayerKnowledge) -> PlayerKnowledge:

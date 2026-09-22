@@ -669,6 +669,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         limit=settings.generation_limit_per_ip_per_hour,
         window_seconds=60 * 60,
     )
+    # Phase 21 F-02 — bounded playthrough creation budgets (in-memory rolling
+    # 1-hour windows; the SAME single-process deployment mode as the Phase 20
+    # rate state, and the SAME F-05 bounded identity map). The per-creator
+    # identity is the stored SHA-256 token verifier (never the raw token, and
+    # never the creator identity exposed anywhere). The DURABLE per-case caps
+    # (MAX_ACTIVE/MAX_RETAINED) are enforced atomically in the store's create
+    # transaction instead — the in-memory budgets only throttle minting rate.
+    app.state.playthrough_creator_limiter = SlidingWindowRateLimiter(
+        clock=app.state.clock,
+        limit=settings.playthrough_create_limit_per_creator,
+        window_seconds=60 * 60,
+    )
+    app.state.playthrough_ip_limiter = SlidingWindowRateLimiter(
+        clock=app.state.clock,
+        limit=settings.playthrough_create_limit_per_ip,
+        window_seconds=60 * 60,
+    )
 
     app.add_middleware(
         EnvelopeCORSMiddleware,

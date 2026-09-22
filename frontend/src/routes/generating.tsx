@@ -33,11 +33,17 @@ import { stageInfoFromPhase, type StageInfo } from "../journey/generationProgres
  * request is in flight and then settle on the REAL server-reported
  * PUBLISHED/FAILED status — never a fabricated success.
  *
- * Phase 16.2 §21 — the stored generation mode (`pd_generation_mode`, written
- * by the /new selector) would travel through the flow inside every progress
- * snapshot and switch the label sequence: `local` uses the seven Local-AI
- * labels (Understanding the case… → … → Preparing the investigation…);
- * demo/unset keeps the generic labels above.
+ * Phase 16.2 §21 — the stored generation mode (`pd_generation_mode`) travels
+ * through the flow inside every progress snapshot and switches the label
+ * sequence: `local` uses the seven Local-AI labels (Understanding the case…
+ * → … → Preparing the investigation…); demo/unset keeps the generic labels
+ * above.
+ *
+ * Phase 21 F-03 — no user action writes `pd_generation_mode` anymore (the
+ * interactive provider selector was removed; the backend provider is
+ * process-global). The key can still hold values left by OLDER app versions
+ * or injected by the QA storage seam, so the read + validation below stay as
+ * defense-in-depth.
  *
  * ADV-212 — the stored mode is NEVER trusted by itself: before any Local-AI
  * label can be claimed the journey validates the mode against the LIVE
@@ -45,8 +51,8 @@ import { stageInfoFromPhase, type StageInfo } from "../journey/generationProgres
  * effect). The `local` sequence is used ONLY when the capability report
  * confirms the local pipeline is actually available; an unavailable mode, a
  * stale/tampered storage value or a fetch failure all fall back to the
- * generic/demo label sequence — the selection on /new remains the source for
- * the labels ONLY when capabilities confirm it.
+ * generic/demo label sequence — the stored value remains the label source
+ * ONLY when capabilities confirm it.
  *
  * On PUBLISHED the journey stores {pd_playthrough_token, pd_playthrough_id}
  * (reuse playthroughToken.ts) and navigates to /scene (automatic after a

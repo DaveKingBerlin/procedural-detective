@@ -53,8 +53,12 @@ http://{$CADDY_DOMAIN:localhost} {
 		transport http {
 			dial_timeout 5s
 			# Upstream generation is a long single request (bounded by
-			# CASE_GENERATION_DEADLINE_SECONDS). Keep this > that deadline.
-			response_header_timeout 330s
+			# CASE_GENERATION_DEADLINE_SECONDS, max supported 300s).
+			# P-02 timeout envelope: this MUST exceed the frontend request
+			# timeout (frontend/src/api/client.ts REQUEST_TIMEOUT_MS = 360s)
+			# with margin so the TLS edge never aborts before the browser.
+			# 420s = 360s + 60s margin (docs/DEPLOYMENT.md § timeout envelope).
+			response_header_timeout 420s
 		}
 	}
 }

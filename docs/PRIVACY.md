@@ -25,7 +25,35 @@ generated case the database stores:
 - **credential verifiers** — only the SHA-256 digest of each bearer token is
   stored, never a raw token.
 
-None of this is stored in browser storage; it is server-side only.
+### 1.1 Browser local storage (Phase 21 F-06)
+
+The browser may store, in its own `localStorage` (scoped to the deployed
+origin the player opened):
+
+- the **scoped playthrough bearer token** (the `playthroughAccessToken`
+  returned when a playthrough is created) — scoped to that single playthrough;
+- the **playthrough ID**; and
+- **notebook hypothesis pins** (which hypothesis rows the player pinned).
+
+Clarifications:
+
+- `localStorage` **persists across page reloads and browser restarts** — it is
+  durable local browser state, not a session cookie.
+- **Shared-device implications:** anyone using the same browser profile on that
+  device can **resume or edit the player's playthrough and see their pinned
+  hypotheses**. On a shared machine, play in a **private/incognito window** or
+  **clear the site data** before handing the device over.
+- **Token expiry scope:** the server-side token is scoped to its playthrough
+  and expires after `PLAYTHROUGH_TOKEN_TTL_SECONDS`; the browser's copy remains
+  in `localStorage` until the site data is cleared (or the token is otherwise
+  invalidated server-side).
+- **Clearing site data** (browser settings / "Clear site data" for the origin)
+  removes all of the above local browser state.
+
+None of the server-side database contents (§1) are stored in the browser — the
+three items above are the complete local browser state this build writes. Do
+not overstate what the backend stores: the browser copy is local to the device
+and profile, while the database keeps the server-side records described in §1.
 
 ## 2. Retention period
 

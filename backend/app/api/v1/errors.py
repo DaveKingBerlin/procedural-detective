@@ -23,6 +23,7 @@ from app.persistence.store import (
     DuplicatePlaythrough,
     DuplicatePublication,
     DuplicateSession,
+    PlaythroughCapacityError,
     StoreError,
     VersionAllocationError,
     VersionNotFoundError,
@@ -95,6 +96,17 @@ def map_service_error(exc: Exception) -> HTTPException:
         )
     if isinstance(exc, InvestigationStateError):
         return http_error(409, "NOT_PLAYING", "Playthrough is not currently playable")
+    if isinstance(exc, PlaythroughCapacityError):
+        # Phase 21 F-02 — per-case playthrough caps reached. SANITIZED: the
+        # ``kind`` ("active"/"retained") and every internal counter are never
+        # echoed; both deny with the same safe 429 envelope. The caller
+        # created NO row and issued NO token (rejection happens inside the
+        # create transaction).
+        return http_error(
+            429,
+            "PLAYTHROUGH_LIMIT_EXCEEDED",
+            "Playthrough limit reached for this case",
+        )
     if isinstance(exc, InvestigationError):
         return http_error(500, "INTERNAL_ERROR", "Internal server error")
     if isinstance(exc, (StoreError, GenerationServiceError)):

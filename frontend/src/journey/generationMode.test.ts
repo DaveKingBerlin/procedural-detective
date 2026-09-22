@@ -4,6 +4,7 @@ import {
   LOCAL_AI_SHOWCASE_NOTE,
   availabilityTag,
   clearGenerationMode,
+  generationModeLine,
   generationModeOptionLabel,
   getGenerationMode,
   isLocalModeAvailable,
@@ -17,8 +18,11 @@ import { effectiveProviderMode } from "./providerMode";
 
 /**
  * Phase 16 Track B — generation-mode capabilities allowlist parsing, the
- * demo-always / available-only selection rules, the honest label+tag copy and
- * the `pd_generation_mode` persistence. Everything is pure (no DOM, no
+ * demo-always / available-only offer rules, the honest label+tag copy, the
+ * legacy `pd_generation_mode` read and — Phase 21 F-03 — the single
+ * READ-ONLY "Generation mode" line (generationModeLine) that replaced the
+ * interactive provider selector (the selected mode was never sent to the
+ * backend; the provider is process-global). Everything is pure (no DOM, no
  * network).
  */
 
@@ -350,6 +354,98 @@ describe("generationModeOptionLabel — honest label + model + tag", () => {
     );
     expect(generationModeOptionLabel(modes[0])).toBe("Demo");
     expect(generationModeOptionLabel(modes[1])).toBe("Cloud AI");
+  });
+});
+
+describe("generationModeLine — Phase 21 F-03 the single READ-ONLY authoritative line", () => {
+  const caps = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("demo-only backend -> 'Generation mode: Deterministic demo' (never a fabricated provider)", () => {
+    expect(
+      generationModeLine(caps({ modes: [{ id: "demo", available: true }] })),
+    ).toBe("Generation mode: Deterministic demo");
+    expect(
+      generationModeLine(
+        caps({ modes: [{ id: "local", available: false, label: "Local AI" }] }),
+      ),
+    ).toBe("Generation mode: Deterministic demo");
+  });
+
+  it("local available -> 'Generation mode: Local AI — <model> — Ready'", () => {
+    expect(
+      generationModeLine(
+        caps({ modes: [{ id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" }] }),
+      ),
+    ).toBe("Generation mode: Local AI — qwen2.5:7b — Ready");
+    // without a DTO model name no fabricated model appears
+    expect(
+      generationModeLine(caps({ modes: [{ id: "local", available: true, label: "Local AI" }] })),
+    ).toBe("Generation mode: Local AI — Ready");
+  });
+
+  it("live available -> 'Generation mode: <capability label>' (DTO verbatim)", () => {
+    expect(
+      generationModeLine(caps({ modes: [{ id: "live", available: true, label: "Cloud AI" }] })),
+    ).toBe("Generation mode: Cloud AI");
+  });
+
+  it("live wins over local when both are reported available (ONE provider story)", () => {
+    const both = caps({
+      modes: [
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+        { id: "live", available: true, label: "Cloud AI" },
+      ],
+    });
+    // Must agree with effectiveProviderMode — the same resolver the provider
+    // qualifier / per-path note use, so the page can never self-contradict.
+    expect(effectiveProviderMode(both)).toBe("live");
+    expect(generationModeLine(both)).toBe("Generation mode: Cloud AI");
+  });
+
+  it("unknown/unreachable/malformed payloads -> the safe deterministic-demo copy", () => {
+    expect(generationModeLine(null)).toBe("Generation mode: Deterministic demo");
+    expect(generationModeLine(caps({ modes: [] }))).toBe("Generation mode: Deterministic demo");
+    expect(generationModeLine(caps(null))).toBe("Generation mode: Deterministic demo");
+  });
+
+  it("hostile DTO material never reaches the line (frozen public fallbacks only)", () => {
+    const hostile = caps({
+      modes: [
+        { id: "local", available: true, label: "http://127.0.0.1:11434", model: "llama3@10.0.0.7" },
+        { id: "live", available: true, label: "javascript:alert(1)" },
+      ],
+    });
+    const line = generationModeLine(hostile);
+    expect(line).not.toContain("127.0.0.1");
+    expect(line).not.toContain("11434");
+    expect(line).not.toContain("javascript");
+    expect(line).not.toContain("@");
+    // live wins; the hostile label drops to the frozen public fallback
+    expect(line).toBe("Generation mode: Cloud AI");
+  });
+
+  it("agrees with effectiveProviderMode for every parsed allowlist (no contradiction)", () => {
+    const payloads: unknown[] = [
+      { modes: [{ id: "demo", available: true }] },
+      { modes: [{ id: "local", available: true, label: "Local AI", model: "x" }] },
+      { modes: [{ id: "live", available: true, label: "Cloud AI" }] },
+      { modes: [] },
+      null,
+    ];
+    for (const raw of payloads) {
+      const parsed = caps(raw);
+      const provider = effectiveProviderMode(parsed);
+      const line = generationModeLine(parsed);
+      if (provider === "fake") {
+        expect(line).toContain("Deterministic demo");
+      } else if (provider === "local") {
+        expect(line).toContain("Local AI");
+        expect(line).toContain("Ready");
+      } else {
+        expect(line).toContain("Cloud AI");
+      }
+      expect(line.startsWith("Generation mode: ")).toBe(true);
+    }
   });
 });
 

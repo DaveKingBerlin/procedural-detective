@@ -251,6 +251,13 @@ _OPERATOR_DOTENV_KEYS = (
     "ANON_SESSION_GLOBAL_LIMIT_PER_MIN",
     "GENERATION_LIMIT_PER_IP_PER_HOUR",
     "GLOBAL_GENERATION_WINDOW_SECONDS",
+    # Phase 21 F-02 — the bounded playthrough admission caps are operator
+    # configuration too; a developer shell .env must never change admission
+    # behavior inside the suite.
+    "MAX_ACTIVE_PLAYTHROUGHS_PER_CASE",
+    "MAX_RETAINED_PLAYTHROUGHS_PER_CASE",
+    "PLAYTHROUGH_CREATE_LIMIT_PER_CREATOR",
+    "PLAYTHROUGH_CREATE_LIMIT_PER_IP",
     # PD-SEC-06: dev-trace toggles are operator config; the suite pins them
     # OFF so a developer shell with PD_DEV_TRACE=true can never leak provider
     # bodies into test output or flip the production policy.

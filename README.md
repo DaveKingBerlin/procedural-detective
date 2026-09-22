@@ -197,9 +197,11 @@ only component that honors forwarded headers — and only when `TRUST_PROXY=true
 2. **Open the frontend at `http://localhost:5173`** — not `127.0.0.1:5173`.
    The default CORS allowlist is `http://localhost:5173`; requests from any
    other origin are rejected by the backend.
-3. **Repeated quick demo re-runs can hit the in-memory global generation quota**
-   (HTTP `429 ADMISSION_DENIED`) until the backend restarts. Restart uvicorn
-   for a fresh demo window.
+3. **Repeated quick demo re-runs can hit the in-memory generation quota**
+   (HTTP `429 ADMISSION_DENIED`). This is expected and self-healing: the
+   rolling quota window renews automatically (Phase 20) — a backend RESTART is
+   **not** required for the global window, and per-IP windows roll forward the
+   same way. Wait for the window to elapse and retry.
 
 ## One-shot demo launcher
 

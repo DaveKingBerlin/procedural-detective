@@ -92,7 +92,7 @@ describe("landing page", () => {
   });
 });
 
-describe("landing page — Phase 16 Track B generation-mode selector", () => {
+describe("landing page — Phase 21 F-03 read-only generation-mode display", () => {
   const renderWithCaps = (capabilities: GenerationCapabilitiesResponse | null): string =>
     renderToStaticMarkup(
       <MemoryRouter initialEntries={["/"]}>
@@ -100,7 +100,24 @@ describe("landing page — Phase 16 Track B generation-mode selector", () => {
       </MemoryRouter>,
     );
 
-  it("renders the selector with Local AI (label + model + Ready) and Cloud AI when available", () => {
+  it("renders the read-only line with Local AI (label + model + Ready) when the backend reports it available", () => {
+    // Phase 21 F-03: the interactive selector is GONE — the container testid
+    // stays but holds a single authoritative read-only line, never a <select>.
+    const html = renderWithCaps({
+      modes: [
+        { id: "demo", available: true },
+        { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+      ],
+    });
+    expect(html).toContain('data-testid="generation-mode-selector"');
+    expect(html).toContain("Generation mode: Local AI — qwen2.5:7b — Ready");
+    expect(html).not.toContain('data-testid="generation-mode-demo-notice"');
+    // No select/options — nothing a click could change.
+    expect(html).not.toContain("<select");
+    expect(html).not.toContain("<option");
+  });
+
+  it("resolves a both-available backend to ONE truthful mode (live wins, matching the provider qualifier)", () => {
     const html = renderWithCaps({
       modes: [
         { id: "demo", available: true },
@@ -108,13 +125,13 @@ describe("landing page — Phase 16 Track B generation-mode selector", () => {
         { id: "live", available: true, label: "Cloud AI" },
       ],
     });
-    expect(html).toContain('data-testid="generation-mode-selector"');
-    expect(html).toContain("Local AI — qwen2.5:7b — Ready");
-    expect(html).toContain("Cloud AI");
-    expect(html).not.toContain('data-testid="generation-mode-demo-notice"');
+    // The backend runs one process-global provider: the display (same
+    // resolver as the qualifier) shows exactly one authoritative line.
+    expect(html).toContain("Generation mode: Cloud AI");
+    expect(html).not.toContain("Generation mode: Local AI");
   });
 
-  it("shows the static demo notice instead of a selector when only demo is available", () => {
+  it("shows the static demo notice + deterministic line instead of a selector when only demo is available", () => {
     const html = renderWithCaps({
       modes: [
         { id: "demo", available: true },
@@ -124,9 +141,10 @@ describe("landing page — Phase 16 Track B generation-mode selector", () => {
     expect(html).not.toContain('data-testid="generation-mode-selector"');
     expect(html).toContain('data-testid="generation-mode-demo-notice"');
     expect(html).toContain("Demo mode active");
+    expect(html).toContain("Generation mode: Deterministic demo");
   });
 
-  it("never renders an unavailable local mode as an option", () => {
+  it("never renders an unavailable local mode (no 'Local AI' claim, no option)", () => {
     const html = renderWithCaps({
       modes: [
         { id: "demo", available: true },
@@ -134,6 +152,25 @@ describe("landing page — Phase 16 Track B generation-mode selector", () => {
       ],
     });
     expect(html).not.toContain("Local AI — qwen2.5:7b");
+    expect(html).not.toContain("<option");
+  });
+
+  it("the page contains NO interactive provider selection control (no testid implying a switch)", () => {
+    for (const capabilities of [
+      {
+        modes: [
+          { id: "demo", available: true },
+          { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+        ],
+      },
+      { modes: [{ id: "demo", available: true }] },
+      null,
+    ]) {
+      const html = renderWithCaps(capabilities);
+      expect(html).not.toContain('data-testid="generation-mode-select"');
+      expect(html).not.toContain('value="local"');
+      expect(html).not.toContain('value="live"');
+    }
   });
 });
 

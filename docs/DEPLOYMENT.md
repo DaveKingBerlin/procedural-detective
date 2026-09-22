@@ -154,6 +154,29 @@ it still sees an `X-Forwarded-For` header while proxy trust is off.
   exactly (a deployment with multiple untrusted hops must keep it false — the
   peer address of the trusted edge is the only safe identity).
 
+**Authoritative production path (Phase 21 P-01).** The shipped Caddy-first
+profile (`docker-compose.prod.yml`, full stack) is the **AUTHORITATIVE
+supported production path** and the ONLY supported way to enable
+`TRUST_PROXY=true`. An **alternate platform ingress** is supported only as a
+`TRUST_PROXY=false` deployment (`docker compose -f docker-compose.prod.yml up
+-d procedural-detective`): the ingress MUST default to `TRUST_PROXY=false` and
+it may be enabled **only after the actual ingress has been verified to**:
+
+1. strip or overwrite hostile `X-Forwarded-For` before the request reaches the
+   app (the app sees only the ingress's own value);
+2. provide a **known hop structure** (you can name every hop that touches the
+   header); and
+3. **preserve the correct client IP** end to end.
+
+`TRUST_PROXY=true` is **NOT portable between ingress providers** — the trust
+boundary is per-ingress and must be re-proven whenever the edge changes. The
+automated contract test `backend/tests/test_phase21_deployment.py` pins the
+DOCUMENTED contract on a forged multi-hop `X-Forwarded-For` header: with
+`TRUST_PROXY=false` the header is ignored (the direct socket peer is the
+identity); with `TRUST_PROXY=true` the left-most entry is honored — which is
+safe ONLY because the shipped Caddy edge overwrites the header on its
+private-network hop.
+
 ## 8. Privacy & retention
 
 Generated cases persist **raw prompt, public case, hidden truth, generation
@@ -215,7 +238,99 @@ The repo-root `.dockerignore` excludes `.env` / `.env.*` (keeping `.env.example`
 Docker build context, so operator secrets are never sent to a daemon/builder
 or build cache. The release check `check_dockerignore` asserts these exclusions.
 
-## 15. Security posture (summary)
+## 15. Logging & log bounds (Phase 21 F-04)
+
+Container stdout and application file logs are both bounded, at two different
+layers, so no log stream can grow without limit:
+
+- **Container stdout (uvicorn + Caddy access logs) — rotated by the runtime.**
+  `docker-compose.prod.yml` carries an explicit bounded `logging:` block on
+  BOTH public services (`procedural-detective` and `caddy`):
+
+  ```yaml
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+  ```
+
+  Uvicorn's access logs and Caddy's access/error logs both go to stdout; the
+  `json-file` driver rotates them to roughly **10 MB x 5 files** per container
+  (the Docker daemon enforces the envelope; verify your actual deployment with
+  `docker inspect <container> --format '{{.HostConfig.LogConfig}}'` after a
+  smoke run).
+- **Backend application file logs — rotated at the app level (unchanged).**
+  When file logging is enabled (`PD_FILE_LOGS` / `PD_LOG_FILE`), the backend
+  writes `logs/procedural-detective.log` through a Python
+  `RotatingFileHandler` at **5 MB x 3 backups**
+  (`backend/app/core/observability.py`: `LOG_MAX_BYTES = 5 * 1024 * 1024`,
+  `LOG_BACKUP_COUNT = 3`). That rotation is independent of the container
+  stdout policy and is unchanged by F-04.
+- **No secrets/tokens in access logs (established policy, restated).** Access
+  logs must NEVER contain bearer tokens, prompts or secrets; the backend's
+  structured logging allow-lists safe fields only
+  (`backend/app/core/observability.py`), and the Caddy access path carries no
+  credentials. Caddy is configured with `admin off` and no token is ever a URL
+  component, so the access-log no-secret rule holds at both boundaries.
+- **Enforcement:** `python -m tools.release_check` asserts the PROD compose
+  services still carry the bounded block (`check_compose_logging_bounds`), and
+  `docker compose -f docker-compose.prod.yml config` renders the effective
+  logging policy.
+
+## 16. Timeout envelope (Phase 21 P-02)
+
+A generation request spans four layers, each with its own timeout. The strict
+deployment contract — enforced by construction, documented here explicitly:
+
+```
+provider timeout  <  remaining backend generation deadline
+                   <  frontend request timeout
+                   <  reverse-proxy upstream timeout
+```
+
+**Values (chosen from the code's clamping math, not from a phase example):**
+
+| Layer | Value | Where configured |
+| --- | --- | --- |
+| Provider per-call timeout | `OLLAMA_TIMEOUT_SECONDS`, bounded `5..300` — clamped to `remaining deadline − 0.1s` by `BudgetTracker.effective_provider_timeout` (`backend/app/generation/budgets.py`) | `.env.example` (`180`) |
+| Backend generation deadline | `CASE_GENERATION_DEADLINE_SECONDS`, default `60`, recommended showcase `300` (max supported by this envelope) | `.env.example` |
+| Frontend request timeout | `360s` (`REQUEST_TIMEOUT_MS = 360000`, `frontend/src/api/client.ts`) | source constant |
+| Reverse-proxy upstream timeout | `420s` (`response_header_timeout 420s`, `docker/Caddyfile`) | `docker/Caddyfile` |
+
+**Margins (documented policy):**
+
+1. **Provider classification margin = 0.1s.** Every provider call is clamped
+   to `remaining_deadline − 0.1s`, so `provider < remaining deadline` holds
+   MECHANICALLY on every call — even a `300` timeout with a `300` deadline
+   (showcase) runs with an effective `299.9s` cap, leaving the controller time
+   to classify a timeout and persist the terminal state. An operator must
+   never raise `OLLAMA_TIMEOUT_SECONDS` above the deadline; doing so only
+   means the clamp silently shortens every call.
+2. **Deadline-to-frontend margin = 60s.** The frontend aborts at 360s and the
+   maximum supported backend deadline is 300s, so `300 + 60 = 360`: the
+   browser NEVER aborts a request the backend still legitimately allows, and
+   a max-length provider call that starts at `t=0` (effective 299.9s) still
+   lands before the browser boundary.
+3. **Frontend-to-proxy margin = 60s.** Caddy aborts at 420s vs the frontend at
+   360s (`360 + 60 = 420`), so the TLS edge never kills a request before the
+   browser's own timeout would. Do not reduce `response_header_timeout` below
+   the frontend timeout when tuning for latency.
+
+**Operational rules (do NOT break the envelope):**
+
+- Never set `CASE_GENERATION_DEADLINE_SECONDS` above `300` unless the
+  frontend and Caddy constants are raised together, preserving both 60s
+  margins. A deadline ≥ the frontend timeout lets the browser abort a request
+  the backend still allows.
+- `OLLAMA_TIMEOUT_SECONDS` is bounded `5..300` by configuration validation and
+  is clamped to the remaining deadline regardless.
+- The config-wiring test `backend/tests/test_phase21_timeout_envelope.py`
+  reads the documented constants AND parses `frontend/src/api/client.ts` +
+  `docker/Caddyfile`, so any drift between this table and the real files fails
+  the suite.
+
+## 17. Security posture (summary)
 
 - CaseTruth never reaches the client before reveal; pre-reveal payloads are
   allowlisted DTOs (leak scanners in the test suite).
@@ -226,7 +341,7 @@ or build cache. The release check `check_dockerignore` asserts these exclusions.
   build contexts.
 - HSTS only at the TLS boundary; no preload unless the operator explicitly opts in.
 
-## 16. Quick reference
+## 18. Quick reference
 
 ```bash
 # Development (unchanged): SPA + API on http://localhost:8000

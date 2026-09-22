@@ -3,9 +3,10 @@ import type {
   GenerationModeDTO,
   GenerationModeId,
 } from "../api/types";
+import { effectiveProviderMode } from "./providerMode";
 
 /**
- * Phase 16 Track B — generation-mode capabilities (parse / select / persist).
+ * Phase 16 Track B — generation-mode capabilities (parse / display).
  *
  * The backend publishes the player-safe allowlist DTO GET
  * /api/v1/generation-capabilities: which generation modes are configured AND
@@ -14,11 +15,25 @@ import type {
  *   - re-parses that trust-boundary reply into the frozen mode ids (unknown
  *     fields and mode ids are dropped — a hostile/buggy reply can never inject
  *     arbitrary options);
- *   - decides which modes the selector offers (Demo is ALWAYS offered; Local
- *     AI / Cloud AI only when the backend reports `available: true`, so an
- *     unavailable mode is NEVER rendered as an option);
- *   - persists the player-selected mode under the contract key `pd_generation_mode`
- *     (injectable storage keeps the module pure and unit-testable without a DOM).
+ *   - resolves the single backend-authoritative display story for the
+ *     READ-ONLY "Generation mode" line (Phase 21 F-03 — see
+ *     {@link generationModeLine}: the backend runs ONE process-global
+ *     provider, so the UI shows its reported mode and never offers a switch);
+ *   - reads the legacy `pd_generation_mode` contract key (getGenerationMode)
+ *     for legacy-safe leftover values only.
+ *
+ * Phase 21 F-03 — STORAGE DISPOSITION: the interactive provider selector was
+ * REMOVED (see src/journey/generationModeSelector.tsx) because the selected
+ * mode was never sent to the backend (the backend provider is process-global,
+ * GENERATION_PROVIDER). NO user action writes `pd_generation_mode` anymore:
+ * the landing and /new pages render the deterministic/backend-reported mode
+ * as read-only information. The storage KEY is retained ONLY because:
+ *   - /generating still reads it via getGenerationMode and re-validates it
+ *     against the LIVE capability DTO (ADV-212 / validatedJourneyMode) as
+ *     defense-in-depth against stale values left by OLDER app versions;
+ *   - the QA seam / unit tests / reset flows may still inject or clear it.
+ * The setter (setGenerationMode) / clearer (clearGenerationMode) remain
+ * exported as documented storage utilities but are called by NO src/ code.
  *
  * Hard guarantees:
  *   - NO host/IP, credentials, prompts, URLs or diagnostics ever leave this
@@ -110,7 +125,15 @@ function writeMode(
   }
 }
 
-/** Persist the selected mode; returns false when no storage is available. */
+/**
+ * Persist a mode under `pd_generation_mode`.
+ *
+ * Phase 21 F-03 — THE UI NO LONGER WRITES THIS KEY: the interactive provider
+ * selector was removed and no src/ code calls this function. It is retained
+ * only as a documented, injectable-storage utility (reset flows / QA seam /
+ * tests). Writing this key from a user-action path would re-introduce the
+ * Phase 21 lie (a persisted "selection" that the backend never honours).
+ */
 export function setGenerationMode(
   mode: GenerationModeId,
   storage?: GenerationModeStorage | null,
@@ -122,6 +145,11 @@ export function setGenerationMode(
  * Read the stored mode id. ONLY the frozen ids are ever returned: a
  * tampered/out-of-contract value (or one for a mode the backend no longer
  * reports) resolves to null, so the journey can never be driven by a stale id.
+ *
+ * Phase 21 F-03 — legacy-safe read only: no user action writes this key
+ * anymore; values found here can only come from OLDER app versions or the QA
+ * seam, and /generating re-validates them against the LIVE capability DTO
+ * (validatedJourneyMode, ADV-212) before any label is chosen.
  */
 export function getGenerationMode(storage?: GenerationModeStorage | null): GenerationModeId | null {
   const store = storage ?? defaultStorage();
@@ -137,7 +165,11 @@ export function getGenerationMode(storage?: GenerationModeStorage | null): Gener
     : null;
 }
 
-/** Clear the stored mode (used by reset flows). Best-effort, never throws. */
+/**
+ * Clear the stored mode (used by reset flows). Best-effort, never throws.
+ * Phase 21 F-03 — no user-action write path exists; kept as a documented
+ * storage utility for reset flows / tests.
+ */
 export function clearGenerationMode(storage?: GenerationModeStorage | null): void {
   const store = storage ?? defaultStorage();
   if (!store) return;
@@ -330,4 +362,50 @@ export function generationModeOptionLabel(mode: SelectableGenerationMode): strin
     return model ? `${label} — ${model} — ${tag}` : `${label} — ${tag}`;
   }
   return !isUnsafeDisplayString(mode.label) ? mode.label : "Cloud AI";
+}
+
+/**
+ * DTO-provided display field with the module's last-line sanitizer: a value
+ * carrying a URL/host/IP/raw-markup token (or an empty/undefined value) is
+ * replaced by the frozen public fallback. Never fails, never throws.
+ */
+function safeDisplay(value: string | undefined, fallback: string | null): string {
+  if (typeof value === "string" && value !== "" && !isUnsafeDisplayString(value)) return value;
+  return fallback ?? "";
+}
+
+/**
+ * Phase 21 F-03 — the SINGLE read-only "Generation mode" line shown on the
+ * landing and /new. It is backend-authoritative and NEVER a provider
+ * selector: the backend runs ONE process-global provider
+ * (GENERATION_PROVIDER), the selected mode was never sent to the backend,
+ * and NO click can change the provider. The display resolution reuses
+ * `effectiveProviderMode` (live > local > deterministic), so this line can
+ * never contradict the capability-driven provider qualifier / per-path note
+ * rendered on the same page.
+ *
+ *   - demo-only (fake)    -> "Generation mode: Deterministic demo"
+ *   - local available     -> "Generation mode: Local AI — <model> — Ready"
+ *   - live available      -> "Generation mode: <DTO capability label>"
+ *
+ * Unknown/loading/unreachable payloads resolve to the deterministic-demo
+ * copy — the deterministic path always exists and never implies a switch, so
+ * it is the safe neutral line — never a fabricated provider claim.
+ */
+export function generationModeLine(capabilities: GenerationCapabilitiesResponse | null): string {
+  switch (effectiveProviderMode(capabilities)) {
+    case "local": {
+      const local = capabilities?.modes.find((mode) => mode.id === "local");
+      const label = safeDisplay(local?.label, "Local AI");
+      const model = safeDisplay(local?.model, null);
+      return `Generation mode: ${label}${model ? ` — ${model}` : ""} — Ready`;
+    }
+    case "live": {
+      const live = capabilities?.modes.find((mode) => mode.id === "live");
+      return `Generation mode: ${safeDisplay(live?.label, "Cloud AI")}`;
+    }
+    case "fake":
+    default:
+      return "Generation mode: Deterministic demo";
+  }
 }

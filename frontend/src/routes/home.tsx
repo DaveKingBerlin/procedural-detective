@@ -1,12 +1,10 @@
-import { useState } from "react";
 import { Link, useNavigate, useOutletContext } from "react-router";
 import type { BackendStatus } from "../hooks/useBackendStatus";
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
-import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
+import type { GenerationCapabilitiesResponse } from "../api/types";
 import { setJourneyParams } from "../journey/context";
 import { EXAMPLE_PROMPT } from "../journey/demoPrompt";
-import { getGenerationMode, setGenerationMode } from "../journey/generationMode";
-import { GenerationModeSelector } from "../journey/generationModeSelector";
+import { GenerationModeDisplay } from "../journey/generationModeSelector";
 import {
   providerPathNoteFromCapabilities,
   providerQualifierFromCapabilities,
@@ -52,12 +50,6 @@ export default function Home(overrides: HomeProps = {}) {
   const capabilities =
     overrides.capabilities !== undefined ? overrides.capabilities : fetchedCapabilities;
   const { state, message, readiness } = outletStatus;
-  const [mode, setMode] = useState<GenerationModeId>(() => getGenerationMode() ?? "demo");
-
-  const selectMode = (next: GenerationModeId) => {
-    setMode(next);
-    setGenerationMode(next);
-  };
 
   const startDemo = () => {
     setJourneyParams({ prompt: EXAMPLE_PROMPT, difficulty: "medium" });
@@ -108,12 +100,15 @@ export default function Home(overrides: HomeProps = {}) {
         {providerPathNoteFromCapabilities(capabilities)}
       </p>
 
-      {/* Phase 16 Track B — generation-mode selector: always offers Demo and
-          additionally Local AI / Cloud AI only when the backend reports them
-          available; a demo-only backend is shown as the static
-          "Demo mode active" notice instead. No host/IP, credentials, prompts
-          or diagnostics are ever rendered — only frozen public labels. */}
-      <GenerationModeSelector capabilities={capabilities} value={mode} onSelect={selectMode} />
+      {/* Phase 21 F-03 — generation-mode READ-ONLY display (the interactive
+          selector was removed: the selected mode was never sent to the
+          backend, whose provider is process-global). The line is driven
+          solely by the backend-generation-capabilities DTO: a demo-only
+          backend shows "Demo mode active" + "Generation mode: Deterministic
+          demo"; a configured local/live provider shows its truthful line.
+          No host/IP, credentials, prompts or diagnostics are ever rendered —
+          only frozen public labels — and no click changes the provider. */}
+      <GenerationModeDisplay capabilities={capabilities} />
 
       <div className="landing-panel">
         <h3>How it works</h3>

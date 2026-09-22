@@ -12,8 +12,8 @@ import {
   selectExamplePrompt,
   type ExamplePromptId,
 } from "../journey/examplePrompts";
-import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, setGenerationMode } from "../journey/generationMode";
-import { GenerationModeSelector } from "../journey/generationModeSelector";
+import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE } from "../journey/generationMode";
+import { GenerationModeDisplay } from "../journey/generationModeSelector";
 import {
   providerPathNoteFromCapabilities,
   providerQualifierFromCapabilities,
@@ -38,6 +38,12 @@ import { examplePromptText, validatePrompt } from "../journey/promptValidation";
  * it reflects the backend's public generation-capabilities DTO (deterministic
  * generator / local AI pipeline / live provider), so a build-time env value
  * can never contradict the backend's actual provider.
+ *
+ * Phase 21 F-03 — the generation-mode area is a READ-ONLY display driven
+ * solely by the capabilities DTO (src/journey/generationModeSelector.tsx).
+ * The interactive provider selector was removed because the "selected" mode
+ * was never sent to the backend (process-global GENERATION_PROVIDER); the
+ * page never implies that a click can switch the provider.
  */
 export interface NewCasePageProps {
   /**
@@ -50,7 +56,9 @@ export interface NewCasePageProps {
    * value the journey reads from `pd_generation_mode` at runtime. When
    * omitted the route reads that key (falling back to Demo); a fixture value
    * lets the honesty copy (unavailable note / §36 showcase sentence) be
-   * unit-tested without a DOM.
+   * unit-tested without a DOM. Phase 21 F-03: legacy-safe read only — no user
+   * action writes the key anymore; values here come from older app versions
+   * or the QA storage seam and are handled as defense-in-depth.
    */
   modeOverride?: GenerationModeId | null;
 }
@@ -63,7 +71,10 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
   const [prompt, setPrompt] = useState("");
   const [difficulty, setDifficulty] = useState<JourneyDifficulty>("medium");
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<GenerationModeId>(() =>
+  // Phase 21 F-03 — the mode is READ-ONLY information now: no user action
+  // changes it (the provider is process-global), so it is read once from the
+  // legacy-safe storage key / override and never written again.
+  const [mode] = useState<GenerationModeId>(() =>
     overrides.modeOverride ?? getGenerationMode() ?? "demo",
   );
   /**
@@ -76,23 +87,21 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
 
   /**
    * Phase 16.2 §20/§36 — mode-honesty flags. The UI only ever claims Local-AI
-   * behavior when the backend allowlist reports local available (the selector
-   * never offers an unavailable mode). A stored/selected `local` mode with an
-   * unavailable/absent/down backend must surface the explicit "Local AI is
-   * unavailable" note instead of silently pretending local is active — and it
-   * must NOT claim the §36 showcase pipeline while unavailable (Demo remains
-   * the honest fallback choice). While capabilities are unknown (null) no
-   * claim and no note is rendered.
+   * behavior when the backend allowlist reports local available (the display
+   * never shows an unavailable mode). Phase 21 F-03: no user action selects a
+   * mode anymore (the provider is process-global and the selector was
+   * removed), so a stored `local` value can ONLY come from OLDER app versions /
+   * the QA storage seam — this is handled as defense-in-depth: a stored
+   * `local` mode with an unavailable/absent/down backend surfaces the explicit
+   * "Local AI is unavailable" note instead of silently pretending local is
+   * active, and it must NOT claim the §36 showcase pipeline while unavailable
+   * (Demo remains the honest fallback). While capabilities are unknown (null)
+   * no claim and no note is rendered.
    */
   const localActive =
     mode === "local" && capabilities !== null && isLocalModeAvailable(capabilities);
   const localUnavailable =
     mode === "local" && capabilities !== null && !isLocalModeAvailable(capabilities);
-
-  const selectMode = (next: GenerationModeId) => {
-    setMode(next);
-    setGenerationMode(next);
-  };
 
   /** Phase 17D Bugfix PART B — select a showcase example: replace the textarea
    *  text with the EXACT example prompt and mark it active. Purely fills the
@@ -233,19 +242,24 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
           <option value="hard">Hard</option>
         </select>
 
-        {/* Phase 16 Track B — generation-mode selector: always offers Demo and
-            additionally Local AI / Cloud AI only when the backend reports them
-            available; a demo-only backend is shown as the static
-            "Demo mode active" notice instead. No host/IP, credentials, prompts
-            or diagnostics are ever rendered — only frozen public labels. */}
-        <GenerationModeSelector capabilities={capabilities} value={mode} onSelect={selectMode} />
+        {/* Phase 21 F-03 — generation-mode READ-ONLY display (the interactive
+            selector was removed: the selected mode was never sent to the
+            backend, whose provider is process-global). A demo-only backend
+            shows "Demo mode active" + "Generation mode: Deterministic demo";
+            a configured local/live provider shows its truthful read-only
+            line. No host/IP, credentials, prompts or diagnostics are ever
+            rendered — only frozen public labels — and no click changes the
+            provider. */}
+        <GenerationModeDisplay capabilities={capabilities} />
 
-        {/* Phase 16.2 §20 — honest unavailability. Local was STORED or freshly
-            selected, but the capabilities allowlist does not report local
-            available (backend down/unselected): show the explicit note and
-            keep Demo selectable — never a silent fallback to demo and never a
-            pretend-local claim (the generation request would otherwise fail
-            with the provider-unavailable reason from the backend). */}
+        {/* Phase 16.2 §20 — honest unavailability (Phase 21 F-03: storage is
+            legacy-only now — no user action writes `pd_generation_mode`, but
+            a leftover `local` value from an older app version / the QA seam
+            still surfaces the explicit note when the capabilities allowlist
+            does not report local available: never a silent fallback to demo
+            and never a pretend-local claim (the generation request would
+            otherwise fail with the provider-unavailable reason from the
+            backend). Keep Demo selectable — it remains the honest fallback. */}
         {localUnavailable && (
           <p className="new-case-local-unavailable" data-testid="local-ai-unavailable" role="status">
             Local AI is unavailable right now. Demo Mode remains available.
