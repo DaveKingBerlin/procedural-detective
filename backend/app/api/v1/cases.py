@@ -24,6 +24,7 @@ from app.auth.tokens import (
     issue_playthrough_access_token,
     verifier as token_verifier,
 )
+from app.core.ratelimit import resolve_client_ip
 from app.models.credentials import CreatorCredential
 from app.models.quota import AnonymousQuotaSession
 from app.schemas.cases import (
@@ -60,6 +61,20 @@ def create_case(
     request: Request,
     session_row: Annotated[AnonymousQuotaSession, Depends(require_session)],
 ) -> CaseStartedDTO:
+    # PD-SEC-02 (§7): per-IP generation budget, checked BEFORE the service
+    # call. The reservation is counted as an ATTEMPTED generation (the
+    # documented "reservation attempts count" policy) and the identity is the
+    # TRUST_PROXY-aware resolved client IP — minting fresh sessions can never
+    # reset it. Denial is the sanitized 429 envelope (no internal detail).
+    limiter = request.app.state.generation_ip_limiter
+    trust_proxy = bool(request.app.state.settings.trust_proxy)
+    ip = resolve_client_ip(request, trust_proxy=trust_proxy)
+    if not limiter.allow(ip, request.app.state.clock.now()):
+        raise http_error(
+            429,
+            "TOO_MANY_REQUESTS",
+            "Too many case generations; please try again later",
+        )
     service = request.app.state.generation_service
     try:
         started = service.start_case_generation(

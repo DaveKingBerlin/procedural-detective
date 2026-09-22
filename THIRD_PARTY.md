@@ -56,6 +56,7 @@ in `frontend/package-lock.json`.
 | --- | --- | --- | --- |
 | python:3.12-slim | 3.12 (Debian "slim") | Runtime base image carrying the backend and the built SPA | Debian software is under its own licenses (predominantly GPL); see upstream |
 | node:24-alpine | Node 24 (Alpine) | Build stage only — compiles the SPA; not in the final image | Alpine/BusyBox under their own licenses; see upstream |
+| caddy:2-alpine | Caddy 2 (Alpine) | **Optional production TLS edge** (`docker-compose.prod.yml`): automatic HTTPS, HTTP→HTTPS redirect, HSTS, request limits/timeouts, reverse proxy to the private backend. Shipped as a deployment option; not part of the app image itself | Apache-2.0 (see upstream) |
 
 The final image runs as a non-root user and contains no build-time node
 toolchain (see `Dockerfile`).

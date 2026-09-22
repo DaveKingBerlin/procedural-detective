@@ -6,7 +6,7 @@ import type { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { Scene } from "@babylonjs/core/scene";
 import { Ray } from "@babylonjs/core/Culling/ray";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
-import type { DiscoveryResultDTO, InteractionResultDTO } from "../api/types";
+import type { InteractionResultDTO } from "../api/types";
 import { cameraProfileFor } from "../environments/kitGeometry";
 import { FOCUS_BG_LIGHT_SCALE, FOCUS_TRANSITION_MS, focusTransitionTickCount } from "./focusCamera";
 import type { InvestigationSceneModel } from "./buildInvestigationScene";
@@ -644,15 +644,6 @@ function makeTestServices(): InvestigationServices {
         evidenceId: null,
         discovery: null,
         result: "interacted",
-      }),
-    ),
-    discoverEvidence: vi.fn(
-      async (): Promise<DiscoveryResultDTO> => ({
-        evidenceId: "x",
-        kind: "object",
-        title: "x",
-        interaction: "inspect",
-        state: "discovered",
       }),
     ),
     readRecord: vi.fn(async () => makeEmailRecord()),

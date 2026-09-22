@@ -207,7 +207,11 @@ def derive_title_from_prompt(prompt: str | None) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def public_case_dict_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+def public_case_dict_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    discovered: set[str] | frozenset[str] | None = None,
+) -> dict[str, Any]:
     """Map the stored frozen payload into the PublicCaseResponse DTO dict.
 
     THE explicit allowlist: only the documented public fields are read and an
@@ -216,11 +220,28 @@ def public_case_dict_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     this mapper reads ONLY those documented fields and converts them into the
     camelCase DTO keys. Hidden sections (`truth`, `solverProof`, `universes`,
     `report`, `prompt`, `seed`, `model`, `locked`) are never read here.
+
+    Phase 20 (PD-SEC-01) parameter ``discovered`` — the PLAYTHROUGH-scoped
+    public-case is only allowed to carry evidence the player already knows:
+
+    - when ``discovered`` is None (the CASE-scoped dossier, REQUIREMENTS
+      41.2 public-case evidence list served by ``GET /cases/{id}`` under the
+      creator credential): the full evidence list + full placement evidenceIds
+      are kept (the case owner generated the case — that data is already
+      legitimately known to their role; the Luna audit flagged the
+      playthrough-scoped route, not the creator-scoped one);
+    - when ``discovered`` is a set of evidence ids (a PLAYTHROUGH-scoped
+      ``GET /playthroughs/{id}/public-case``): the ``evidence`` list is
+      filtered to ONLY those ids and every world_graph placement's
+      ``evidenceId`` is present only for a discovered evidence (null
+      otherwise). A fresh playthrough therefore exposes ZERO evidence
+      ids/titles/descriptions pre-discovery.
     """
     draft = payload.get("draft")
     if not isinstance(draft, Mapping):
         raise ValueError("payload carries no draft document")
     scene_spec = draft.get("scene")
+    discovered_ids = frozenset(discovered) if discovered is not None else None
 
     def _persons() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -263,10 +284,16 @@ def public_case_dict_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     def _evidence() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for fact in draft.get("evidence") or ():
+            evidence_id = str(fact.get("id"))
+            # PD-SEC-01: the playthrough-scoped public-case carries ONLY the
+            # evidence the player has actually discovered (id/title/description
+            # are then player-known); nothing undiscovered ever appears.
+            if discovered_ids is not None and evidence_id not in discovered_ids:
+                continue
             presentation = fact.get("presentation") or {}
             out.append(
                 {
-                    "id": fact.get("id"),
+                    "id": evidence_id,
                     "kind": fact.get("kind"),
                     "reliability": fact.get("reliability"),
                     "title": presentation.get("title"),
@@ -286,17 +313,32 @@ def public_case_dict_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             }
             for loc in world_graph.get("locations") or ()
         ]
-        world_graph_dto["placements"] = [
-            {
-                "objectId": placement.get("object_id"),
-                "assetId": placement.get("asset_id"),
-                "locationId": placement.get("location_id"),
-                "anchor": placement.get("anchor"),
-                "interaction": placement.get("interaction"),
-                "evidenceId": placement.get("evidence_id"),
-            }
-            for placement in world_graph.get("placements") or ()
-        ]
+        for placement in world_graph.get("placements") or ():
+            placement_evidence_id = placement.get("evidence_id")
+            exposed_evidence_id = (
+                str(placement_evidence_id)
+                if placement_evidence_id is not None
+                else None
+            )
+            # PD-SEC-01: an undiscovered placement never leaks its evidence id
+            # on the playthrough-scoped DTO (null when the player has not
+            # discovered it, or in the full creator dossier when discovered is
+            # not supplied).
+            if discovered_ids is not None and (
+                exposed_evidence_id is None
+                or exposed_evidence_id not in discovered_ids
+            ):
+                exposed_evidence_id = None
+            world_graph_dto["placements"].append(
+                {
+                    "objectId": placement.get("object_id"),
+                    "assetId": placement.get("asset_id"),
+                    "locationId": placement.get("location_id"),
+                    "anchor": placement.get("anchor"),
+                    "interaction": placement.get("interaction"),
+                    "evidenceId": exposed_evidence_id,
+                }
+            )
 
     return {
         "caseId": payload.get("caseId"),
@@ -604,7 +646,12 @@ def project_world_objects(
     - DEF-050: duplicate placements for one objectId (legacy/crafted payloads)
       fold into ONE WorldObjectDTO — the FIRST placement in published order
       wins, exactly matching ``placement_for_object``;
-    - ``evidenceId`` is exposed ONLY as a nullable id (never its content);
+    - ``evidenceId`` is exposed ONLY as a nullable id (never its content), and
+      — PD-SEC-01 (Phase 20) — ONLY for evidence the player has already
+      discovered: an UNDISCOVERED object's ``evidenceId`` is null (the id is
+      not player-known before investigation; the object keeps its ``discovered``
+      / ``read`` flags, which mirror the caller's PlayerKnowledge, and its
+      ``interaction`` affordance so the interact endpoint keeps working);
     - ``discovered`` / ``read`` flags come from the caller's PlayerKnowledge.
 
     The output is deterministic: sorted by ``objectId`` with unique objectIds.
@@ -662,6 +709,16 @@ def project_world_objects(
         if evidence_id is not None and str(evidence_id) not in evidence:
             continue  # dangling evidence reference -> skip the placement
         obj = objects[object_id]
+        exposed_evidence_id: str | None = None
+        if evidence_id is not None:
+            evidence_str = str(evidence_id)
+            # PD-SEC-01: an UNDISCOVERED evidence id is not player-known and
+            # must never be exposed pre-discovery. The evidenceId is only
+            # emitted once the player has actually discovered it (the id then
+            # belongs to PlayerKnowledge and the frontend binds it to the
+            # object after a successful interact).
+            if evidence_str in discovered_ids:
+                exposed_evidence_id = evidence_str
         item: dict[str, Any] = {
             "objectId": object_id,
             "assetId": asset_id,
@@ -670,7 +727,7 @@ def project_world_objects(
             "locationId": str(placement.get("location_id")),
             "anchor": str(placement.get("anchor")),
             "interaction": str(placement.get("interaction")),
-            "evidenceId": str(evidence_id) if evidence_id is not None else None,
+            "evidenceId": exposed_evidence_id,
             "discovered": evidence_id is not None and str(evidence_id) in discovered_ids,
             "read": evidence_id is not None and str(evidence_id) in read_ids,
         }

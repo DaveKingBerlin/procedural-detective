@@ -48,6 +48,7 @@ class DurableAdmissionController(AdmissionController):
         max_generations_global_per_window: int,
         anonymous_quota_session_ttl_seconds: int,
         global_window_end: float | None = None,
+        global_window_seconds: int = 60,
         lock: threading.RLock | None = None,
     ) -> None:
         super().__init__(
@@ -59,6 +60,7 @@ class DurableAdmissionController(AdmissionController):
             max_generations_global_per_window=max_generations_global_per_window,
             anonymous_quota_session_ttl_seconds=anonymous_quota_session_ttl_seconds,
             global_window_end=global_window_end,
+            global_window_seconds=global_window_seconds,
         )
         self._lock = lock if lock is not None else threading.RLock()
 

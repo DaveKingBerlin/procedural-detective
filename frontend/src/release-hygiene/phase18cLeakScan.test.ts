@@ -36,7 +36,6 @@ const MODULES: string[][] = [
 const ENDPOINT_HELPERS = [
   "getInvestigation",
   "interactObject",
-  "discoverEvidence",
   "readRecord",
   "submitAccusation",
   "getReveal",

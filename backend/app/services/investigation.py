@@ -11,7 +11,11 @@ The service owns the PLAYER-SAFE investigation mechanics:
   reload. It never writes knowledge and never reveals truth.
 - ``discover_evidence``      — server-authoritative evidence discovery
   (membership in the pinned CaseVersion + reachability via a world-graph
-  placement; idempotent; marks the placement's location visited);
+  placement; idempotent; marks the placement's location visited). Phase 20
+  (PD-SEC-01): this method has NO client-facing API route — it is reachable
+  ONLY INTERNALLY from ``interact_with_object``, so a player can never
+  discover evidence by id without a preceding validated world interaction
+  (the ADV-225 direct by-id discover contract is superseded);
 - ``interact_with_object``   — validated world-graph interaction (placement
   membership + exact interaction match; 409 on mismatch, NO state change);
 - ``read_record``            — read of a DISCOVERED record (403 when not
@@ -216,17 +220,13 @@ class InvestigationService:
         - idempotent: repeating returns state ``already-discovered``;
         - the linked placement's location is marked visited server-side.
 
-        ADV-225 (Phase 19C, accepted standing contract — DOC NOTE): direct
-        by-id discovery of a REACHABLE evidence record is intended behavior
-        matching the golden by-id discover contract (REQUIREMENTS 40.8). A
-        placement-linked evidence id — including the driver worlds'
-        deterministic canonical forensics (``d_ev_weapon_false_*`` /
-        ``d_ev_weapon_true`` / the time-bearing records) — IS reachable by a
-        player who knows the id without an object interaction. This is the
-        documented state: reachability is the gate; the DTO stays lean (kind +
-        title + interaction only, never content/descriptions/propositions), and
-        a FABRICATED or unreachable id (no valid placement) still answers the
-        generic 404 with zero state change. No action beyond this note.
+        Phase 20 (PD-SEC-01) — INTERNAL ONLY: the direct client-facing
+        discovery route ``POST .../evidence/{evidence_id}/discover`` has been
+        REMOVED (the ADV-225 accepted-risk standing contract is superseded).
+        This method is reachable ONLY from ``interact_with_object`` after the
+        server has validated a real world interaction on the object whose
+        placement links the evidence. A player can therefore never discover
+        evidence by id without investigating the scene first.
         """
         payload = self._pinned_payload(playthrough)
         self._require_playing(playthrough)

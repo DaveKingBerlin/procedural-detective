@@ -242,6 +242,20 @@ _OPERATOR_DOTENV_KEYS = (
     "LLM_API_KEY",
     "LLM_MODEL",
     "FAKE_PROVIDER_SCRIPT",
+    # Phase 20 (PD-SEC-02/PD-SEC-06): the public-admission rate limits, the
+    # production environment marker and the trusted-proxy flag are operator
+    # configuration too — never let an operator box leak them into tests.
+    "ENVIRONMENT",
+    "TRUST_PROXY",
+    "ANON_SESSION_LIMIT_PER_IP_PER_10_MIN",
+    "ANON_SESSION_GLOBAL_LIMIT_PER_MIN",
+    "GENERATION_LIMIT_PER_IP_PER_HOUR",
+    "GLOBAL_GENERATION_WINDOW_SECONDS",
+    # PD-SEC-06: dev-trace toggles are operator config; the suite pins them
+    # OFF so a developer shell with PD_DEV_TRACE=true can never leak provider
+    # bodies into test output or flip the production policy.
+    "PD_DEV_TRACE",
+    "PD_GENERATION_DEBUG_LOGS",
 )
 
 

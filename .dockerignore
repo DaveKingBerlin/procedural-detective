@@ -1,5 +1,13 @@
-# Build context hygiene for `docker build` (Phase8 J). The frontend is built
-# inside the image; local build artifacts/caches must never enter the context.
+# Build context hygiene for `docker build` (Phase8 J + Phase20 PD-SEC-07).
+# The frontend is built INSIDE the image (stage 1 compiles it), so local
+# build artifacts/caches must never enter the context.
+#
+# PD-SEC-07: `.env` and every `.env.*` variant are git-ignored AND excluded
+# from the Docker build context. Even when a Dockerfile step never copies them
+# into the final image, an unexcluded `.env` would still be sent to a remote
+# daemon / remote builder / build cache. `.env.example` (the documented
+# example) stays in the context. Operator secrets ONLY ever live in
+# operator-local `.env` / environment, never in the build context.
 
 # VCS / governance
 .git
@@ -20,6 +28,20 @@ opencode.json
 .claude
 .codex
 .cursor
+.ollama
+
+# -------- Phase 20 PD-SEC-07: operator secrets never reach the builder ------
+.env
+.env.*
+!.env.example
+
+# Logs (local/runtime; never part of the image)
+logs/
+*.log
+
+# Local temp dirs
+tmp/
+temp/
 
 # Node (built inside the image; local copies are dev-only)
 node_modules
@@ -35,8 +57,8 @@ procedural_detective.db
 
 # QA / audit artifacts
 e2e/artifacts
-screenshots/generated
 tests/__pycache__
+screenshots/generated
 
 # Local documents that are not part of the runtime image
 ADVERSARIAL_REVIEW.md

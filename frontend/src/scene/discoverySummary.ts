@@ -21,8 +21,6 @@ export interface DiscoverySummary {
   /** Sorted by evidence id (stable regardless of interaction order). */
   entries: DiscoverySummaryEntry[];
   discoveredCount: number;
-  /** Number of world objects published with an evidence link (the in-scene total). */
-  discoverableCount: number;
 }
 
 export function summarizeDiscovery(
@@ -40,8 +38,7 @@ export function summarizeDiscovery(
     const read = readSet.has(evidenceId);
     return { evidenceId, title, read };
   });
-  const discoverableCount = worldObjects.filter((obj) => obj.evidenceId !== null).length;
-  return { entries, discoveredCount: entries.length, discoverableCount };
+  return { entries, discoveredCount: entries.length };
 }
 
 /**
@@ -49,13 +46,16 @@ export function summarizeDiscovery(
  * evidence is discovered. Direct 3D interaction is the PRIMARY method, so the
  * copy says so — "Find evidence, then accuse someone." is deliberately kept
  * as the leading phrase (QA e2e pins it), followed by the scene-first hint.
+ *
+ * PD-SEC-01 (Phase 20): the old "Discovered X / Y evidence items" form used
+ * the pre-reveal count of evidence-linked world objects as the denominator.
+ * The backend now strips that linkage (evidenceId) from undiscovered objects,
+ * so the denominator is structurally unknowable on the client — the player
+ * sees a bare, always-honest "Discovered X evidence items".
  */
 export function objectiveText(summary: DiscoverySummary, hasInteracted: boolean): string {
   if (!hasInteracted) {
     return "Find evidence, then accuse someone. Click objects in the 3D scene to inspect them — the object list below is an accessibility fallback.";
-  }
-  if (summary.discoverableCount > 0) {
-    return `Discovered ${summary.discoveredCount} / ${summary.discoverableCount} evidence items — keep clicking objects in the scene to find more, then make your accusation when you are ready.`;
   }
   return `Discovered ${summary.discoveredCount} evidence items — keep clicking objects in the scene, then make your accusation when you are ready.`;
 }

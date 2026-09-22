@@ -82,7 +82,8 @@ def test_n24_pre_reveal_no_canonical_designation(phase5_app):
         )
 
         res = c.post(
-            f"/api/v1/playthroughs/{pt_id}/evidence/{KNIFE_EVIDENCE}/discover",
+            f"/api/v1/playthroughs/{pt_id}/objects/kitchen_knife/interact",
+            json={"interaction": "inspect"},
             headers=headers,
         )
         assert res.status_code == 200, res.json()

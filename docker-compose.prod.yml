@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------------------
+# Procedural Detective — PRODUCTION deployment (Phase20 PD-SEC-03).
+#
+# HTTPS-ONLY public architecture:
+#
+#   Internet
+#      |  HTTPS :443 / :80->HTTPS redirect
+#      v
+#   caddy            (public TLS edge: auto-HTTPS, HSTS, body/header limits,
+#                     timeouts, proxy to the PRIVATE backend only)
+#      |  private HTTP, compose network only
+#      v
+#   procedural-detective  (uvicorn :8000 — NO host port published)
+#
+# The uvicorn backend NEVER exposes a host port here: there is no `ports:`
+# block on the backend service, so browsers/curl on the host cannot reach
+# :8000 directly. Only the Caddy edge publishes ports 80/443.
+#
+# Dev flow is unchanged — plain `docker compose up --build` still publishes
+# :8000 for local development (see docker-compose.yml).
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up --build -d
+#   curl -k https://localhost/api/v1/health          # local smoke (internal CA)
+#   curl -I -k https://localhost/                     # SPA over TLS + HSTS
+#
+# Real hosting: set in your .env / environment
+#   CADDY_DOMAIN=detective.example.com
+#   CADDY_EMAIL=you@example.com
+# then Caddy obtains a trusted certificate automatically. The same file also
+# serves as the edge-compatible config for a platform ingress: only the
+# backend service is started (`docker compose -f docker-compose.prod.yml up -d
+# procedural-detective`) and the ingress terminates TLS itself (private
+# backend, never a public :8000).
+# ---------------------------------------------------------------------------
+
+services:
+  procedural-detective:
+    build: .
+    image: procedural-detective:latest
+    volumes:
+      - pd-data:/data
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/procedural_detective.db}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      PD_DEV_TRACE: ${PD_DEV_TRACE:-false}
+      GENERATION_PROVIDER: ${GENERATION_PROVIDER:-fake}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      STATIC_DIR: ${STATIC_DIR:-/app/static}
+    # Operator/provider configuration (LLM_API_KEY, LLM_MODEL,
+    # LIVE_PROVIDER_URL, OLLAMA_BASE_URL, OLLAMA_MODEL, ...) is injected ONLY
+    # via the optional .env file: Settings rejects EMPTY-string values for the
+    # live/ollama provider settings, so they must remain UNSET (defaults apply)
+    # unless the operator really configures them.
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    # Private network ONLY: `expose` documents :8000 for the edge; nothing
+    # is published to the host. There is deliberately NO `ports:` block.
+    expose:
+      - "8000"
+    networks:
+      - pd-internal
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 5
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - procedural-detective
+    ports:
+      # The ONLY public exposure: the TLS edge.
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+      CADDY_EMAIL: ${CADDY_EMAIL:-}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - pd-internal
+
+volumes:
+  pd-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  pd-internal:
+    driver: bridge

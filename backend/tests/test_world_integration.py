@@ -203,13 +203,17 @@ def test_five_showcase_prompts_publish_selected_environment(phase5_migrated_clie
     # the prompt-specific supporting object IS in the bootstrap
     for prompt_id in expectation.bootstrap_assert_ids:
         assert prompt_id in asset_ids, (env_id, prompt_id)
-    # the required evidence is clickable: non-empty interaction + evidence link
+    # the required evidence is clickable: non-empty interaction. PD-SEC-01
+    # (Phase 20): the evidenceId is NOT exposed pre-discovery (a fresh
+    # playthrough has no player-known evidence), so the bootstrap carries
+    # null evidenceIds — the interact affordance still proves the object is
+    # clickable, and discovery happens server-side through the placement.
     knife_asset_id, knife_interaction, knife_evidence, knife_generated = asset_ids["kitchen_knife"]
     assert knife_interaction in ("inspect", "read")
-    assert knife_evidence is not None
+    assert knife_evidence is None  # undiscovered -> id withheld pre-reveal
     laptop_id, laptop_interaction, laptop_evidence, _ = asset_ids["apartment_laptop"]
     assert laptop_interaction == "read"
-    assert laptop_evidence == "email_thomas_01"
+    assert laptop_evidence is None  # undiscovered -> id withheld pre-reveal
     # proc assets project their embedded definitions
     if expectation.proc_assets_expected:
         assert any(v[3] for v in asset_ids.values()), env_id

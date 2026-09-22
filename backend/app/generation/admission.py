@@ -12,8 +12,12 @@ Semantics per REQUIREMENTS 32.10/32.11:
 - a rejected admission makes ZERO provider calls (the controller calls
   ``admit_generation`` before constructing/building any provider request);
 - per-session AND aggregate (global) concurrency limits are enforced;
-- a rolling global window starts at controller construction (or an injected
-  ``global_window_end``) and is deterministic with a ``ManualClock``.
+- a ROLLING global window starts at controller construction (or an injected
+  ``global_window_end``) and — PD-SEC-02 fix — RENEWS automatically: when the
+  current time reaches ``window_end`` a new window starts
+  (``window_end = now + global_window_seconds``) and the rolled counters are
+  reset atomically. The window can NEVER reject-forever after an expiry.
+  Deterministic with a ``ManualClock``.
 """
 
 from __future__ import annotations
@@ -82,6 +86,7 @@ class AdmissionController:
         max_generations_global_per_window: int,
         anonymous_quota_session_ttl_seconds: int,
         global_window_end: float | None = None,
+        global_window_seconds: int = 60,
     ) -> None:
         if isinstance(max_concurrent_generations, bool) or not isinstance(
             max_concurrent_generations, int
@@ -113,6 +118,12 @@ class AdmissionController:
             raise TypeError("anonymous_quota_session_ttl_seconds must be an int")
         if anonymous_quota_session_ttl_seconds <= 0:
             raise ValueError("anonymous_quota_session_ttl_seconds must be > 0")
+        if isinstance(global_window_seconds, bool) or not isinstance(
+            global_window_seconds, int
+        ):
+            raise TypeError("global_window_seconds must be an int")
+        if global_window_seconds <= 0:
+            raise ValueError("global_window_seconds must be > 0")
         if global_window_end is not None and (
             isinstance(global_window_end, bool)
             or not isinstance(global_window_end, (int, float))
@@ -125,13 +136,18 @@ class AdmissionController:
         self._max_session_window = int(max_generations_per_session_per_window)
         self._max_global_window = int(max_generations_global_per_window)
         self._ttl_seconds = float(anonymous_quota_session_ttl_seconds)
-        # One rolling global window from controller construction (or injected
-        # end) — deterministic with a ManualClock.
+        # PD-SEC-02: the ROLLING global generation window. It starts at
+        # controller construction (or the injected end) and RENEWS forever:
+        # when ``now >= window_end`` the admission step starts a fresh window
+        # of ``global_window_seconds`` and resets the rolled counters. The
+        # window is measured in ``global_window_seconds`` (a short rolling
+        # quota, sensible default 60s) — NOT the anonymous-session TTL.
+        self._global_window_seconds = float(global_window_seconds)
         now = float(clock.now())
         self._global_window_end = (
             float(global_window_end)
             if global_window_end is not None
-            else now + self._ttl_seconds
+            else now + self._global_window_seconds
         )
         self._global_generations_in_window = 0
         self._global_active = 0
@@ -195,13 +211,17 @@ class AdmissionController:
                     "admission denied: global concurrency limit reached",
                 )
             )
+        # PD-SEC-02 global quota-window fix: when the current time has reached
+        # the window end, START A NEW WINDOW and RESET the rolled counters
+        # atomically — then evaluate the FRESH window below. This is a single
+        # deterministic step: the ``DurableAdmissionController`` wrapper runs
+        # every ``admit_generation`` under one RLock (FastAPI serves sync
+        # handlers from a thread pool), and the base controller is
+        # single-threaded under the ``ManualClock`` used by tests. Never
+        # reject-forever after an expiry.
         if now >= self._global_window_end:
-            raise AdmissionDenied(
-                AdmissionDecision(
-                    False,
-                    "admission denied: global quota window expired",
-                )
-            )
+            self._global_window_end = now + self._global_window_seconds
+            self._global_generations_in_window = 0
         if self._global_generations_in_window >= self._max_global_window:
             raise AdmissionDenied(
                 AdmissionDecision(
@@ -244,6 +264,11 @@ class AdmissionController:
     @property
     def global_active_concurrency(self) -> int:
         return self._global_active
+
+    @property
+    def global_window_end(self) -> float:
+        """Current rolling global window end (PD-SEC-02; rolls forward)."""
+        return self._global_window_end
 
     @property
     def global_window_generations(self) -> int:

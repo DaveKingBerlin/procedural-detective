@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   API_BASE_URL,
   ApiError,
+  apiUrl,
   createAnonymousSession,
   createCase,
   createPlaythrough,
-  discoverEvidence,
   getGenerationCapabilities,
   getGenerationProgress,
   getHealth,
@@ -13,6 +13,8 @@ import {
   getReadiness,
   interactObject,
   readRecord,
+  resolveApiBaseUrl,
+  SAME_ORIGIN_API_ROOT,
 } from "./client";
 import { TEST_TOKEN } from "../scene/testFixtures";
 
@@ -46,8 +48,53 @@ describe("getHealth", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const url = String(fetchMock.mock.calls[0][0]);
-    expect(url.startsWith(API_BASE_URL)).toBe(true);
-    expect(url).toContain("/api/v1/health");
+    expect(url).toBe(apiUrl("/api/v1/health"));
+  });
+});
+
+/* ======================================================================
+ * PD-SEC-04 (Phase 20) — API base resolution is SAME-ORIGIN by default.
+ * ==================================================================== */
+
+describe("resolveApiBaseUrl (PD-SEC-04 — same-origin API base)", () => {
+  it("falls back to the same-origin relative /api/v1 when the override is ABSENT", () => {
+    expect(resolveApiBaseUrl(undefined)).toBe("/api/v1");
+    expect(resolveApiBaseUrl(null)).toBe("/api/v1");
+  });
+
+  it("falls back to the same-origin relative /api/v1 when the override is EMPTY/whitespace", () => {
+    expect(resolveApiBaseUrl("")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("   ")).toBe("/api/v1");
+  });
+
+  it("honors an explicit validated absolute http(s) URL override", () => {
+    expect(resolveApiBaseUrl("http://localhost:8000")).toBe("http://localhost:8000");
+    expect(resolveApiBaseUrl("https://detective.example.com")).toBe("https://detective.example.com");
+    expect(resolveApiBaseUrl("https://detective.example.com/api/v1")).toBe("https://detective.example.com/api/v1");
+  });
+
+  it("rejects garbage / non-http(s) overrides with the same-origin safe fallback", () => {
+    expect(resolveApiBaseUrl("localhost:8000")).toBe("/api/v1"); // bare host, no scheme
+    expect(resolveApiBaseUrl("ftp://localhost:8000")).toBe("/api/v1"); // non-http scheme
+    expect(resolveApiBaseUrl("http://")).toBe("/api/v1"); // no host
+    expect(resolveApiBaseUrl("http:///path")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("javascript:alert(1)")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://user:pass@localhost:8000")).toBe("/api/v1"); // credentials rejected
+    expect(resolveApiBaseUrl("http://local host:8000")).toBe("/api/v1"); // whitespace in host
+    expect(resolveApiBaseUrl('http://localhost:8000" ; alert(1)')).toBe("/api/v1"); // smuggling junk
+  });
+});
+
+describe("apiUrl — request builder works for absolute AND relative bases (PD-SEC-04)", () => {
+  it("the default test base is the same-origin relative /api/v1 (no env override)", () => {
+    expect(API_BASE_URL).toBe(SAME_ORIGIN_API_ROOT);
+  });
+
+  it("collapses the redundant prefix so a relative base yields /api/v1/health", () => {
+    expect(apiUrl("/api/v1/health")).toBe("/api/v1/health");
+    expect(apiUrl("/api/v1/playthroughs/PT-1/investigation")).toBe(
+      "/api/v1/playthroughs/PT-1/investigation",
+    );
   });
 });
 
@@ -172,7 +219,7 @@ describe("getInvestigation", () => {
 
     expect(bootstrap.playthroughId).toBe("PT-demo-0001");
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/playthroughs/PT-demo-0001/investigation`);
+    expect(String(url)).toBe(apiUrl("/api/v1/playthroughs/PT-demo-0001/investigation"));
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${TEST_TOKEN}`);
     expect((init as RequestInit).method ?? "GET").toBe("GET");
@@ -206,7 +253,7 @@ describe("interactObject", () => {
     expect(result.result).toBe("interacted");
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toBe(
-      `${API_BASE_URL}/api/v1/playthroughs/PT-demo-0001/objects/kitchen_knife/interact`,
+      apiUrl("/api/v1/playthroughs/PT-demo-0001/objects/kitchen_knife/interact"),
     );
     const requestInit = init as RequestInit;
     expect(requestInit.method).toBe("POST");
@@ -233,29 +280,6 @@ describe("interactObject", () => {
   });
 });
 
-describe("discoverEvidence", () => {
-  it("POSTs to the evidence discover endpoint", async () => {
-    fetchMock.mockResolvedValue(
-      jsonResponse(
-        { evidenceId: "body_found_01", kind: "witness_observation", title: "Body found", interaction: "view", state: "discovered" },
-        200,
-      ),
-    );
-
-    const result = await discoverEvidence("PT-demo-0001", "body_found_01", TEST_TOKEN);
-
-    expect(result.evidenceId).toBe("body_found_01");
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toBe(
-      `${API_BASE_URL}/api/v1/playthroughs/PT-demo-0001/evidence/body_found_01/discover`,
-    );
-    const requestInit = init as RequestInit;
-    expect(requestInit.method).toBe("POST");
-    const headers = requestInit.headers as Record<string, string>;
-    expect(headers.Authorization).toBe(`Bearer ${TEST_TOKEN}`);
-  });
-});
-
 describe("readRecord", () => {
   it("GETs the record URL with the bearer token", async () => {
     fetchMock.mockResolvedValue(
@@ -278,7 +302,7 @@ describe("readRecord", () => {
     expect(result.kind).toBe("email");
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toBe(
-      `${API_BASE_URL}/api/v1/playthroughs/PT-demo-0001/records/email_thomas_01`,
+      apiUrl("/api/v1/playthroughs/PT-demo-0001/records/email_thomas_01"),
     );
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${TEST_TOKEN}`);
@@ -311,7 +335,7 @@ describe("getGenerationCapabilities (Phase 16 Track B)", () => {
     });
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/generation-capabilities`);
+    expect(String(url)).toBe(apiUrl("/api/v1/generation-capabilities"));
     const requestInit = init as RequestInit;
     expect(requestInit.method ?? "GET").toBe("GET");
     expect(requestInit.headers).toBeUndefined(); // public endpoint — no auth headers
@@ -361,7 +385,7 @@ describe("Phase 8 journey endpoints", () => {
     const session = await createAnonymousSession();
     expect(session.anonymousSessionToken).toBe("anon-token");
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/sessions/anonymous`);
+    expect(String(url)).toBe(apiUrl("/api/v1/sessions/anonymous"));
     expect((init as RequestInit).method).toBe("POST");
     expect((init as RequestInit).headers).toBeUndefined(); // no auth on the quota session
   });
@@ -376,7 +400,7 @@ describe("Phase 8 journey endpoints", () => {
     const created = await createCase("anon-token", "A mystery", "hard");
     expect(created.caseId).toBe("C1");
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/cases`);
+    expect(String(url)).toBe(apiUrl("/api/v1/cases"));
     const requestInit = init as RequestInit;
     expect(requestInit.method).toBe("POST");
     const headers = requestInit.headers as Record<string, string>;
@@ -398,7 +422,7 @@ describe("Phase 8 journey endpoints", () => {
     const progress = await getGenerationProgress("G1", "creator");
     expect(progress.progress).toBe(45);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/generations/G1`);
+    expect(String(url)).toBe(apiUrl("/api/v1/generations/G1"));
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer creator");
   });
@@ -410,7 +434,7 @@ describe("Phase 8 journey endpoints", () => {
     const playthrough = await createPlaythrough("creator", "C1", 1);
     expect(playthrough.playthroughAccessToken).toBe("pt-token");
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toBe(`${API_BASE_URL}/api/v1/cases/C1/versions/1/playthroughs`);
+    expect(String(url)).toBe(apiUrl("/api/v1/cases/C1/versions/1/playthroughs"));
     expect((init as RequestInit).method).toBe("POST");
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer creator");

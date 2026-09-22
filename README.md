@@ -134,7 +134,10 @@ as a playable 3D investigation.
 ```
 
 One container serves the SPA **and** the API (single origin), with a durable
-SQLite volume and migrations running automatically on startup.
+SQLite volume and migrations running automatically on startup. **Public
+production is HTTPS-only**: a TLS edge (Caddy or your platform ingress)
+fronts a private uvicorn backend — `:8000` is never exposed publicly, and the
+frontend talks to the API same-origin at `/api/v1`. See `docs/DEPLOYMENT.md`.
 
 ## Safety and trust boundaries
 
@@ -230,14 +233,31 @@ listeners are left behind.
 ## Docker setup
 
 ```bash
-docker compose up --build
-# → http://localhost:8000  (health: /api/v1/health, readiness: /api/v1/readiness)
+docker compose up --build   # development — SPA + API on http://localhost:8000
+
+# Production is HTTPS-only: TLS edge (Caddy) + private backend, no public :8000
+CADDY_DOMAIN=detective.example.com CADDY_EMAIL=you@example.com \
+  docker compose -f docker-compose.prod.yml up --build -d
 ```
 
 The multi-stage image builds the frontend (Node 24) and the backend
 (Python 3.12), runs as a non-root user, persists SQLite to the `pd-data`
 volume, and runs `alembic upgrade head` before the server starts. See
 `docs/DEPLOYMENT.md` for the full production configuration.
+
+## Security & privacy
+
+Public production is **HTTPS-only** with a **private uvicorn backend** —
+production never publishes `:8000`; a Caddy TLS edge (or your platform
+ingress) terminates TLS and the frontend reaches the API **same-origin** at
+`/api/v1` (no absolute public API URL). Rate limiting, trusted-proxy and
+production-profile guidance: `docs/DEPLOYMENT.md`.
+
+**Privacy:** generated cases persist the raw prompt, public case, hidden
+truth, generation metadata and player state in the private SQLite volume.
+There is **no automatic deletion** — data is retained for the demo period and
+then deleted by the operator. Policy + operator deletion/backup procedures:
+`docs/PRIVACY.md`.
 
 ## Environment configuration
 

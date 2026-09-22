@@ -150,10 +150,20 @@ def _consumer_accepts_bucket(consumer: Callable[..., Any]) -> bool:
 
 def _parse_doc(content: str) -> dict[str, Any]:
     """Strict single-document parse with duplicate-key rejection (mirror of the
-    strict generation parser) — returns the dict or raises ``ValueError``."""
+    strict generation parser) — returns the dict or raises ``ValueError``.
+
+    PD-SEC-09: the decode runs behind the SAME bounded depth preflight as the
+    generation parser (``bounded_json_loads``), so a deep nesting bomb in a
+    provider response raises a clean ``BoundedJsonError`` (a ``ValueError``)
+    instead of an uncaught ``RecursionError``.
+    """
     if not isinstance(content, str) or not content.strip():
         raise ValueError("provider output is empty")
-    return json.loads(content, object_pairs_hook=_reject_duplicate_keys)
+    from app.assets.depthguard import MAX_STRUCT_NESTING, bounded_json_loads
+
+    return bounded_json_loads(
+        content, object_pairs_hook=_reject_duplicate_keys, limit=MAX_STRUCT_NESTING
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -340,3 +340,42 @@ describe("Phase 18C notebook — empty groups show app-authored copy only", () =
     }
   });
 });
+
+describe("PD-SEC-01 — no undiscovered evidence title/description reaches the notebook (Phase 20)", () => {
+  it("a cached but UNDISCOVERED record's title/description never surfaces", () => {
+    // Simulate a hostile/misfed cache: a read record exists locally but the
+    // server-authoritative knowledge says its evidence is NOT discovered.
+    const records = [
+      makeEmailRecord(), // title "Weekend plans" — email_thomas_01
+      makeWitnessRecord(),
+    ];
+    const model = modelFor([], [], records);
+    const visibleText = model.groups
+      .flatMap((group) => group.entries)
+      .map((entry) => `${entry.label}\u0000${entry.detail ?? ""}`)
+      .join("\u0000");
+    expect(visibleText).not.toContain("Weekend plans");
+    expect(visibleText).not.toContain("plans");
+    expect(allEvidenceIds(model)).toEqual([]);
+  });
+
+  it("world objects that are NOT server-confirmed discovered never enter the objects group", () => {
+    const model = modelFor([], []);
+    expect(groupOf(model, "objects").entries).toEqual([]);
+  });
+
+  it("discovery gating is per-record: undiscovered records stay hidden even among discovered ones", () => {
+    const discovered = ["email_thomas_01"];
+    const records = [makeEmailRecord(), makeWitnessRecord()];
+    const model = modelFor(discovered, [], records);
+    const visibleText = model.groups
+      .flatMap((group) => group.entries)
+      .map((entry) => `${entry.label}\u0000${entry.detail ?? ""}`)
+      .join("\u0000");
+    // The discovered email record may surface as an object entry; the
+    // undiscovered witness record's title must not.
+    expect(allEvidenceIds(model)).toContain("email_thomas_01");
+    expect(visibleText).not.toContain("neighbour");
+    expect(model.groups.flatMap((group) => group.entries).filter((e) => e.evidenceId === "record_witness_hall_01")).toEqual([]);
+  });
+});

@@ -204,7 +204,15 @@ class InvestigationBootstrapResponse(BaseModel):
 
 
 class DiscoveryResultDTO(BaseModel):
-    """POST .../evidence/{evidence_id}/discover -> 200 (REQUIREMENTS 40.8)."""
+    """The discovery block returned INSIDE a successful object interaction
+    (REQUIREMENTS 40.8).
+
+    Phase 20 (PD-SEC-01): the direct client-facing endpoint
+    ``POST .../evidence/{evidence_id}/discover`` has been REMOVED — this DTO
+    is produced ONLY by ``POST .../objects/{object_id}/interact`` after the
+    server validated the world interaction (the evidence id is then
+    player-known).
+    """
 
     evidenceId: str
     kind: str

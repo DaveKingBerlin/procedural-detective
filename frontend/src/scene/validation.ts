@@ -67,6 +67,28 @@ function requireNullableString(owner: Record<string, unknown>, field: string, wh
 }
 
 /**
+ * A string-or-null field that may ALSO be OMITTED entirely (undefined).
+ *
+ * PD-SEC-01 (Phase 20): the backend strips `evidenceId` from UNDISCOVERED
+ * world objects in pre-reveal DTOs — a missing key is the NEW valid pre-reveal
+ * value (normalized to null, exactly like the older explicit null). A PRESENT
+ * but non-string/non-null value is still malformed and rejected — the parser
+ * never silently coerces a hostile value.
+ */
+function requireOptionalNullableString(
+  owner: Record<string, unknown>,
+  field: string,
+  where: string,
+): string | null {
+  const value = owner[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    throw new ValidationError(`${where}.${field} must be a string, null, or absent.`);
+  }
+  return value;
+}
+
+/**
  * A string that MAY be empty (but must still be a string). Used for the
  * world-object `interaction` field: DEF-062 — published cases carry an empty
  * interaction string for objects with NO interaction affordance (the
@@ -137,7 +159,9 @@ export const validateWorldObject: Validator<WorldObjectDTO> = {
       // DEF-062: interaction may be "" (NO affordance). Non-string/missing is
       // still malformed — the field is REQUIRED for the player-safe DTO shape.
       interaction: requireStringAllowEmpty(raw, "interaction", "worldObject"),
-      evidenceId: requireNullableString(raw, "evidenceId", "worldObject"),
+      // PD-SEC-01: `evidenceId` is optional — absent for UNDISCOVERED objects
+      // (backend strips it pre-reveal), null/string for known/discovered ones.
+      evidenceId: requireOptionalNullableString(raw, "evidenceId", "worldObject"),
       discovered: requireBoolean(raw, "discovered", "worldObject"),
       read: requireBoolean(raw, "read", "worldObject"),
       // Phase 13: only a `proc.*` asset uses the `generated` block. Missing or

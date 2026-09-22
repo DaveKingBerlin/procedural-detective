@@ -1,0 +1,60 @@
+# Procedural Detective — public TLS edge (Phase20 PD-SEC-03).
+#
+# Minimal Caddy 2 reverse proxy that fronts the PRIVATE uvicorn backend
+# (service `procedural-detective` on the compose internal network, port 8000).
+# Public deployment exposes ONLY this edge: the backend never publishes a host
+# port (`docker-compose.prod.yml` has no `ports:` for the backend service).
+#
+# Behavior (Phase20 §10.1, "do not over-engineer"):
+#   - automatic HTTPS (managed certs: Let's Encrypt/ZeroSSL for a public
+#     CADDY_DOMAIN; Caddy's internal CA for `localhost`/private hosts);
+#   - HTTP -> HTTPS redirect;
+#   - Strict-Transport-Security at the HTTPS boundary only, NO preload by
+#     default (Phase20 §10.3 — do not enable preload blindly);
+#   - request body limit (last-resort guard; the backend's own
+#     MAX_REQUEST_BODY_SIZE=65536 is the authoritative cap);
+#   - request/header read timeouts, bounded idle timeout, max header size;
+#   - proxy to the private backend with a bounded dial + upstream cap that
+#     MUST exceed CASE_GENERATION_DEADLINE_SECONDS (default 60, recommended
+#     showcase 300) so long generations are never cut at the edge.
+#
+# CADDY_DOMAIN is injected by docker-compose.prod.yml (default: localhost, for
+# local smoke). For real hosting set CADDY_DOMAIN=detective.example.com and
+# CADDY_EMAIL=<operator email> in your .env / environment.
+#
+# HSTS note: max-age=31536000 with NO `preload` — enabling preload submits the
+# domain to a public preload list and is a permanent commitment for the host.
+# Consider preload only after the host is definitively authoritative.
+{
+	admin off
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 30s
+			idle 2m
+		}
+		max_header_size 128kb
+	}
+}
+
+http://{$CADDY_DOMAIN:localhost} {
+	redir / https://{$CADDY_DOMAIN:localhost}{uri} permanent
+}
+
+{$CADDY_DOMAIN:localhost} {
+	request_body {
+		max_size 70000
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+	reverse_proxy procedural-detective:8000 {
+		transport http {
+			dial_timeout 5s
+			# Upstream generation is a long single request (bounded by
+			# CASE_GENERATION_DEADLINE_SECONDS). Keep this > that deadline.
+			response_header_timeout 330s
+		}
+	}
+}

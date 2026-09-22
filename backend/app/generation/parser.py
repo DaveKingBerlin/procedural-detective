@@ -38,6 +38,24 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# --------------------------------------------------------------------------- #
+# PD-SEC-09 — bounded structured-provider JSON depth preflight.
+#
+# The provider body is already SIZE-bounded (MAX_PROVIDER_OUTPUT_CHARS below,
+# and the transport caps at 256 KiB), but a size-bounded document can still be
+# a deep NESTING BOMB ("[[[[...]]]]" 100k levels fits in 200k chars) that would
+# blow the interpreter recursion limit inside ``json.loads`` with an uncaught
+# ``RecursionError``. The same iterative bracket-depth preflight the Asset
+# pipeline uses (``app.assets.depthguard.bounded_json_loads``) is therefore
+# applied HERE, at the one generic entry every generation-stage document passes
+# through: a too-deep document is rejected as a clean ``BoundedJsonError`` (a
+# ``ValueError``) and flows through the normal sanitized "not valid JSON" issue,
+# exactly like the AssetSpec path. ``MAX_STRUCT_NESTING`` = 32 is far above
+# every legitimate generated document (stage payloads nest at a handful of
+# levels) and far below CPython's recursion ceiling.
+# ---------------------------------------------------------------------------
+
+from app.assets.depthguard import BoundedJsonError, MAX_STRUCT_NESTING, bounded_json_loads
 from app.domain.evidence import (
     ALIBI_TIME_CLAIM,
     FORENSIC_WEAPON_MATCH,
@@ -1099,7 +1117,13 @@ def _parse_document(content: str) -> tuple[dict | None, list[str]]:
             f"({MAX_PROVIDER_OUTPUT_CHARS}): got {len(content)} chars"
         )
     try:
-        data = json.loads(content, object_pairs_hook=_reject_duplicate_keys)
+        # PD-SEC-09: bounded depth preflight BEFORE the decoder — a deep
+        # nested document raises BoundedJsonError (a ValueError) instead of an
+        # uncaught RecursionError. Duplicate keys are still rejected via the
+        # same hook.
+        data = bounded_json_loads(
+            content, object_pairs_hook=_reject_duplicate_keys, limit=MAX_STRUCT_NESTING
+        )
     except _DuplicateKeyError as exc:
         # Deterministic first-duplicate reporting (DEF-041/ADV-128): JSON
         # silently last-wins on duplicate keys, which must never reach the
@@ -1111,7 +1135,9 @@ def _parse_document(content: str) -> tuple[dict | None, list[str]]:
         if len(message) > 120:
             message = message[:120] + "..."
         # Keep any earlier (e.g. length) issues; a short non-JSON payload
-        # still yields the documented single JSON issue.
+        # still yields the documented single JSON issue. BoundedJsonError is a
+        # ValueError subclass, so a depth-bomb lands here too (sanitized:
+        # only the documented bound is ever mentioned).
         return None, issues + [f"provider output is not valid JSON: {message}"]
     if not isinstance(data, dict):
         return None, issues + ["provider output root must be a JSON object"]

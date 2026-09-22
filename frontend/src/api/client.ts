@@ -4,7 +4,6 @@ import type {
   AnonymousSessionResponse,
   CreateCaseResponse,
   CreatePlaythroughResponse,
-  DiscoveryResultDTO,
   ErrorEnvelope,
   EvidenceReadResultDTO,
   GenerationCapabilitiesResponse,
@@ -25,9 +24,58 @@ interface CreateCaseRequest {
   difficulty?: string;
 }
 
-/** Backend base URL. Overridable via VITE_API_BASE_URL; defaults to the local FastAPI dev server. */
-export const API_BASE_URL: string =
-  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+/**
+ * PD-SEC-04 (Phase 20) — production API base is SAME-ORIGIN.
+ *
+ * The default API root is the relative `/api/v1` path resolved against the
+ * CURRENT browser origin, so a production build never points at a hard-coded
+ * private/localhost origin. A `VITE_API_BASE_URL` override is honored ONLY
+ * when it is an explicit, syntactically valid absolute http(s) URL (the
+ * documented local-dev override `http://localhost:8000` still works via the
+ * env var). Any other value (absent, empty, whitespace, or junk) is skipped
+ * with the safe same-origin fallback — never a bare "localhost" default.
+ */
+
+/** Absolute-URL validation: http(s):// host[:port][/path]. Rejects credentials,
+ *  protocols other than http/https, shell metacharacters and whitespace. */
+const ABSOLUTE_HTTP_URL = /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?(?:\/\S*)?$/;
+
+/** The same-origin relative API root (paths already carry the /api/v1 prefix). */
+export const SAME_ORIGIN_API_ROOT = "/api/v1";
+
+/**
+ * Resolve the API base from an (ambient) VITE_API_BASE_URL value. Pure and
+ * deterministic: absent/empty -> same-origin `/api/v1`; valid absolute
+ * http(s) URL -> the trimmed literal; anything else -> same-origin fallback.
+ */
+export function resolveApiBaseUrl(configured: string | undefined | null): string {
+  if (typeof configured !== "string") return SAME_ORIGIN_API_ROOT;
+  const value = configured.trim();
+  if (value === "") return SAME_ORIGIN_API_ROOT;
+  if (ABSOLUTE_HTTP_URL.test(value)) return value;
+  return SAME_ORIGIN_API_ROOT;
+}
+
+/** Backend base URL (see doc above). */
+export const API_BASE_URL: string = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
+
+/**
+ * Compose the full request URL from the resolved base and an API path. Works
+ * for BOTH bases:
+ *  - absolute origin base (`http://localhost:8000`) -> base + path;
+ *  - same-origin relative root (`/api/v1`) -> the redundant prefix in the
+ *    path is collapsed once, so `apiUrl("/api/v1/health")` === "/api/v1/health".
+ */
+export function apiUrl(path: string): string {
+  const base = API_BASE_URL;
+  if (base === "" || base === "/") return path;
+  let normalized = base;
+  if (normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+  if (normalized.endsWith(SAME_ORIGIN_API_ROOT) && path.startsWith(SAME_ORIGIN_API_ROOT)) {
+    return normalized.slice(0, -SAME_ORIGIN_API_ROOT.length) + path;
+  }
+  return `${normalized}${path}`;
+}
 
 const REQUEST_TIMEOUT_MS = 300000;
 
@@ -112,7 +160,7 @@ async function parseJsonBody<T>(response: Response): Promise<T> {
 }
 
 async function request<T>(path: string): Promise<T> {
-  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`);
+  const response = await fetchWithTimeout(apiUrl(path));
   if (response.ok) {
     return await parseJsonBody<T>(response);
   }
@@ -166,7 +214,7 @@ async function authedRequest<T>(path: string, token: string, options: AuthedRequ
     body = JSON.stringify(options.body);
   }
   const init: RequestInit = { method: options.method ?? "GET", headers, body };
-  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, REQUEST_TIMEOUT_MS, init);
+  const response = await fetchWithTimeout(apiUrl(path), REQUEST_TIMEOUT_MS, init);
   if (response.ok) {
     return await parseJsonBody<T>(response);
   }
@@ -188,6 +236,13 @@ export function getInvestigation(playthroughId: string, token: string): Promise<
  * POST {base}/api/v1/playthroughs/{playthrough_id}/objects/{object_id}/interact
  * body {"interaction": "<object interaction>"} -> InteractionResultDTO.
  */
+/** POST {base}/api/v1/playthroughs/{playthrough_id}/objects/{object_id}/interact
+ *  body {"interaction": "<object interaction>"} -> InteractionResultDTO.
+ *
+ * PD-SEC-01 (Phase 20): object interaction is the ONLY client-side discovery
+ * path. The direct `evidence/{evidence_id}/discover` route is removed from
+ * the backend; the interact response carries the discovered evidence id
+ * (`discovery.evidenceId`) so the client never needs an undiscovered id. */
 export function interactObject(
   playthroughId: string,
   objectId: string,
@@ -198,19 +253,6 @@ export function interactObject(
     `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/objects/${encodeURIComponent(objectId)}/interact`,
     token,
     { method: "POST", body: { interaction } },
-  );
-}
-
-/** POST {base}/api/v1/playthroughs/{playthrough_id}/evidence/{evidence_id}/discover -> DiscoveryResultDTO. */
-export function discoverEvidence(
-  playthroughId: string,
-  evidenceId: string,
-  token: string,
-): Promise<DiscoveryResultDTO> {
-  return authedRequest<DiscoveryResultDTO>(
-    `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/evidence/${encodeURIComponent(evidenceId)}/discover`,
-    token,
-    { method: "POST", body: {} },
   );
 }
 
@@ -279,7 +321,7 @@ export function getReveal(playthroughId: string, token: string): Promise<RevealR
 
 /** JSON POST without credentials (anonymous session creation). */
 async function unauthPost<T>(path: string): Promise<T> {
-  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, REQUEST_TIMEOUT_MS, {
+  const response = await fetchWithTimeout(apiUrl(path), REQUEST_TIMEOUT_MS, {
     method: "POST",
   });
   if (response.ok) {

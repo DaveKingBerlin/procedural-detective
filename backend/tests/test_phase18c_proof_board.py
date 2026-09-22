@@ -300,13 +300,15 @@ def test_pre_reveal_responses_never_carry_dimension_keys(phase5_app):
     bundle = create_published_case_and_playthrough(phase5_app)
     pt_id = bundle["playthroughId"]
     pt_token = bundle["playthroughToken"]
-    from phase6_helpers import bootstrap, discover, read_record
+    from phase6_helpers import KNIFE_OBJECT, bootstrap, interact, read_record
 
     with client(phase5_app) as c:
         headers = auth(pt_token)
         boot = bootstrap(phase5_app, pt_id, pt_token)
         assert boot.status_code == 200, boot.json()
-        disc = discover(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
+        # PD-SEC-01: the direct discover route is removed — discovery is
+        # exercised through the validated object interaction.
+        disc = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
         assert disc.status_code == 200, disc.json()
         record = read_record(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
         assert record.status_code == 200, record.json()

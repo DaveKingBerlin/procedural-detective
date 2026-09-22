@@ -80,11 +80,17 @@ def get_playthrough(
 @router.get(
     "/{playthrough_id}/public-case",
     response_model=PublicCaseResponse,
-    summary="Public case of the PINNED published version",
+    summary="Public case of the PINNED published version (player-known only)",
     description=(
         "Requires the playthrough's own playthroughAccessToken. The payload "
         "is resolved ONLY from the published_versions row for the pinned "
-        "(caseId, caseVersion) — publishing v2 never changes this response."
+        "(caseId, caseVersion) — publishing v2 never changes this response. "
+        "Phase 20 (PD-SEC-01): this PLAYTHROUGH-scoped DTO exposes evidence "
+        "ONLY once the player has actually discovered it — a fresh playthrough "
+        "carries an EMPTY evidence list and null world-graph evidenceIds, so "
+        "no undiscovered evidence id/title/description is ever revealed "
+        "pre-discovery. (The creator-scoped GET /cases/{id} dossier keeps the "
+        "full REQUIREMENTS 41.2 evidence list.)"
     ),
 )
 def get_playthrough_public_case(
@@ -93,8 +99,16 @@ def get_playthrough_public_case(
     row: Annotated[Playthrough, Depends(require_playthrough)] = None,
 ) -> PublicCaseResponse:
     service = request.app.state.generation_service
+    # Player-knowledge snapshot (empty for a fresh playthrough): the ONLY
+    # evidence allowed on the playthrough-scoped public-case is what the
+    # player has already discovered (PD-SEC-01).
+    snapshot = request.app.state.store.snapshot_player_knowledge(row.playthrough_id)
     try:
-        public_case = service.get_public_case(row.case_id, row.case_version)
+        public_case = service.get_public_case(
+            row.case_id,
+            row.case_version,
+            discovered=set(snapshot.discovered),
+        )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - envelope everything sanitized

@@ -580,6 +580,7 @@ class GenerationService:
                 anonymous_quota_session_ttl_seconds=(
                     settings.anonymous_quota_session_ttl_seconds
                 ),
+                global_window_seconds=settings.global_generation_window_seconds,
             )
         self._admission = admission
         self._provider_factory = (
@@ -1585,8 +1586,21 @@ class GenerationService:
             ),
         }
 
-    def get_public_case(self, case_id: str, case_version: int) -> dict[str, Any] | None:
-        """Exact published-version public DTO dict (from the frozen payload)."""
+    def get_public_case(
+        self,
+        case_id: str,
+        case_version: int,
+        *,
+        discovered: set[str] | frozenset[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Exact published-version public DTO dict (from the frozen payload).
+
+        ``discovered`` (Phase 20 / PD-SEC-01) — when supplied the DTO is the
+        PLAYTHROUGH-scoped public-case and carries ONLY player-known evidence
+        metadata (see ``publication.public_case_dict_from_payload``); when
+        None (the creator-scoped ``GET /cases/{id}`` dossier) the full
+        REQUIREMENTS 41.2 public-case evidence list is kept.
+        """
         row = self._store.get_published(case_id, case_version)
         if row is None:
             return None
@@ -1594,7 +1608,7 @@ class GenerationService:
             payload = json.loads(row.payload_json)
         except (ValueError, TypeError):
             return None
-        return public_case_dict_from_payload(payload)
+        return public_case_dict_from_payload(payload, discovered=discovered)
 
     def get_latest_public_case(self, case_id: str) -> dict[str, Any] | None:
         """Latest published-version public DTO dict (GET /cases default only)."""

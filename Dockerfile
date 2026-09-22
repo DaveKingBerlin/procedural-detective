@@ -20,6 +20,11 @@ FROM node:24-alpine AS frontend-build
 
 WORKDIR /build/frontend
 
+# Assets shared with the SPA build: the kit manifests are imported via
+# `../../../assets/environments/*.json` from frontend/src/environments, i.e.
+# they resolve to /build/assets — they MUST be in the build context root.
+COPY assets/ /build/assets/
+
 # Layer-cache friendly: lockfile + manifest first, `npm ci` then source.
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
@@ -48,6 +53,7 @@ ENV \
 # Backend + Alembic chain. The dev extras include httpx (the live-provider
 # adapter imports it at module import time) — required at runtime too.
 COPY backend/ ./backend/
+COPY assets/ /app/assets/
 RUN pip install --no-cache-dir "./backend[dev]" \
     && rm -rf /root/.cache/pip
 

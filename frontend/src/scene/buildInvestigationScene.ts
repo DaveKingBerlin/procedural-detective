@@ -177,6 +177,40 @@ export function applyKnowledgeToSceneModel(
 }
 
 /**
+ * PD-SEC-01 (Phase 20) — server-confirmed post-discovery object binding.
+ *
+ * The backend now OMITS `evidenceId` from UNDISCOVERED world objects in the
+ * pre-reveal DTOs (bootstrap/public-case): before discovery the client has no
+ * right to know any evidence id. The ONLY discovery path is a successful
+ * POST /objects/{id}/interact, whose response carries the id that is now
+ * player-known. This pure, deterministic merge binds that id onto the matching
+ * world object so the subsequent knowledge sync ({@link applyKnowledgeToSceneModel})
+ * can flip its `discovered`/`read` flags, and so the player-safe derivations
+ * (discovery-summary strip, floating captions, detective notebook, object-list
+ * markers) can resolve titles from public registry labels.
+ *
+ * Reference-stable + idempotent: when the object already carries the same id
+ * (repeat / already-discovered interactions), the ORIGINAL model reference is
+ * returned — no rebuild, no re-render churn.
+ */
+export function bindEvidenceToSceneModel(
+  model: InvestigationSceneModel,
+  objectId: string,
+  evidenceId: string,
+): InvestigationSceneModel {
+  if (evidenceId === "") return model;
+  let changed = false;
+  const worldObjects = model.worldObjects.map((obj) => {
+    if (obj.objectId !== objectId) return obj;
+    if (obj.evidenceId === evidenceId) return obj;
+    changed = true;
+    return { ...obj, evidenceId };
+  });
+  if (!changed) return model;
+  return { ...model, worldObjects };
+}
+
+/**
  * Deterministic de-cramping of co-located world objects (Phase 8 E).
  *
  * The backend may place several objects at the same semantic anchor (the

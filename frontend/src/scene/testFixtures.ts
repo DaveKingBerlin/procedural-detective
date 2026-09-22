@@ -317,6 +317,31 @@ export function makeBootstrap(
 }
 
 /**
+ * PD-SEC-01 (Phase 20) — simulate the NEW backend contract: strip the
+ * pre-reveal evidence linkage (evidenceId) from every UNDISCOVERED world
+ * object in a bootstrap. The key is DELETED (not set to null), matching the
+ * backend "omitted field" behavior the frontend validator must tolerate.
+ * Discovered objects keep their (player-known) id.
+ *
+ * Pure — never mutates its input; fully type-preserving via object spreads.
+ */
+export function stripUndiscoveredEvidenceIds(
+  bootstrap: InvestigationBootstrapResponse,
+): InvestigationBootstrapResponse {
+  return {
+    ...bootstrap,
+    scene: {
+      ...bootstrap.scene,
+      worldObjects: bootstrap.scene.worldObjects.map((obj) => {
+        if (obj.discovered) return obj;
+        const { evidenceId: _removed, ...rest } = obj;
+        return rest as unknown as WorldObjectDTO;
+      }),
+    },
+  };
+}
+
+/**
  * Phase 11 Track B caned fixture: the SAME golden asset set re-anchored on
  * OFFICE manifest anchors (the backend placer re-anchors the golden objects
  * per kit). Non-apartment world objects resolve through the office kit

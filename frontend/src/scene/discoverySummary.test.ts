@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildInvestigationScene } from "./buildInvestigationScene";
 import { objectiveText, summarizeDiscovery } from "./discoverySummary";
-import { makeBootstrap, makeWorldObject } from "./testFixtures";
+import { makeBootstrap, makeWorldObject, stripUndiscoveredEvidenceIds } from "./testFixtures";
 
 /**
  * Player-facing discovery summary + objective updates (Phase 8 F): pure
@@ -35,7 +35,6 @@ describe("summarizeDiscovery", () => {
     expect(summary.entries[1].title).toBe("Kitchen knife"); // object label fallback
     expect(summary.entries[1].read).toBe(false);
     expect(summary.discoveredCount).toBe(2);
-    expect(summary.discoverableCount).toBe(2); // objects with an evidence link
   });
 
   it("is stable under reordering of discovered ids", () => {
@@ -63,13 +62,16 @@ describe("objectiveText", () => {
     expect(text).toContain("accessibility fallback");
   });
 
-  it("updates to a discovered count once the player has interacted", () => {
-    expect(objectiveText(partial, true)).toContain("Discovered 1 / 2 evidence items");
+  it("updates to a discovered count once the player has interacted (PD-SEC-01: no pre-reveal denominator)", () => {
+    expect(objectiveText(partial, true)).toContain("Discovered 1 evidence items");
     expect(objectiveText(partial, true)).toContain("clicking objects in the scene");
     expect(objectiveText(partial, true)).toContain("make your accusation");
+    // The old "X / Y" form derived Y from pre-reveal evidence ids — those ids
+    // are stripped under PD-SEC-01, so the count is never a fraction.
+    expect(objectiveText(partial, true)).not.toContain("/");
   });
 
-  it("falls back to a bare count when no discoverable count is known", () => {
+  it("uses the same honest bare count when no discoverable context is known", () => {
     const orphan = summarizeDiscovery(["x"], [], [], new Map());
     expect(objectiveText(orphan, true)).toBe(
       "Discovered 1 evidence items — keep clicking objects in the scene, then make your accusation when you are ready.",
@@ -78,10 +80,13 @@ describe("objectiveText", () => {
 });
 
 describe("scene integration — the golden fixture summary", () => {
-  it("the canned bootstrap exposes four discoverable in-scene items", () => {
-    const model = buildInvestigationScene(makeBootstrap());
+  it("the canned bootstrap starts with zero discovered evidence (pre-reveal ids stripped)", () => {
+    const model = buildInvestigationScene(
+      stripUndiscoveredEvidenceIds(makeBootstrap()),
+    );
     const summary = summarizeDiscovery([], [], model.worldObjects, new Map());
-    expect(summary.discoverableCount).toBe(4); // knife, laptop, letter opener, scissors
+    expect(summary.entries).toEqual([]);
+    expect(summary.discoveredCount).toBe(0);
   });
 
   it("co-located objects resolve through the spacing helper (table + vase)", () => {

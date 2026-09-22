@@ -15,9 +15,17 @@ Every endpoint:
 Endpoints:
 
 - GET    /playthroughs/{playthrough_id}/investigation
-- POST   /playthroughs/{playthrough_id}/evidence/{evidence_id}/discover
-- POST   /playthroughs/{playthrough_id}/objects/{object_id}/interact
 - GET    /playthroughs/{playthrough_id}/records/{record_id}
+- POST   /playthroughs/{playthrough_id}/objects/{object_id}/interact
+
+Phase 20 (PD-SEC-01): the client-facing direct discovery route
+``POST /playthroughs/{playthrough_id}/evidence/{evidence_id}/discover``
+has been REMOVED (the ADV-225 accepted-risk standing contract is
+superseded). Evidence discovery happens ONLY through the server-validated
+world interaction above; the service-level ``discover_evidence`` logic
+remains reachable exclusively INTERNALLY (``InvestigationService``), never
+through an API route. A player can therefore never enumerate/discover
+evidence by id without interacting with the world first.
 """
 
 from __future__ import annotations
@@ -30,7 +38,6 @@ from app.api.v1.errors import http_error, map_service_error
 from app.auth import require_playthrough
 from app.models.playthroughs import Playthrough
 from app.schemas.investigation import (
-    DiscoveryResultDTO,
     EvidenceReadResultDTO,
     InteractionResultDTO,
     InvestigationBootstrapResponse,
@@ -109,35 +116,6 @@ def get_investigation(
 
 
 @router.post(
-    "/{playthrough_id}/evidence/{evidence_id}/discover",
-    response_model=DiscoveryResultDTO,
-    summary="Discover one evidence record (server-authoritative)",
-    description=(
-        "Requires the playthrough's own playthroughAccessToken. The evidence "
-        "must belong to the PINNED CaseVersion and be reachable via a valid "
-        "world-graph placement (404 otherwise — unknown/fabricated and "
-        "non-reachable ids are indistinguishable). Idempotent: repeating "
-        "returns state 'already-discovered'. Marks the linked placement's "
-        "location visited (server-side)."
-    ),
-)
-def discover_evidence(
-    playthrough_id: str,
-    evidence_id: str,
-    request: Request,
-    row: Annotated[Playthrough, Depends(require_playthrough)] = None,
-) -> DiscoveryResultDTO:
-    service = _service(request)
-    try:
-        result = service.discover_evidence(row, evidence_id)
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001 - envelope everything sanitized
-        raise _translate(exc) from None
-    return DiscoveryResultDTO(**result)
-
-
-@router.post(
     "/{playthrough_id}/objects/{object_id}/interact",
     response_model=InteractionResultDTO,
     summary="Interact with one world object (validated by the placement)",
@@ -149,8 +127,9 @@ def discover_evidence(
         "change (DEF-062); the requested interaction must otherwise equal "
         "the placement's published interaction (mismatch -> 409 "
         "INTERACTION_NOT_ALLOWED, no state change). An evidence-linked "
-        "placement runs the same discovery logic as the discover endpoint "
-        "and returns its DTO."
+        "placement runs the server-internal discovery logic (PD-SEC-01: the "
+        "direct client-facing discover route has been removed — this world "
+        "interaction is the ONLY discovery path) and returns its DTO."
     ),
 )
 def interact_with_object(

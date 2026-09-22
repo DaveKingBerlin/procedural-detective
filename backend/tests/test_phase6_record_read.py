@@ -33,9 +33,9 @@ from phase5_helpers import (
 from phase6_helpers import (
     EMAIL_EVIDENCE,
     KNIFE_EVIDENCE,
+    KNIFE_OBJECT,
     V2_ONLY_EVIDENCE,
     case_for,
-    discover,
     interact,
     playthrough,
     publish_v2_with_extra_evidence,
@@ -84,7 +84,7 @@ def test_4_undiscovered_cannot_be_read(phase5_app):
 def test_7_read_after_discover_succeeds(phase5_app):
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
-    res = discover(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
+    res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200
     res = read_record(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
     assert res.status_code == 200
@@ -107,7 +107,7 @@ def test_8_duplicate_read_is_idempotent(phase5_app):
     """O8: every repeat read returns the byte-identical DTO."""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
-    discover(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
+    interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     first = read_record(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
     assert first.status_code == 200
     second = read_record(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
@@ -134,7 +134,7 @@ def test_10_read_from_another_caseversion_answers_404(phase5_app):
 def test_11_v1_read_unchanged_after_v2_publish(phase5_app):
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
-    discover(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
+    interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     before = read_record(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE).json()
     publish_v2_with_extra_evidence(phase5_app, case_id)
     after = read_record(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)

@@ -65,7 +65,12 @@ def bootstrap(phase5_app, pt_id, pt_token):
 
 
 def discover(phase5_app, pt_id, pt_token, evidence_id):
-    """POST .../evidence/{evidence_id}/discover."""
+    """POST .../evidence/{evidence_id}/discover — the DIRECT client-facing
+    route was REMOVED (Phase 20 / PD-SEC-01): discovery happens ONLY through
+    a validated world interaction (``interact``). This probe intentionally
+    POSTs the dead path and MUST come back 404 (route gone, no state change);
+    callers that need to actually discover evidence must use ``interact``.
+    """
     with client(phase5_app) as c:
         res = c.post(
             f"/api/v1/playthroughs/{pt_id}/evidence/{evidence_id}/discover",

@@ -23,13 +23,30 @@ Phase 8 additions (deployment hardening, Phase8 H/I/J):
 
 Phase 18A addition (submission trust / release hygiene):
 
-- ``SecurityHeadersMiddleware`` — minimal security headers on EVERY HTTP
-  response: ``Content-Security-Policy: frame-ancestors 'none'`` +
-  ``X-Frame-Options: DENY`` (the app is served same-origin and never needs
-  iframing), ``X-Content-Type-Options: nosniff``, ``Referrer-Policy:
+- ``SecurityHeadersMiddleware`` — security headers on EVERY HTTP
+  response. ``Content-Security-Policy`` is the Phase 20 (PD-SEC-08) baseline:
+  ``default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;
+  font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self';
+  frame-ancestors 'none'; form-action 'self'; script-src 'self'`` — WITHOUT
+  ``'unsafe-eval'`` (the production Vite/Babylon build was verified to contain
+  no ``eval()``/``new Function``/``WebAssembly`` usage, so strict script-src is
+  safe; the Babylon texture-loading chunks that construct blob workers are
+  NOT imported by the app and stay lazy-unloaded, so no blob:/worker-src
+  whitelist is required today — adapt only if the browser suite proves a
+  texture path needs it) plus ``X-Frame-Options: DENY``,
+  ``X-Content-Type-Options: nosniff``, ``Referrer-Policy:
   strict-origin-when-cross-origin`` and a deny-all ``Permissions-Policy``.
-  A full CSP (default-src) is deliberately NOT set — the Babylon.js renderer
-  needs data:/blob: URLs and generated inline material.
+
+Phase 20 additions (PD-SEC-02 / PD-SEC-06):
+
+- ``anon_session_limiter`` + ``generation_ip_limiter`` on ``app.state`` — the
+  bounded public admission policies for ``POST /sessions/anonymous``
+  (per-IP + global ceiling) and ``POST /cases`` (per-IP hourly budget),
+  keyed on the ``TRUST_PROXY``-aware resolved client IP. Deployment mode
+  (§8.1): single-process hackathon hosting; in-memory rate state is accepted
+  and NO multi-replica claim is made.
+- ``enforce_production_trace_policy`` — production startup REJECTS
+  ``PD_DEV_TRACE=true`` / ``PD_GENERATION_DEBUG_LOGS=true`` (PD-SEC-06).
 """
 
 from __future__ import annotations
@@ -52,7 +69,11 @@ from starlette.responses import Response
 
 from app.api.v1 import api_router
 from app.core.config import SERVICE_NAME, SERVICE_VERSION, Settings
-from app.core.observability import configure_logging
+from app.core.observability import (
+    configure_logging,
+    enforce_production_trace_policy,
+)
+from app.core.ratelimit import AnonymousSessionLimiter, SlidingWindowRateLimiter
 from app.db.session import create_db_engine
 from app.persistence.store import Store
 from app.persistence.timebase import EpochClock
@@ -297,24 +318,65 @@ class CacheControlMiddleware:
 
 
 # --------------------------------------------------------------------------- #
-# Phase 18A — minimal security headers (CSP frame-ancestors hardening)
+# Phase 18A + Phase 20 (PD-SEC-08) — security headers + full baseline CSP
 # --------------------------------------------------------------------------- #
 #
 # The app is served SAME-ORIGIN (single container: FastAPI + built SPA) and
 # never needs to be embedded in a third-party frame, so framing is denied.
-# A FULL Content-Security-Policy is intentionally NOT set here: the Babylon.js
-# 3D renderer relies on data:/blob: URLs and generated inline material, and a
-# restrictive default-src would risk breaking the shipped demo for debatable
-# gain. Only the framing directive is sent (frame-ancestors is the CSP level-3
-# equivalent of X-Frame-Options; both are sent for older browsers). The other
-# headers are advisory/non-restrictive and cannot break rendering:
+#
+# PD-SEC-08: a FULL source-restricting CSP baseline is now sent (defense in
+# depth; Phase 20 §19):
+#
+#   default-src 'self'                       — everything else falls back to self
+#   script-src 'self'                        — NO 'unsafe-eval': the production
+#                                              Vite/Babylon build was scanned and
+#                                              contains NO eval()/new Function/
+#                                              WebAssembly usage; index.html loads
+#                                              the app via an external module
+#                                              script only (no inline scripts).
+#                                              The Babylon KTX2/basis texture
+#                                              loader chunks (which construct
+#                                              blob workers) are NOT imported by
+#                                              the app and remain lazy-unloaded,
+#                                              so no blob:/worker-src whitelist
+#                                              is required; adapt the whitelist
+#                                              ONLY if the browser suite proves a
+#                                              texture path needs it (§19).
+#   style-src 'self' 'unsafe-inline'         — Vite ships an external stylesheet;
+#                                              Babylon/React inject inline style
+#                                              attributes (style-src-attr).
+#   img-src 'self' data:                     — Babylon procedural/dynamic
+#                                              textures use data: URLs.
+#   font-src 'self'                          — bundled fonts only.
+#   connect-src 'self'                       — same-origin API (PD-SEC-04).
+#   object-src 'none'                        — no plugins/embeds.
+#   base-uri 'self'                          — no base-tag hijack.
+#   frame-ancestors 'none'                   — framing denied (level-3).
+#   form-action 'self'                       — forms only submit same-origin.
+#
+# The remaining headers are advisory/non-restrictive and cannot break
+# rendering:
+#  - X-Frame-Options: DENY — older-browser framing equivalent;
 #  - X-Content-Type-Options: nosniff — don't MIME-sniff API/SPA responses;
 #  - Referrer-Policy: strict-origin-when-cross-origin — never leak query
 #    strings cross-origin (the SPA uses query params only on its own origin);
 #  - Permissions-Policy — deny camera/microphone/geolocation (unused).
 
+_CSP_BASELINE = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'; "
+    "form-action 'self'"
+)
+
 _SECURITY_HEADERS = (
-    ("content-security-policy", "frame-ancestors 'none'"),
+    ("content-security-policy", _CSP_BASELINE),
     ("x-frame-options", "DENY"),
     ("x-content-type-options", "nosniff"),
     ("referrer-policy", "strict-origin-when-cross-origin"),
@@ -566,6 +628,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     singleton (env vars + optional .env) is used as the one config source.
     """
     settings = settings if settings is not None else Settings()
+    # PD-SEC-06: production must never run with development trace logging. The
+    # phase-preferred policy is to REJECT startup with a clear sanitized error
+    # (see ``enforce_production_trace_policy`` in app/core/observability.py).
+    enforce_production_trace_policy(settings)
     configure_logging(settings)
 
     app = SecurityHeadersFastAPI(
@@ -587,6 +653,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         store=app.state.store,
         clock=app.state.clock,
         publication=app.state.publication_service,
+    )
+    # PD-SEC-02 — bounded public admission policies (single-process in-memory
+    # rate state, documented deployment mode §8.1). Keyed on the
+    # TRUST_PROXY-aware resolved client IP; atomic under each limiter's lock.
+    app.state.anon_session_limiter = AnonymousSessionLimiter(
+        clock=app.state.clock,
+        per_ip_limit=settings.anon_session_limit_per_ip_per_10_min,
+        per_ip_window_seconds=10 * 60,
+        global_limit=settings.anon_session_global_limit_per_min,
+        global_window_seconds=60,
+    )
+    app.state.generation_ip_limiter = SlidingWindowRateLimiter(
+        clock=app.state.clock,
+        limit=settings.generation_limit_per_ip_per_hour,
+        window_seconds=60 * 60,
     )
 
     app.add_middleware(

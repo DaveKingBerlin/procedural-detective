@@ -134,6 +134,19 @@ describe("validateWorldGraph", () => {
     expect(parsed.evidenceId).toBeNull();
   });
 
+  it("tolerates a MISSING evidenceId key (PD-SEC-01: backend strips it pre-reveal)", () => {
+    const raw = makeWorldObject() as unknown as Record<string, unknown>;
+    delete raw.evidenceId;
+    const parsed = validateWorldObject.validate(raw);
+    expect(parsed.evidenceId).toBeNull();
+  });
+
+  it("still rejects a present-but-hostile evidenceId (never coerced)", () => {
+    const raw = makeWorldObject() as unknown as Record<string, unknown>;
+    raw.evidenceId = 42;
+    expectValidationError(() => validateWorldObject.validate(raw), "evidenceId");
+  });
+
   it("accepts a world object with an EMPTY interaction string (DEF-062 no-affordance DTO)", () => {
     // DEF-062: published cases encode "no affordance" as interaction:"" (the
     // manifest-derived DTO). An empty string is valid — only a non-string or a

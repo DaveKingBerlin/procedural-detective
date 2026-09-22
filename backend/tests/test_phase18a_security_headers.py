@@ -1,18 +1,19 @@
-"""Phase 18A — minimal security headers (CSP frame-ancestors hardening).
+"""Phase 18A + Phase 20 — security headers (CSP PD-SEC-08 hardening).
 
 The app is served same-origin (single container: FastAPI + built SPA) and never
-needs iframing. A minimal, non-restrictive header set is added by
-``SecurityHeadersMiddleware`` (outermost) so it reaches EVERY response:
+needs iframing. ``SecurityHeadersMiddleware`` (outermost) sends a header set on
+EVERY response:
 
-- Content-Security-Policy: frame-ancestors 'none'  (CSP level-3 framing deny)
-- X-Frame-Options: DENY                             (older-browser equivalent)
+- Content-Security-Policy: the Phase 20 (PD-SEC-08) baseline
+  ``default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
+  img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none';
+  base-uri 'self'; frame-ancestors 'none'; form-action 'self'`` — explicitly
+  WITHOUT ``'unsafe-eval'`` (the production Vite/Babylon build contains no
+  eval()/new Function/WebAssembly usage; see main.py).
+- X-Frame-Options: DENY
 - X-Content-Type-Options: nosniff
 - Referrer-Policy: strict-origin-when-cross-origin
 - Permissions-Policy: camera=(), microphone=(), geolocation=()
-
-A FULL CSP (default-src ...) is deliberately NOT set: the Babylon.js renderer
-needs data:/blob: URLs and generated inline material, so a restrictive
-default-src would risk breaking the shipped demo (documented in main.py).
 
 These headers must exist on health/readiness/capabilities, on the normal
 published-case flow, on sanitized error responses and on the served SPA.
@@ -28,14 +29,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.core.config import Settings  # noqa: E402
-from app.main import create_app  # noqa: E402
+from app.main import _CSP_BASELINE, create_app  # noqa: E402
 from phase5_helpers import auth, create_case, create_session  # noqa: E402
 from phase6_helpers import client as phase6_client  # noqa: E402
 
 
 def _assert_security_headers(res) -> None:
     headers = res.headers
-    assert headers["content-security-policy"] == "frame-ancestors 'none'"
+    assert headers["content-security-policy"] == _CSP_BASELINE
     assert headers["x-frame-options"] == "DENY"
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["referrer-policy"] == "strict-origin-when-cross-origin"
@@ -120,15 +121,35 @@ def test_static_spa_serving_carries_security_headers(tmp_path, database_url):
         application.state.store.dispose()
 
 
-def test_no_full_default_src_csp_present():
-    """The phase deliberately avoids a full CSP: only the framing directive is
-    sent. Asserting this contract guards against a future default-src that
-    would silently break the Babylon.js renderer in the shipped demo."""
+def test_phase20_full_csp_baseline_is_sent_without_unsafe_eval():
+    """PD-SEC-08 — the FULL source-restricting CSP baseline is now sent.
+
+    This test REPLACES the pre-Phase-20 contract (which deliberately sent only
+    ``frame-ancestors 'none'`` and asserted no full CSP). Phase 20 adds the
+    full default-src baseline for defense-in-depth; the baseline is asserted
+    EXACTLY — in particular it must contain ``script-src 'self'`` with NO
+    ``'unsafe-eval'`` service (the production Vite/Babylon build was verified
+    to contain no eval()/new Function/WebAssembly usage; a future change that
+    adds unsafe-eval must carry an explicit justified whitelist decision)."""
     from app.main import _SECURITY_HEADERS
     from app.main import SecurityHeadersMiddleware
 
     assert SecurityHeadersMiddleware is not None
     csp = dict(_SECURITY_HEADERS)["content-security-policy"]
-    assert csp == "frame-ancestors 'none'"      # framing-only
-    assert "default-src" not in csp             # never a full restrictive CSP
-    assert "frame-ancestors" in csp
+    assert csp == _CSP_BASELINE
+    for directive in (
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "font-src 'self'",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ):
+        assert directive in csp, directive
+    assert "'unsafe-eval'" not in csp
+    assert "'unsafe-inline'" not in csp.replace("style-src 'self' 'unsafe-inline'", "")
+    assert "http:" not in csp and "https:" not in csp

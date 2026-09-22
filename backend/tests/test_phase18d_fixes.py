@@ -46,7 +46,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 
 from app.core.config import Settings  # noqa: E402
-from app.main import SecurityHeadersFastAPI, create_app  # noqa: E402
+from app.main import SecurityHeadersFastAPI, _CSP_BASELINE, create_app  # noqa: E402
 from app.services.reveal import RevealProjectionError, dimensions_of  # noqa: E402
 from phase5_helpers import assert_sanitized_error, auth  # noqa: E402
 from phase6_helpers import client as phase6_client  # noqa: E402
@@ -70,8 +70,10 @@ from tools import release_check  # noqa: E402
 # ADV-204 — security headers on EVERY response (unhandled 500 included)
 # --------------------------------------------------------------------------- #
 
+# Phase 18D ADV-204 assertions. The CSP value is the Phase 20 (PD-SEC-08)
+# baseline (imported from main.py); every other header is unchanged.
 _SECURITY_HEADER_EXPECT = {
-    "content-security-policy": "frame-ancestors 'none'",
+    "content-security-policy": _CSP_BASELINE,
     "x-frame-options": "DENY",
     "x-content-type-options": "nosniff",
     "referrer-policy": "strict-origin-when-cross-origin",
@@ -287,12 +289,19 @@ def test_adv205_genuinely_empty_repo_is_allowed(scratch_repo):
 
 def _configure_scratch_repo(repo: Path) -> None:
     """A release-shaped scratch repo: placeholder-free release docs so the only
-    failing check is the one under test."""
+    failing check is the one under test. ``.dockerignore`` carries the Phase 20
+    (PD-SEC-07) required exclusions so ``run_all``'s dockerignore gate passes
+    on synthetic repos too."""
     (repo / "README.md").write_text("# Scratch\n", encoding="utf-8")
     (repo / "SUBMISSION.md").write_text(
         "# Submission\n| Live demo | https://demo.example/\n", encoding="utf-8"
     )
     (repo / "THIRD_PARTY.md").write_text("none\n", encoding="utf-8")
+    (repo / ".dockerignore").write_text(
+        ".env\n.env.*\n!.env.example\nlogs/\n*.log\n*.db\n*.sqlite\n"
+        "*.sqlite3\ntmp/\ntemp/\n.ollama/\n",
+        encoding="utf-8",
+    )
 
 
 def test_adv206_tracked_env_production_with_secret_fails_the_tool(scratch_repo):

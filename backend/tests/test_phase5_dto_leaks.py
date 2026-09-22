@@ -114,10 +114,14 @@ def test_26_deep_nested_scan_across_every_phase5_endpoint(phase5_app):
         assert res.status_code == 200
         public_body = res.json()
         assert_no_hidden_leaks(public_body, known_tokens=known_tokens)
-        # Deep-nesting worked: the evidence/worldGraph sections exist and are
-        # part of the scanned tree.
-        assert len(public_body["evidence"]) > 0
+        # PD-SEC-01 (Phase 20): the PLAYTHROUGH-scoped public-case exposes NO
+        # undiscovered evidence — a fresh playthrough carries an EMPTY
+        # evidence list and null world-graph placement evidenceIds (the
+        # creator-scoped GET /cases/{id} dossier keeps the 41.2 list).
+        assert public_body["evidence"] == []
         assert len(public_body["worldGraph"]["placements"]) > 0
+        for placement in public_body["worldGraph"]["placements"]:
+            assert placement["evidenceId"] is None
 
 
 def test_24_public_case_dto_contains_no_case_truth(phase5_app):

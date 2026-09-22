@@ -210,8 +210,20 @@ def test_b_project_world_objects_dedupes_duplicate_placements():
     # The FIRST placement in published order wins (kitchen_counter/inspect).
     assert knife["anchor"] == "kitchen_counter"
     assert knife["interaction"] == "inspect"
-    assert knife["evidenceId"] == "forensic_knife_match_01"
+    # PD-SEC-01: the evidenceId is exposed ONLY for DISCOVERED evidence — a
+    # plain projection (no discovered set) withholds the undiscovered id.
+    assert knife["evidenceId"] is None
     assert knife["subtype"] == "sharp_weapon"
+    # Once the evidence is player-known the id is exposed (post-discovery).
+    after_discovery = next(
+        w
+        for w in project_world_objects(
+            payload, discovered={"forensic_knife_match_01"}
+        )
+        if w["objectId"] == "kitchen_knife"
+    )
+    assert after_discovery["evidenceId"] == "forensic_knife_match_01"
+    assert after_discovery["anchor"] == "kitchen_counter"
 
 
 def test_b_placement_for_object_matches_projected_dto():

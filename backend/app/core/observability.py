@@ -37,6 +37,10 @@ _SAFE_FIELDS = frozenset(
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})
 _generation_debug_logs = False
 
+# PD-SEC-06: the production environment marker. ``ENVIRONMENT=production``
+# triggers the development-trace prohibition below.
+PRODUCTION_ENVIRONMENT = "production"
+
 
 class JsonEventFormatter(logging.Formatter):
     """Emit one safe JSON object per line."""
@@ -60,6 +64,36 @@ class JsonEventFormatter(logging.Formatter):
 
 def _level(value: str | None) -> int:
     return getattr(logging, str(value or "INFO").upper(), logging.INFO)
+
+
+def enforce_production_trace_policy(settings: Any | None = None) -> None:
+    """PD-SEC-06: production startup REJECTS development trace logging.
+
+    When ``ENVIRONMENT=production`` and either ``PD_DEV_TRACE=true`` or
+    ``PD_GENERATION_DEBUG_LOGS=true`` is enabled, startup is refused with a
+    clear SANITIZED ``RuntimeError`` (the phase-preferred policy: reject, not
+    force-off-and-warn). The error is deliberately generic — it never echoes
+    operator values, filesystem paths or stack traces.
+
+    Because every production entrypoint constructs the app through
+    ``create_app`` (which calls this before logging is configured), a
+    trace-enabled production process can never serve a request.
+    """
+    environment = str(
+        getattr(settings, "environment", None)
+        or os.environ.get("ENVIRONMENT", "")
+        or "development"
+    )
+    if environment != PRODUCTION_ENVIRONMENT:
+        return
+    dev_trace = os.environ.get("PD_DEV_TRACE") == "true"
+    debug_logs = bool(getattr(settings, "pd_generation_debug_logs", False))
+    if dev_trace or debug_logs:
+        raise RuntimeError(
+            "refusing to start in production with development trace logging "
+            "enabled (PD_DEV_TRACE and PD_GENERATION_DEBUG_LOGS must be false "
+            "or unset in production)"
+        )
 
 
 def configure_logging(settings: Any | None = None) -> None:
@@ -126,4 +160,13 @@ def file_logging_description(settings: Any | None = None) -> str:
     return f"console + {path} (rotating, 5 MB, 3 backups)"
 
 
-__all__ = ["DEFAULT_LOG_FILE", "LOG_BACKUP_COUNT", "LOG_MAX_BYTES", "configure_logging", "emit_event", "file_logging_description"]
+__all__ = [
+    "DEFAULT_LOG_FILE",
+    "LOG_BACKUP_COUNT",
+    "LOG_MAX_BYTES",
+    "PRODUCTION_ENVIRONMENT",
+    "configure_logging",
+    "emit_event",
+    "enforce_production_trace_policy",
+    "file_logging_description",
+]

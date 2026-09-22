@@ -8,7 +8,7 @@ import type {
   PlaythroughLifecycleState,
   PlayerKnowledgeDTO,
 } from "../api/types";
-import { buildInvestigationScene, applyKnowledgeToSceneModel, type InvestigationSceneModel } from "./buildInvestigationScene";
+import { buildInvestigationScene, applyKnowledgeToSceneModel, bindEvidenceToSceneModel, type InvestigationSceneModel } from "./buildInvestigationScene";
 import type { CreateInvestigationSceneResult, InvestigationSceneHandle } from "./renderInvestigation";
 import { ValidationError } from "./validation";
 
@@ -24,9 +24,16 @@ import { ValidationError } from "./validation";
  *
  * Knowledge rules enforced here:
  *   - discovered/read flags ALWAYS come from the server (bootstrap first,
- *     then interact/discover/read responses). The client NEVER marks
- *     anything known on its own: knowledge grows only with ids the server
- *     returned, and repeated discovery is idempotent.
+ *     then interact/read responses). The client NEVER marks anything known on
+ *     its own: knowledge grows only with ids the server returned, and repeated
+ *     discovery is idempotent.
+ *   - PD-SEC-01 (Phase 20): the bootstrap no longer carries `evidenceId` for
+ *     UNDISCOVERED world objects. Discovery happens ONLY through
+ *     POST /objects/{id}/interact — the direct evidence discover route is gone.
+ *     When the server confirms a discovery, its response id is bound onto the
+ *     interacted object (player-known from then on) BEFORE the knowledge merge
+ *     so the DEF-072 flag flip and every player-safe derivation (summary
+ *     strip, captions, notebook) can resolve the id.
  *   - a record is fetched ONLY after the server confirmed the evidence is
  *     discovered through a successful interaction.
  *   - all failures are mapped to short player-safe messages — never raw
@@ -38,11 +45,11 @@ import { ValidationError } from "./validation";
 
 export type InvestigationErrorKind = "network" | "auth" | "gameplay" | "malformed" | "scene";
 
-/** The four frozen investigation endpoints, injectable for tests. */
+/** The three frozen investigation endpoints (direct evidence discovery is
+ *  REMOVED — discovery happens exclusively through interactObject). */
 export interface InvestigationServices {
   getInvestigation(playthroughId: string, token: string): Promise<InvestigationBootstrapResponse>;
   interactObject(playthroughId: string, objectId: string, interaction: string, token: string): Promise<InteractionResultDTO>;
-  discoverEvidence(playthroughId: string, evidenceId: string, token: string): Promise<DiscoveryResultDTO>;
   readRecord(playthroughId: string, recordId: string, token: string): Promise<EvidenceReadResultDTO>;
 }
 
@@ -269,6 +276,13 @@ export class InvestigationSession {
         `${state === "discovered" ? "Discovered" : "Already discovered"}: ${title}`,
         evidenceId,
       );
+      // PD-SEC-01: bind the now player-known id onto the interacted object
+      // BEFORE the knowledge merge — the bootstrap omits evidence ids for
+      // undiscovered objects, so without this the DEF-072 flag flip/captions/
+      // notebook could not resolve the discovery.
+      if (this.model) {
+        this.model = bindEvidenceToSceneModel(this.model, objectId, evidenceId);
+      }
       this.applyDiscovery(result.discovery);
     } else {
       // Phase 19C §3 — a NON-EVIDENCE interact: the server confirmed NO

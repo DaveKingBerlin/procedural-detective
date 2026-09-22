@@ -496,10 +496,24 @@ def test_evidence_bearing_proc_object_is_directly_clickable(database_url):
 
     store, service, started, _clock = _publish_unseen(database_url)
     payload = _payload(store, started.case_id)
-    world_objects = project_world_objects(payload)
-    ice_pick = next(
-        item for item in world_objects if item["assetId"].startswith("proc.")
+    # PD-SEC-01: the projection exposes evidenceId ONLY for player-DISCOVERED
+    # evidence. Undiscovered (empty discovered set) -> null evidenceId; once
+    # the player has discovered the forensic record the id is player-known and
+    # appears (that is exactly what the projection does for the placeholder
+    # post-discovery bootstrap below).
+    undiscovered = next(
+        item for item in project_world_objects(payload) if item["assetId"].startswith("proc.")
     )
+    assert undiscovered["interaction"] in INTERACTION_ALLOWLIST
+    assert undiscovered["evidenceId"] is None
+    discovered_obj = next(
+        item
+        for item in project_world_objects(
+            payload, discovered={"bronze_ceremonial_ice_pick_fp_01"}
+        )
+        if item["assetId"].startswith("proc.")
+    )
+    ice_pick = discovered_obj
     # non-empty interaction + evidence link + discoverable evidence
     assert ice_pick["interaction"] in INTERACTION_ALLOWLIST
     assert ice_pick["evidenceId"] == "bronze_ceremonial_ice_pick_fp_01"
@@ -994,12 +1008,13 @@ def test_api_unseen_weapon_publishes_bootstrap_clickable_and_survives_restart(da
             item for item in boot1["scene"]["worldObjects"]
             if item["assetId"].startswith("proc.")
         )
-        # bootstrap: generated block + interaction + evidence link
+        # bootstrap: generated block + interaction present; PD-SEC-01 — the
+        # evidenceId of an UNDISCOVERED record is NOT exposed pre-reveal.
         assert ice_pick["objectId"] == "bronze_ceremonial_ice_pick"
         assert ice_pick["generated"] is not None
         assert ice_pick["generated"]["hitbox"] is not None
         assert ice_pick["interaction"] in INTERACTION_ALLOWLIST
-        assert ice_pick["evidenceId"] == "bronze_ceremonial_ice_pick_fp_01"
+        assert ice_pick["evidenceId"] is None
         # the public case DTO exposes the same object
         dto = client1.get(
             f"/api/v1/cases/{created1['caseId']}?version=1",
@@ -1058,8 +1073,12 @@ def test_unseen_weapon_evidence_discoverable_without_breaking_solver(database_ur
     # the evidence fact exists and labels the unseen object
     evidence_ids = {fact["id"] for fact in payload["draft"]["evidence"]}
     assert "bronze_ceremonial_ice_pick_fp_01" in evidence_ids
-    # discoverable + clickable in the bootstrap projection
-    world_objects = project_world_objects(payload)
+    # discoverable + clickable in the bootstrap projection (PD-SEC-01: the
+    # evidenceId appears once the record is DISCOVERED — it is then
+    # player-known)
+    world_objects = project_world_objects(
+        payload, discovered={"bronze_ceremonial_ice_pick_fp_01"}
+    )
     ice_pick = next(item for item in world_objects if item["assetId"].startswith("proc."))
     assert ice_pick["interaction"] == "inspect"
     assert ice_pick["evidenceId"] == "bronze_ceremonial_ice_pick_fp_01"

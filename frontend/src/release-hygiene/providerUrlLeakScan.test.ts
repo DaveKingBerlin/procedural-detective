@@ -21,8 +21,13 @@ import { describe, expect, it } from "vitest";
  *   - any `http(s)://` literal whose host is NOT in the explicit allowlist:
  *       * a bare scheme token (`"http://"` / `"https://"`) — the DENYLIST
  *         guards already shipped in generationMode/assetCatalog/kitCatalog;
- *       * `localhost[:port]` — the VITE_API_BASE_URL local-dev default;
  *       * `github.com` — the canonical public repository link on the landing.
+ *
+ * PD-SEC-04 (Phase 20): `localhost` is NO LONGER allowed in production source
+ * either. The API base now defaults to the SAME-ORIGIN relative `/api/v1`
+ * (see src/api/client.ts); `http://localhost:8000` may exist only as an
+ * explicit build-time `VITE_API_BASE_URL` env override, never as a source
+ * literal.
  *
  * Comments are removed first (they do not ship); string literals are kept.
  * The scan is an INVARIANT, not a report: adding a provider URL / LAN IP to
@@ -42,9 +47,8 @@ const PRIVATE_HOST_IP: readonly RegExp[] = [
   /\bhost\.docker\.internal\b/i,
 ];
 
-/** Hosts that are legitimately part of the product source. */
+/** Hosts that are legitimately part of the product source (PD-SEC-04: no localhost). */
 const ALLOWED_URL_HOSTS: ReadonlyArray<{ label: string; test: (host: string) => boolean }> = [
-  { label: "localhost (API dev origin)", test: (host) => host === "localhost" || host.startsWith("localhost:") },
   { label: "github.com (canonical repo link)", test: (host) => host === "github.com" },
 ];
 

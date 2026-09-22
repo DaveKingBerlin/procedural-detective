@@ -138,21 +138,17 @@ def test_13_bootstrap_contains_no_undiscovered_evidence_content(phase5_app):
 
 
 def test_16_nested_leak_regression_every_phase6_response(phase5_app):
-    """O16: recursive key scan of EVERY Phase 6 response (bootstrap, discover,
-    interact, read) — no truth / murderer / weapon / time / proof /
-    diagnostics / verifier / token / internal ids, at ANY nesting level."""
+    """O16: recursive key scan of EVERY Phase 6 response (bootstrap, interact,
+    read) — no truth / murderer / weapon / time / proof / diagnostics /
+    verifier / token / internal ids, at ANY nesting level. (The direct
+    discover endpoint was removed in Phase 20 / PD-SEC-01; discovery is
+    exercised through the interact response below.)"""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
     responses = []
     with client(phase5_app) as c:
         headers = auth(pt_token)
         res = c.get(f"/api/v1/playthroughs/{pt_id}/investigation", headers=headers)
-        assert res.status_code == 200
-        responses.append(res.json())
-        res = c.post(
-            f"/api/v1/playthroughs/{pt_id}/evidence/forensic_knife_match_01/discover",
-            headers=headers,
-        )
         assert res.status_code == 200
         responses.append(res.json())
         res = c.post(
@@ -196,8 +192,10 @@ def test_11_v1_bootstrap_unchanged_after_v2_publish(phase5_app):
 
 def test_bootstrap_world_objects_sorted_with_golden_scene(phase5_app):
     """The Milestone-1 scene: >= 6 world objects, sorted by objectId, with the
-    kitchen knife + laptop + victim body present and evidenceId exposed only
-    as a nullable id (no content)."""
+    kitchen knife + laptop + victim body present. PD-SEC-01 (Phase 20): no
+    UNDISCOVERED evidence id is exposed — every object's ``evidenceId`` is
+    None before the player has discovered the linked evidence (the
+    ``discovered``/``read`` flags are the player-safe PlayerKnowledge mirror)."""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
     res = bootstrap(phase5_app, pt_id, pt_token)
@@ -208,15 +206,17 @@ def test_bootstrap_world_objects_sorted_with_golden_scene(phase5_app):
     ids = [w["objectId"] for w in world_objects]
     assert ids == sorted(ids)
     by_id = {w["objectId"]: w for w in world_objects}
-    assert by_id[KNIFE_OBJECT]["evidenceId"] == "forensic_knife_match_01"
+    # PD-SEC-01: no undiscovered evidence id may be exposed pre-discovery.
+    assert by_id[KNIFE_OBJECT]["evidenceId"] is None
     assert by_id[KNIFE_OBJECT]["locationId"] == SCENE_LOCATION
     assert by_id[KNIFE_OBJECT]["discovered"] is False
     assert by_id[KNIFE_OBJECT]["read"] is False
-    assert by_id[LAPTOP_OBJECT]["evidenceId"] == "email_thomas_01"
+    assert by_id[LAPTOP_OBJECT]["evidenceId"] is None
     assert by_id[LAPTOP_OBJECT]["interaction"] == "read"
     # ADV-222: the victim body is evidence-linked to the time-bearing
-    # body_found_01 record (discoverable WHEN fact on a placed object).
-    assert by_id[BODY_OBJECT]["evidenceId"] == "body_found_01"
+    # body_found_01 record (discoverable WHEN fact on a placed object) — but
+    # the id is NOT exposed before the player interacts with the body.
+    assert by_id[BODY_OBJECT]["evidenceId"] is None
     assert by_id[BODY_OBJECT]["interaction"] == "inspect"
     # Scene location from the pinned payload (never "latest").
     assert body["scene"]["location"] == {
@@ -224,6 +224,26 @@ def test_bootstrap_world_objects_sorted_with_golden_scene(phase5_app):
         "name": SCENE_NAME,
     }
     assert_no_hidden_leaks(body)
+
+
+def test_bootstrap_exposes_evidence_id_only_after_discovery(phase5_app):
+    """PD-SEC-01: after a validated world interaction discovers the linked
+    evidence, the evidenceId IS player-known and appears on the object (the
+    same discovery that the interact endpoint returns); before that it is
+    None."""
+    case_id, creator = case_for(phase5_app)
+    pt_id, pt_token = playthrough(phase5_app, case_id, creator)
+    by_id = _world_objects_by_id(phase5_app, pt_id, pt_token)
+    assert by_id[KNIFE_OBJECT]["evidenceId"] is None
+    assert by_id[KNIFE_OBJECT]["discovered"] is False
+    # Interact with the knife -> the server discovers the linked evidence.
+    res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
+    assert res.status_code == 200
+    assert res.json()["evidenceId"] == "forensic_knife_match_01"
+    # A fresh bootstrap now carries the player-known evidenceId + flag.
+    by_id = _world_objects_by_id(phase5_app, pt_id, pt_token)
+    assert by_id[KNIFE_OBJECT]["evidenceId"] == "forensic_knife_match_01"
+    assert by_id[KNIFE_OBJECT]["discovered"] is True
 
 
 def test_unknown_object_interact_answers_404(phase5_app):

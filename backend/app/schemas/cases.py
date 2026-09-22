@@ -131,6 +131,20 @@ class PublicCaseResponse(BaseModel):
     """GET /api/v1/cases/{caseId} and GET .../public-case (REQUIREMENTS 41.2).
 
     Public world material ONLY. Never the hidden truth.
+
+    Phase 20 (PD-SEC-01): the shared schema is served by TWO scopes with
+    different evidence visibility:
+
+    - ``GET /cases/{caseId}`` (creator credential) is the CASE-scoped
+      dossier: REQUIREMENTS 41.2 mandates the full public-case evidence list
+      there, so the ``evidence`` array + placement ``evidenceId`` are kept
+      (the case owner generated the case — that data is already legitimately
+      known to their role);
+    - ``GET /playthroughs/{playthrough_id}/public-case`` (playthrough
+      credential) is the PLAYTHROUGH-scoped DTO: it carries ONLY what the
+      player has actually discovered — an empty ``evidence`` array and null
+      placement ``evidenceId`` before discovery (see
+      ``publication.public_case_dict_from_payload(..., discovered=...)``).
     """
 
     caseId: str

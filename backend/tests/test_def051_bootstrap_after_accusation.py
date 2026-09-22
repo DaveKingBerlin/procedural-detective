@@ -36,7 +36,6 @@ from phase5_helpers import auth
 from phase6_helpers import (
     case_for,
     client,
-    discover,
     interact,
     playthrough,
     read_record,
@@ -110,8 +109,10 @@ def test_b_knowledge_frozen_after_accusation(phase5_app):
     pt_id, pt_token = playthrough(phase5_app, case_id, creator, version=1)
     truth = truth_bundle(phase5_app, case_id, 1)
 
-    # Normal PLAYING gameplay: discover the knife and read its record.
-    res = discover(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
+    # Normal PLAYING gameplay: discover the knife (world interaction) and read
+    # its record. PD-SEC-01: the direct discover route is gone — discovery
+    # happens through the validated object interaction.
+    res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200, res.json()
     res = read_record(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
     assert res.status_code == 200, res.json()
@@ -130,25 +131,28 @@ def test_b_knowledge_frozen_after_accusation(phase5_app):
 
 
 def test_c_gameplay_mutations_stay_playing_only(phase5_app):
-    """(b) discover / interact / read-record AFTER accusation answer the frozen
-    409 NOT_PLAYING envelope and mutate NOTHING (knowledge stays frozen)."""
+    """(b) interact / read-record AFTER accusation answer the frozen
+    409 NOT_PLAYING envelope and mutate NOTHING (knowledge stays frozen).
+    (PD-SEC-01: the direct discover route is removed; its PLAYING-gate
+    semantics are exercised through the interact endpoint.)"""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator, version=1)
     truth = truth_bundle(phase5_app, case_id, 1)
 
     # PLAYING gameplay first, then accuse.
-    res = discover(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
+    res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200, res.json()
     _accuse(phase5_app, pt_id, pt_token, truth)
     frozen = _bootstrap(phase5_app, pt_id, pt_token)
     kb_knife = frozen["playerKnowledge"]
 
-    # discover a NEW record -> 409, no knowledge change.
-    res = discover(phase5_app, pt_id, pt_token, EMAIL_EVIDENCE)
+    # interact with a NEW object (would discover EMAIL when PLAYING) -> 409
+    # NOT_PLAYING, no knowledge change.
+    res = interact(phase5_app, pt_id, pt_token, "apartment_laptop", "read")
     assert res.status_code == 409, res.text
     assert res.json()["error"]["code"] == "NOT_PLAYING"
 
-    # interact with an object -> 409, no knowledge change.
+    # interact with an already-discovered object -> 409, no knowledge change.
     res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 409, res.text
     assert res.json()["error"]["code"] == "NOT_PLAYING"

@@ -199,14 +199,62 @@ class Settings(BaseSettings):
     max_concurrent_generations: int = Field(
         default=1, gt=0, description="MAX_CONCURRENT_GENERATIONS."
     )
+    # Phase 20 PD-SEC-02 audit: the previous shipped default was 3. The
+    # security phase (§7) recommends a public MAX_CONCURRENT_GENERATIONS_GLOBAL
+    # of 2; the default is aligned to that so an unconfigured public operator
+    # is bounded the same way the phase audit recommends.
     max_concurrent_generations_global: int = Field(
-        default=3, gt=0, description="MAX_CONCURRENT_GENERATIONS_GLOBAL."
+        default=2, gt=0, description="MAX_CONCURRENT_GENERATIONS_GLOBAL."
     )
     max_generations_per_session_per_window: int = Field(
         default=3, gt=0, description="MAX_GENERATIONS_PER_SESSION_PER_WINDOW."
     )
     max_generations_global_per_window: int = Field(
         default=20, gt=0, description="MAX_GENERATIONS_GLOBAL_PER_WINDOW."
+    )
+    # Phase 20 PD-SEC-02 — rolling global generation quota window duration
+    # (seconds). The global window used to be created once at controller
+    # construction and was NEVER renewed; behaviour now rolls forward: when the
+    # current time reaches ``window_end`` the admission controller starts a
+    # fresh window and resets the rolled counters atomically (never
+    # reject-forever).
+    global_generation_window_seconds: int = Field(
+        default=60,
+        gt=0,
+        description="GLOBAL_GENERATION_WINDOW_SECONDS.",
+    )
+    # -- Phase 20 public admission rate limiting (PD-SEC-02) ------------------
+    # Bounded public admission for POST /sessions/anonymous: a per-IP rolling
+    # window PLUS a global ceiling. Operator-configurable canonical names.
+    anon_session_limit_per_ip_per_10_min: int = Field(
+        default=10,
+        gt=0,
+        description="ANON_SESSION_LIMIT_PER_IP_PER_10_MIN.",
+    )
+    anon_session_global_limit_per_min: int = Field(
+        default=100,
+        gt=0,
+        description="ANON_SESSION_GLOBAL_LIMIT_PER_MIN.",
+    )
+    # Per-IP generation budget for POST /cases (phase 20 §7). Bound together
+    # with the existing per-session budget, global concurrency ceiling and the
+    # rolling global quota, so minting fresh sessions can never reset the
+    # per-IP generation budget.
+    generation_limit_per_ip_per_hour: int = Field(
+        default=10,
+        gt=0,
+        description="GENERATION_LIMIT_PER_IP_PER_HOUR.",
+    )
+    # Trusted proxy handling (PD-SEC-02 §6.2): when True AND the deployment
+    # runs behind the documented trusted reverse proxy (TLS edge -> private
+    # backend), forwarded client IPs (LEFT-MOST X-Forwarded-For entry) are
+    # honored for rate-limit identity. When False (the DEFAULT) forwarded
+    # headers are IGNORED and the direct socket peer address is always used —
+    # a hostile X-Forwarded-For header can never bypass a per-IP limit.
+    trust_proxy: bool = Field(
+        default=False,
+        description="TRUST_PROXY (honor forwarded client IPs only when true "
+        "and behind the documented trusted proxy).",
     )
     max_prompt_chars: int = Field(
         default=4000, gt=0, description="MAX_PROMPT_CHARS."
@@ -307,6 +355,15 @@ class Settings(BaseSettings):
         ),
     )
     # -- Phase 17E structured operator logging -------------------------------
+    environment: Literal["development", "production", "test"] = Field(
+        default="development",
+        validation_alias="ENVIRONMENT",
+        description=(
+            "ENVIRONMENT (development|production|test). production forces "
+            "PD-SEC-06 logging policy: PD_DEV_TRACE=true or "
+            "PD_GENERATION_DEBUG_LOGS=true rejects startup."
+        ),
+    )
     pd_log_level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = Field(
         default="INFO", validation_alias="PD_LOG_LEVEL",
         description="PD_LOG_LEVEL (CRITICAL|ERROR|WARNING|INFO|DEBUG).",

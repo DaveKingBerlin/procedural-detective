@@ -7,7 +7,14 @@ import {
   type InvestigationServices,
   type SceneFactory,
 } from "./investigationFlow";
-import { makeBootstrap, makeEmailRecord, makeWitnessRecord, makeWorldObject, TEST_TOKEN } from "./testFixtures";
+import {
+  makeBootstrap,
+  makeEmailRecord,
+  makeWitnessRecord,
+  makeWorldObject,
+  stripUndiscoveredEvidenceIds,
+  TEST_TOKEN,
+} from "./testFixtures";
 import { discoveredCaptionsForWorld } from "./objectCaption";
 import { objectiveText, summaryFromSession } from "./discoverySummary";
 
@@ -42,13 +49,6 @@ function makeServices(overrides: Partial<InvestigationServices> = {}): Investiga
   const services: InvestigationServices = {
     getInvestigation: vi.fn(async () => makeBootstrap()),
     interactObject: vi.fn(async () => knifeInteractResult()),
-    discoverEvidence: vi.fn(async (): Promise<Awaited<ReturnType<InvestigationServices["discoverEvidence"]>>> => ({
-      evidenceId: "body_found_01",
-      kind: "witness_observation",
-      title: "Body found in the kitchen",
-      interaction: "view_record",
-      state: "discovered",
-    })),
     readRecord: vi.fn(async () => makeEmailRecord()),
     ...overrides,
   };
@@ -376,7 +376,7 @@ describe("Phase 19C — discovery opens the panel data, increments the counter a
     expect(after.entries.map((entry) => entry.evidenceId)).toEqual(["forensic_knife_match_01"]);
     expect(after.entries[0].title).toBeTruthy();
     expect(objectiveText(after, true)).toBe(
-      "Discovered 1 / 4 evidence items — keep clicking objects in the scene to find more, then make your accusation when you are ready.",
+      "Discovered 1 evidence items — keep clicking objects in the scene, then make your accusation when you are ready.",
     );
 
     // THE MARKING: the merged scene model (object-list markers + captions)
@@ -404,7 +404,7 @@ describe("Phase 19C — discovery opens the panel data, increments the counter a
     expect(
       summary.entries.filter((entry) => entry.evidenceId === "forensic_knife_match_01"),
     ).toHaveLength(1);
-    expect(objectiveText(summary, true)).toContain("Discovered 1 / 4");
+    expect(objectiveText(summary, true)).toContain("Discovered 1 evidence items");
   });
 
   it("a NON-evidence interact marks nothing discovered and leaves the summary unchanged (Phase 19C §4)", async () => {
@@ -437,7 +437,7 @@ describe("Phase 19C — discovery opens the panel data, increments the counter a
     const summary = summaryFromSession(session, session.sceneModel!);
     expect(summary.discoveredCount).toBe(0);
     expect(summary.entries).toEqual([]);
-    expect(objectiveText(summary, true)).toContain("Discovered 0 / 4");
+    expect(objectiveText(summary, true)).toContain("Discovered 0 evidence items");
     expect(discoveredCaptionsForWorld(session.sceneModel!.worldObjects, new Map())).toEqual([]);
   });
 });
@@ -726,5 +726,73 @@ describe("Phase 18C — Detective Notebook session access (record cache + hydrat
     await session.hydrateNotebookRecords(); // must NOT throw
 
     expect(services.readRecord).not.toHaveBeenCalled();
+  });
+});
+
+describe("PD-SEC-01 — pre-reveal evidence ids stripped from the bootstrap (Phase 20)", () => {
+  it("parses a bootstrap whose undiscovered objects OMIT evidenceId entirely (missing key tolerated)", async () => {
+    const services = makeServices({
+      getInvestigation: vi.fn(async () => stripUndiscoveredEvidenceIds(makeBootstrap()) as never),
+    });
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected ok start");
+
+    const knife = session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    // Pre-reveal: the id is simply not there — no UI may depend on it.
+    expect(knife.evidenceId).toBeNull();
+    expect(knife.discovered).toBe(false);
+    expect(session.discoveredEvidenceIdsSnapshot()).toEqual([]);
+    // No undiscovered evidence title/description may surface pre-disclosure.
+    expect(summaryFromSession(session, session.sceneModel!).entries).toEqual([]);
+  });
+
+  it("interactObject is the ONLY discovery path — no direct discover helper exists in the service surface", async () => {
+    const services = makeServices();
+    await makeSession(services).start(null);
+    expect((services as unknown as Record<string, unknown>).discoverEvidence).toBeUndefined();
+  });
+
+  it("a server-confirmed discovery binds the now-known id and flips flags/captions/strip without a reload", async () => {
+    const services = makeServices({
+      getInvestigation: vi.fn(async () => stripUndiscoveredEvidenceIds(makeBootstrap()) as never),
+    });
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+    expect(outcome.ok).toBe(true);
+
+    // Pre-reveal nothing is known about the knife object.
+    const before = session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    expect(before.evidenceId).toBeNull();
+    expect(before.discovered).toBe(false);
+
+    // Only the interact path exists; interactObject internally discovers.
+    await session.interact("kitchen_knife");
+
+    // The disclosed id is bound and the server-authoritative flags flip.
+    const knife = session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    expect(knife.evidenceId).toBe("forensic_knife_match_01");
+    expect(knife.discovered).toBe(true);
+    expect(knife.read).toBe(true);
+
+    // The discovery strip + captions + counter derive from the SAME knowledge.
+    const after = summaryFromSession(session, session.sceneModel!);
+    expect(after.discoveredCount).toBe(1);
+    expect(after.entries.map((entry) => entry.evidenceId)).toEqual(["forensic_knife_match_01"]);
+    expect(after.entries[0].title).toBeTruthy();
+    expect(objectiveText(after, true)).toBe(
+      "Discovered 1 evidence items — keep clicking objects in the scene, then make your accusation when you are ready.",
+    );
+    const captions = discoveredCaptionsForWorld(
+      session.sceneModel!.worldObjects,
+      session.discoveredRecordTitles(),
+    );
+    expect(captions.map((caption) => caption.objectId)).toContain("kitchen_knife");
+
+    // The knowledge came ONLY from the server-confirmed interact response.
+    const interactMock = services.interactObject as ReturnType<typeof vi.fn>;
+    expect(interactMock).toHaveBeenCalledWith(PT_ID, "kitchen_knife", "inspect", TEST_TOKEN);
   });
 });

@@ -1,119 +1,229 @@
 # Procedural Detective — Production Deployment
 
-Single-container, single-origin deployment. One container serves the React SPA
-**and** the FastAPI backend from the same origin, so CORS is moot for normal
-browser traffic and the SQLite database lives in a durable Docker volume.
+Phase 20 security-hardened deployment (PD-SEC-03/04/05/06). **Public hosting
+is HTTPS-only**; the FastAPI/uvicorn backend is **private-network-only** and
+the browser talks to the API **same-origin** over the TLS edge. Local
+development still uses the simple `docker compose up --build` flow on `:8000`.
 
-## 1. Environment variables
+```
+Internet
+   |  HTTPS :443   (HTTP :80 -> HTTPS redirect)
+   v
+TLS reverse proxy / platform ingress      <- Caddy (shipped) or your provider
+   |  private HTTP, compose network only
+   v
+Uvicorn :8000  (private; NO host port published in production)
+```
+
+`Uvicorn is not publicly reachable in production` — the production profile
+publishes **only** the TLS edge; `:8000` is never exposed to the host or the
+Internet (PD-SEC-03 §10/§10.2).
+
+## 1. Two deployment profiles
+
+| Profile | Command | Public exposure |
+| --- | --- | --- |
+| **Development** | `docker compose up --build` | `http://localhost:8000` (uvicorn published — local only) |
+| **Production** | `docker compose -f docker-compose.prod.yml up --build -d` | HTTPS `:443` + HTTP→HTTPS `:80` via Caddy; backend private only |
+
+The development flow is unchanged: `docker compose up --build` still serves
+the SPA + API from one container on `:8000` for local work. The production
+file (`docker-compose.prod.yml`) uses the **same image** but publishes no
+backend port at all.
+
+## 2. Production architecture (HTTPS-only, same-origin)
+
+- **TLS edge (shipped):** `docker/docker-compose.prod.yml` starts a minimal
+  Caddy 2 container (`caddy:2-alpine`) that fronts the private backend:
+  - automatic HTTPS (managed certificates via Let's Encrypt/ZeroSSL for a
+    public `CADDY_DOMAIN`; Caddy's internal CA for `localhost` smoke tests);
+  - HTTP → HTTPS redirect;
+  - `Strict-Transport-Security` at the **HTTPS boundary only**, **no preload**
+    by default (PD-SEC-03 §10.3 — do not enable preload blindly);
+  - request body limit (last-resort guard above the backend's own
+    `MAX_REQUEST_BODY_SIZE`), request-header/body read timeouts and a max
+    header size, and an upstream cap above
+    `CASE_GENERATION_DEADLINE_SECONDS` so long generations are never cut;
+  - proxies **only** to the private backend service (`procedural-detective:8000`).
+  Config: `docker/Caddyfile` (§4). No uvicorn port is published.
+- **Platform ingress (alternative):** if your hosting provider terminates TLS
+  itself, start only the backend service — it is already private-only:
+  `docker compose -f docker-compose.prod.yml up -d procedural-detective`.
+  The ingress forwards HTTPS to the container on the private network and must
+  be configured with HTTP→HTTPS redirect + HSTS at its own boundary.
+- **Same-origin API (PD-SEC-04):** the production frontend calls the API at a
+  **relative** `https://<host>/api/v1/...` — there is **no absolute public API
+  URL**. The backend serves the SPA and the API from one origin, so CORS is
+  moot and `VITE_API_BASE_URL` must **not** be pointed at
+  `http://localhost:8000` in a public build (§10). Private/playthrough
+  responses remain `Cache-Control: no-store` regardless.
+
+## 3. Environment variables
 
 Canonical names (REQUIREMENTS §45), exact one-per-setting. Full list with
 defaults: `.env.example`.
 
 | Variable | Purpose | Container default |
 | --- | --- | --- |
-| `DATABASE_URL` | SQLAlchemy URL. Container default points at the durable volume: `sqlite:////data/procedural_detective.db`. Local default is `<repo-root>/procedural_detective.db`. | `sqlite:////data/procedural_detective.db` |
-| `GENERATION_PROVIDER` | `fake` (deterministic demo, default) or `live` (opt-in LLM). | `fake` |
+| `DATABASE_URL` | SQLAlchemy URL. Production points at the durable volume: `sqlite:////data/procedural_detective.db`. | `sqlite:////data/procedural_detective.db` |
+| `ENVIRONMENT` | Deployment mode. `production` is the prod-profile default; dev defaults to `development`. | `production` (prod compose) / `development` (dev) |
+| `PD_DEV_TRACE` | Developer trace. **Must be `false` in production** — the prod profile forces it `false` (see §12). | `false` |
+| `TRUST_PROXY` | Honor proxy-forwarded client IPs (`X-Forwarded-For` etc.) ONLY when `true` and the TLS edge is the defined trusted proxy (§7). | `false` (dev) / `true` (prod compose with Caddy) |
+| `GENERATION_PROVIDER` | `fake` (deterministic demo, default) or `live` / `ollama` (opt-in). | `fake` |
 | `LLM_API_KEY` | Live-mode credential. **Never committed.** | unset |
 | `LLM_MODEL` | Live-mode model name (e.g. `gpt-4.1`). Required for live. | unset |
 | `LIVE_PROVIDER_URL` | Live-mode HTTPS endpoint. Rejected unless `https://`. | unset |
-| `CORS_ALLOWED_ORIGINS` | Comma-separated allowlist. `*`/`null` are rejected. Same-origin serving makes CORS moot; set it to the deployed UI origin only when the UI is hosted separately. | `http://localhost:5173` (dev) |
-| `STATIC_DIR` | Directory of the built frontend (`index.html` + `assets/`). When set, the backend serves the SPA at `/` and falls back to `index.html` for `/scene` `/accuse` `/reveal`. Unset in local dev (Vite serves the UI). | `/app/static` |
-| `API_HOST` / `API_PORT` | uvicorn bind. | `0.0.0.0` / `8000` |
-| `…TTL_SECONDS` | Token/quota TTLs (`CREATOR_TOKEN_TTL_SECONDS`, `PLAYTHROUGH_TOKEN_TTL_SECONDS`, `ANONYMOUS_QUOTA_SESSION_TTL_SECONDS`) and all generation budgets (`MAX_*`, `CASE_GENERATION_DEADLINE_SECONDS`, …). | see `.env.example` |
+| `OLLAMA_BASE_URL` | Local-AI operator endpoint. Only loopback/private/LAN hosts accepted; must remain **private** (§13). | `http://127.0.0.1:11434` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated allowlist. `*`/`null` rejected. Same-origin serving makes it moot; set it to the deployed UI origin only when the UI is hosted separately. | empty (same-origin) |
+| `STATIC_DIR` | Built-frontend directory served by the backend (SPA at `/` + SPA fallback). | `/app/static` |
+| `API_HOST` / `API_PORT` | uvicorn bind inside the container. | `0.0.0.0` / `8000` (never published in prod) |
+| `…TTL_SECONDS`, `MAX_*` | Token/quota TTLs and generation budgets (see `.env.example`; rate limiting in §7). | see `.env.example` |
+| `CADDY_DOMAIN` / `CADDY_EMAIL` | Production TLS edge host / ACME contact (`docker-compose.prod.yml`). | `localhost` / unset |
 
-## 2. Durable volume
+## 4. Caddy TLS edge (`docker/Caddyfile` + `docker-compose.prod.yml`)
 
-The container persists SQLite to `/data` (a Docker **named volume**, not a
-path in the image). The entrypoint creates `/data` and hands ownership to the
-unprivileged `app` user before starting the server:
+```bash
+# Local smoke (localhost internal CA — use -k / trust the local root once):
+docker compose -f docker-compose.prod.yml up --build -d
+curl -k https://localhost/api/v1/health
+curl -I -k https://localhost/          # 200 + Strict-Transport-Security
 
-- `docker compose up --build` defines the volume automatically (`pd-data`).
-- Plain `docker run`:
-  `docker run --rm -v pd-data:/data -p 8000:8000 procedural-detective:latest`
+# Real hosting: point CADDY_DOMAIN at the public host in .env / environment.
+CADDY_DOMAIN=detective.example.com
+CADDY_EMAIL=you@example.com
+docker compose -f docker-compose.prod.yml up --build -d
+```
 
-Rebuilds and restarts never touch the data; deleting the volume deletes cases.
+The Caddyfile is deliberately minimal (PD-SEC-03 §10.1, "do not over-engineer"):
+auto-HTTPS, HTTP→HTTPS redirect, HSTS (no preload), request-body/header-size
+limits, read/idle timeouts, and a proxy to the private `procedural-detective`
+service. It never exposes a uvicorn port.
 
-## 3. Migrations on startup
-
-Controlled startup (no sidecar, no init container):
-
-1. `docker/entrypoint.sh` runs `alembic upgrade head` **once** before the
-   server starts (`python -m alembic -c /app/backend/alembic.ini upgrade
-   head`). Backend module: `backend/app/startup.py::run_migrations()`.
-2. Only after migration succeeds does uvicorn start.
-3. `/api/v1/readiness` compares the database revision against the Alembic head
-   and reports `200 {"status":"ready", ...}` afterwards.
-4. **Graceful failure:** a malformed `DATABASE_URL` is rejected by `Settings`
-   at configuration time; an unwritable database directory makes the entrypoint
-   exit non-zero with a clear sanitized message ("Failed to apply database
-   migrations…"). A misconfigured container never serves a never-ready app.
-
-## 4. Health / readiness probes
+## 5. Health / readiness probes
 
 | Endpoint | Meaning |
 | --- | --- |
 | `GET /api/v1/health` | Liveness: fixed body, **never touches the database**. Used by the docker HEALTHCHECK. |
 | `GET /api/v1/readiness` | Readiness: real `SELECT 1` **and** Alembic at head. `503 NOT_READY` envelope otherwise. |
 
-## 5. Demo mode vs Live mode
+In production, probe them through the TLS edge (`https://<host>/api/v1/health`).
+The docker HEALTHCHECK inside the backend keeps probing loopback within the
+private network.
 
-**Demo mode (default, zero-cost, zero-credentials):** `GENERATION_PROVIDER=fake`.
-The deterministic offline provider replays the shipped validated golden case
-for any prompt, so the complete browser journey (prompt → generate →
-investigate → accuse → reveal) works with no API key, no network, no cost.
-This is the public hackathon demo path.
+## 6. Migration on startup (unchanged)
 
-**Live mode (opt-in):** `GENERATION_PROVIDER=live` **plus** all of
-`LLM_API_KEY`, `LLM_MODEL`, `LIVE_PROVIDER_URL` (must be `https://`). A live
-call can then synthesize genuinely new cases through the same
-validate-repair-publish pipeline. The live-provider boundary stays replaceable
-(`app/generation/live_provider.py`). Never commit credentials; inject them via
-the environment (`.env` is git-ignored).
+The entrypoint runs `alembic upgrade head` exactly once before uvicorn starts
+(`docker/entrypoint.sh` → `backend/app/startup.py`). `DATABASE_URL` pointing
+at a private volume path is enforced; a misconfigured container exits non-zero
+with a sanitized message and never serves an unready app.
 
-## 6. Production CORS (single-origin)
+## 7. Rate limiting & trusted proxy (PD-SEC-02, §27)
 
-The shipped container serves the SPA **and** the API from one origin
-(`http://<host>:8000`), so same-origin browser requests never trigger CORS at
-all. If the UI is ever hosted separately, set `CORS_ALLOWED_ORIGINS` to exactly
-the deployed UI origin. Arbitrary origins are never reflected: `*` and `null`
-are rejected at configuration time and disallowed preflights answer the shared
-error envelope without an `Access-Control-Allow-Origin` header.
+Public generators are bounded at multiple layers (per-session budget, per-IP
+budget and global ceilings — canonical names in `.env.example`, operator-tuned
+starting values: session per-window budget, global per-window quota, and
+`MAX_CONCURRENT_GENERATIONS_GLOBAL`). Behavior:
 
-## 7. Cache policy
+- **Anonymous-session admission** and **generation** are rate-limited with
+  rolling windows that recover without a process restart.
+- **Forwarded-client-IP spoof resistance:** `X-Forwarded-For` / `Forwarded` /
+  `X-Real-IP` are **ignored unless `TRUST_PROXY=true`**. When false (default
+  in dev) the direct socket peer address is used. The prod profile ships
+  `TRUST_PROXY=true` **only because** the Caddy edge sets the forwarded
+  headers and is the defined trusted proxy; if you swap the edge, keep
+  `TRUST_PROXY=false` unless you can name the trusted reverse proxy exactly.
 
-Every private/authenticated `/api/v1` response (sessions, cases, generations,
-playthroughs, investigation, accusation, reveal) — including the reveal
-response and the playthrough bootstrap — carries `Cache-Control: no-store`
-(+ `Pragma: no-cache`). The SPA `index.html` is served `no-store`; content-
-hashed Vite assets under `/assets` are served `immutable` (public,
-`max-age=31536000`). `/api/v1/health` and `/api/v1/readiness` remain
-cacheable-safe status words.
+## 8. Privacy & retention
 
-## 8. Security posture (summary)
+Generated cases persist **raw prompt, public case, hidden truth, generation
+metadata and player state** in the private SQLite volume. Read the policy:
 
-- `CaseTruth` never reaches the client before reveal; every pre-reveal payload
-  is an allowlisted DTO (enforced by the full test suite's leak scanners).
-- Reveal is gated on `{ACCUSED, REVEALED}` (frozen REQUIREMENTS 40.12).
-- Bearer tokens are opaque, hashed at rest, constant-time compared, and only
-  ever returned at issuance.
-- Non-2xx responses all use the `{"error":{code,message,details}}` envelope;
-  500s never leak tracebacks or internals.
-- No secrets are logged; the API key never appears in provider-config error
-  messages. Uncommitted `.env` keeps real credentials out of git.
+> **Retention:** data is retained for the duration of the hackathon/demo
+> period and is then eligible for operator deletion. The build does **NOT**
+> delete automatically. Operator deletion + backup procedures:
+> `docs/PRIVACY.md`.
 
-## 9. Quick reference
+The SQLite volume is reachable only on the private network; it is never
+exposed to the edge or to browsers.
+
+## 9. Production CORS (same-origin)
+
+Same-origin serving makes CORS moot: the SPA and the API share one origin and
+the browser never issues same-origin preflights. If the UI is ever hosted
+separately, set `CORS_ALLOWED_ORIGINS` to exactly the deployed UI origin;
+`*`/`null` are rejected at configuration time and disallowed preflights answer
+the shared error envelope without an `Access-Control-Allow-Origin` header.
+
+## 10. Production API base (same-origin, PD-SEC-04)
+
+The frontend resolves the API as `/api/v1` from the current browser origin
+(`https://<host>/api/v1/...`). There is **no absolute public API URL**, and a
+production build must not embed `http://localhost:8000` (the audit finding),
+`127.0.0.1`, a private/LAN IP or an Ollama provider endpoint. The release check
+scans `frontend/dist` for these and fails the gate on any hit
+(`python -m tools.release_check --allow-hosted-placeholders`). Local dev may
+still override `VITE_API_BASE_URL=http://localhost:8000`; production must not.
+
+## 11. Cache policy (unchanged)
+
+Every private/authenticated `/api/v1` response carries `Cache-Control: no-store`
+(+ `Pragma: no-cache`). The SPA `index.html` is served `no-store`;
+content-hashed Vite assets under `/assets` are `immutable, max-age=31536000`.
+Health/readiness stay cacheable-safe status words.
+
+## 12. Dev-trace prohibition in production (PD-SEC-06)
+
+`PD_DEV_TRACE=true` can print upstream provider error content — it must never
+run in production. The production profile forces `PD_DEV_TRACE=false` and sets
+`ENVIRONMENT=production`; production startup rejects (or forces off and warns
+about) dev tracing. Provider error bodies are logged class/status-only, never
+contents, and provider URLs/bearer tokens are never logged.
+
+## 13. Ollama stays private (PD-SEC-03/§27)
+
+Local-AI mode is operator-configured (`GENERATION_PROVIDER=ollama` +
+`OLLAMA_BASE_URL`). `OLLAMA_BASE_URL` accepts only loopback, private/LAN or
+`host.docker.internal` hosts — it is never exposed to the browser, never taken
+from a prompt, and in production the Ollama host must remain on the private
+network (never the public edge, never the Internet).
+
+## 14. Docker build-context hygiene (PD-SEC-07)
+
+The repo-root `.dockerignore` excludes `.env` / `.env.*` (keeping `.env.example`),
+`logs/`, `*.db`/`*.sqlite*`, `tmp/`/`temp/` and local Ollama config from the
+Docker build context, so operator secrets are never sent to a daemon/builder
+or build cache. The release check `check_dockerignore` asserts these exclusions.
+
+## 15. Security posture (summary)
+
+- CaseTruth never reaches the client before reveal; pre-reveal payloads are
+  allowlisted DTOs (leak scanners in the test suite).
+- Reveal gated on `{ACCUSED, REVEALED}` (frozen REQUIREMENTS 40.12).
+- Bearer tokens opaque, hashed at rest, constant-time compared, returned once.
+- `{"error":{code,message,details}}` envelope; 500s never leak tracebacks.
+- No secrets logged; `.env` keeps credentials out of git **and** out of Docker
+  build contexts.
+- HSTS only at the TLS boundary; no preload unless the operator explicitly opts in.
+
+## 16. Quick reference
 
 ```bash
-# Build + run (compose)
+# Development (unchanged): SPA + API on http://localhost:8000
 docker compose up --build
 
-# Plain docker
-docker build -t procedural-detective:latest .
-docker run -d --name pd -v pd-data:/data -p 8000:8000 procedural-detective:latest
+# Production (HTTPS-only): TLS edge + private backend
+CADDY_DOMAIN=detective.example.com CADDY_EMAIL=you@example.com \
+  docker compose -f docker-compose.prod.yml up --build -d
 
-# Verify
-curl http://localhost:8000/api/v1/health
-curl http://localhost:8000/api/v1/readiness
-curl -I http://localhost:8000/          # SPA index.html (Cache-Control: no-store)
-curl http://localhost:8000/scene        # SPA fallback (index.html, 200)
+# Verify production
+curl -k https://localhost/api/v1/health          # local smoke (internal CA)
+curl -k https://localhost/api/v1/readiness
+curl -I -k https://localhost/                     # SPA index.html + HSTS
+curl -I http://localhost/                          # 301 -> https
+
+# Platform-ingress alternative (only the private backend):
+docker compose -f docker-compose.prod.yml up -d procedural-detective
+
+# Release gate (includes the .dockerignore + production-bundle scans)
+python -m tools.release_check --allow-hosted-placeholders
 ```

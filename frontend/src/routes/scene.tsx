@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { discoverEvidence, getInvestigation, interactObject, readRecord } from "../api/client";
+import { getInvestigation, interactObject, readRecord } from "../api/client";
 import { clearPlaythroughCredentials, getPlaythroughId, getPlaythroughToken } from "../api/playthroughToken";
 import type { EvidenceReadResultDTO } from "../api/types";
 import { getCatalogError } from "../catalog/assetCatalog";
@@ -201,7 +201,9 @@ export default function ScenePage() {
     setPins(loadHypothesis(playthroughId));
     setNotebookOpen(true);
 
-    const services = { getInvestigation, interactObject, discoverEvidence, readRecord };
+    // PD-SEC-01: interactObject is the ONLY discovery entry (the direct
+    // evidence discover route is removed server-side).
+    const services = { getInvestigation, interactObject, readRecord };
     const session = new InvestigationSession(
       services,
       token,

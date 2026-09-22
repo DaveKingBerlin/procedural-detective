@@ -28,6 +28,15 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
      provider configuration variable NAMES (``OLLAMA_BASE_URL`` / ``LLM_API_KEY``
      / ...), which never belong in a player-side build. The build directory is
      git-ignored; the check skips cleanly when it does not exist.
+     Phase20 PD-SEC-04 (§12.2): the scan ALSO flags a production-bundle embed
+     of ``localhost:8000`` (the audited HTTP fallback base) and any bare
+     ``127.0.0.1`` — a production build must reference the API same-origin
+     (relative ``/api/v1``) only.
+  6. DOCKER BUILD-CONTEXT HYGIENE (Phase20 PD-SEC-07) — ``.dockerignore`` at
+     the repo root must exist and exclude ``.env`` / ``.env.*`` (while keeping
+     ``.env.example``), ``logs/``, ``*.db`` / ``*.sqlite*`` runtime databases,
+     ``tmp/``/``temp/`` and local Ollama config (``.ollama/``) so operator
+     secrets never reach a Docker daemon/builder/build cache.
 
 Exit code: 0 ONLY when every non-optional check passes (with
 ``--allow-hosted-placeholders``, hosting/video-only placeholders and
@@ -139,6 +148,58 @@ _PROVIDER_ENV_NAMES = (
 # gated behind the exact query (?pd-debug-pick=1); the tool REPORTS (never
 # fails) on them in a player build so the frontend track sees them.
 _DEBUG_AID_TOKENS = ("pd-debug-pick", "__pdDebugScene", "PD_DEV_TRACE")
+
+# Dev/loopback endpoints a PLAYER build must never embed as API bases
+# (Phase20 PD-SEC-04 §12.2 expects ZERO hits in a production build). A bare
+# host token like ``http://localhost`` appears legitimately inside react-router
+# library internals, so the check is deliberately targeted: the audited leak is
+# the concrete ``http://localhost:8000`` API-base fallback, and loopback IPv4
+# (``127.0.0.1``) never belongs in a player build at all.
+_FRONTEND_DEV_HOST_TOKENS = ("localhost:8000", "127.0.0.1")
+
+# --------------------------------------------------------------------------- #
+# docker build-context hygiene (Phase20 PD-SEC-07 §18/§18.1)
+# --------------------------------------------------------------------------- #
+
+# Required `.dockerignore` exclusions, each searched as a whole-file regex
+# (multiline, case-insensitive). The dotenv family must be excluded with the
+# documented ``.env.example`` re-inclusion, operator logs/dbs must never enter
+# the context, and local Ollama config (``.ollama/``) is defence-in-depth.
+_DOCKERIGNORE_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
+    (".env", re.compile(r"^\s*\.env\s*$", re.MULTILINE | re.IGNORECASE)),
+    (
+        ".env.* variants",
+        re.compile(r"^\s*\.env\.\*\s*$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        "!.env.example re-inclusion",
+        re.compile(r"^\s*!\s*\.env\.example\s*$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        "logs/ directory",
+        re.compile(r"^\s*logs/?\s*(?:#.*)?$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        "*.log files",
+        re.compile(r"^\s*\*\.log\s*$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        "*.db files",
+        re.compile(r"^\s*\*\.db\s*$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        "*.sqlite / *.sqlite3 files",
+        re.compile(r"^\s*\*\.sqlite(?:3)?\s*$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        "tmp/ and temp/ directories",
+        re.compile(r"^\s*(?:tmp|temp)/?\s*(?:#.*)?$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        ".ollama local config",
+        re.compile(r"^\s*\.ollama/?\s*(?:#.*)?$", re.MULTILINE | re.IGNORECASE),
+    ),
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -709,6 +770,16 @@ def scan_frontend_build(frontend_dir: Path) -> list[Finding]:
                         "(:11434) in the player build",
                     )
                 )
+            for token in _FRONTEND_DEV_HOST_TOKENS:
+                if token.casefold() in lowered:
+                    findings.append(
+                        Finding(
+                            "frontend-build", "fail",
+                            f"{path.relative_to(frontend_dir)}:{number}: dev/loopback "
+                            f"API base {token!r} in the player build (must be "
+                            "same-origin /api/v1)",
+                        )
+                    )
             for name in _PROVIDER_ENV_NAMES:
                 if name.casefold() in lowered:
                     findings.append(
@@ -733,10 +804,53 @@ def scan_frontend_build(frontend_dir: Path) -> list[Finding]:
             Finding(
                 "frontend-build", "ok",
                 f"frontend build clean ({files_scanned} files: no private host/IP/"
-                "URL literal, no :11434, no provider config names)",
+                "URL literal, no :11434, no provider config names, no "
+                "localhost:8000/loopback API base)",
             )
         )
     return findings
+
+
+def check_dockerignore(repo_root: Path) -> list[Finding]:
+    """Phase20 PD-SEC-07: secret files must be excluded from the Docker context.
+
+    Asserts the root ``.dockerignore`` exists and excludes the dotenv family
+    (``.env`` / ``.env.*`` while re-including ``.env.example``), ``logs/`` and
+    ``*.log``, runtime database files, ``tmp/``/``temp/`` and local Ollama
+    config. An unexcluded ``.env`` is sent to remote Docker daemons / builders
+    / build caches even when the Dockerfile never ``COPY``s it into the image.
+    """
+    dockerignore = repo_root / ".dockerignore"
+    if not dockerignore.is_file():
+        return [
+            Finding(
+                "dockerignore", "fail",
+                ".dockerignore is missing at the repo root — .env could reach "
+                "the Docker build context (PD-SEC-07)",
+            )
+        ]
+    try:
+        text = dockerignore.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [
+            Finding("dockerignore", "fail", f".dockerignore cannot be read: {exc}")
+        ]
+    missing = [name for name, pattern in _DOCKERIGNORE_PATTERNS
+               if not pattern.search(text)]
+    if missing:
+        return [
+            Finding(
+                "dockerignore", "fail",
+                ".dockerignore is missing required exclusions: " + ", ".join(missing),
+            )
+        ]
+    return [
+        Finding(
+            "dockerignore", "ok",
+            ".dockerignore excludes .env / .env.* (keeps .env.example), logs, "
+            "runtime DBs, tmp/temp and local Ollama config from the build context",
+        )
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -757,6 +871,7 @@ def run_all(
     findings.extend(check_third_party(repo_root))
     findings.extend(check_tracked_secrets(tracked))
     findings.extend(scan_private_endpoints(repo_root, tracked))
+    findings.extend(check_dockerignore(repo_root))
     findings.extend(scan_frontend_build(frontend_dir))
     return findings
 
@@ -771,7 +886,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="release_check",
         description=(
             "Release-hygiene check: placeholders, THIRD_PARTY.md, tracked "
-            ".env/logs/dbs, private endpoint leakage and the frontend build."
+            ".env/logs/dbs, private endpoint leakage, Docker build-context "
+            "hygiene (.dockerignore) and the frontend build."
         ),
     )
     parser.add_argument(

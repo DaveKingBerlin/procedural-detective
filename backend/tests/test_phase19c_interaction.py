@@ -285,9 +285,12 @@ def test_4_undiscovered_evidence_absent_from_bootstrap_and_interact(phase5_app):
     assert snap.discovered == (EMAIL_EVIDENCE,)
 
 
-def test_5_direct_discovery_bypass_remains_impossible(phase5_app):
-    """POST /evidence/{id}/discover for an unknown OR unreachable id -> 404
-    generic, sanitized, and NO state change."""
+def test_5_direct_discovery_route_removed(phase5_app):
+    """Phase 20 (PD-SEC-01): the DIRECT discovery route
+    ``POST /evidence/{id}/discover`` has been REMOVED for normal player
+    discovery — it answers 404 for ANY id (even a placement-reachable one),
+    sanitized, with NO state change. Discovery happens ONLY through a
+    validated ``POST /objects/{object_id}/interact`` (phase19c tests 1-3)."""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
 
@@ -301,6 +304,15 @@ def test_5_direct_discovery_bypass_remains_impossible(phase5_app):
             body = res.json()
             assert body["error"]["code"] == "NOT_FOUND"
             assert_sanitized_error(res.text)
+        # The route is gone even for a REAL placement-reachable evidence id:
+        # without a preceding world interaction nothing can ever be discovered
+        # by id.
+        res = c.post(
+            f"/api/v1/playthroughs/{pt_id}/evidence/forensic_knife_match_01/discover",
+            headers=auth(pt_token),
+        )
+        assert res.status_code == 404, res.json()
+        assert res.json()["error"]["code"] == "NOT_FOUND"
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.discovered == ()
     assert snap.visited == ()

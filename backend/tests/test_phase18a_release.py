@@ -5,7 +5,7 @@ removed by the autouse conftest fixture — the operator LAN host is NEVER read)
 
 1. tools.release_check behaviour as a unit-testable suite (placeholders,
    THIRD_PARTY.md, tracked secrets/logs/dbs, private endpoint leakage,
-   frontend build scan);
+   Docker build-context hygiene, frontend build scan);
 2. no placeholder release links (hosting/video placeholders are REPORT-only
    under the same --allow-hosted-placeholders semantics; the test passes both
    now and on the final post-docs state);
@@ -227,6 +227,72 @@ def test_release_tool_frontend_build_scan(tmp_path, hermetic_env):
     assert any("__pdDebugScene" in m for m in report_messages)
 
 
+def test_release_tool_dockerignore_check(tmp_path, hermetic_env):
+    """PD-SEC-07: the dockerignore gate fails when the file is missing or when
+    a required secret/log/db exclusion is absent, and passes on the real repo
+    ``.dockerignore``."""
+    # Missing file -> fail.
+    missing = release_check.check_dockerignore(tmp_path)
+    assert missing == [f for f in missing if f.severity == "fail"]
+    assert any("missing" in f.message for f in missing)
+
+    # Valid .dockerignore -> ok.
+    (tmp_path / ".dockerignore").write_text(
+        ".env\n"
+        ".env.*\n"
+        "!.env.example\n"
+        "\n"
+        "logs/\n"
+        "*.log\n"
+        "*.db\n"
+        "*.sqlite\n"
+        "*.sqlite3\n"
+        "tmp/\n"
+        "temp/\n"
+        ".ollama/\n",
+        encoding="utf-8",
+    )
+    good = release_check.check_dockerignore(tmp_path)
+    assert [f for f in good if f.severity == "ok"] == good, [f.message for f in good]
+
+    # Dropping the .env.* variant -> fail naming the missing pattern.
+    (tmp_path / ".dockerignore").write_text(
+        ".env\n!.env.example\nlogs/\n*.db\n", encoding="utf-8"
+    )
+    bad = release_check.check_dockerignore(tmp_path)
+    assert [f for f in bad if f.severity == "fail"] == bad, [f.message for f in bad]
+    assert any(".env.*" in f.message for f in bad)
+
+    # The actual repo .dockerignore must satisfy every required exclusion.
+    repo = release_check.check_dockerignore(_REPO_ROOT)
+    assert [f for f in repo if f.severity == "ok"] == repo, [f.message for f in repo]
+
+
+def test_release_tool_frontend_build_flags_dev_hosts(tmp_path, hermetic_env):
+    """Phase20 PD-SEC-04: a production bundle embedding http://localhost:8000
+    or a bare 127.0.0.1 must FAIL the frontend-build scan; a clean build must
+    pass. (The current checked-out frontend/dist may legitimately still carry
+    the audited fallback until the parallel frontend track rebuilds — the gate
+    exists NOW and must pass on the FINAL clean build.)"""
+    build = tmp_path / "dist"
+    build.mkdir()
+    (build / "index.html").write_text(
+        "<html><body>ok</body></html>\n", encoding="utf-8"
+    )
+    clean = release_check.scan_frontend_build(build)
+    assert [f for f in clean if f.severity == "ok"] == clean, [f.message for f in clean]
+
+    (build / "leaky.js").write_text(
+        "const base = 'http://localhost:8000';\n"
+        "const alt = ['127.0.0.1'];\n",
+        encoding="utf-8",
+    )
+    findings = release_check.scan_frontend_build(build)
+    fail_messages = [f.message for f in findings if f.severity == "fail"]
+    assert any("localhost:8000" in m for m in fail_messages), fail_messages
+    assert any("127.0.0.1" in m for m in fail_messages), fail_messages
+
+
 def test_release_tool_exits_nonzero_on_blockers_and_zero_clean(hermetic_env):
     """CLI contract: non-zero when a real blocker exists, zero when the only
     remaining findings are hosted placeholders (--allow-hosted-placeholders)
@@ -312,10 +378,12 @@ def test_player_dtos_never_contain_provider_endpoint_or_lan_ip(phase5_app):
         bodies.append(investigate.json())
         _assert_no_provider_endpoint_texts(bodies)
 
-        # discover + read a real record through the API (golden evidence id).
-        from phase6_helpers import KNIFE_EVIDENCE, discover, read_record
+        # interact + read a real record through the API (golden evidence id;
+        # PD-SEC-01: the direct discover route was removed — discovery happens
+        # through the validated object interaction).
+        from phase6_helpers import KNIFE_EVIDENCE, KNIFE_OBJECT, interact, read_record
 
-        discovery = discover(phase5_app, pt_id, pt_token, KNIFE_EVIDENCE)
+        discovery = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
         assert discovery.status_code == 200, discovery.json()
         bodies.append(discovery.json())
         _assert_no_provider_endpoint_texts(bodies)

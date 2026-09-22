@@ -65,9 +65,13 @@ def _inv_bootstrap(phase5_app, pt_id, pt_token):
 
 
 def _discover_knife(phase5_app, pt_id, pt_token):
+    """Valid world-interaction discovery of the knife evidence (PD-SEC-01:
+    the direct discover route was REMOVED — discovery happens through the
+    validated object interaction)."""
     with _client(phase5_app) as client:
         res = client.post(
-            f"/api/v1/playthroughs/{pt_id}/evidence/{KNIFE_EVIDENCE}/discover",
+            f"/api/v1/playthroughs/{pt_id}/objects/{KNIFE_OBJECT}/interact",
+            json={"interaction": "inspect"},
             headers=auth(pt_token),
         )
     assert res.status_code == 200, res.text
@@ -144,9 +148,12 @@ def test_1_03_playthrough_a_cannot_access_b_knowledge(phase5_app):
         )
         assert res.status_code == 404
         assert res.json()["error"]["code"] == "NOT_FOUND"
-        # A's token discovering on B -> 404.
+        # A's token interacting on B's object -> 404 (cross-playthrough; the
+        # direct discover route was removed in Phase 20 / PD-SEC-01, so the
+        # same cross-playthrough gate is exercised through the interact path).
         res = client.post(
-            f"/api/v1/playthroughs/{pt_b}/evidence/{KNIFE_EVIDENCE}/discover",
+            f"/api/v1/playthroughs/{pt_b}/objects/{KNIFE_OBJECT}/interact",
+            json={"interaction": "inspect"},
             headers=auth(token_a),
         )
         assert res.status_code == 404
