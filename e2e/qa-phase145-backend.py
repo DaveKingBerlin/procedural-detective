@@ -108,7 +108,7 @@ def main() -> int:
     # 4. serve the public API (uvicorn, same bind the shipped launcher uses).
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=settings.api_port, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=settings.api_port, log_level="warning", proxy_headers=False)
     return 0
 
 

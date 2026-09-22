@@ -50,7 +50,7 @@ def main() -> int:
     app = create_app(settings)
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=settings.api_port, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=settings.api_port, log_level="warning", proxy_headers=False)
     return 0
 
 
