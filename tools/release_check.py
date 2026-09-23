@@ -48,10 +48,9 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
       ``PD_DEV_TRACE=false``, ``TRUST_PROXY=true`` behind the shipped Caddy
       edge) must exist, and the production example must never carry a dev-only
       value (``TRUST_PROXY=false`` / ``ENVIRONMENT=development`` active).
-   9. PROD EFFECTIVE CONFIG PREFLIGHT (Phase21 B Finding 7) — renders the
-      EFFECTIVE ``docker-compose.prod.yml`` environment after deterministic
-      interpolation (compose defaults ``${VAR:-default}`` overlaid with the
-      operator ``.env`` when present, else ``.env.production.example``) and
+   9. PROD EFFECTIVE CONFIG PREFLIGHT (Phase21C AUD-21B-02) — invokes Docker
+      Compose's authoritative ``config --format json`` render with the current
+      shell environment, project directory and production compose file, then
       asserts: ``ENVIRONMENT=production``, ``PD_DEV_TRACE=false``,
       ``TRUST_PROXY=true`` for the Caddy ingress profile (a ``.env`` that
       overrides with dev values FAILS with a clear message), the P-02 timeout
@@ -60,9 +59,9 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
       published (``expose`` only, no ``ports:``), the Ollama port ``11434`` is
       never a published host port, and the production frontend bundle uses the
       same-origin API (no ``localhost:8000`` / ``127.0.0.1`` embed). The
-``CADDY_DOMAIN`` ready-to-host verdict FAILS when it is ``localhost`` or
-       empty unless ``--allow-local`` / ``allow_local`` is passed (local-smoke
-       default); the strict single preflight command is
+``CADDY_DOMAIN`` ready-to-host verdict rejects empty, local, IP, malformed and
+       reserved/example hostnames. ``--allow-local`` / ``allow_local`` forgives
+       only an explicit local-smoke hostname; the strict single command is
        ``python -m tools.prod_preflight``.
 
 The production-DEPLOYMENT checks (7, 8, 9) apply ONLY when the deployment
@@ -77,12 +76,11 @@ Exit code: 0 ONLY when every non-optional check passes (with
 ``--allow-hosted-placeholders``, hosting/video-only placeholders and
 query-gated debug-aid tokens are REPORTED separately and never fail the run).
 
-The tool never prints any configured endpoint or credential. The prod
-effective-config check READS the working-tree ``.env`` (if present) but ONLY
-the public validation keys it asserts on (``ENVIRONMENT``, ``PD_DEV_TRACE``,
-``TRUST_PROXY``, ``CADDY_DOMAIN``, ``CASE_GENERATION_DEADLINE_SECONDS``) — it
-never reads or prints secrets (``.env`` stays operator-local); when ``.env`` is
-absent the documented ``.env.production.example`` is the interpolation source.
+The tool never prints Docker Compose's rendered model, configured endpoint or
+credential. Compose reads the working-tree ``.env`` and current shell itself.
+A custom startup env file is inspected only when the operator explicitly gives
+the matching ``--env-file`` option to ``tools.prod_preflight``. Findings name
+only validation keys and sanitized verdicts.
 
 Usage:
     python -m tools.release_check [--allow-hosted-placeholders] [--frontend-dir PATH]
@@ -93,8 +91,10 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1037,14 +1037,6 @@ _ENV_EXAMPLE_PROD = ".env.production.example"
 # fail-closed preflight (Phase21B Finding 2/7).
 _PROD_REQUIRED_ENVIRONMENT = "production"
 _PROD_REQUIRED_PD_DEV_TRACE = "false"
-_PROD_REQUIRED_TRUST_PROXY = "true"
-
-# Compose interpolation of the backend service `environment:` block:
-#   KEY: ${VAR:-default}
-# The default may itself contain ':' (e.g. DATABASE_URL) so the *exhaustive*
-# match is: ${NAME} or ${NAME:-<everything up to the closing brace>}.
-_COMPOSE_INTERP_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}$")
-
 
 def _parse_env_file(text: str) -> dict[str, str]:
     """Minimal stdlib-only dotenv reader used ONLY for the documented example
@@ -1176,155 +1168,244 @@ def check_prod_env_profile(repo_root: Path) -> list[Finding]:
     ]
 
 
-def _service_blocks_for(text: str) -> dict[str, list[str]]:
-    """:func:`_compose_service_blocks` without skips (kept tiny for tests)."""
-    return _compose_service_blocks(text)
+class _ComposeRenderError(RuntimeError):
+    """Sanitized failure from the authoritative Docker Compose render."""
 
 
-def _service_environment_entries(text: str, service: str) -> dict[str, str]:
-    """``{KEY: raw_value}`` of a service ``environment:`` map block (indent-6
-    ``KEY: VALUE`` lines under an indent-4 ``environment:`` key), parsed from
-    the raw compose text via the stdlib-only block scanner. Values keep their
-    ``${VAR:-default}`` spelling so the caller interpolates deterministically.
+def _render_prod_compose_config(
+    repo_root: Path,
+    compose: Path,
+    *,
+    env_file: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> dict[str, object]:
+    """Return Docker Compose's effective production model as JSON.
+
+    Compose itself remains the sole authority for interpolation and precedence:
+    the command inherits the current process environment and uses the deployment
+    project directory. A working-tree ``.env`` is selected by Compose in the
+    normal way. A non-default startup env file is used only when the caller
+    explicitly supplies the same ``--env-file`` option used for deployment.
+
+    Errors are deliberately sanitized because the rendered model may contain
+    provider credentials from the service ``env_file``.
     """
-    blocks = _service_blocks_for(text)
-    lines = blocks.get(service) or []
-    entries: dict[str, str] = {}
-    in_env = False
-    for raw in lines:
-        indent = len(raw) - len(raw.lstrip(" "))
-        content = raw.strip()
-        if not in_env:
-            if content == "environment:" and indent == 4:
-                in_env = True
-            continue
-        if indent <= 4 and not content.startswith("#"):
-            # A new service-level key ended the environment map.
-            if content and ":" in content and not content.startswith("- "):
-                break
-            continue
-        if not content or content.startswith("#"):
-            continue
-        if content.startswith("- "):
-            eq = content[2:]
-            if "=" in eq:
-                key, _, value = eq.partition("=")
-                entries[key.strip()] = value.strip()
-            continue
-        if ":" in content:
-            key, _, value = content.partition(":")
-            entries[key.strip()] = value.strip()
-    return entries
+    invoke = runner or subprocess.run
+    command = [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(repo_root),
+    ]
+    if env_file is not None:
+        command.extend(["--env-file", str(env_file.resolve())])
+    command.extend(["-f", str(compose), "config", "--format", "json"])
+
+    try:
+        completed = invoke(
+            command,
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _ComposeRenderError(
+            "docker compose config could not be executed"
+        ) from exc
+    if completed.returncode != 0:
+        raise _ComposeRenderError(
+            "docker compose config exited non-zero"
+        )
+    try:
+        rendered = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise _ComposeRenderError(
+            "docker compose config did not return valid JSON"
+        ) from exc
+    if not isinstance(rendered, dict):
+        raise _ComposeRenderError(
+            "docker compose config returned an unexpected JSON document"
+        )
+    return rendered
 
 
-def _interpolate_compose_text(value: str, overrides: dict[str, str]) -> str:
-    """One compose ``${VAR}`` / ``${VAR:-default}`` interpolation against the
-    operator/env-example overrides. Unsupported syntax is returned verbatim so
-    a caller only asserts on keys whose spelling it controls.
-    """
-    match = _COMPOSE_INTERP_RE.match(value.strip())
-    if not match:
-        return value
-    name, default = match.group(1), match.group(2)
-    if name in overrides:
-        return overrides[name]
-    return default if default is not None else ""
+def _rendered_service(
+    rendered: dict[str, object], service_name: str
+) -> dict[str, object] | None:
+    services = rendered.get("services")
+    if not isinstance(services, dict):
+        return None
+    service = services.get(service_name)
+    return service if isinstance(service, dict) else None
 
 
-def _effective_env(text: str, service: str, overrides: dict[str, str]) -> dict[str, str]:
-    """Effective ``environment:`` map for ``service`` after deterministic
-    interpolation: compose defaults ``${VAR:-default}`` are overlaid with the
-    operator ``.env`` (or the documented production example when no ``.env``
-    exists)."""
+def _rendered_environment(service: dict[str, object]) -> dict[str, str]:
+    raw = service.get("environment")
+    if not isinstance(raw, dict):
+        return {}
     return {
-        key: _interpolate_compose_text(raw, overrides)
-        for key, raw in _service_environment_entries(text, service).items()
+        str(key): "" if value is None else str(value)
+        for key, value in raw.items()
     }
 
 
-def _published_ports(text: str) -> list[str]:
-    """Every host-published port entry (``- <host>:<container>`` lines) across
-    ALL services — used to prove the backend and any Ollama host are never
-    publicly published in the prod compose."""
-    ports: list[str] = []
-    for lines in _service_blocks_for(text).values():
-        in_ports = False
-        for raw in lines:
-            indent = len(raw) - len(raw.lstrip(" "))
-            content = raw.strip()
-            if content == "ports:" and indent == 4:
-                in_ports = True
-                continue
-            if in_ports:
-                if indent == 4:
-                    if content == "environment:":
-                        in_ports = False
-                        continue
-                    in_ports = False
-                    continue
-                if indent < 6 and content and not content.startswith("#"):
-                    in_ports = False
-                    continue
-                if content.startswith("- "):
-                    ports.append(content[2:])
-    return ports
+def _rendered_log_bounds_problem(
+    service_name: str, service: dict[str, object]
+) -> str | None:
+    logging = service.get("logging")
+    if not isinstance(logging, dict):
+        return f"service {service_name!r} has no rendered logging policy"
+    options = logging.get("options")
+    if (
+        logging.get("driver") != _BOUNDED_LOG_DRIVER
+        or not isinstance(options, dict)
+        or str(options.get("max-size")) != _BOUNDED_LOG_MAX_SIZE
+        or str(options.get("max-file")) != _BOUNDED_LOG_MAX_FILE
+    ):
+        return (
+            f"service {service_name!r} must render logging.driver "
+            f"{_BOUNDED_LOG_DRIVER!r} with max-size {_BOUNDED_LOG_MAX_SIZE!r} "
+            f"/ max-file {_BOUNDED_LOG_MAX_FILE!r}"
+        )
+    return None
 
 
-def _log_bounds_problems(text: str) -> list[str]:
-    """Reuse of the F-04 gate: json-file 10m x 5 on BOTH public services."""
-    problems: list[str] = []
-    services = _service_blocks_for(text)
-    for name in _BOUNDED_COMPOSE_SERVICES:
-        block = services.get(name)
-        if block is None:
-            problems.append(f"service {name!r} is missing from the prod compose")
+def _rendered_port_targets(service: dict[str, object]) -> list[str]:
+    raw_ports = service.get("ports")
+    if not isinstance(raw_ports, list):
+        return []
+    targets: list[str] = []
+    for entry in raw_ports:
+        if isinstance(entry, dict):
+            target = entry.get("target")
+            published = entry.get("published")
+            if target is not None:
+                targets.append(str(target))
+            if published is not None:
+                targets.append(str(published))
+        else:
+            targets.append(str(entry))
+    return targets
+
+
+def _has_private_data_volume(
+    rendered: dict[str, object], backend: dict[str, object]
+) -> bool:
+    raw_volumes = backend.get("volumes")
+    declared = rendered.get("volumes")
+    if not isinstance(raw_volumes, list) or not isinstance(declared, dict):
+        return False
+    for mount in raw_volumes:
+        if not isinstance(mount, dict):
             continue
-        if not _COMPOSE_LOGGING_BLOCK_RE.search("\n".join(block)):
-            problems.append(
-                f"service {name!r} must carry logging.driver: "
-                f"{_BOUNDED_LOG_DRIVER!r} with max-size {_BOUNDED_LOG_MAX_SIZE!r} "
-                f"/ max-file {_BOUNDED_LOG_MAX_FILE!r}"
-            )
-    return problems
+        source = mount.get("source")
+        if (
+            mount.get("type") == "volume"
+            and mount.get("target") == "/data"
+            and isinstance(source, str)
+            and source in declared
+        ):
+            return True
+    return False
+
+
+_PUBLIC_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_RESERVED_PUBLIC_HOST_SUFFIXES = (
+    "example",
+    "invalid",
+    "test",
+    "example.com",
+    "example.net",
+    "example.org",
+)
+
+
+def _caddy_domain_problem(value: str) -> tuple[str | None, bool]:
+    """Return ``(sanitized_problem, explicit_local_smoke)`` for a hostname.
+
+    This is deliberately a syntax/reserved-name gate. DNS resolution,
+    certificate issuance and operator ownership remain part of the public TLS
+    smoke and are not inferred here.
+    """
+    domain = value.strip().lower().rstrip(".")
+    if not domain:
+        return "CADDY_DOMAIN is empty", False
+
+    if (
+        domain == "localhost"
+        or domain.endswith(".localhost")
+        or domain.endswith(".local")
+    ):
+        return "CADDY_DOMAIN is an explicit local-smoke hostname", True
+
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        return "CADDY_DOMAIN is an IP address, not a public hostname", False
+
+    if len(domain) > 253 or "." not in domain:
+        return "CADDY_DOMAIN is not a fully qualified public hostname", False
+
+    for suffix in _RESERVED_PUBLIC_HOST_SUFFIXES:
+        if domain == suffix or domain.endswith(f".{suffix}"):
+            return "CADDY_DOMAIN uses a reserved placeholder domain", False
+
+    if any(not _PUBLIC_HOST_LABEL_RE.fullmatch(label) for label in domain.split(".")):
+        return "CADDY_DOMAIN is not a syntactically valid public hostname", False
+
+    return None, False
 
 
 def check_prod_effective_config(
     repo_root: Path,
     *,
     allow_local: bool = False,
+    ingress_profile: str = "caddy",
     compose_path: Path | None = None,
     client_ts_path: Path | None = None,
     caddyfile_path: Path | None = None,
     frontend_dir: Path | None = None,
+    compose_env_file: Path | None = None,
+    compose_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> list[Finding]:
-    """Phase21B Finding 7 — fail-closed preflight of the EFFECTIVE production
-    deployment (post-interpolation, not just YAML defaults).
+    """Fail-closed preflight of Docker Compose's effective production model.
 
-    Renders ``docker-compose.prod.yml`` deterministically (stdlib-only): each
-    ``${VAR:-default}`` in the backend/caddy service ``environment:`` blocks is
-    resolved against the operator ``.env`` when it exists, otherwise against the
-    documented ``.env.production.example``. Asserts:
+    ``docker compose config --format json`` is authoritative and inherits the
+    current shell environment. The parsed render, rather than a second Compose
+    interpolation implementation, is validated. Asserts:
 
-      - ``ENVIRONMENT=production``, ``PD_DEV_TRACE=false``, ``TRUST_PROXY=true``
-        (the shipped Caddy ingress profile). A ``.env`` that accidentally sets
-        ``ENVIRONMENT=development`` / ``TRUST_PROXY=false`` FAILS with a clear
-        message (Phase21B Finding 2);
+      - ``ENVIRONMENT=production`` and ``PD_DEV_TRACE=false``; the Caddy profile
+        requires ``TRUST_PROXY=true`` while an unverified alternate ingress
+        requires the safe ``TRUST_PROXY=false`` default;
       - P-02 timeout envelope: backend deadline
         (``CASE_GENERATION_DEADLINE_SECONDS`` effective) < FRONTEND request
         timeout (``frontend/src/api/client.ts`` ``REQUEST_TIMEOUT_MS``) < proxy
         timeout (``docker/Caddyfile`` ``response_header_timeout``);
-      - Docker log bounds json-file 10m x 5 on BOTH public services;
-      - the backend port is NEVER publicly published (``expose`` only — no
-        ``ports:`` block) and no service publishes the Ollama port 11434;
-      - ``CADDY_DOMAIN`` is not a placeholder: ``localhost``/empty FAILS the
-        ready-to-host verdict unless ``allow_local`` (local-smoke) is passed,
-        in which case it is REPORTED;
+      - rendered Docker log bounds json-file 10m x 5 on BOTH public services;
+      - the backend port is NEVER publicly published, no service publishes the
+        Ollama port 11434, and the backend mounts a declared volume at ``/data``;
+      - ``CADDY_DOMAIN`` is a plausible non-reserved FQDN; explicit local names
+        are accepted only as REPORTs with ``allow_local``. DNS, ownership and
+        certificate issuance remain part of the separate public TLS smoke;
       - the production frontend bundle uses the same-origin API (no
         ``localhost:8000`` / ``127.0.0.1`` embed — reuses the bundle scan).
 
     Never prints a configured value — only key names and verdicts.
     """
-    compose = compose_path or (repo_root / _COMPOSE_PROD_FILE)
+    if ingress_profile not in {"caddy", "alternate"}:
+        return [
+            Finding(
+                "prod-effective-config", "fail",
+                "unknown ingress profile; choose 'caddy' or 'alternate' "
+                "(fail closed)",
+            )
+        ]
+
+    compose = (compose_path or (repo_root / _COMPOSE_PROD_FILE)).resolve()
     if not compose.is_file():
         return [
             Finding(
@@ -1335,34 +1416,37 @@ def check_prod_effective_config(
             )
         ]
     try:
-        text = compose.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
+        rendered = _render_prod_compose_config(
+            repo_root.resolve(), compose,
+            env_file=compose_env_file,
+            runner=compose_runner,
+        )
+    except _ComposeRenderError as exc:
         return [
-            Finding("prod-effective-config", "fail", f"{compose} cannot be read: {exc}")
+            Finding(
+                "prod-effective-config", "fail",
+                f"{exc}; effective production configuration was not validated "
+                "(fail closed)",
+            )
         ]
 
-    secrets_dotenv = repo_root / ".env"
-    if secrets_dotenv.is_file():
-        try:
-            overrides: dict[str, str] = _parse_env_file(
-                secrets_dotenv.read_text(encoding="utf-8", errors="replace")
+    backend = _rendered_service(rendered, "procedural-detective")
+    caddy = _rendered_service(rendered, "caddy")
+    if backend is None or caddy is None:
+        missing = "backend" if backend is None else "Caddy"
+        return [
+            Finding(
+                "prod-effective-config", "fail",
+                f"rendered production configuration is missing the {missing} "
+                "service (fail closed)",
             )
-        except OSError:
-            overrides = {}
-    else:
-        overrides = _read_env_file(repo_root, _ENV_EXAMPLE_PROD)
+        ]
+    backend_env = _rendered_environment(backend)
+    caddy_env = _rendered_environment(caddy)
 
-    backend_env = _effective_env(text, "procedural-detective", overrides)
-    caddy_env = _effective_env(text, "caddy", overrides)
-
-    # The deadline is NOT a compose-declared environment key: it reaches the
-    # container via env_file/.env (or falls back to the backend Settings
-    # default 60). Effective value = operator/env-example override or 60.
-    deadline_raw = (
-        overrides.get("CASE_GENERATION_DEADLINE_SECONDS")
-        or backend_env.get("CASE_GENERATION_DEADLINE_SECONDS")
-        or "60"
-    )
+    # The backend Settings default is 60 seconds when the rendered container
+    # environment does not explicitly set the deadline.
+    deadline_raw = backend_env.get("CASE_GENERATION_DEADLINE_SECONDS") or "60"
     try:
         deadline = int(float(deadline_raw))
     except (TypeError, ValueError):
@@ -1392,38 +1476,38 @@ def check_prod_effective_config(
 
     findings: list[Finding] = []
 
-    # 1. production markers (dev overrides FAIL closed with a clear message).
-    effective_env = backend_env.get("ENVIRONMENT", "")
-    if effective_env != _PROD_REQUIRED_ENVIRONMENT:
+    # 1. Production markers from the authoritative Compose render.
+    if backend_env.get("ENVIRONMENT", "") != _PROD_REQUIRED_ENVIRONMENT:
         findings.append(
             Finding(
                 "prod-effective-config", "fail",
-                f"effective ENVIRONMENT is {effective_env!r}, not 'production' — "
-                "a production deployment must set ENVIRONMENT=production; copying "
-                "the DEV example (.env.example) to .env overrides the prod "
-                "compose default and disables production enforcement (Phase21B "
-                "Finding 2)",
+                "rendered ENVIRONMENT is not 'production'; the current shell, "
+                ".env and Compose inputs must produce ENVIRONMENT=production",
             )
         )
     if backend_env.get("PD_DEV_TRACE", "").lower() != _PROD_REQUIRED_PD_DEV_TRACE:
         findings.append(
             Finding(
                 "prod-effective-config", "fail",
-                f"effective PD_DEV_TRACE is {backend_env.get('PD_DEV_TRACE')!r}, "
-                "not 'false' — dev tracing must never run in a public build "
-                "(PD-SEC-06)",
+                "rendered PD_DEV_TRACE is not 'false'; dev tracing must never "
+                "run in a public build (PD-SEC-06)",
             )
         )
-    if backend_env.get("TRUST_PROXY", "").lower() != _PROD_REQUIRED_TRUST_PROXY:
+    expected_trust_proxy = "true" if ingress_profile == "caddy" else "false"
+    if backend_env.get("TRUST_PROXY", "").lower() != expected_trust_proxy:
+        profile_reason = (
+            "the shipped Caddy edge requires TRUST_PROXY=true so clients do not "
+            "collapse into one shared rate-limit bucket"
+            if ingress_profile == "caddy"
+            else "an alternate ingress must default to TRUST_PROXY=false until "
+            "its forwarded-header behavior is independently verified"
+        )
         findings.append(
             Finding(
                 "prod-effective-config", "fail",
-                f"effective TRUST_PROXY is {backend_env.get('TRUST_PROXY')!r}, not "
-                "'true' — behind the shipped Caddy edge, TRUST_PROXY=false "
-                "collapses all clients into one shared Caddy-peer rate-limit "
-                "bucket (PD-SEC-02). TRUST_PROXY=true is valid ONLY behind the "
-                "shipped Caddy edge or an independently verified ingress — it is "
-                "NOT portable (Phase21 P-01)",
+                f"rendered TRUST_PROXY is not '{expected_trust_proxy}' for the "
+                f"{ingress_profile} ingress profile; {profile_reason} "
+                "(PD-SEC-02 / Phase21 P-01)",
             )
         )
 
@@ -1432,8 +1516,8 @@ def check_prod_effective_config(
         findings.append(
             Finding(
                 "prod-effective-config", "fail",
-                f"effective CASE_GENERATION_DEADLINE_SECONDS is unparseable "
-                f"({deadline_raw!r}) — the P-02 envelope cannot be verified "
+                "rendered CASE_GENERATION_DEADLINE_SECONDS is unparseable; "
+                "the P-02 envelope cannot be verified "
                 "(fail closed)",
             )
         )
@@ -1455,7 +1539,18 @@ def check_prod_effective_config(
                 "can abort a request the backend still allows (P-02 envelope)",
             )
         )
-    if proxy_timeout <= 0:
+    if ingress_profile == "alternate":
+        findings.append(
+            Finding(
+                "prod-effective-config", "fail",
+                "alternate ingress cannot receive a ready-to-host verdict from "
+                "the shipped full-stack Compose configuration because it still "
+                "publishes Caddy and does not describe the exact selected-service "
+                "startup or external edge; TRUST_PROXY remains false, and the "
+                "alternate deployment requires separate verification (fail closed)",
+            )
+        )
+    elif proxy_timeout <= 0:
         findings.append(
             Finding(
                 "prod-effective-config", "fail",
@@ -1474,52 +1569,65 @@ def check_prod_effective_config(
             )
         )
 
-    # 3. Docker log bounds on both public services (F-04) — fail-closed reuse.
-    for problem in _log_bounds_problems(text):
-        findings.append(Finding("prod-effective-config", "fail", problem))
+    # 3. Docker log bounds on both public services (F-04), from the render.
+    for service_name, service in (
+        ("procedural-detective", backend),
+        ("caddy", caddy),
+    ):
+        problem = _rendered_log_bounds_problem(service_name, service)
+        if problem:
+            findings.append(Finding("prod-effective-config", "fail", problem))
 
     # 4. Backend port never publicly published + Ollama port never published.
-    backend_block = (_service_blocks_for(text).get("procedural-detective") or [])
-    backend_has_ports = any(raw.strip() == "ports:" for raw in backend_block)
-    backend_exposes = any(raw.strip() == "expose:" for raw in backend_block)
-    if backend_has_ports:
+    if _rendered_port_targets(backend):
         findings.append(
             Finding(
                 "prod-effective-config", "fail",
-                "the backend service publishes a host port (it has a `ports:` "
-                "block) — production must expose :8000 privately only (PD-SEC-03)",
+                "the rendered backend service publishes a host port (`ports:`); "
+                "production must expose :8000 privately only (PD-SEC-03)",
             )
         )
-    if not backend_exposes:
+    exposes = backend.get("expose")
+    if not isinstance(exposes, list) or "8000" not in {str(item) for item in exposes}:
         findings.append(
             Finding(
                 "prod-effective-config", "fail",
-                "the backend service has no `expose:` block — the private "
-                "network documentation of :8000 is missing",
+                "the rendered backend service does not expose private port 8000",
             )
         )
-    for entry in _published_ports(text):
-        if "11434" in entry:
-            findings.append(
-                Finding(
-                    "prod-effective-config", "fail",
-                    f"the Ollama port 11434 is published to the host ({entry}) — "
-                    "Ollama must stay on the private network, never public "
-                    "(PD-SEC-03)",
+    services = rendered.get("services")
+    if isinstance(services, dict):
+        for service in services.values():
+            if not isinstance(service, dict):
+                continue
+            if "11434" in _rendered_port_targets(service):
+                findings.append(
+                    Finding(
+                        "prod-effective-config", "fail",
+                        "the rendered configuration publishes the Ollama port "
+                        "11434; Ollama must stay private (PD-SEC-03)",
+                    )
                 )
+                break
+    if not _has_private_data_volume(rendered, backend):
+        findings.append(
+            Finding(
+                "prod-effective-config", "fail",
+                "the rendered backend has no declared named volume mounted at "
+                "/data; production persistence cannot be verified",
             )
-
-    # 5. CADDY_DOMAIN placeholder (ready-to-host verdict).
-    domain = (caddy_env.get("CADDY_DOMAIN") or "").strip().lower()
-    if not domain or domain == "localhost":
-        message = (
-            "CADDY_DOMAIN is empty" if not domain else "CADDY_DOMAIN is 'localhost'"
         )
-        if allow_local:
+
+    # 5. CADDY_DOMAIN syntax/reserved-name gate (ready-to-host verdict).
+    domain_problem, explicit_local_smoke = _caddy_domain_problem(
+        caddy_env.get("CADDY_DOMAIN") or ""
+    )
+    if ingress_profile == "caddy" and domain_problem:
+        if allow_local and explicit_local_smoke:
             findings.append(
                 Finding(
                     "prod-effective-config", "report",
-                    f"{message} — accepted as the local-smoke default; set a real "
+                    f"{domain_problem} — accepted only for local smoke; set a real "
                     "public CADDY_DOMAIN before ANY public hosting (run "
                     "python -m tools.prod_preflight for the strict ready-to-host "
                     "verdict)",
@@ -1529,9 +1637,13 @@ def check_prod_effective_config(
             findings.append(
                 Finding(
                     "prod-effective-config", "fail",
-                    f"{message} — the ready-to-host verdict FAILS until CADDY_DOMAIN "
-                    "is a real public domain set in .env /.env.production.example "
-                    "(pass --allow-local only for a local smoke deployment)",
+                    f"{domain_problem} — the ready-to-host verdict FAILS until "
+                    "CADDY_DOMAIN "
+                    "is a real public domain in the actual startup .env (or the "
+                    "same explicit --env-file used by preflight and startup); pass "
+                    "--allow-local only with an explicit local-smoke hostname. "
+                    "DNS, ownership and certificate issuance are verified by the "
+                    "separate public TLS smoke",
                 )
             )
 
@@ -1564,10 +1676,12 @@ def check_prod_effective_config(
             Finding(
                 "prod-effective-config", "ok",
                 "effective production configuration validated (fail-closed): "
-                f"ENVIRONMENT=production, PD_DEV_TRACE=false, TRUST_PROXY=true "
-                f"(Caddy edge), deadline {deadline}s < frontend {frontend_timeout}s "
+                "ENVIRONMENT=production, PD_DEV_TRACE=false, "
+                f"TRUST_PROXY={expected_trust_proxy} ({ingress_profile} ingress), "
+                f"deadline {deadline}s < frontend {frontend_timeout}s "
                 f"< proxy {proxy_timeout}s, log bounds present, backend private, "
-                "no published Ollama port, same-origin production bundle"
+                "no published Ollama port, persistent data volume present, "
+                "same-origin production bundle"
             )
         )
     return findings
@@ -1587,8 +1701,8 @@ def run_all(
 ) -> list[Finding]:
     """Every release check; the CLI exits 1 when any finding has severity fail.
 
-    ``prod_allow_local`` (default True) treats the compose ``localhost``
-    ``CADDY_DOMAIN`` default as the documented local-smoke REPORT; the STRICT
+    ``prod_allow_local`` (default True) treats an explicit local hostname as
+    the documented local-smoke REPORT; the STRICT
     ready-to-host verdict lives in ``python -m tools.prod_preflight`` (which
     runs the same ``check_prod_effective_config`` with ``allow_local=False``).
     """

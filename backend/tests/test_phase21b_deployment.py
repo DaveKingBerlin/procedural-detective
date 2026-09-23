@@ -66,7 +66,9 @@ def _real_caddyfile() -> Path:
     return _CADDYFILE
 
 
-def _write_prod_example(tmp_path: Path, *, domain: str = "detective.example.com") -> None:
+def _write_prod_example(
+    tmp_path: Path, *, domain: str = "detective.procedural-game.dev"
+) -> None:
     (tmp_path / ".env.production.example").write_text(
         "ENVIRONMENT=production\n"
         "PD_DEV_TRACE=false\n"
@@ -80,11 +82,17 @@ def _write_prod_example(tmp_path: Path, *, domain: str = "detective.example.com"
 def _seed(tmp_path: Path, *, compose: str | None = None) -> Path:
     """A tmp "deployment root": real prod compose (+ real client/Caddy files
     referenced by absolute path via the helper overrides), plus the PROD env
-    example. Returns tmp_path."""
+    example copied to the documented startup ``.env``. Returns tmp_path."""
     (tmp_path / "docker-compose.prod.yml").write_text(
         compose if compose is not None else _real_compose_text(), encoding="utf-8"
     )
     _write_prod_example(tmp_path)
+    # Match the documented startup profile: production example copied to the
+    # automatic Compose .env before `docker compose ... up` / preflight.
+    (tmp_path / ".env").write_text(
+        (tmp_path / ".env.production.example").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     return tmp_path
 
 
@@ -214,7 +222,7 @@ def test_placeholder_caddy_domain_fails_ready_to_host(tmp_path):
     """CADDY_DOMAIN=localhost/empty FAILS the strict ready-to-host verdict and
     is a REPORT under --allow-local (local-smoke default)."""
     _seed(tmp_path)
-    (tmp_path / ".env.production.example").write_text(
+    (tmp_path / ".env").write_text(
         "ENVIRONMENT=production\nPD_DEV_TRACE=false\nTRUST_PROXY=true\n"
         "CADDY_DOMAIN=localhost\n",
         encoding="utf-8",
@@ -239,7 +247,7 @@ def test_placeholder_caddy_domain_fails_ready_to_host(tmp_path):
 
 def test_empty_caddy_domain_fails_ready_to_host(tmp_path):
     _seed(tmp_path)
-    (tmp_path / ".env.production.example").write_text(
+    (tmp_path / ".env").write_text(
         "ENVIRONMENT=production\nPD_DEV_TRACE=false\nTRUST_PROXY=true\n"
         "CADDY_DOMAIN=\n",
         encoding="utf-8",
@@ -280,9 +288,13 @@ def test_missing_log_bounds_fails(tmp_path):
 def test_deadline_above_frontend_timeout_fails(tmp_path):
     """P-02 envelope: effective deadline >= frontend 360s fails the preflight."""
     _seed(tmp_path)
-    (tmp_path / ".env.production.example").write_text(
+    # Phase21C validates Compose's rendered container environment.  The
+    # service env_file is the real startup input for Settings-only keys such as
+    # CASE_GENERATION_DEADLINE_SECONDS, so exercise a real .env here.
+    (tmp_path / ".env").write_text(
         "ENVIRONMENT=production\nPD_DEV_TRACE=false\nTRUST_PROXY=true\n"
-        "CADDY_DOMAIN=detective.example.com\nCASE_GENERATION_DEADLINE_SECONDS=400\n",
+        "CADDY_DOMAIN=detective.procedural-game.dev\n"
+        "CASE_GENERATION_DEADLINE_SECONDS=400\n",
         encoding="utf-8",
     )
     findings = release_check.check_prod_effective_config(
@@ -312,14 +324,14 @@ def test_backend_port_publication_fails(tmp_path):
 
 def test_published_ollama_port_fails(tmp_path):
     text = _real_compose_text().replace(
-        "volumes:",
-        "  ollama-leak:\n"
+        "\nvolumes:\n",
+        "\n  ollama-leak:\n"
         "    image: ollama/ollama:latest\n"
         "    ports:\n"
         '      - "11434:11434"\n'
         "    networks:\n"
         "      - pd-internal\n"
-        "\nvolumes:",
+        "\nvolumes:\n",
         1,
     )
     assert "11434:11434" in text
@@ -369,16 +381,17 @@ def test_privacy_doc_canonical_command_and_no_obsolete_sql():
     assert "idempotent and recreate" not in blob
 
 
-def test_privacy_doc_documents_host_side_invocation_and_backup_first():
+def test_privacy_doc_documents_compose_native_invocation_and_backup_first():
     text = _REPO_ROOT.joinpath("docs", "PRIVACY.md").read_text(encoding="utf-8")
     blob = " ".join(text.split())
     lowered = blob.lower()
-    assert "host-side" in lowered or "host side" in lowered
+    assert "docker compose run" in lowered
     assert "does **not** ship" in blob
     assert "back up" in lowered and "first" in lowered
-    assert "back up the whole volume first" in lowered
-    assert "single-writer" in lowered
-    assert "DATABASE_URL=sqlite://" in blob
+    assert "tools.backup_production backup" in blob
+    assert "docker compose -f docker-compose.prod.yml stop" in blob
+    assert "-v pd-data:" not in blob
+    assert "/var/lib/docker/volumes/pd-data" not in blob
 
 
 def test_dockerfile_does_not_copy_tools_tree_into_runtime():
@@ -396,9 +409,11 @@ def test_operations_runbook_exists_and_covers_backup_before_delete():
     text = runbook.read_text(encoding="utf-8")
     blob = " ".join(text.split())
     assert "python -m tools.delete_case" in blob
-    assert "Back up" in blob
+    assert "tools.backup_production backup" in blob
+    assert "tools.backup_production restore" in blob
     assert "single-writer" in text.lower()
-    assert "host" in text.lower()
+    assert "docker compose" in text.lower()
+    assert "-v pd-data:" not in blob
     assert "prod_preflight" in blob
 
 

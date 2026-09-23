@@ -10,7 +10,9 @@ protected.
 ## 1. What is stored
 
 Procedural Detective persists one SQLite database (``procedural_detective.db``)
-in a private Docker volume (``pd-data`` at ``/data`` in the container). For a
+in the private Compose data volume mounted at ``/data``. Docker derives the
+concrete runtime volume name from the effective project configuration; the
+operator tooling resolves it rather than assuming a literal name. For a
 generated case the database stores:
 
 - the **raw prompt** the user submitted (``cases.title``; the full prompt is
@@ -82,18 +84,29 @@ requires database-level control.
 Removes **everything** (all prompts, cases, truths, playthroughs, quotas):
 
 ```bash
-# 1. Optional: back up first (see §5).
-docker run --rm -v pd-data:/data -v "%CD%":/backup alpine \
-  tar czf /backup/pd-data-backup.tar.gz -C /data .
+# 1. Stop all SQLite writers but retain the current volume.
+docker compose -f docker-compose.prod.yml stop
 
-# 2. Stop and remove the deployment AND its data volume.
+# 2. Create a verified backup outside the source checkout. Record the printed
+#    archive path and SHA-256 and require exit code 0 before continuing.
+python -m tools.backup_production backup \
+  --output-dir /secure/backups/procedural-detective
+
+# 3. As a separate, explicitly confirmed action, remove the deployment and
+#    its actual project-scoped data volume.
 docker compose -f docker-compose.prod.yml down -v
 
-# 3. Start fresh (migrations run automatically on startup).
+# 4. Start fresh (migrations run automatically on startup).
 docker compose -f docker-compose.prod.yml up --build -d
 ```
 
-The same works for the local dev stack: `docker compose down -v`.
+Do not combine backup and `down -v` in one command chain or unattended job.
+The backup contains all private data and remains subject to this retention
+policy; securely erase it when its approved recovery period ends. Restoring a
+wipe uses the verified command in `docs/OPERATIONS.md` §1. When startup uses an
+explicit Compose `--env-file`, `--project-directory`, or `--project-name`, pass
+the identical options to backup and restore so they resolve the same concrete
+project volume.
 
 ### 3.2 Single-case deletion — canonical audited command
 
@@ -128,53 +141,38 @@ What the command does (in ONE transaction, fail-closed):
 It NEVER runs against the default/repository database unless `DATABASE_URL`
 points there — it uses the exact same single configuration source as the app.
 
-#### Where the operator runs it — HOST-side (tool availability)
+#### Where the operator runs it
 
-The runtime Docker image does **not** ship the `tools/` tree (the `Dockerfile`
-copies only `backend/`, `assets/` and the built frontend into the runtime
-stage), so `python -m tools.delete_case` is **not available inside the
-container**. The supported path is **host-side invocation against the mounted
-DB volume**, from a source checkout whose backend dependencies are installed
-(e.g. `pip install -e ./backend[dev]`).
-
-Procedure (back up FIRST, guarantee a single writer):
+The runtime image does **not** ship the repository `tools/` tree. The supported
+production procedure stops every writer, creates a verified backup, and then
+uses `docker compose run` with the source checkout mounted read-only. Compose
+attaches the application's effective data-volume declaration automatically;
+the procedure never guesses a runtime volume name or uses Docker's private
+host storage path.
 
 ```bash
-# 1) STOP the stack so the SQLite volume has no live writer (SQLite is
-#    single-writer; the app container must not hold a conflicting write lock).
-docker compose -f docker-compose.prod.yml down
+# 1) Stop writers but retain the containers and data volume.
+docker compose -f docker-compose.prod.yml stop
 
-# 2) BACK UP the whole volume first (non-negotiable before ANY deletion).
-docker run --rm -v pd-data:/data -v "%CD%":/backup alpine \
-  tar czf /backup/pd-data-backup.tar.gz -C /data .
+# 2) Back up first; continue only after exit 0 and checksum verification.
+python -m tools.backup_production backup \
+  --output-dir /secure/backups/procedural-detective
 
-# 3) Run the audited command ON THE HOST, pointing DATABASE_URL at the SQLite
-#    file inside the mounted volume. Linux hosts keep named-volume data under
-#    /var/lib/docker/volumes/pd-data/_data/:
-#    DATABASE_URL=sqlite:////var/lib/docker/volumes/pd-data/_data/procedural_detective.db python -m tools.delete_case <case_id> --yes
-#
-#    Docker Desktop (Windows/macOS) does not expose a stable host path into
-#    the volume, so use the portable copy-out flow instead (forward-slash
-#    absolute path in DATABASE_URL, e.g. sqlite:///C:/work/pd-maintenance.db):
-docker run --rm -v pd-data:/data -v "%CD%":/work alpine \
-  cp /data/procedural_detective.db /work/pd-maintenance.db
-DATABASE_URL=sqlite:///<path-to>/pd-maintenance.db \
-  python -m tools.delete_case <case_id> --yes
-#    then verify + copy the maintained file back into the volume:
-docker run --rm -v pd-data:/data -v "%CD%":/work alpine \
-  cp /work/pd-maintenance.db /data/procedural_detective.db
+# 3) Run the audited deletion in a one-off application service container.
+docker compose -f docker-compose.prod.yml run --rm --no-deps \
+  --entrypoint python --workdir /maintenance \
+  --volume "$(pwd):/maintenance:ro" \
+  procedural-detective -m tools.delete_case <case_id> --yes
 
-# 4) Restart the deployment (migrations run automatically on startup).
+# 4) Restart the deployment and verify readiness.
 docker compose -f docker-compose.prod.yml up --build -d
+curl --fail https://<public-host>/api/v1/readiness
 ```
 
-Restarting is not required after a successful run; the command itself verifies
-the triggers. Do **not** fall back to a manual trigger-drop when the command
-is unavailable — that voids the immutability guarantee for the remaining
-active cases (there is NO supported "recreate by re-applying a migration" path;
-a recorded migration head is not re-run). Full workflow, including
-backup/restore details and the Linux vs Docker Desktop path difference, is in
-**`docs/OPERATIONS.md` §2**.
+PowerShell uses `--volume "${PWD}:/maintenance:ro"`; see
+`docs/OPERATIONS.md` §2 for the complete platform examples. Do **not** fall
+back to manual trigger drops or raw SQL. A recorded migration head is not
+re-run, so it cannot repair manually removed immutability triggers.
 
 ## 4. Player-facing exposure (what is never served)
 
@@ -187,17 +185,20 @@ backup/restore details and the Linux vs Docker Desktop path difference, is in
 
 ## 5. SQLite volume privacy & backups
 
-- The database lives in a **Docker named volume** (``pd-data``), **not** inside
-  the image — rebuilds and restarts never touch it, and deleting the volume
-  deletes the data.
+- The database lives in the **Compose-managed data volume**, **not** inside
+  the image. Rebuilds and restarts preserve it; deleting that volume deletes
+  the data. The concrete runtime name is obtained from the effective Compose
+  render by `tools.backup_production`, never assumed by an operator command.
 - The backend is reachable only on the **private compose network** in the
   production profile; its port is **never published to the host or Internet**
   (PD-SEC-03). The database is never exposed directly to browsers or to the
   public edge.
-- **Backup inference:** the volume contains the entire dataset. Backup the
-  whole volume while the stack is stopped for a consistent snapshot
-  (§3.1 step 1); restoring the archive restores all prompts/cases/truth. Never
-  back the volume up through the public edge.
+- **Backup inference:** the volume contains the entire dataset. Stop the stack
+  and use `python -m tools.backup_production backup` for a consistent,
+  checksum-verified archive. Restoring that archive restores prompts, cases,
+  CaseTruth and player data, so archives require the same privacy controls and
+  retention decisions as the live database. Never transfer a backup through
+  the public edge.
 - Operators who cannot wipe at contest end should state the shorter ad-hoc
   retention they actually guarantee instead of relying on automatic expiry
   (there is none).

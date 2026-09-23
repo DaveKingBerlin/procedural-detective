@@ -1,11 +1,11 @@
-"""Phase 21B Finding 7 — FAIL-CLOSED production preflight CLI.
+"""FAIL-CLOSED production preflight CLI.
 
-One command that validates the EFFECTIVE production deployment — not just the
-YAML/example defaults. It runs the SAME stdlib-only check suite as
-``tools.release_check`` but with the STRICT ready-to-host verdict on
+One command that validates Docker Compose's rendered production deployment,
+including current shell overrides. It runs the same check suite as
+``tools.release_check`` with the strict ready-to-host verdict on
 ``CADDY_DOMAIN``:
 
-    python -m tools.prod_preflight [--allow-local]
+    python -m tools.prod_preflight [--allow-local] [--env-file PATH]
 
 Checks (all fail-closed; ANY ``fail`` finding exits 1):
 
@@ -21,16 +21,17 @@ Checks (all fail-closed; ANY ``fail`` finding exits 1):
        - json-file 10m x 5 log bounds on BOTH public services;
        - backend port NEVER publicly published (expose only, no `ports:`) and
          the Ollama port 11434 is never a published host port;
-       - CADDY_DOMAIN is a real (non-localhost, non-empty) public domain —
-         FAILS the ready-to-host verdict unless --allow-local (local smoke);
+       - CADDY_DOMAIN is a plausible non-reserved FQDN — local, IP, malformed
+         and reserved/example names FAIL the ready-to-host verdict. DNS and
+         certificate issuance remain part of the public TLS smoke;
        - production frontend bundle is same-origin/clean when present;
   3. compose logging bounds (F-04) — repeated as its own finding.
 
-The preflight reads the working-tree ``.env`` for the OPTIONAL interpolation it
-MUST validate, but only the public validation keys (ENVIRONMENT, PD_DEV_TRACE,
-TRUST_PROXY, CADDY_DOMAIN, CASE_GENERATION_DEADLINE_SECONDS) — no configured
-value is ever printed. When no ``.env`` exists, the documented
-``.env.production.example`` is the interpolation source.
+The preflight invokes ``docker compose config --format json`` with the current
+process environment and project directory. Compose automatically uses ``.env``
+just as the documented startup command does. If startup uses a different
+``--env-file``, pass that exact path here too. The rendered model, configured
+endpoints and credentials are never printed.
 
 Exit code: 0 ONLY when every check passes.
 """
@@ -61,9 +62,29 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-local",
         action="store_true",
         help=(
-            "Accept CADDY_DOMAIN=localhost/empty as the local-smoke default "
-            "(REPORT instead of FAIL). Do NOT pass this for a public hosting "
-            "certification."
+            "Accept an explicit localhost/.localhost/.local hostname as a "
+            "local-smoke REPORT. Empty, malformed, IP and reserved/example "
+            "names still FAIL. Do NOT pass this for public certification."
+        ),
+    )
+    parser.add_argument(
+        "--ingress-profile",
+        choices=("caddy", "alternate"),
+        default="caddy",
+        help=(
+            "Ingress being certified. The shipped Caddy profile requires "
+            "TRUST_PROXY=true. An alternate ingress defaults to "
+            "TRUST_PROXY=false and fails closed until a separate deployment "
+            "configuration and edge verification exist."
+        ),
+    )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            "Use the same explicit Compose --env-file as the real startup "
+            "command. Omit it for the documented automatic .env behavior."
         ),
     )
     args = parser.parse_args(argv)
@@ -71,7 +92,12 @@ def main(argv: list[str] | None = None) -> int:
     findings: list[release_check.Finding] = []
     findings.extend(release_check.check_prod_env_profile(_REPO_ROOT))
     findings.extend(
-        release_check.check_prod_effective_config(_REPO_ROOT, allow_local=args.allow_local)
+        release_check.check_prod_effective_config(
+            _REPO_ROOT,
+            allow_local=args.allow_local,
+            ingress_profile=args.ingress_profile,
+            compose_env_file=args.env_file,
+        )
     )
     findings.extend(release_check.check_compose_logging_bounds(_REPO_ROOT))
 
@@ -106,8 +132,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"production preflight: {len(unique)} findings, "
               f"{len(failures)} FAILING (first: {failures[0].message})")
         return 1
+    verdict = (
+        "local-smoke configuration validated; NOT a ready-to-host verdict"
+        if args.allow_local
+        else "ready-to-host configuration validated"
+    )
     print(f"production preflight: ALL {len(unique)} findings OK "
-          "(ready-to-host configuration validated)" +
+          f"({verdict})" +
           (f" with {len(reports)} REPORT-only notes" if reports else ""))
     return 0
 
