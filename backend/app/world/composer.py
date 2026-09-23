@@ -62,10 +62,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 from app.assets.catalog import Catalog, load_catalog_from_repo
 from app.assets.compiler import GeneratedAssetDefinition
+from app.assets.generated_cache import GeneratedAssetCache
 from app.assets.oracle import resolve_or_generate
 from app.assets.resolver import (
     AssetRequest,
     Provenance,
+    resolve,
     resolve_with_variant,
 )
 from app.assets.spec_provider import (
@@ -648,6 +650,18 @@ def compose_world(
         raise TypeError("compose_world requires a WorldRequirements")
     if catalog is None:
         catalog = load_catalog_from_repo()
+    if cache is None:
+        # ADV-240 — a ``None`` cache means "NO shared state": compose with a
+        # FRESH per-call generated-asset cache. The process-shared module
+        # oracle (``app.assets.oracle._DEFAULT_ORACLE``) is a cross-CALLER
+        # registry: a warm entry would otherwise let earlier compositions
+        # change later decorative generation/drop decisions (the ADV-240
+        # cache-order dependence). A fresh cache makes the composition of a
+        # request byte-identical REGARDLESS of the process cache state; the
+        # cache is then only a per-call memoizer. Callers that want
+        # cross-composition memoization pass their OWN ``GeneratedAssetCache``
+        # explicitly (the generation service and the Ollama driver do).
+        cache = GeneratedAssetCache()
     # Phase 14_5 — provider-call budget: one bounded provider wrapper per
     # composition (a service-hoisted BoundedSpecProvider is reused as-is so
     # every repair pass of ONE attempt shares a single budget).
@@ -720,6 +734,17 @@ def compose_world(
         asset_request = _to_asset_request(request)
         criticality = str(getattr(request, "criticality", CRITICALITY_DECORATIVE))
         semantic_name = str(getattr(request, "requested_name", ""))
+        if (
+            criticality == CRITICALITY_DECORATIVE
+            and semantic_name in generation_denied_names
+        ):
+            # ADV-240 — DECORATIVE generation-permit drop: this request needs
+            # the provider but its deterministic permit slot was already
+            # allocated to an EARLIER candidate (request order, cache-
+            # independent). It is dropped with a player-safe note exactly like
+            # a budget-exhausted decorative — a warm generated-asset cache can
+            # NEVER change this decision.
+            return None
         resolve_started = 0.0
         try:
             import time
@@ -918,6 +943,26 @@ def compose_world(
     #    silent wrong substitution), an unresolvable REQUIRED object keeps the
     #    blocking ``world.unresolved-object`` issue (repair -> terminal fail).
     #
+    #    ADV-240 — DETERMINISTIC DECORATIVE GENERATION-PERMIT PRE-PASS. The
+    #    per-composition procedural generation budget (``SPEC_PROVIDER_CALL_
+    #    LIMIT``) MUST be allocated from the REQUEST ALONE (stable key: request
+    #    order, then semantic id), NOT from the process cache state. A warm
+    #    generated-asset cache makes earlier generation attempts free, which
+    #    would otherwise silently free budget for LATER decorative objects and
+    #    change the placed/dropped set between two identical compositions in
+    #    the same process. The pre-pass catalog-resolves every request (pure,
+    #    deterministic — no provider, no cache) and grants a generation PERMIT
+    #    to the first ``SPEC_PROVIDER_CALL_LIMIT`` requests (in request order)
+    #    that NEED the provider (catalog FALLBACK / unresolved, or a
+    #    low-confidence SEMANTIC REQUIRED escalation). DECORATIVE requests that
+    #    need the provider WITHOUT a permit are deterministically dropped with a
+    #    player-safe note exactly as if the budget had been exhausted); a cache
+    #    hit can then only MEMOIZE (same definition) — it can never change the
+    #    decision for the same request. REQUIRED / evidence-critical requests
+    #    are NEVER capped (they cannot lose a generation attempt to optional
+    #    decoration). Empty-cache and warm-cache compositions of the same input
+    #    are therefore byte-identical.
+    #
     #    Phase 19E §"base-dedup collision fix" — the dedupe is SEMANTIC, never
     #    by render asset: a request dedupes against the kit base ONLY when its
     #    SEMANTIC identity equals an already-materialized base object id (the
@@ -931,6 +976,37 @@ def compose_world(
     #    projection binds the sealed weapon evidence by object id). Duplicate
     #    SEMANTIC ids never produce duplicate placements.
     base_object_ids = {plan["object_id"] for plan in base_plans}
+    generation_denied_names: set[str] = set()
+    _needs_generation = 0
+    for _index, _request in enumerate(world_reqs.objects):
+        _criticality = str(
+            getattr(_request, "criticality", CRITICALITY_DECORATIVE)
+        )
+        _asset_request = _to_asset_request(_request)
+        _resolution = None
+        try:
+            _resolution = resolve(_asset_request, catalog=catalog)
+        except Exception:  # noqa: BLE001 - the runtime resolution still governs
+            _resolution = None
+        _needs = _resolution is None or _resolution.provenance is Provenance.FALLBACK
+        if (
+            not _needs
+            and _criticality == CRITICALITY_REQUIRED
+            and _resolution is not None
+            and _resolution.provenance is Provenance.SEMANTIC_MATCH
+            and _resolution.confidence is not None
+            and _resolution.confidence < CRITICAL_MIN_SEMANTIC_CONFIDENCE
+        ):
+            # the REQUIRED low-confidence escalation calls the provider once.
+            _needs = True
+        if not _needs:
+            continue
+        if _criticality == CRITICALITY_REQUIRED:
+            continue  # REQUIRED never loses a generation attempt to decoration
+        if _needs_generation >= SPEC_PROVIDER_CALL_LIMIT:
+            generation_denied_names.add(str(getattr(_request, "requested_name", "")))
+            continue
+        _needs_generation += 1
     new_plans: list[dict[str, Any]] = []
     seen_new_assets: set[str] = set()
     materialized_semantic_ids: set[str] = set(base_object_ids)

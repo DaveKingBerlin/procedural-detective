@@ -45,6 +45,15 @@ Comparison semantics — the GENERIC, deterministic equivalence layer (DEF-054):
    matches, so a future short-but-meaningful golden motive id remains
    verifiable.
 
+2b. weapon (ADV-237): the locked weapon is reduced through the pipeline's
+   SINGLE semantic-id slug source (``app.world.requirements.semantic_object_id``
+   — the same 40-char-bounded slug the composer materializes for the resolved
+   weapon object) BEFORE the DEF-054 normalized equality of rule 1. The
+   pipeline materializes a locked weapon under its SEMANTIC id (display text
+   -> slug, truncated identically EVERYWHERE), so a >40-char locked weapon
+   MUST match its truncated composed id — never a divergence, never a
+   collision (one weapon per case).
+
 3. crime_time: the locked value and the draft canonical are compared as the
    SAME UTC epoch tick. A locked value may be a full ISO-8601-with-offset
    timestamp (existing rule) OR a bare 24h wall-clock ``H:MM[:SS]`` /
@@ -199,7 +208,16 @@ class LockedConstraints:
                 )
         if self.weapon is not None:
             actual = crime.weapon_id
-            if not _identity_equivalent(self.weapon, actual):
+            # ADV-237 — the locked weapon is reduced via the pipeline's SINGLE
+            # semantic-id slug source FIRST (same 40-char bound the composer
+            # materializes): a >40-char locked display text is NEVER compared
+            # against its truncated composed id as a raw string — that would be
+            # the ADV-237 divergence (a genuinely long but valid weapon would
+            # FAIL a case that otherwise publishes).
+            from app.world.requirements import semantic_object_id
+
+            locked_weapon_id = semantic_object_id(self.weapon)
+            if not _identity_equivalent(locked_weapon_id, actual):
                 issues.append(
                     f"locked weapon {self.weapon!r} does not match draft "
                     f"crime.weapon_id {actual!r}"

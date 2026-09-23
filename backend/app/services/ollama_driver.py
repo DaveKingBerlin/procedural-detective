@@ -231,14 +231,19 @@ def _identity_slug(value: str | None) -> str:
 
     ASCII letters/digits only (mirrors ``normalize_identity``), honorifics
     dropped, words joined with ``_``. ``"Dr. Anna Weiss"`` ->
-    ``"anna_weiss"``.
+    ``"anna_weiss"``. Long values are truncated to the SAME 40-character
+    bound as ``semantic_object_id``/``composer._slugify`` (ADV-237: the id
+    sheet must NEVER diverge from the composed semantic object id for a
+    >40-char locked weapon — the weapon line uses ``semantic_object_id``
+    directly so sheet and composer ALWAYS agree).
     """
     words = [
         word
         for word in re.findall(r"[a-z0-9]+", str(value or "").casefold())
         if word not in _HONORIFICS
     ]
-    return "_".join(words)
+    joined = " ".join(words)
+    return joined[:40].replace(" ", "_").strip("_")
 
 
 def _locked_id_sheet(attempt: Any) -> str:
@@ -266,7 +271,17 @@ def _locked_id_sheet(attempt: Any) -> str:
         value = fields.get(key)
         if value is None:
             continue
-        lines.append(f"- {id_name}: {_identity_slug(value)}")
+        if key == "weapon":
+            # ADV-237 — the WEAPON id token IS the pipeline's semantic object
+            # id (``semantic_object_id`` = the same 40-char-bounded slug the
+            # composer uses for the resolved semantic object). A locked weapon
+            # longer than 40 characters therefore ALWAYS gets the SAME
+            # truncated id in the sheet, the injection, the composition and the
+            # presence guard (no divergence: the composed object id ALWAYS
+            # equals the injected request id).
+            lines.append(f"- {id_name}: {semantic_object_id(value)}")
+        else:
+            lines.append(f"- {id_name}: {_identity_slug(value)}")
         any_token = True
     time_value = fields.get("crime_time")
     if time_value and any_token:
@@ -370,7 +385,14 @@ def _weapon_evidence_id(attempt: Any, evidence_spec: Any) -> str:
         return ""
     from app.generation.constraints import normalize_identity
 
-    needle = normalize_identity(weapon)
+    # ADV-237 — the needle is the SINGLE slug source: evidence propositions
+    # reference the id-sheet token = ``semantic_object_id(weapon)`` (the same
+    # 40-char-bounded slug the composer materializes). ``normalize_identity``
+    # is invariant to "_"/" ", so this equals the raw locked text for short
+    # weapons and only differs when the 40-char truncation bites (the exact
+    # ADV-237 divergence: a >40-char locked weapon must still find its sealed
+    # evidence).
+    needle = normalize_identity(semantic_object_id(weapon))
     for item in getattr(evidence_spec, "evidence", ()) or ():
         item_id = getattr(item, "id", None)
         for prop in getattr(item, "propositions", ()) or ():
@@ -952,16 +974,32 @@ def parse_world_requirements(
     genuine semantic content gaps (e.g. a malformed object/relation structure)
     raise and route through the bounded retry.
     """
+    from app.world.extract import unsafe_object_match
+
     data = _parse_doc(content)
     if not isinstance(data, dict):
         raise ValueError("world_requirements root must be a JSON object")
     objects: list[ObjectRequest] = []
+    unsafe_notes: list[str] = []
     for index, item in enumerate(data.get("objects") or ()):
         if not isinstance(item, dict):
             raise ValueError(f"world_requirements.objects[{index}] must be an object")
         name = item.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(f"world_requirements.objects[{index}]: name required")
+        # ADV-235 — the world stage parser applies the SAME KNOWN-UNSAFE gate
+        # as the extractor's safe-fail: a model-invented request whose name
+        # matches UNSAFE_OBJECT_TERMS (word-boundary NFKC-casefold) is NEVER
+        # composed here — it is recorded as a sanitized note and skipped, so a
+        # hostile/unsafe noun cannot be smuggled into the composition through
+        # the model's world response either.
+        unsafe_term = unsafe_object_match(name)
+        if unsafe_term:
+            unsafe_notes.append(
+                f"unsafeUnsupported: known-unsafe object term {unsafe_term!r} "
+                "was not composed"
+            )
+            continue
         criticality = item.get("criticality")
         if criticality not in (CRITICALITY_REQUIRED, CRITICALITY_DECORATIVE):
             criticality = CRITICALITY_DECORATIVE
@@ -1051,7 +1089,9 @@ def parse_world_requirements(
             location_tokens=tuple(data.get("locationTokens") or ()),
             objects=tuple(objects),
             relations=tuple(sorted(set(relations), key=lambda r: (r.kind, r.target))),
-            unsafe_unsupported=tuple(data.get("unsafeUnsupported") or ()),
+            unsafe_unsupported=tuple(
+                dict.fromkeys([*(data.get("unsafeUnsupported") or ()), *unsafe_notes])
+            ),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"world_requirements invalid: {exc}") from None
@@ -1095,10 +1135,22 @@ def inject_locked_weapon_request(
       * a hostile locked value (URL/path/control chars/oversized) is left
         unchanged — the presence guard then FAILS CLOSED downstream (nothing
         publishes), exactly the safe behavior for an unrepresentable weapon.
+      * ADV-235 (fail-closed safety): a locked weapon matching
+        ``UNSAFE_OBJECT_TERMS`` (word-boundary NFKC-casefold match — the SAME
+        matching the extractor's safe-fail uses, shared via
+        ``app.world.extract.unsafe_object_match``) is NEVER composed and NEVER
+        upgraded. It is recorded as a sanitized ``unsafeUnsupported`` note and
+        the merge SKIPS the injection; any world request whose semantic id
+        matches the locked weapon is also REMOVED (a model-invented unsafe
+        request never materializes). The attempt then FAILS CLOSED through the
+        object-presence guard (crime.weapon_id referenced but not represented
+        -> ``SemanticObjectResolutionError`` -> ``VALIDATION_FAILED``, nothing
+        publishes). Safe arbitrary weapons (fork/hammer/...) are unaffected.
 
     Zero provider calls: this merge is LOCAL and deterministic.
     """
     from app.generation.constraints import normalize_identity
+    from app.world.extract import unsafe_object_match
 
     if not isinstance(world_reqs, WorldRequirements):
         raise TypeError("inject_locked_weapon_request requires a WorldRequirements")
@@ -1106,6 +1158,35 @@ def inject_locked_weapon_request(
     weapon = getattr(locked, "weapon", None) if locked is not None else None
     if not isinstance(weapon, str) or not weapon:
         return world_reqs
+    if unsafe_object_match(weapon):
+        # ADV-235 — an unsafe locked weapon is NEVER materialized by the
+        # injection. Record the sanitized safe-fail note and drop any world
+        # request whose semantic id equals the locked weapon (so nothing named
+        # like the unsafe weapon survives the merge); the driver's presence
+        # guard then FAILS CLOSED (VALIDATION_FAILED, never a publish).
+        note = (
+            "unsafeUnsupported: known-unsafe object term "
+            f"{unsafe_object_match(weapon)!r} was not composed"
+        )
+        needle = normalize_identity(semantic_object_id(weapon))
+        kept: list[Any] = []
+        for request in world_reqs.objects:
+            if request is None:
+                continue
+            if (
+                isinstance(getattr(request, "requested_name", None), str)
+                and normalize_identity(semantic_object_id(request.requested_name)) == needle
+            ):
+                continue  # the unsafe semantic object is never composed
+            kept.append(request)
+        notes = tuple(dict.fromkeys([*world_reqs.unsafe_unsupported, note]))
+        return WorldRequirements(
+            environment_hint=world_reqs.environment_hint,
+            location_tokens=world_reqs.location_tokens,
+            objects=tuple(kept),
+            relations=world_reqs.relations,
+            unsafe_unsupported=notes,
+        )
     needle = normalize_identity(semantic_object_id(weapon))
     if not needle:
         return world_reqs
@@ -2931,7 +3012,13 @@ def _enhance_weapon(attempt: Any, obj: ObjectSpec) -> ObjectSpec:
     weapon = getattr(locked, "weapon", None) if locked is not None else None
     if not isinstance(weapon, str) or not weapon:
         return obj
-    if normalize_identity(weapon) != normalize_identity(obj.object_id):
+    # ADV-237 — compare against the SINGLE slug source (semantic_object_id):
+    # ``obj.object_id`` is the composed SEMANTIC id (40-char truncated for
+    # long names); the raw locked text normalizes to the FULL string for a
+    # >40-char weapon and would never match. The needle must be the SAME
+    # truncated id the sheet/injection/composer use so a long locked weapon
+    # still enters the POTENTIAL_WEAPON universe.
+    if normalize_identity(semantic_object_id(weapon)) != normalize_identity(obj.object_id):
         return obj
     return ObjectSpec(
         object_id=obj.object_id,

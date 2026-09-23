@@ -63,11 +63,14 @@ MAX_STRING_LENGTH = 120  # every other free-form string (hints/tags/values)
 # substituted with a semantically-incorrect catalog asset: the world composer
 # records ``world.unresolved-object`` and the generation lifecycle repairs or
 # fails publication. A DECORATIVE object may degrade gracefully.
-# Documented classification rule (applied by ``app.world.extract``): a prompt
+# Documented classification rule (applied by ``app.world.extract``; ADV-236
+# the arc is NARROWED to genuinely weapon-adjacent strong signals): a prompt
 # noun is REQUIRED when it appears in the locked-constraint weapon field or in
-# "tool|weapon|used|killed|with"-adjacent context that arcs the CASE story
-# (the weapon the killer is described as using); every other unseen noun is
-# DECORATIVE.
+# strong weapon/case context that arcs the CASE story (the killer was
+# "killed/stabbed with X" / it "is the weapon/tool" used — see
+# ``UNSEEN_WEAPON_CONTEXT_WORDS``); ``with``/``used``-adjacent ordinary
+# instrument prose ("with a tray", "used a spatula") is DECORATIVE, never
+# REQUIRED, so ordinary prose nouns can never fail a case.
 CRITICALITY_REQUIRED = "required"
 CRITICALITY_DECORATIVE = "decorative"
 CRITICALITY_ALLOWED: tuple[str, ...] = (CRITICALITY_REQUIRED, CRITICALITY_DECORATIVE)

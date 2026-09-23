@@ -317,6 +317,19 @@ class BudgetTracker:
         procedural-asset ceiling (``MAX_PROCEDURAL_ASSETS_PER_GENERATION``) is
         already reached. Never consumes a model call — this is a per-object
         count guard, not a provider call.
+
+        ADV-239 (documented decision): the ceiling is PER GENERATION ATTEMPT —
+        repair/regeneration passes of ONE attempt share the SAME tracker, so a
+        decoration-rich world whose unknown objects repeat across passes can
+        reach the 20-distinct ceiling. REQUIREMENTS defines the ceiling per
+        generation attempt and ADR-001 documents it as the "Richness bound:
+        distinct procedural assets per generation" — this is CORRECT budget
+        semantics, NOT a decorative-drop defect. Within ONE composition the
+        per-composition provider budget caps decorations (the composer drops
+        over-bound decoration with player-safe notes and provides the
+        required iterate deterministically), so a decorative-only over-ceiling
+        never invalidates REQUIRED objects and never fails a case that would
+        otherwise publish in a single pass.
         """
         if not isinstance(object_id, str) or not object_id:
             raise ValueError("procedural asset id must be a non-empty string")

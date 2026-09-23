@@ -21,11 +21,15 @@ PURE, DETERMINISTIC text extraction (NO LLM, NO network, NO randomness):
   ``KNOWN_OBJECT_TABLE``, NOT a known-unsafe term and NOT filtered by the
   documented bounded English stop/non-noun heuristics becomes a BOUNDED
   ``ObjectRequest`` with ``criticality = "required" | "decorative"`` (frozen
-  field on ``ObjectRequest``). Classification rule (documented): a noun that
-  appears in the locked-constraint weapon field or in
-  ``tool|weapon|used|killed|with``-adjacent context that arcs the CASE story
-  (the killer "used X", was "killed with X", the "murder weapon is X") is
-  REQUIRED; every other unseen noun is DECORATIVE. The three project golden
+  field on ``ObjectRequest``). Classification rule (documented; ADV-236 the
+  arc is NARROWED to genuinely weapon-adjacent strong signals): a noun that
+  appears in the locked-constraint weapon field or in strong weapon/case
+  context that arcs the CASE story — ``tool|weapon|killed|kill|killer|murder|
+  stabbed|struck|strike|beat|wielded|holding|clutched|brandished|...`` (the
+  killer "was killed with X", the "murder weapon is X") — is REQUIRED; every
+  other unseen noun, including ``with``/``used``-adjacent ordinary instrument
+  prose ("with a tray", "used a spatula"), is DECORATIVE (it can never fail
+  the case). The three project golden
   unseen examples ("bronze ceremonial ice pick", "unusual forensic sample
   press", "carved ivory desk seal") are deliberately NOT in any production
   lookup table — they flow through the general mechanism (a defensive test
@@ -272,15 +276,22 @@ MAX_UNKNOWN_PHRASE_WORDS = 4
 
 # Documented weapon/case-arc context words: a noun phrase within a bounded
 # window of one of these in the SAME sentence is REQUIRED (it arcs the CASE
-# story — the killer "used"/was "killed with" it, it is "the weapon/tool" used,
-# or it appears in the locked-constraint weapon field).
+# story — the killer was "killed with" it, it "is the weapon/tool" used, or it
+# appears in the locked-constraint weapon field).
+#
+# ADV-236 (narrowed): the arc classification is LIMITED to genuinely
+# weapon-adjacent STRONG signals. The universally-common instrument/companion
+# prepositions and bare-prose verbs ("with", "used", "use", "uses", "using")
+# were removed: "with a tray", "with a cup of coffee" and "used a spatula" are
+# ordinary INSTRUMENT PROSE — those nouns classify DECORATIVE (they never arc
+# the CASE story and can never fail a case). The locked weapon is made REQUIRED
+# by the weapon-lock injection (the ``Weapon:`` line / locked sheet is the
+# authority), and killing/murder/weapon signals keep strong phrases
+# ("The killer used a bronze ceremonial ice pick" stays REQUIRED via the
+# strong ``killer`` signal; "was killed with a fork" via ``killed``).
 UNSEEN_WEAPON_CONTEXT_WORDS: tuple[str, ...] = (
     "tool",
     "weapon",
-    "used",
-    "use",
-    "uses",
-    "using",
     "killed",
     "kill",
     "kills",
@@ -297,7 +308,6 @@ UNSEEN_WEAPON_CONTEXT_WORDS: tuple[str, ...] = (
     "beat",
     "stunned",
     "wielded",
-    "with",
     "holding",
     "clutched",
     "brandished",
@@ -582,6 +592,27 @@ UNSAFE_OBJECT_TERMS: tuple[str, ...] = (
     "revolver",
 )
 
+
+def unsafe_object_match(value: Any) -> str:
+    """The FIRST ``UNSAFE_OBJECT_TERMS`` member found in ``value`` (or "").
+
+    Uses THE SAME matching as the extractor's safe-fail gate: the value is
+    NFKC-normalized + casefolded and each term is matched at a word boundary
+    (``re.search(r"\b<term>\b", ...)``). ``"Weapon: GUN"`` / ``"a gun with a
+    silencer"`` -> ``"gun"``; ``"fork"`` / ``"claw hammer"`` -> ``""``.
+    Deterministic (term-list order). SHARED by the extractor's own unsafe
+    scan, the weapon-lock injection gate (ADV-235 — a locked KNOWN-UNSAFE
+    weapon must NEVER be composed/upgraded, in ANY merge/materialization) and
+    the driver's world-stage parser.
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    for term in UNSAFE_OBJECT_TERMS:
+        if re.search(r"\b" + re.escape(term) + r"\b", normalized):
+            return term
+    return ""
+
 # Sentence delimiters used only to scope relation binding (bounded, plain).
 _SENTENCE_SPLIT_RE = re.compile(r"[.;!?\n]+")
 
@@ -787,8 +818,9 @@ def _unseen_candidates(
             continue
         requested_name = phrase_text
         # Criticality: REQUIRED when the phrase IS the locked weapon field or
-        # sits in tool|weapon|used|killed|with-adjacent context (the bound
-        # look-back window) that arcs the CASE story; otherwise DECORATIVE.
+        # sits in strong weapon/tool/killing-adjacent context (the bound
+        # look-back window, ADV-236-narrowed — bare "with"/"used X" instrument
+        # prose is DECORATIVE) that arcs the CASE story; otherwise DECORATIVE.
         phrase_words = tuple(w for _s, _e, _r, w in phrase)
         criticality = CRITICALITY_DECORATIVE
         if locked_atoms and phrase_words == locked_atoms:
@@ -947,62 +979,79 @@ def extract_world_requirements(
     #         trailing DECORATIVE unseen requests deterministically (the
     #         REQUIRED weapon never loses its slot to optional decoration);
     #       * a hostile locked value (URL / path / control chars / oversized)
-    #         is RECORDED as a safe-fail note and NEVER composed.
+    #         is RECORDED as a safe-fail note and NEVER composed;
+    #       * ADV-235 (fail-closed safety): a locked weapon that matches
+    #         ``UNSAFE_OBJECT_TERMS`` (word-boundary NFKC-casefold match, the
+    #         SAME matching as the extractor's safe-fail) is NEVER composed and
+    #         NEVER upgraded here — the safe-fail note is recorded (deduped with
+    #         the prompt scan) and the merge is skipped entirely, so nothing
+    #         unsafe materializes and the attempt FAILS CLOSED downstream
+    #         (the referenced object-id is absent -> VALIDATION_FAILED, never a
+    #         publish). Safe arbitrary weapons (fork/hammer/...) are unaffected.
     from app.generation.constraints import normalize_identity
 
     locked_weapon = locked.weapon if locked is not None else None
     if isinstance(locked_weapon, str) and locked_weapon:
-        needle = normalize_identity(semantic_object_id(locked_weapon))
-        if needle:
-            matching = [
-                (index, request)
-                for index, request in enumerate(objects)
-                if normalize_identity(semantic_object_id(request.requested_name)) == needle
-            ]
-            if matching:
-                index, matching_request = matching[0]
-                if matching_request.criticality != CRITICALITY_REQUIRED:
-                    objects[index] = ObjectRequest(
-                        requested_name=matching_request.requested_name,
-                        category_hint=matching_request.category_hint,
-                        subtype_hint=matching_request.subtype_hint,
-                        tags=matching_request.tags,
-                        required_interaction=matching_request.required_interaction,
-                        evidence_id=matching_request.evidence_id,
-                        required_evidence_capabilities=(
-                            matching_request.required_evidence_capabilities
-                        ),
-                        variant_params=matching_request.variant_params,
-                        criticality=CRITICALITY_REQUIRED,
-                    )
-            else:
-                try:
-                    injected = ObjectRequest(
-                        requested_name=locked_weapon,
-                        criticality=CRITICALITY_REQUIRED,
-                    )
-                except ValueError:
-                    unsafe_notes.append(
-                        "unsafeUnsupported: locked weapon request was rejected "
-                        "by the string-safety gate and was not composed"
-                    )
+        unsafe_term = unsafe_object_match(locked_weapon)
+        if unsafe_term:
+            note = (
+                f"unsafeUnsupported: known-unsafe object term {unsafe_term!r} "
+                "was not composed"
+            )
+            if note not in unsafe_notes:
+                unsafe_notes.append(note)
+        else:
+            needle = normalize_identity(semantic_object_id(locked_weapon))
+            if needle:
+                matching = [
+                    (index, request)
+                    for index, request in enumerate(objects)
+                    if normalize_identity(semantic_object_id(request.requested_name)) == needle
+                ]
+                if matching:
+                    index, matching_request = matching[0]
+                    if matching_request.criticality != CRITICALITY_REQUIRED:
+                        objects[index] = ObjectRequest(
+                            requested_name=matching_request.requested_name,
+                            category_hint=matching_request.category_hint,
+                            subtype_hint=matching_request.subtype_hint,
+                            tags=matching_request.tags,
+                            required_interaction=matching_request.required_interaction,
+                            evidence_id=matching_request.evidence_id,
+                            required_evidence_capabilities=(
+                                matching_request.required_evidence_capabilities
+                            ),
+                            variant_params=matching_request.variant_params,
+                            criticality=CRITICALITY_REQUIRED,
+                        )
                 else:
-                    if len(objects) >= MAX_OBJECT_REQUESTS:
-                        # keep the REQUIRED weapon; drop the LAST DECORATIVE
-                        # unseen request deterministically (never known /
-                        # already-required requests).
-                        for drop_index in range(len(objects) - 1, -1, -1):
-                            if objects[drop_index].criticality == CRITICALITY_DECORATIVE:
-                                del objects[drop_index]
-                                break
-                        else:
-                            unsafe_notes.append(
-                                "unsafeUnsupported: locked weapon request could "
-                                "not be added within the object bound"
-                            )
-                            injected = None  # type: ignore[assignment]
-                    if injected is not None:
-                        objects.append(injected)
+                    try:
+                        injected = ObjectRequest(
+                            requested_name=locked_weapon,
+                            criticality=CRITICALITY_REQUIRED,
+                        )
+                    except ValueError:
+                        unsafe_notes.append(
+                            "unsafeUnsupported: locked weapon request was rejected "
+                            "by the string-safety gate and was not composed"
+                        )
+                    else:
+                        if len(objects) >= MAX_OBJECT_REQUESTS:
+                            # keep the REQUIRED weapon; drop the LAST DECORATIVE
+                            # unseen request deterministically (never known /
+                            # already-required requests).
+                            for drop_index in range(len(objects) - 1, -1, -1):
+                                if objects[drop_index].criticality == CRITICALITY_DECORATIVE:
+                                    del objects[drop_index]
+                                    break
+                            else:
+                                unsafe_notes.append(
+                                    "unsafeUnsupported: locked weapon request could "
+                                    "not be added within the object bound"
+                                )
+                                injected = None  # type: ignore[assignment]
+                        if injected is not None:
+                            objects.append(injected)
 
     # 3. relations: exact contiguous phrase matches bound to every matched
     #    object in the same sentence that precedes the phrase.
@@ -1049,4 +1098,5 @@ __all__ = [
     "UNSAFE_OBJECT_TERMS",
     "extract_world_requirements",
     "is_base_object_request",
+    "unsafe_object_match",
 ]
