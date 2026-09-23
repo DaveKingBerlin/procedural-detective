@@ -9,6 +9,7 @@ import type {
   PlayerKnowledgeDTO,
 } from "../api/types";
 import { buildInvestigationScene, applyKnowledgeToSceneModel, bindEvidenceToSceneModel, type InvestigationSceneModel } from "./buildInvestigationScene";
+import { semanticLabelOrNull } from "./objectLabel";
 import type { CreateInvestigationSceneResult, InvestigationSceneHandle } from "./renderInvestigation";
 import { ValidationError } from "./validation";
 
@@ -309,9 +310,14 @@ export class InvestigationSession {
       // label-anchored feedback signals nothing was found here and — because
       // no knowledge changed — the scene stays fully interactive (the player
       // can obviously move on; "find evidence, then accuse" keeps guiding).
+      // Phase 19E: the label is the SEMANTIC human label (catalog registry
+      // label OR the humanized proc canonicalName for arbitrary generated
+      // objects — never a raw objectId/assetId/proc.* token); when no
+      // nameable source exists the unanchored fallback is used.
+      const label = semanticLabelOrNull(worldObject);
       feedback.toast = this.makeToast(
-        worldObject.label
-          ? `Nothing relevant was found on the ${worldObject.label}.`
+        label
+          ? `Nothing relevant was found on the ${label}.`
           : "Nothing relevant was found here.",
         result.evidenceId,
       );

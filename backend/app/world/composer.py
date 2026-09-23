@@ -97,6 +97,7 @@ from app.world.requirements import (
     RELATION_TO_ANCHOR_TYPES,
     WorldRequirements,
     safe_string_issues,
+    semantic_object_id,
 )
 
 
@@ -130,6 +131,22 @@ CRITICAL_MIN_SEMANTIC_CONFIDENCE = 6.0
 # Per-composition provider-call budget cap (see BoundedSpecProvider); the
 # service hoists ONE budget over the whole attempt so repair passes share it.
 SPEC_PROVIDER_CALL_LIMIT = MAX_SPEC_PROVIDER_CALLS_PER_GENERATION
+
+# Phase 19E — the default TOTAL VISIBLE OBJECT BOUND per kit when the caller
+# does not pass one. Scene enrichment must stay within current rendering and
+# placement capacity: the total number of PLACED world objects (kit base +
+# prompt/procedural objects) never exceeds this cap. DECORATIVE objects beyond
+# the cap are dropped deterministically (player-safe notes — optional
+# decoration can never fail a case); REQUIRED / evidence-relevant objects are
+# never dropped for the bound, and a set that cannot be reduced by dropping
+# decoration FAILS CLOSED (``world.object-count-bound``). The provider / asset
+# budgets (MAX_LLM_CALLS_PER_GENERATION, MAX_CORE_LLM_CALLS_PER_GENERATION,
+# MAX_PROCEDURAL_ASSETS_PER_GENERATION) are UNCHANGED — this is a visible-scene
+# bound only (Phase 19E §"Bounds"). Operator-configurable via
+# ``MAX_WORLD_OBJECTS_PER_KIT`` (measured safe default 32 on the shipped kits;
+# a kit's anchor capacity rarely exceeds ~20 composites and the Phase 11
+# manifest validator caps anchors at 40).
+DEFAULT_MAX_WORLD_OBJECTS = 32
 
 # ADV-153 — player-safe composition notes for DECORATIVE unseen objects that
 # could not be generated/placed: they are left OUT of the world (never a
@@ -613,6 +630,7 @@ def compose_world(
     kit: EnvironmentKit | None = None,
     environment_id: str | None = None,
     environment_provenance: str | None = "EXACT",
+    max_world_objects: int | None = None,
 ) -> WorldComposition:
     """Deterministically compose the world for ``world_reqs`` on a kit.
 
@@ -620,6 +638,11 @@ def compose_world(
     Returns a ``WorldComposition`` whose ``issues`` tuple is the sanitized
     WORld validation bucket (empty == composable). Never raises for
     domain-recoverable problems.
+
+    ``max_world_objects`` (Phase 19E) is the caller-configurable TOTAL VISIBLE
+    OBJECT BOUND (see ``DEFAULT_MAX_WORLD_OBJECTS``); REQUIRED /
+    evidence-relevant objects are never dropped for it and over-bound-only-by-
+    decoration FAILS CLOSED with ``world.object-count-bound``.
     """
     if not isinstance(world_reqs, WorldRequirements):
         raise TypeError("compose_world requires a WorldRequirements")
@@ -888,15 +911,29 @@ def compose_world(
             }
         )
 
-    # 2. prompt object resolution + dedupe against the base set. Each request
+    # 2. prompt object resolution + SEMANTIC-IDENTITY dedupe. Each request
     #    resolves INDEPENDENTLY (ADV-153): the successfully resolved objects
     #    ALWAYS stay in the composition; an unresolvable DECORATIVE object is
     #    left out with a player-safe note (never a blocking issue, never a
     #    silent wrong substitution), an unresolvable REQUIRED object keeps the
     #    blocking ``world.unresolved-object`` issue (repair -> terminal fail).
-    base_assets = {plan["asset_id"] for plan in base_plans}
+    #
+    #    Phase 19E §"base-dedup collision fix" — the dedupe is SEMANTIC, never
+    #    by render asset: a request dedupes against the kit base ONLY when its
+    #    SEMANTIC identity equals an already-materialized base object id (the
+    #    golden case: "kitchen knife" -> base ``kitchen_knife``). A REQUIRED
+    #    semantic weapon whose RENDER representation resolves to a KIT-BASE
+    #    asset but whose semantic id is DIFFERENT (e.g. ``antique brass letter
+    #    opener`` -> render ``PROP_LETTER_OPENER_01`` that the kit already uses
+    #    for the base ``letter_opener``) still MATERIALIZES as its OWN semantic
+    #    object: a distinct placement reuses the base asset visually while the
+    #    semantic id survives (evidence associations stay valid — the driver
+    #    projection binds the sealed weapon evidence by object id). Duplicate
+    #    SEMANTIC ids never produce duplicate placements.
+    base_object_ids = {plan["object_id"] for plan in base_plans}
     new_plans: list[dict[str, Any]] = []
     seen_new_assets: set[str] = set()
+    materialized_semantic_ids: set[str] = set(base_object_ids)
     composition_notes: list[str] = []
     for request in world_reqs.objects:
         resolved = _resolve_prompt_object(request)
@@ -926,11 +963,65 @@ def compose_world(
             "assetId": resolved.asset_id,
             "provenance": resolved.provenance,
         }
-        if resolved.asset_id in base_assets or resolved.asset_id in seen_new_assets:
-            # dedupe: the golden base (or an earlier prompt request) already
-            # supplies this asset; the solver-critical links stay put.
+        semantic_candidate = semantic_object_id(requested_name)
+        if semantic_candidate in base_object_ids:
+            # SEMANTIC identity already materialized by a base placement (the
+            # golden kitchen knife): the solver-critical base link stays put.
+            continue
+        if resolved.asset_id in seen_new_assets or semantic_candidate in materialized_semantic_ids:
+            # The render asset (or the semantic id) is already claimed. A
+            # REQUIRED semantic object whose RENDER slot was taken by an
+            # EARLIER DECORATIVE new plan REPLACES that decorative plan
+            # (semantic priority: the weapon/evidence object never loses its
+            # slot to decoration). Duplicate semantic ids, a REQUIRED-vs-
+            # REQUIRED same-render collision and decorative dedupe all keep the
+            # "already materialized" rule (the fail-closed presence guard
+            # reports any REQUIRED semantic that stays unrepresented).
+            if (
+                str(getattr(request, "criticality", CRITICALITY_DECORATIVE))
+                == CRITICALITY_REQUIRED
+                and semantic_candidate not in materialized_semantic_ids
+            ):
+                claimant_index = next(
+                    (
+                        index
+                        for index, plan in enumerate(new_plans)
+                        if plan["asset_id"] == resolved.asset_id
+                        and str(plan.get("criticality", CRITICALITY_DECORATIVE))
+                        == CRITICALITY_DECORATIVE
+                    ),
+                    None,
+                )
+                if claimant_index is not None:
+                    old = new_plans[claimant_index]
+                    materialized_semantic_ids.discard(
+                        semantic_object_id(str(old.get("requested_name", "")))
+                    )
+                    hint = _relation_hint_for_plan(
+                        request, resolved, kit, catalog, world_reqs
+                    )
+                    new_plans[claimant_index] = {
+                        "object_id": None,  # assigned below
+                        "asset_id": resolved.asset_id,
+                        "interaction": str(
+                            getattr(request, "required_interaction", "") or ""
+                        ),
+                        "evidence_id": (
+                            str(getattr(request, "evidence_id", None))
+                            if getattr(request, "evidence_id", None) is not None
+                            else None
+                        ),
+                        "is_new": True,
+                        "hint": hint,
+                        "requested_name": requested_name,
+                        "resolved": resolved,
+                        "criticality": CRITICALITY_REQUIRED,
+                    }
+                    materialized_semantic_ids.add(semantic_candidate)
+                    continue
             continue
         seen_new_assets.add(resolved.asset_id)
+        materialized_semantic_ids.add(semantic_candidate)
         hint = _relation_hint_for_plan(request, resolved, kit, catalog, world_reqs)
         new_plans.append(
             {
@@ -946,6 +1037,9 @@ def compose_world(
                 "hint": hint,
                 "requested_name": requested_name,
                 "resolved": resolved,
+                "criticality": str(
+                    getattr(request, "criticality", CRITICALITY_DECORATIVE)
+                ),
             }
         )
 
@@ -957,8 +1051,66 @@ def compose_world(
         )
         used_ids.add(plan["object_id"])
 
-    # 3. placement (single deterministic allocation authority).
-    placed = _place_plans(kit, base_plans + new_plans, catalog, generated_definitions)
+    # 2b. Phase 19E §"Bounds / placement priority" — TOTAL VISIBLE OBJECT BOUND.
+    #     REQUIRED / evidence-linked plans are NEVER dropped for the bound; a
+    #     DECORATIVE new plan beyond capacity is dropped deterministically
+    #     (player-safe note; the case never fails for optional decoration). A
+    #     set that STAYS over-bound after every decorative drop FAILS CLOSED
+    #     (``world.object-count-bound`` — nothing publishes).
+    def _evidence_relevant(plan: Mapping[str, Any]) -> bool:
+        return (
+            str(plan.get("criticality", CRITICALITY_DECORATIVE)) == CRITICALITY_REQUIRED
+            or plan.get("evidence_id") is not None
+        )
+
+    bound = (
+        int(max_world_objects)
+        if max_world_objects is not None and int(max_world_objects) > 0
+        else DEFAULT_MAX_WORLD_OBJECTS
+    )
+    overflow = len(base_plans) + len(new_plans) - bound
+    if overflow > 0:
+        decorative_indices = [
+            index
+            for index, plan in enumerate(new_plans)
+            if not _evidence_relevant(plan)
+        ]
+        if overflow > len(decorative_indices):
+            issues.append(
+                _world_issue(
+                    "object-count-bound",
+                    "requested world exceeds the total visible object bound and "
+                    "cannot be reduced by dropping decorative objects",
+                )
+            )
+        else:
+            drop_indices = set(decorative_indices[-overflow:])
+            kept: list[dict[str, Any]] = []
+            for index, plan in enumerate(new_plans):
+                if index in drop_indices:
+                    note = _decorative_unresolved_note(plan["requested_name"])
+                    if note not in composition_notes:
+                        composition_notes.append(note)
+                    continue
+                kept.append(plan)
+            new_plans = kept
+
+    # 3. placement (single deterministic allocation authority) with Phase 19E
+    #    priority+drop: REQUIRED / evidence-linked plans first and never
+    #    dropped; DECORATIVE new plans are dropped one-at-a-time (from the END
+    #    of the deterministic request order) ONLY when the full hinted /
+    #    natural placement fails (anchor capacity / clearance / collision), so
+    #    optional decoration can never fail a case while evidence-relevant
+    #    objects get placement priority.
+    placed = _place_plans_priority(
+        kit,
+        base_plans,
+        new_plans,
+        catalog,
+        generated_definitions,
+        lambda plan: _decorative_unresolved_note(plan["requested_name"]),
+        composition_notes,
+    )
     if placed is None:
         issues.append(
             _world_issue(
@@ -1209,6 +1361,18 @@ def _place_plans(
     generated_definitions: Mapping[str, GeneratedAssetDefinition],
 ) -> tuple[Any, ...] | None:
     """Deterministic placement (try hints; natural fallback). None on failure."""
+    # Phase 19E — the plan list is routed through the NON-RECURSIVE
+    # topological order (``app.world.graph``) so parent plans (kit base,
+    # shared definitions) are ALWAYS ordered before their children, no matter
+    # how deep a caller's plan graph is (never RecursionError). The placer
+    # re-sorts by asset id internally, so the deterministic result is
+    # unchanged — this is a hardening seam, not a behavior change.
+    if len(plans) > 1:
+        from app.world.graph import order_plans_deterministic
+
+        plans = order_plans_deterministic(
+            plans, key=lambda plan: str(plan.get("object_id") or "")
+        )
     base_requests = [
         PlacementRequest(
             asset_id=plan["asset_id"],
@@ -1247,6 +1411,56 @@ def _place_plans(
                 return placed
         except PlacementError:
             continue
+    return None
+
+
+def _place_plans_priority(
+    kit: EnvironmentKit,
+    base_plans: Sequence[Mapping[str, Any]],
+    new_plans: Sequence[Mapping[str, Any]],
+    catalog: Catalog,
+    generated_definitions: Mapping[str, GeneratedAssetDefinition],
+    note_factory: Callable[[Mapping[str, Any]], str],
+    note_sink: list[str],
+) -> tuple[Any, ...] | None:
+    """Phase 19E — deterministic placement with EVIDENCE-FIRST priority + drop.
+
+    REQUIRED / evidence-linked new plans are NEVER dropped. DECORATIVE new
+    plans are dropped one-at-a-time from the END of the deterministic request
+    order ONLY when the full (hinted, then natural) placement fails — anchor
+    capacity / clearance / collision — so optional decoration cannot fail a
+    case while evidence-relevant objects keep placement priority (Phase 19E
+    §"Placement"). Each dropped placement is recorded through ``note_factory``
+    into ``note_sink`` (player-safe composition notes). Returns the placed
+    tuple, or None when even the base + REQUIRED set cannot be placed.
+    """
+    droppable_indices = [
+        index
+        for index, plan in enumerate(new_plans)
+        if not (
+            str(plan.get("criticality", CRITICALITY_DECORATIVE)) == CRITICALITY_REQUIRED
+            or plan.get("evidence_id") is not None
+        )
+    ]
+    decorative = [new_plans[index] for index in droppable_indices]
+    kept = [new_plans[index] for index in range(len(new_plans)) if index not in set(droppable_indices)]
+
+    # deterministic fallback: try the FULL set first (all decoration kept); if
+    # the placement contract fails (anchor capacity / clearance / collision),
+    # drop ONE decorative plan at a time from the END of the request order and
+    # retry. Dropped decorations are recorded as player-safe notes.
+    for keep in range(len(decorative), -1, -1):
+        held = decorative[:keep]
+        dropped = decorative[keep:]
+        placed = _place_plans(
+            kit, [*base_plans, *kept, *held], catalog, generated_definitions
+        )
+        if placed is not None:
+            for plan in dropped:
+                note = note_factory(plan)
+                if note not in note_sink:
+                    note_sink.append(note)
+            return placed
     return None
 
 

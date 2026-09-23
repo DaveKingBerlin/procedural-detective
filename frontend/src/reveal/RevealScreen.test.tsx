@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AccusationCandidatesDTO } from "../api/types";
-import { makeCandidates, makeHostileReveal, makePartialReveal, makeRevealResponse, makeWrongReveal } from "../scene/testFixtures";
+import { CANNED_REVEAL_CRIME_TIME, makeCandidates, makeHostileReveal, makePartialReveal, makeRevealResponse, makeWrongReveal } from "../scene/testFixtures";
 import RevealScreen from "./RevealScreen";
 
 /**
@@ -68,6 +68,37 @@ describe("solved reveal rendering", () => {
     // Correct case: the player's resolved name equals the truth name.
     expect(html).toContain("Ada Marsh");
     expect(html).toContain("Your accusation:");
+  });
+});
+
+describe("Phase 19E — semantic weapon 'fork' reveal", () => {
+  it("shows the semantic weaponName 'Fork' in the truth and never a proc.* render id", () => {
+    const reveal = makeRevealResponse({
+      truth: {
+        murdererId: "suspect_alpha",
+        murdererName: "Ada Marsh",
+        motiveId: "motive_alpha",
+        motiveLabel: "A dispute over money",
+        weaponId: "fork",
+        weaponName: "Fork",
+        crimeTime: CANNED_REVEAL_CRIME_TIME,
+      },
+      player: {
+        accusation: {
+          murdererId: "suspect_alpha",
+          motiveId: "motive_alpha",
+          weaponId: "fork",
+          crimeTime: "21:45:00",
+        },
+      },
+    });
+    const html = markup(reveal);
+    expect(html).toContain("Fork");
+    expect(html).not.toContain("proc.decor.");
+    expect(html).not.toContain("f00d5a11e4b2c313");
+    // The accusation resolution uses the SEMANTIC id against the candidate
+    // universe (no render id anywhere in the reveal markup).
+    expect(html).not.toContain("proc.");
   });
 });
 

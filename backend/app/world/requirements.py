@@ -82,6 +82,30 @@ RELATION_KINDS: tuple[str, ...] = (
     "on_wall",
 )
 
+
+def semantic_object_id(requested_name: Any) -> str:
+    """Deterministic canonical SEMANTIC object id from a requested name.
+
+    The authoritative public/evidence identity (Phase 19 §"semantic object id
+    vs render asset id" / Phase 19E): the slug of the SEMANTIC display name,
+    NEVER the render asset identity. ``"antique brass letter opener"`` ->
+    ``"antique_brass_letter_opener"``; ``"fork"`` -> ``"fork"``. The id-sheet
+    weapon id (``app.services.ollama_driver._identity_slug``) equals this slug
+    for the lock weapons (short, honorific-free names), so CaseTruth / evidence
+    references / solver / accusation all agree on the same token. Bounded to 40
+    characters exactly like the composer's new-object id rule (a longer name is
+    truncated deterministically — ``safe_string_issues`` already bounded the
+    name; this is a stable collision-free-form reduction). Returns ``"prop"``
+    when nothing safe remains (a hostile request never escapes validation
+    before this point — the caller records a safe-fail note).
+    """
+    lowered = "".join(
+        ch for ch in str(requested_name).casefold() if ch.isalnum() or ch in " _-"
+    )
+    words = [word for word in lowered.replace("-", " ").split() if word]
+    slug = " ".join(words)[:40].replace(" ", "_").strip("_")
+    return slug if slug else "prop"
+
 # The documented mapping from a relation kind to the semantic anchor TYPE it
 # addresses (the Phase 11 ANCHOR_TYPES vocabulary). ``near_victim`` is the
 # PROXIMITY relation: the composer places the bound object on an

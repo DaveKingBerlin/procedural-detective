@@ -126,6 +126,31 @@ describe("accusation candidate rendering", () => {
     );
   });
 
+  it("renders the Phase 19E semantic weapon 'fork' with its human label and NO winner marking", () => {
+    // Phase 19E: the CaseTruth weapon "fork" now materializes in the weapon
+    // candidate universe with its SEMANTIC id + a proc.* render assetId. The
+    // picker must show the human name only, submit the semantic id and keep
+    // the pre-reveal winner-unmarked invariant.
+    const fork: AccusationCandidatesDTO = {
+      suspects: [{ id: "thomas_reed", name: "Thomas Reed" }],
+      motives: [{ id: "motive_alpha", label: "A dispute over money" }],
+      weapons: [
+        { id: "weapon_alpha", assetId: "PROP_GENERIC_01", name: "Kitchen knife" },
+        { id: "fork", assetId: "proc.decor.f00d5a11e4b2c313", name: "Fork" },
+      ],
+    };
+    const flow = makeFlow(fork);
+    const html = render(flow);
+    expect(html).toContain("Fork");
+    expect(html).not.toContain("proc.decor.f00d5a11e4b2c313");
+    // the semantic id is the submitted value (never the render assetId)
+    expect(inputFor(html, "accusation-option-weaponId-fork")).toContain('value="fork"');
+    expect(inputFor(html, "accusation-option-weaponId-fork")).not.toContain("proc.");
+    // pre-reveal winner-unmarked invariant holds for the new candidate universe
+    expect(html.toLowerCase()).not.toContain("correct");
+    expect(html.toLowerCase()).not.toContain("winner");
+  });
+
   it("renders a labelled 24h time-of-day input (WHEN) with no date control", () => {
     const html = render(makeFlow());
     expect(html).toContain('type="time"');

@@ -90,6 +90,28 @@ export function isProceduralArtifact(obj: SceneWorldObject): boolean {
   );
 }
 
+/** The minimal label-bearing surface the semantic label path reads.
+ *  (SceneWorldObject satisfies it; so do slimmer structural fixtures in tests.) */
+export interface SemanticLabelSource {
+  label: string | null;
+  generated?: { canonicalName?: string } | null;
+}
+
+/**
+ * The semantic human label of a world object when a NAMEABLE source exists:
+ *  - the established public registry label when one exists (catalog objects),
+ *  - otherwise a sanitized humanization of generated.canonicalName.
+ * Returns null when neither source exists (unknown/label-less objects), so
+ * callers with a dedicated "no nameable object" fallback (e.g. the Phase 19C
+ * "Nothing relevant was found here." toast) can keep it. Never returns a raw
+ * assetId, objectId or "proc.*" token.
+ */
+export function semanticLabelOrNull(obj: SemanticLabelSource): string | null {
+  const catalogLabel = typeof obj.label === "string" ? obj.label.trim() : "";
+  if (catalogLabel !== "") return humanizeCanonicalName(catalogLabel);
+  return humanizeCanonicalName(obj.generated?.canonicalName);
+}
+
 /**
  * The primary player-facing label of a world object:
  *  - the established public registry label when one exists (catalog objects) —
@@ -99,12 +121,8 @@ export function isProceduralArtifact(obj: SceneWorldObject): boolean {
  *  - otherwise the safe "Evidence Object" fallback.
  * Never returns a raw assetId, objectId or "proc.*" token.
  */
-export function evidenceLabelFor(obj: SceneWorldObject): string {
-  const catalogLabel = typeof obj.label === "string" ? obj.label.trim() : "";
-  if (catalogLabel !== "") return humanizeCanonicalName(catalogLabel) ?? FALLBACK_EVIDENCE_LABEL;
-  const humanized = humanizeCanonicalName(obj.generated?.canonicalName);
-  if (humanized !== null) return humanized;
-  return FALLBACK_EVIDENCE_LABEL;
+export function evidenceLabelFor(obj: SemanticLabelSource): string {
+  return semanticLabelOrNull(obj) ?? FALLBACK_EVIDENCE_LABEL;
 }
 
 /** The honest, public-safe focus badges for one world object. */

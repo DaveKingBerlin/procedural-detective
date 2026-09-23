@@ -1,4 +1,5 @@
 import type { InvestigationSceneModel, SceneWorldObject } from "./buildInvestigationScene";
+import { semanticLabelOrNull } from "./objectLabel";
 
 /**
  * Phase 15 Track B — discovered-evidence caption model (pure, deterministic).
@@ -8,8 +9,9 @@ import type { InvestigationSceneModel, SceneWorldObject } from "./buildInvestiga
  * The caption text is app-authored only:
  *   1. the evidence title from a READ record (the player already knows it from
  *      the evidence panel — no truth leak), else
- *   2. the object's PUBLIC registry label (the same label the tooltip and the
- *      object list show), else
+ *   2. the object's SEMANTIC human label (the same label the tooltip and the
+ *      object list show — the public registry label, or the humanized
+ *      canonicalName of a generated proc.* object, Phase 19E), else
  *   3. nothing: undiscovered objects, unknown assets and label-less objects
  *      NEVER get a caption, so no hidden/truth/server-free-text can appear.
  */
@@ -35,7 +37,7 @@ export function discoveredCaptionsForWorld(
     if (!obj.discovered || obj.evidenceId === null) continue;
     const text =
       discoveredTitles.get(obj.evidenceId) ??
-      (typeof obj.label === "string" && obj.label !== "" ? obj.label : null);
+      semanticLabelOrNull(obj);
     if (text === null) continue; // unknown/label-less discovered objects stay silent
     captions.push({ objectId: obj.objectId, text });
   }

@@ -585,13 +585,16 @@ export default function ScenePage() {
                       aria-pressed={obj.objectId === selectedObjectId}
                       onClick={() => handleObjectAction(obj.objectId)}
                     >
-                      {obj.label ?? obj.objectId}
+                      {/* Phase 19E: the object list shows the SEMANTIC human
+                          label (registry label / humanized proc canonicalName),
+                          never the raw objectId/assetId/proc.* token. */}
+                      {evidenceLabelFor(obj)}
                     </button>
                     <span
                       className="object-label visually-hidden"
                       data-testid={`object-label-${obj.objectId}`}
                     >
-                      {obj.label ?? obj.objectId}
+                      {evidenceLabelFor(obj)}
                     </span>
                     {obj.discovered && (
                       <span className="object-discovered" data-testid={`object-discovered-${obj.objectId}`}>
@@ -617,7 +620,9 @@ export default function ScenePage() {
                   </li>
                 ) : (
                   <li key={obj.objectId}>
-                    <span data-testid={`object-label-${obj.objectId}`}>{obj.label ?? obj.objectId}</span>
+                    {/* Phase 19E: decorative/label-less objects also render the
+                        semantic human label, never the raw objectId/assetId. */}
+                    <span data-testid={`object-label-${obj.objectId}`}>{evidenceLabelFor(obj)}</span>
                   </li>
                 ),
               )}

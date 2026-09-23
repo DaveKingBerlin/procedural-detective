@@ -190,6 +190,23 @@ class Settings(BaseSettings):
             "SEQUENTIAL — effective asset concurrency is always 1."
         ),
     )
+    # Phase 19E — the CONFIGURABLE TOTAL VISIBLE OBJECT BOUND per published
+    # scene. Scene enrichment (furniture/office/kitchen/hotel props) must stay
+    # bounded by the current rendering + placement capacity: this is a SAFE
+    # cap on the total number of PLACED world objects (kit base + prompt /
+    # procedural objects), NOT a provider budget and NOT the procedural-asset
+    # sub-budget (MAX_PROCEDURAL_ASSETS_PER_GENERATION stays authoritative for
+    # distinct generated assets). When the requested world would exceed the
+    # bound, DECORATIVE objects beyond capacity are deterministically dropped
+    # (player-safe notes; the case never fails for optional decoration).
+    # REQUIRED / evidence-relevant objects are never dropped to satisfy it: an
+    # over-bound set that cannot be reduced by dropping decoration FAILS
+    # CLOSED (nothing is published).
+    max_world_objects_per_kit: int = Field(
+        default=32,
+        gt=0,
+        description="MAX_WORLD_OBJECTS_PER_KIT.",
+    )
     max_repair_passes: int = Field(
         default=2, ge=0, description="MAX_REPAIR_PASSES."
     )

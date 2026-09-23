@@ -82,6 +82,212 @@ export function makeWorldObject(overrides: Partial<WorldObjectDTO> = {}): WorldO
  * the client's `startsWith("proc.")` gate). */
 export const PROC_TROPHY_ASSET_ID = "proc.decor.a1b2c3d4e5f60718";
 
+/* ======================================================================
+ * Phase 19E — GENERALIZED SEMANTIC OBJECT fixtures.
+ *
+ * These are WORK-ALIKES of the backend's Phase 19E canned specs (the driver's
+ * locked-weapon injection + the procedural AssetSpec lane in
+ * backend/tests/test_phase19e_semantic_pipeline.py): a deterministic "fork"
+ * (the CaseTruth-declared weapon example) and a "coffee mug" (INTERACTIVE
+ * decorative object, no evidence). Their objectIds ARE the semantic ids, the
+ * assetIds are `proc.*` RENDER ids, and the validated canonicalNames are the
+ * ONLY human-label sources the frontend may show.
+ * ==================================================================== */
+
+/** Canned `proc.*` FORK render asset id (semantic id = "fork"). */
+export const FORK_PROC_ASSET_ID = "proc.decor.f00d5a11e4b2c313";
+
+/** The evidence association the backend links the locked fork weapon to. */
+export const FORK_EVIDENCE_ID = "forensic_fork_match_01";
+
+/** Canned `proc.*` COFFEE MUG render asset id (semantic id = "coffee_mug"). */
+export const COFFEE_MUG_PROC_ASSET_ID = "proc.decor.c0ffee7a11b2c313";
+
+/**
+ * Fork-shaped declarative definition (2 parts: prongs + handle) — the exact
+ * backend FORK_SPEC shape (canonicalName "Fork", steel tones), bounds-valid
+ * by construction and accepted by the Phase 13 client gate.
+ */
+export function makeForkDefinition(overrides: Partial<GeneratedAssetDefinition> = {}): GeneratedAssetDefinition {
+  return {
+    compilerVersion: 1,
+    schemaVersion: 1,
+    assetId: FORK_PROC_ASSET_ID,
+    canonicalName: "Fork",
+    dimensions: { x: 0.05, y: 0.3, z: 0.05 },
+    parts: [
+      makeGeneratedPart("part_00", {
+        role: "prongs",
+        transform: {
+          position: { x: 0, y: 0, z: 0.02 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.03, y: 0.1, z: 0.01 },
+        },
+        color: "#b9c0c8",
+      }),
+      makeGeneratedPart("part_01", {
+        role: "handle",
+        transform: {
+          position: { x: 0, y: -0.12, z: 0.02 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.025, y: 0.09, z: 0.02 },
+        },
+        color: "#b9c0c8",
+      }),
+    ],
+    hitbox: { scale: { x: 0.15, y: 0.5, z: 0.15 } },
+    ...overrides,
+  };
+}
+
+/**
+ * Coffee-mug declarative definition (cup body + handle) — the Phase 19E
+ * INTERACTIVE-decorative example: a valid procedural object with interaction
+ * "inspect" and NO evidence association.
+ */
+export function makeCoffeeMugDefinition(overrides: Partial<GeneratedAssetDefinition> = {}): GeneratedAssetDefinition {
+  return {
+    compilerVersion: 1,
+    schemaVersion: 1,
+    assetId: COFFEE_MUG_PROC_ASSET_ID,
+    canonicalName: "Coffee Mug",
+    dimensions: { x: 0.1, y: 0.16, z: 0.1 },
+    parts: [
+      makeGeneratedPart("part_00", {
+        role: "body",
+        primitive: "cylinder",
+        transform: {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.09, y: 0.12, z: 0.09 },
+        },
+        color: "#e8e4dc",
+      }),
+      makeGeneratedPart("part_01", {
+        role: "handle",
+        transform: {
+          position: { x: 0.07, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 0.03, y: 0.08, z: 0.02 },
+        },
+        color: "#e8e4dc",
+      }),
+    ],
+    hitbox: { scale: { x: 0.2, y: 0.3, z: 0.2 } },
+    ...overrides,
+  };
+}
+
+/**
+ * The semantic WEAPON world object the Phase 19E backend injects for
+ * "Weapon: fork": objectId == the semantic id ("fork"), render assetId is a
+ * `proc.*` id, the object carries a validated generated definition and the
+ * evidence association (weapon evidence). Payload-driven interaction
+ * "inspect".
+ */
+export function makeForkWorldObject(overrides: Partial<WorldObjectDTO> = {}): WorldObjectDTO {
+  return makeWorldObject({
+    objectId: "fork",
+    assetId: FORK_PROC_ASSET_ID,
+    assetType: "fork",
+    subtype: "fork",
+    locationId: "miller_apartment_kitchen",
+    anchor: "kitchen_counter",
+    interaction: "inspect",
+    evidenceId: FORK_EVIDENCE_ID,
+    generated: makeForkDefinition(),
+    ...overrides,
+  });
+}
+
+/**
+ * The Phase 19E INTERACTIVE-DECORATIVE coffee mug: a valid procedural object
+ * with interaction "inspect" and NO evidence association (server confirms
+ * discovery:null -> the Phase 19C "Nothing relevant was found on <label>."
+ * copy). Never a solver/weapon candidate member on the client.
+ */
+export function makeCoffeeMugWorldObject(overrides: Partial<WorldObjectDTO> = {}): WorldObjectDTO {
+  return makeWorldObject({
+    objectId: "coffee_mug",
+    assetId: COFFEE_MUG_PROC_ASSET_ID,
+    assetType: "coffee_mug",
+    subtype: "coffee_mug",
+    locationId: "miller_apartment_kitchen",
+    anchor: "kitchen_counter",
+    interaction: "inspect",
+    evidenceId: null,
+    generated: makeCoffeeMugDefinition(),
+    ...overrides,
+  });
+}
+
+/**
+ * A RICHER published world (Phase 19E §"Scene richness"): the golden nine
+ * plus the semantic fork (evidence-linked procedural weapon), the interactive
+ * coffee mug (no evidence), a catalog variant (glass bottle), a catalog
+ * template (claw hammer), a proc.* decorative trophy and more catalog
+ * decorative objects. 17 objects total — far below the configured
+ * MAX_WORLD_OBJECTS_PER_KIT (32), proving the scene model builds and renders
+ * richer sets without regressions.
+ */
+export function makeRichWorldBootstrap(
+  overrides: Partial<InvestigationBootstrapResponse> = {},
+): InvestigationBootstrapResponse {
+  const base = makeBootstrap();
+  base.scene.worldObjects = [
+    ...base.scene.worldObjects,
+    makeForkWorldObject(),
+    makeCoffeeMugWorldObject(),
+    makeWorldObject({
+      objectId: "glass_bottle",
+      assetId: "PROP_GLASS_BOTTLE_01",
+      assetType: "bottle",
+      subtype: "bottle",
+      anchor: "kitchen_counter",
+      interaction: "",
+      evidenceId: null,
+    }),
+    makeWorldObject({
+      objectId: "claw_hammer",
+      assetId: "PROP_HAMMER_01",
+      assetType: "tool",
+      subtype: "tool",
+      anchor: "shelf_01",
+      interaction: "",
+      evidenceId: null,
+    }),
+    makeProcWorldObject({ objectId: "custom_trophy", anchor: "dining_table" }),
+    makeWorldObject({
+      objectId: "kitchen_clock",
+      assetId: "PROP_CLOCK_01",
+      assetType: "clock",
+      subtype: "clock",
+      anchor: "hall_wall_01",
+      interaction: "",
+      evidenceId: null,
+    }),
+    makeWorldObject({
+      objectId: "desk_lamp",
+      assetId: "PROP_DESK_LAMP_01",
+      assetType: "light",
+      subtype: "light",
+      anchor: "desk_main",
+      interaction: "",
+      evidenceId: null,
+    }),
+    makeWorldObject({
+      objectId: "wristwatch",
+      assetId: "PROP_WATCH_01",
+      assetType: "watch",
+      subtype: "watch",
+      anchor: "bedside_table",
+      interaction: "",
+      evidenceId: null,
+    }),
+  ];
+  return makeBootstrap({ ...base, ...overrides });
+}
+
 /** One canned generated part (values are bounds-valid by construction). */
 export function makeGeneratedPart(
   id: string,

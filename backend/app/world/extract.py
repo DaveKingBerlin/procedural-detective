@@ -70,10 +70,12 @@ from app.generation.constraints import LockedConstraints
 from app.world.requirements import (
     CRITICALITY_DECORATIVE,
     CRITICALITY_REQUIRED,
+    MAX_OBJECT_REQUESTS,
     ObjectRequest,
     PlacementRelation,
     WorldRequirements,
     safe_string_issues,
+    semantic_object_id,
 )
 
 # --------------------------------------------------------------------------- #
@@ -445,6 +447,14 @@ NOUN_HEAD_VOCABULARY: frozenset[str] = frozenset(
         "boulder", "slab", "paving", "pan", "skillet", "pot", "kettle",
         "fryingpan", "bottle", "glass", "jar", "jug", "pitcher", "carafe",
         "flask", "vial", "ampoule", "brick", "bust", "clock", "globe",
+        # -- Phase 19E generalization — ordinary concrete nouns (cutlery/tools).
+        # NOT a weapon whitelist: these are general kitchen/workshop nouns a
+        # prompt may name; weapon classification (REQUIRED) comes ONLY from the
+        # documented rule (locked-constraint weapon field / weapon-adjacent
+        # context), never from head vocabulary membership.
+        "fork", "forks", "spoon", "spoons", "knife", "screwdriver",
+        "screwdrivers", "toolbox", "toolboxes", "spatula", "whisk", "ladle",
+        "tongs", "rollingpin", "broom", "mop", "dustpan", "duster", "pusher",
         # -- warehouse / tools ------------------------------------------------
         "rope", "chain", "cable", "wire", "cord", "strap", "belt", "tie",
         "handcuffs", "shackle", "manacle", "gag", "duct", "tape", "knife",
@@ -918,6 +928,81 @@ def extract_world_requirements(
 
     claims.sort(key=lambda pair: pair[0])
     objects = [*emitted.values(), *unseen_objects]
+
+    # 2c. Phase 19E — GENERALIZED DETERMINISTIC WEAPON-LOCK INJECTION (the
+    #     ``Weapon:``-line / prime-lock unlock, NO fork/whitelist special-case).
+    #     A locked CaseTruth weapon MUST ALWAYS materialize as a REQUIRED
+    #     semantic world object, regardless of catalog membership and regardless
+    #     of whether the prompt spells the weapon as a determiner-span noun
+    #     phrase ("Weapon: fork" has no determiner; "fork" is not in the known
+    #     table). The merge rule is semantic-identity based:
+    #       * a request whose semantic id matches the locked weapon keeps its
+    #         (safer display) name but is upgraded to REQUIRED — the known-table
+    #         "kitchen knife" for a locked "Kitchen knife" / "kitchen_knife";
+    #       * otherwise a NEW Request is appended with requested_name = the
+    #         locked weapon display text, criticality REQUIRED (the semantic id
+    #         is then exactly the id-sheet weapon id, so CaseTruth / evidence /
+    #         solver / accusation all agree);
+    #       * the object bound (MAX_OBJECT_REQUESTS) is preserved by dropping
+    #         trailing DECORATIVE unseen requests deterministically (the
+    #         REQUIRED weapon never loses its slot to optional decoration);
+    #       * a hostile locked value (URL / path / control chars / oversized)
+    #         is RECORDED as a safe-fail note and NEVER composed.
+    from app.generation.constraints import normalize_identity
+
+    locked_weapon = locked.weapon if locked is not None else None
+    if isinstance(locked_weapon, str) and locked_weapon:
+        needle = normalize_identity(semantic_object_id(locked_weapon))
+        if needle:
+            matching = [
+                (index, request)
+                for index, request in enumerate(objects)
+                if normalize_identity(semantic_object_id(request.requested_name)) == needle
+            ]
+            if matching:
+                index, matching_request = matching[0]
+                if matching_request.criticality != CRITICALITY_REQUIRED:
+                    objects[index] = ObjectRequest(
+                        requested_name=matching_request.requested_name,
+                        category_hint=matching_request.category_hint,
+                        subtype_hint=matching_request.subtype_hint,
+                        tags=matching_request.tags,
+                        required_interaction=matching_request.required_interaction,
+                        evidence_id=matching_request.evidence_id,
+                        required_evidence_capabilities=(
+                            matching_request.required_evidence_capabilities
+                        ),
+                        variant_params=matching_request.variant_params,
+                        criticality=CRITICALITY_REQUIRED,
+                    )
+            else:
+                try:
+                    injected = ObjectRequest(
+                        requested_name=locked_weapon,
+                        criticality=CRITICALITY_REQUIRED,
+                    )
+                except ValueError:
+                    unsafe_notes.append(
+                        "unsafeUnsupported: locked weapon request was rejected "
+                        "by the string-safety gate and was not composed"
+                    )
+                else:
+                    if len(objects) >= MAX_OBJECT_REQUESTS:
+                        # keep the REQUIRED weapon; drop the LAST DECORATIVE
+                        # unseen request deterministically (never known /
+                        # already-required requests).
+                        for drop_index in range(len(objects) - 1, -1, -1):
+                            if objects[drop_index].criticality == CRITICALITY_DECORATIVE:
+                                del objects[drop_index]
+                                break
+                        else:
+                            unsafe_notes.append(
+                                "unsafeUnsupported: locked weapon request could "
+                                "not be added within the object bound"
+                            )
+                            injected = None  # type: ignore[assignment]
+                    if injected is not None:
+                        objects.append(injected)
 
     # 3. relations: exact contiguous phrase matches bound to every matched
     #    object in the same sentence that precedes the phrase.

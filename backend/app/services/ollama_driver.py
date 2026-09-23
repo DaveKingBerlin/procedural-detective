@@ -70,10 +70,12 @@ from app.world.environment import canonicalize_environment_hint
 from app.world.requirements import (
     CRITICALITY_DECORATIVE,
     CRITICALITY_REQUIRED,
+    MAX_OBJECT_REQUESTS,
     ObjectRequest,
     PlacementRelation,
     RELATION_KINDS,
     WorldRequirements,
+    semantic_object_id,
 )
 
 _PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
@@ -1056,6 +1058,123 @@ def parse_world_requirements(
 
 
 # --------------------------------------------------------------------------- #
+# Phase 19E — DETERMINISTIC WEAPON-LOCK INJECTION (the GENERAL ``fork`` fix).
+# --------------------------------------------------------------------------- #
+#
+# A CaseTruth-declared weapon is a REQUIRED semantic world object REGARDLESS of
+# what the model's WORLD_REQUIREMENTS stage returns and REGARDLESS of catalog
+# membership. The merge below runs AFTER the model's world response is parsed
+# (and in the deterministic extractor for the non-LLM paths), so the run can
+# never die at the fail-closed object-presence guard simply because the model
+# omitted the weapon or because the deterministic extractor could not emit it
+# (head word not in the noun lexicon / not in the known table). This is the
+# general rule — the SAME code path serves fork / hammer / screwdriver /
+# rolling pin / glass bottle / letter-opener variants / any locked weapon.
+# No fork / whitelist special-casing anywhere.
+
+
+def inject_locked_weapon_request(
+    world_reqs: WorldRequirements, attempt: Any
+) -> WorldRequirements:
+    """Phase 19E §2 — merge the locked CaseTruth weapon into world requirements.
+
+    Match is on SEMANTIC IDENTITY (the slug of the requested name normalizes to
+    the locked weapon id):
+
+      * a request already matching the locked weapon (e.g. the model emitted
+        ``"fork"`` or ``"kitchen knife"``) is upgraded to REQUIRED and kept —
+        never a second request, never a duplicate placement;
+      * otherwise a NEW ``ObjectRequest(requested_name=<locked weapon display
+        name>, criticality="required")`` is appended. The semantic id (slug of
+        the locked name == the id-sheet weapon id) is preserved; the RENDER
+        representation resolves independently (catalog / catalog variant /
+        validated declarative AssetSpec) in the composer.
+      * the ``MAX_OBJECT_REQUESTS`` bound is preserved by deterministically
+        dropping the last DECORATIVE unseen request (the REQUIRED weapon never
+        loses its slot to optional decoration);
+      * a hostile locked value (URL/path/control chars/oversized) is left
+        unchanged — the presence guard then FAILS CLOSED downstream (nothing
+        publishes), exactly the safe behavior for an unrepresentable weapon.
+
+    Zero provider calls: this merge is LOCAL and deterministic.
+    """
+    from app.generation.constraints import normalize_identity
+
+    if not isinstance(world_reqs, WorldRequirements):
+        raise TypeError("inject_locked_weapon_request requires a WorldRequirements")
+    locked = getattr(attempt, "locked", None)
+    weapon = getattr(locked, "weapon", None) if locked is not None else None
+    if not isinstance(weapon, str) or not weapon:
+        return world_reqs
+    needle = normalize_identity(semantic_object_id(weapon))
+    if not needle:
+        return world_reqs
+
+    matched = False
+    objects: list[Any] = []
+    for request in world_reqs.objects:
+        if (
+            request is not None
+            and isinstance(getattr(request, "requested_name", None), str)
+            and normalize_identity(semantic_object_id(request.requested_name)) == needle
+        ):
+            matched = True
+            if request.criticality != CRITICALITY_REQUIRED:
+                request = ObjectRequest(
+                    requested_name=request.requested_name,
+                    category_hint=request.category_hint,
+                    subtype_hint=request.subtype_hint,
+                    tags=request.tags,
+                    required_interaction=request.required_interaction,
+                    evidence_id=request.evidence_id,
+                    required_evidence_capabilities=request.required_evidence_capabilities,
+                    variant_params=request.variant_params,
+                    criticality=CRITICALITY_REQUIRED,
+                )
+                emit_event(
+                    "world.weapon.locked.upgraded",
+                    generationAttemptId=getattr(attempt, "attempt_id", None),
+                    semanticObjectId=request.requested_name,
+                )
+        objects.append(request)
+
+    if not matched:
+        try:
+            injected = ObjectRequest(
+                requested_name=weapon, criticality=CRITICALITY_REQUIRED
+            )
+        except (TypeError, ValueError):
+            # hostile locked weapon: leave the world as-is; the fail-closed
+            # presence guard handles it (nothing publishes).
+            return world_reqs
+        if len(objects) >= MAX_OBJECT_REQUESTS:
+            for index in range(len(objects) - 1, -1, -1):
+                candidate = objects[index]
+                if (
+                    candidate is not None
+                    and getattr(candidate, "criticality", "") == CRITICALITY_DECORATIVE
+                ):
+                    del objects[index]
+                    break
+            else:
+                return world_reqs
+        objects.append(injected)
+        emit_event(
+            "world.weapon.locked.injected",
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            semanticObjectId=weapon,
+        )
+
+    return WorldRequirements(
+        environment_hint=world_reqs.environment_hint,
+        location_tokens=world_reqs.location_tokens,
+        objects=tuple(objects),
+        relations=world_reqs.relations,
+        unsafe_unsupported=world_reqs.unsafe_unsupported,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # AssetSpec adapter (implements app.assets.spec_provider.AssetSpecProvider)
 # --------------------------------------------------------------------------- #
 
@@ -1901,6 +2020,13 @@ class OllamaStageDriver:
         if parsed_world is not None:
             world_reqs = parsed_world
 
+        # Phase 19E §2 — DETERMINISTIC WEAPON-LOCK INJECTION (the GENERAL
+        # rule, no fork/whitelist special-casing): the CaseTruth-declared
+        # weapon is a REQUIRED semantic world object regardless of what the
+        # model's world stage returned and regardless of catalog membership.
+        # Local merge, zero provider calls.
+        world_reqs = inject_locked_weapon_request(world_reqs, attempt)
+
         # --- 4. world composition (Environment Resolver + Oracle + placer) ---
         spec_adapter = (
             self._spec_adapter(provider, attempt, budget_consumer)
@@ -2308,6 +2434,9 @@ metrics_provider=lambda: attempt.budget,
                 evidence_placements=(),
                 catalog=self._catalog,
                 kit=kit,
+                max_world_objects=int(
+                    getattr(self._settings, "max_world_objects_per_kit", 32)
+                ),
             )
         except StageDriverProviderFailure:
             # ADV-213: a TYPED provider failure (per-asset/global budget
@@ -2855,6 +2984,7 @@ __all__ = [
     "OllamaAssetSpecProvider",
     "OllamaStageDriver",
     "StageDriverProviderFailure",
+    "inject_locked_weapon_request",
     "parse_case_people",
     "parse_world_requirements",
     "_BASE_SHARP_WEAPON_IDS",

@@ -280,10 +280,16 @@ class KnownFakeSpecProvider:
         return AssetSpecResponse(content=None)
 
 
-def test_fail_closed_when_semantic_object_cannot_be_represented():
-    """A Medium-style run whose world DOES NOT produce the semantic weapon
-    object fails closed: the typed guard maps to a sanitized terminal code and
-    NOTHING is published."""
+def test_empty_world_publishes_via_locked_weapon_injection():
+    """Phase 19E §2 — the DETERMINISTIC WEAPON-LOCK INJECTION changes the
+    pre-19E fail-closed semantics for "the world omits the weapon": a
+    CaseTruth-declared weapon is a REQUIRED semantic world object regardless of
+    what the model's world stage returns, so an EMPTY world response now
+    PUBLISHES — the driver injects ``antique brass letter opener`` (semantic
+    id preserved, render resolves to the catalog alias) and the full pipeline
+    validates. The replaced behavior (fail closed because the weapon was
+    omitted) was pre-19E; the fail-closed guarantee now applies ONLY when a
+    weapon truly cannot be REPRESENTED (see the test below)."""
     from app.services.ollama_driver import (
         SemanticObjectResolutionError as DriverError,
     )
@@ -291,7 +297,7 @@ def test_fail_closed_when_semantic_object_cannot_be_represented():
     empty_world = {
         "environmentHint": "hotel suite",
         "locationTokens": ["hotel", "suite"],
-        "objects": [],  # the weapon object is NEVER requested
+        "objects": [],  # the model NEVER requests the weapon
         "relations": [],
         "unsafeUnsupported": [],
     }
@@ -301,10 +307,62 @@ def test_fail_closed_when_semantic_object_cannot_be_represented():
         _j(empty_world),
     ]
     record, _transport = _run(posts, prompt=MEDIUM_PROMPT)
+    assert record.state is GenerationState.PUBLISHED
+    assert record.published is not None
+    assert record.draft.crime.weapon_id == SEMANTIC_WEAPON_ID
+    # the injection materialized the semantic object (alias render path).
+    from app.generation import pipeline
+
+    public, _facts, _truth, _draft = pipeline.assemble(record)
+    weapon = next(
+        o for o in public.objects if o.object_id == SEMANTIC_WEAPON_ID
+    )
+    assert weapon.asset_id == RENDER_ASSET_ID
+    assert record.solver_proof.weapon.winner == SEMANTIC_WEAPON_ID
+    assert record.solver_proof.weapon.unique
+    assert DriverError is SemanticObjectResolutionError
+
+
+def test_fail_closed_when_locked_weapon_cannot_be_represented():
+    """Phase 19E — one intentionally unsupported weapon-like object with no
+    representable geometry STILL FAILS CLOSED: the deterministic injection
+    requests the weapon, the procedural lane cannot produce a VALID declarative
+    AssetSpec (Phase 13 / Phase 17 gates reject the candidate after the
+    bounded repair budget), the REQUIRED object stays unresolved and NOTHING
+    publishes (typed sanitized failure). The injection never bypasses the
+    validators and never auto-publishes unsolved cases. ``fork`` is chosen
+    because it has NO catalog/variant representation — the ONLY path is the
+    procedural lane, which here cannot yield a valid spec."""
+    world = {
+        "environmentHint": "office",
+        "locationTokens": ["office"],
+        "objects": [],
+        "relations": [],
+        "unsafeUnsupported": [],
+    }
+    # ASSET_SPEC + 2 ASSET_SPEC_REPAIR calls: every candidate fails the strict
+    # Phase 13 / Phase 17 gates ("<not-json>" payloads), so the REQUIRED
+    # weapon has no valid representation.
+    posts = [
+        _j(_case_people(weapon="fork")),
+        _j(_evidence(weapon_obj="fork", murderer="paul_becker")),
+        _j(world),
+        "<not-json>",
+        "<not-json>",
+        "<not-json>",
+    ]
+    record, _transport = _run(
+        posts, prompt=MEDIUM_PROMPT.replace("antique brass letter opener", "fork"),
+        max_repair_passes=0,
+        max_full_regenerations=0,
+    )
     assert record.state is GenerationState.FAILED
     assert record.published is None
-    assert DriverError is SemanticObjectResolutionError
     assert record.failure_code == "VALIDATION_FAILED"
+    assert any(
+        "world.unresolved-object" in line
+        for line in (record.deferred_structural or ())
+    )
 
 
 def test_guard_raises_typed_sanitized_error_directly():

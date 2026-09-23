@@ -1089,6 +1089,9 @@ class GenerationService:
                     evidence_placements=draft.world_graph.placements,
                     catalog=catalog,
                     kit=kit,
+                    max_world_objects=int(
+                        getattr(self._settings, "max_world_objects_per_kit", 32)
+                    ),
                 )
 
             composition = _compose(world_reqs)

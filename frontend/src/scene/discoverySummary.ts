@@ -1,5 +1,7 @@
+import type { GeneratedAssetDefinition } from "../api/types";
 import type { InvestigationSceneModel } from "./buildInvestigationScene";
 import type { InvestigationSession } from "./investigationFlow";
+import { semanticLabelOrNull } from "./objectLabel";
 
 /**
  * Player-facing discovery summary (Phase 8 F).
@@ -9,7 +11,9 @@ import type { InvestigationSession } from "./investigationFlow";
  * of truth is always the server-derived PlayerKnowledge snapshot exposed by
  * the investigation session: the client NEVER marks evidence known on its
  * own. Titles come from the read-record cache when available, otherwise from
- * the world object's application-owned label (or the safe object id).
+ * the world object's SEMANTIC human label (the public registry label, or the
+ * humanized canonicalName of a generated proc.* object — Phase 19E), or the
+ * raw evidence id as the last safe resort.
  */
 export interface DiscoverySummaryEntry {
   evidenceId: string;
@@ -26,14 +30,22 @@ export interface DiscoverySummary {
 export function summarizeDiscovery(
   discoveredIds: readonly string[],
   readIds: readonly string[],
-  worldObjects: ReadonlyArray<{ evidenceId: string | null; label: string | null; objectId: string }>,
+  worldObjects: ReadonlyArray<{
+    evidenceId: string | null;
+    objectId: string;
+    label: string | null;
+    generated?: GeneratedAssetDefinition | null;
+  }>,
   recordTitles: ReadonlyMap<string, string>,
 ): DiscoverySummary {
   const readSet = new Set(readIds);
   const entries = [...new Set(discoveredIds)].sort().map((evidenceId) => {
     const title =
       recordTitles.get(evidenceId) ??
-      worldObjects.find((obj) => obj.evidenceId === evidenceId)?.label ??
+      (() => {
+        const obj = worldObjects.find((candidate) => candidate.evidenceId === evidenceId);
+        return obj === undefined ? null : semanticLabelOrNull(obj);
+      })() ??
       evidenceId;
     const read = readSet.has(evidenceId);
     return { evidenceId, title, read };
