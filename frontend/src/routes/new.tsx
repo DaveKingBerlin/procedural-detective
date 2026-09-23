@@ -47,14 +47,16 @@ import { examplePromptText, validatePrompt } from "../journey/promptValidation";
  *
  * Phase 21B Finding 3 — the demo link label + note are TRUTHFUL per the
  * backend capability DTO (src/journey/generationMode.ts demoCtaLabel /
- * demoCtaNote). The deterministic/no-cost promise appears ONLY when a known
- * demo-only allowlist says the backend will run the deterministic path; a
- * local/live backend renames the CTA to "Try an example case" with the
- * truthful per-mode note + the "not the free deterministic demo" warning; a
- * null/unreachable report downgrades to the neutral label and a
- * provider-neutral note. The ACTION itself is byte-identical in every state
- * (stageJourney(examplePromptText(), difficulty)) — no request field, no
- * mode switching.
+ * demoCtaNote). The deterministic/no-cost promise appears ONLY when the
+ * backend server-enforces the deterministic path (`configuredProvider ==
+ * "fake"` or the older-server availability-derived demo-only shape); an
+ * ollama/live-configured backend renames the CTA to "Try an example case"
+ * with the truthful per-mode note + the "not the free deterministic demo"
+ * warning — EVEN when its probe fails (DEF-096: configuredProvider is
+ * authoritative); a null/unreachable report downgrades to the neutral label
+ * and a provider-neutral note. The ACTION itself is byte-identical in every
+ * state (stageJourney(examplePromptText(), difficulty)) — no request field,
+ * no mode switching.
  */
 export interface NewCasePageProps {
   /**
@@ -258,9 +260,11 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
             backend, whose provider is process-global). A demo-only backend
             shows "Demo mode active" + "Generation mode: Deterministic demo";
             a configured local/live provider shows its truthful read-only
-            line. No host/IP, credentials, prompts or diagnostics are ever
-            rendered — only frozen public labels — and no click changes the
-            provider. */}
+            line (with an "Unavailable" tag while its probe is down —
+            DEF-096); a DTO-unavailable state shows the neutral reachability
+            line, never a provider claim (DEF-097). No host/IP, credentials,
+            prompts or diagnostics are ever rendered — only frozen public
+            labels — and no click changes the provider. */}
         <GenerationModeDisplay capabilities={capabilities} />
 
         {/* Phase 16.2 §20 — honest unavailability (Phase 21 F-03: storage is

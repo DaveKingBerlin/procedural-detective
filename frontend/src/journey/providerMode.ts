@@ -18,6 +18,20 @@ import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/ty
  *     the playable investigation;
  *   - "live": the backend runs the configured live provider.
  *
+ * Phase 21B (DEF-096/ADV-232) — configuredProvider authority: the DTO's new
+ * top-level `configuredProvider` ("fake" | "ollama" | "live", the sanitized
+ * operator-config provider) is AUTHORITATIVE — an ollama/live-configured
+ * backend resolves to "local"/"live" EVEN while its availability probe is
+ * down/failed (the runtime still runs that provider on the next POST /cases),
+ * so a probe failure can never collapse an Ollama deploy to the fake/demo
+ * story. When `configuredProvider` is ABSENT (older server) the availability-
+ * based derivation applies (backward compatible).
+ *
+ * Phase 21B (DEF-097) — DTO-unavailable neutrality: when the capability DTO is
+ * NULL/unreachable/empty (the frontend cannot know the provider), the qualifier
+ * and per-path note are the NEUTRAL reachability copy — never the
+ * deterministic-demo claim, never a provider claim of any kind.
+ *
  * Availability is derived ONLY from the capability DTO `available` booleans
  * (the same parse the selector uses), so a stored `local`/`live` selection or
  * a `VITE_APP_PROVIDER` env value can NEVER make the UI claim a provider the
@@ -99,19 +113,66 @@ export function providerQualifier(mode: AppProviderMode): string {
 }
 
 /**
+ * DEF-097 (Phase 21B) — NEUTRAL app-level provider qualifier for the state
+ * where the capability DTO is UNAVAILABLE (endpoint unreachable, fetch
+ * failure, empty allowlist, malformed payload — i.e. `null` capabilities or a
+ * resolved empty payload). The frontend CANNOT know the provider when the DTO
+ * did not report, so EVERY provider claim (deterministic demo / Local AI /
+ * Live AI) is suppressed in this state. Worded to be non-spoiling and to point
+ * at the reachable once the service is back — the exact contract the CTA note
+ * already uses ("Runs the same generation pipeline as a custom prompt.").
+ */
+export const PROVIDER_QUALIFIER_UNKNOWN =
+  "Generation is available once the service is reachable.";
+
+/**
+ * DEF-097 (Phase 21B) — NEUTRAL per-path provider note for the same
+ * DTO-unavailable state (see {@link PROVIDER_QUALIFIER_UNKNOWN}). Sentence
+ * fragment (lower-case, as the fake/local/live notes are) that claims NO
+ * provider identity when the frontend cannot know it.
+ */
+export const PROVIDER_PATH_NOTE_UNKNOWN =
+  "runs through the backend-configured generation pipeline once the service is reachable";
+
+/**
+ * True ONLY when the capability DTO actually reported usable mode information:
+ * a non-null object carrying a non-empty `modes` array. This is the exact
+ * "the backend told us something" predicate used by every truthful surface
+ * (CTA, qualifier, per-path note, F-03 line, generation-mode display):
+ * `null`, a malformed payload and the empty-allowlist fetch-failure payload
+ * ({modes: []}) all resolve to FALSE here, so no page surface may claim a
+ * provider in that state (DEF-096/DEF-097).
+ */
+export function providerIsReported(
+  capabilities: GenerationCapabilitiesResponse | null,
+): boolean {
+  if (capabilities === null || typeof capabilities !== "object") return false;
+  return Array.isArray(capabilities.modes) && capabilities.modes.length > 0;
+}
+
+/**
  * Resolve the effective provider story from the parsed capability DTO — the
- * SAME allowlist-parsed payload the generation-mode selector consumes. Only
- * the DTO decides:
- *   - "live"  when the backend reports live available (GENERATION_PROVIDER=live
- *     configured AND selected);
- *   - "local" when the backend reports the local Ollama mode available (the
- *     probe passed) and no live mode is available;
- *   - "fake"  EVERY other case — including unknown (`null`) capabilities,
- *     malformed payloads and a stored/local-unavailable backend. The
- *     deterministic story is always true (the demo path always exists), so it
- *     is the honest default while the probe is still in flight.
+ * SAME allowlist-parsed payload the generation-mode selector consumes. The
+ * DTO decides, in this order:
+ *   - BACKEND-CONFIGURED AUTHORITY (Phase 21B / DEF-096): when the DTO carries
+ *     `configuredProvider` ("fake" | "ollama" | "live", the operator-config
+ *     generator provider re-parsed to the closed enum), that value is
+ *     AUTHORITATIVE — the runtime WILL run that provider on the next
+ *     POST /cases even while an availability probe is down or failed. So
+ *     "ollama" resolves to "local" and "live" resolves to "live" REGARDLESS
+ *     of the `available` booleans (a probe failure must never collapse an
+ *     Ollama-configured backend to the fake/demo story); "fake" resolves to
+ *     "fake" exactly as the availability-based logic does today;
+ *   - BACKWARD-COMPATIBLE FALLBACK (OLDER server that omits
+ *     `configuredProvider`): the pre-21B derivation — "live" when the backend
+ *     reports live available, "local" when the backend reports the local
+ *     Ollama mode available, "fake" in every other case (a demo-only backend,
+ *     an unavailable local/live, a malformed payload or unknown `null`
+ *     capabilities — the deterministic path always exists, so it is the
+ *     honest default while the probe is still in flight).
  * A hostile/malformed payload can never favour an option: `available` must be
- * exactly the boolean true and the id must be a frozen GenerationModeId.
+ * exactly the boolean true, the id must be a frozen GenerationModeId, and
+ * `configuredProvider` must be exactly one of the three closed values.
  */
 export function effectiveProviderMode(
   capabilities: GenerationCapabilitiesResponse | null,
@@ -119,6 +180,14 @@ export function effectiveProviderMode(
   if (capabilities === null || typeof capabilities !== "object") return "fake";
   const modes = capabilities.modes;
   if (!Array.isArray(modes)) return "fake";
+  // DEF-096: the sanitized operator-config provider is authoritative whenever
+  // it is present — an ollama/live deploy keeps its real identity even when
+  // the availability probe FAILED (the runtime still runs that provider).
+  const configured = capabilities.configuredProvider;
+  if (configured === "fake") return "fake";
+  if (configured === "ollama") return "local";
+  if (configured === "live") return "live";
+  // configuredProvider absent (older server): availability-based derivation.
   const available = (id: GenerationModeId): boolean => {
     const entry = modes.find((mode) => mode.id === id);
     return entry?.available === true;
@@ -130,18 +199,28 @@ export function effectiveProviderMode(
 
 /**
  * Capability-driven per-path note (replaces the build-time note in the
- * routes). While capabilities are unknown (null) the deterministic default is
- * shown — never a claim about a provider the backend has not confirmed.
+ * routes). DEF-097: while the capability DTO is UNAVAILABLE (null, endpoint
+ * unreachable, empty/malformed allowlist) the note is NEUTRAL — the frontend
+ * cannot know the provider in that state, so it never claims the deterministic
+ * generator (nor any other provider). When the DTO reported, the truthful
+ * per-mode note for {@link effectiveProviderMode} is shown.
  */
 export function providerPathNoteFromCapabilities(
   capabilities: GenerationCapabilitiesResponse | null,
 ): string {
+  if (!providerIsReported(capabilities)) return PROVIDER_PATH_NOTE_UNKNOWN;
   return providerPathNote(effectiveProviderMode(capabilities));
 }
 
-/** Capability-driven app-level qualifier (replaces the build-time qualifier). */
+/**
+ * Capability-driven app-level qualifier (replaces the build-time qualifier).
+ * DEF-097: same neutral rule as {@link providerPathNoteFromCapabilities} —
+ * a DTO-unavailable state yields the neutral qualifier, never a provider
+ * claim; a reported DTO yields the truthful per-mode qualifier.
+ */
 export function providerQualifierFromCapabilities(
   capabilities: GenerationCapabilitiesResponse | null,
 ): string {
+  if (!providerIsReported(capabilities)) return PROVIDER_QUALIFIER_UNKNOWN;
   return providerQualifier(effectiveProviderMode(capabilities));
 }

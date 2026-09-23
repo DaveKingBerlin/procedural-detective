@@ -1,6 +1,6 @@
 import type { GenerationCapabilitiesResponse } from "../api/types";
 import { generationModeLine } from "./generationMode";
-import { effectiveProviderMode } from "./providerMode";
+import { effectiveProviderMode, providerIsReported } from "./providerMode";
 
 /**
  * Phase 21 F-03 — READ-ONLY generation-mode display (landing + /new).
@@ -20,19 +20,27 @@ import { effectiveProviderMode } from "./providerMode";
  *
  *   - while capabilities are unknown (`null`) nothing is rendered — no claim
  *     is made until the backend has reported;
+ *   - when the capability DTO is UNAVAILABLE (endpoint unreachable, fetch
+ *     failure, empty allowlist — DEF-097) the read-only line is the NEUTRAL
+ *     reachability copy "Generation mode: Available once the service is
+ *     reachable." — the deterministic "Demo mode active" story is a provider
+ *     claim the frontend cannot make when the DTO did not report;
  *   - when only the deterministic demo mode is offerable (`effectiveProviderMode
- *     === "fake"`, which also covers unknown/unreachable payloads that resolve
- *     to the demo-only allowlist) the static honest notice "Demo mode active"
- *     (`data-testid=generation-mode-demo-notice`) is shown together with the
- *     truthful read-only line "Generation mode: Deterministic demo"
+ *     === "fake"` over a REPORTED DTO) the static honest notice "Demo mode
+ *     active" (`data-testid=generation-mode-demo-notice`) is shown together
+ *     with the truthful read-only line "Generation mode: Deterministic demo"
  *     (`data-testid=generation-mode-line`) — never a provider claim, never a
  *     switch;
  *   - otherwise the container (`data-testid=generation-mode-selector`) shows
  *     the single read-only line: "Generation mode: Local AI — <model> — Ready"
- *     when the backend reports the local pipeline available, or
- *     "Generation mode: <capability label>" when the backend reports a live
- *     provider. The DTO label/model pass verbatim ONLY after the allowlist +
- *     last-line sanitizer guards (no host/IP/URL/raw markup ever rendered).
+ *     when the backend reports the local pipeline available,
+ *     "Generation mode: Local AI — <model> — Unavailable" for a configured
+ *     local backend whose probe FAILED (DEF-096 — the runtime still runs that
+ *     provider, so the line stays per-mode and never claims "Deterministic
+ *     demo"), or "Generation mode: <capability label>[ — Unavailable]" when
+ *     the backend reports/configured a live provider. The DTO label/model pass
+ *     verbatim ONLY after the allowlist + last-line sanitizer guards (no
+ *     host/IP/URL/raw markup ever rendered).
  */
 export interface GenerationModeDisplayProps {
   /** Parsed allowlist DTO; null while the backend has not reported yet. */
@@ -42,9 +50,24 @@ export interface GenerationModeDisplayProps {
 export function GenerationModeDisplay({ capabilities }: GenerationModeDisplayProps) {
   if (capabilities === null) return null; // unknown until the backend reports
 
+  if (!providerIsReported(capabilities)) {
+    // DEF-097: the endpoint answered nothing usable (empty allowlist after a
+    // fetch failure, malformed payload...). The frontend CANNOT know the
+    // provider, so the deterministic "Demo mode active" notice + line are
+    // suppressed and the neutral read-only line is shown instead — no page
+    // surface may claim a provider in this state.
+    return (
+      <div className="generation-mode-selector" data-testid="generation-mode-selector">
+        <p className="generation-mode-line" data-testid="generation-mode-line">
+          {generationModeLine(capabilities)}
+        </p>
+      </div>
+    );
+  }
+
   if (effectiveProviderMode(capabilities) === "fake") {
-    // Demo-only (or unknown/unreachable payloads resolved to the demo-only
-    // allowlist): the honest static notice plus the truthful deterministic
+    // Demo-only (server-enforced deterministic or the availability-derived
+    // fake backend): the honest static notice plus the truthful deterministic
     // line. No selector container, no options — nothing implies a switch.
     // NOTE: `generation-mode-demo-notice` must keep its exact copy "Demo
     // mode active" (QA-owned e2e asserts it verbatim).

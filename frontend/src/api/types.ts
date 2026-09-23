@@ -400,6 +400,24 @@ export interface CreatePlaythroughResponse {
 /** The only generation modes the client may ever offer (Phase 16 I/J). */
 export type GenerationModeId = "demo" | "local" | "live";
 
+/**
+ * Phase 21B (DEF-096/ADV-232) — the backend-CONFIGURED operator generation
+ * provider (the exact raw `generation_provider` setting), re-expressed as the
+ * closed enum "fake" | "ollama" | "live". This is the backend-AUTHORITATIVE
+ * "what will actually run" signal: it is emitted VERBATIM from the server and
+ * is INDEPENDENT of probe availability, so an ollama-configured backend with a
+ * FAILED probe still reports "ollama" (the runtime WILL run that provider on
+ * the next POST /cases) instead of collapsing to the fake-only demo shape.
+ *
+ * The field is SANITIZED by the backend (defensive allowlist, fail-closed to
+ * "fake") and NEVER carries a URL/host/IP/port/credential — it is a bare enum
+ * token. On the CLIENT the parser re-sanitizes it to exactly this closed enum
+ * and drops any other value. Missing/unknown MUST be treated as UNKNOWN
+ * (never as "fake"): an OLDER server omits the field, so the client falls back
+ * to the availability-based derivation for backward compatibility.
+ */
+export type ConfiguredProvider = "fake" | "ollama" | "live";
+
 /** One player-safe generation mode entry from the capability DTO. */
 export interface GenerationModeDTO {
   id: string;
@@ -413,4 +431,13 @@ export interface GenerationModeDTO {
 /** 200 body of GET {base}/api/v1/generation-capabilities. */
 export interface GenerationCapabilitiesResponse {
   modes: GenerationModeDTO[];
+  /**
+   * Phase 21B (DEF-096/ADV-232) — backend-authoritative operator-config
+   * generator provider (closed enum "fake" | "ollama" | "live"; sanitized by
+   * the server, never a URL/IP/port/credential). Client-parse keeps ONLY the
+   * closed enum; unknown/missing values are dropped so consumers treat the
+   * field as UNKNOWN (never as "fake") and fall back to the availability-based
+   * derivation (backward compatible with OLDER servers that omit the field).
+   */
+  configuredProvider?: ConfiguredProvider | null;
 }

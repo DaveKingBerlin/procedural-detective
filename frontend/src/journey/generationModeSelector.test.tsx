@@ -14,12 +14,19 @@ import {
  *
  *   - renders NOTHING while capabilities are unknown (no claim before the
  *     backend reports);
+ *   - shows the NEUTRAL reachability line "Generation mode: Available once
+ *     the service is reachable." on a DTO-UNAVAILABLE payload (empty
+ *     allowlist after a fetch failure / malformed) — NEVER the
+ *     deterministic-demo story (DEF-097);
  *   - shows the honest static "Demo mode active" notice + the truthful
- *     "Generation mode: Deterministic demo" line on a demo-only / unknown /
- *     unreachable backend;
+ *     "Generation mode: Deterministic demo" line ONLY on a REPORTED demo-only
+ *     backend (fake-configured or older-server availability-derived);
  *   - shows the single read-only line "Generation mode: Local AI — <model> —
- *     Ready" / "Generation mode: <live label>" when the backend reports the
- *     corresponding mode available;
+ *     Ready" when the backend reports the corresponding mode available, and
+ *     "Generation mode: Local AI — <model> — Unavailable" / "Generation mode:
+ *     <live label> — Unavailable" for a CONFIGURED local/live backend whose
+ *     probe FAILED (DEF-096 — the runtime still runs that provider, so the
+ *     line stays per-mode and never claims "Deterministic demo");
  *   - NEVER renders an interactive provider control: no <select>, no option,
  *     no onChange, no testid implying a switch, no "selected value" markup.
  *
@@ -121,12 +128,39 @@ describe("read-only generation-mode display — truthfulness (Phase 21 F-03)", (
     expect(html).not.toContain("Local AI");
   });
 
-  it("unknown/unreachable payload (empty allowlist) -> the safe deterministic-demo copy", () => {
+  it("DEF-097 — DTO-unavailable payload (empty allowlist after a fetch failure) -> the NEUTRAL reachability line, NO demo story", () => {
+    // Phase 21B / DEF-097: the frontend cannot know the provider when the DTO
+    // did not report, so the deterministic "Demo mode active" notice + line
+    // must NOT appear — they would contradict the page's neutral CTA. The
+    // read-only line is the neutral reachability copy instead.
     const html = render({ capabilities: { modes: [] } });
-    expect(html).toContain("Generation mode: Deterministic demo");
-    expect(html).toContain("Demo mode active");
-    expect(html).not.toContain('data-testid="generation-mode-selector"');
+    expect(html).toContain(
+      "Generation mode: Available once the service is reachable.",
+    );
+    expect(html).not.toContain("Generation mode: Deterministic demo");
+    expect(html).not.toContain('data-testid="generation-mode-demo-notice"');
+    expect(html).not.toContain("Demo mode active");
+    expect(html).toContain('data-testid="generation-mode-line"');
     expect(html).not.toContain("<select");
+  });
+
+  it("DEF-096 — a configured local backend with a FAILED probe shows the truthful 'Unavailable' per-mode line (never the demo story)", () => {
+    const html = render({
+      capabilities: {
+        configuredProvider: "ollama",
+        modes: [
+          { id: "demo", available: false },
+          { id: "local", available: false, label: "Local AI", model: "llama3.2:3b" },
+        ],
+      },
+    });
+    // The runtime WILL still run the Ollama provider: the line stays per-mode
+    // with the availability-appropriate tag, and NO demo claim appears.
+    expect(html).toContain("Generation mode: Local AI — llama3.2:3b — Unavailable");
+    expect(html).not.toContain("Generation mode: Deterministic demo");
+    expect(html).not.toContain('data-testid="generation-mode-demo-notice"');
+    expect(html).not.toContain("Demo mode active");
+    expect(html).toContain('data-testid="generation-mode-selector"');
   });
 
   it("hostile DTO — never renders host/IP, credential, prompt or diagnostic strings", () => {

@@ -40,8 +40,12 @@ def test_capability_shape_with_default_fake_provider(database_url):
         response = c.get("/api/v1/generation-capabilities")
     assert response.status_code == 200
     body = response.json()
-    # EXACT top-level shape: only "modes".
-    assert set(body.keys()) == {"modes"}
+    # EXACT top-level shape: "modes" + the backend-authoritative
+    # "configuredProvider" enum (Phase21B Finding 3 / DEF-096).
+    assert set(body.keys()) == {"modes", "configuredProvider"}
+    # A fake-config backend reports the closed enum verbatim — never a URL,
+    # host/IP, model token or credential.
+    assert body["configuredProvider"] == "fake"
     modes = body["modes"]
     ids = [m["id"] for m in modes]
     assert ids == ["demo", "local"]  # live is NOT configured -> hidden

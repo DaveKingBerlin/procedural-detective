@@ -190,6 +190,36 @@ describe("parseGenerationCapabilities — trust-boundary allowlist", () => {
     expect(modes[1].model).toBe("llama3.2:3b");
     expect(generationModeOptionLabel(modes[1])).toBe("Local AI — llama3.2:3b — Ready");
   });
+
+  it("Phase 21B (DEF-096) — re-sanitizes `configuredProvider` to the closed enum 'fake'|'ollama'|'live'", () => {
+    const fake = parseGenerationCapabilities({
+      configuredProvider: "fake",
+      modes: [{ id: "demo", available: true }],
+    });
+    expect(fake.configuredProvider).toBe("fake");
+    const ollama = parseGenerationCapabilities({
+      configuredProvider: "ollama",
+      modes: [{ id: "demo", available: false }, { id: "local", available: false, label: "Local AI" }],
+    });
+    expect(ollama.configuredProvider).toBe("ollama");
+    const live = parseGenerationCapabilities({
+      configuredProvider: "live",
+      modes: [{ id: "demo", available: false }, { id: "live", available: false, label: "Cloud AI" }],
+    });
+    expect(live.configuredProvider).toBe("live");
+  });
+
+  it("Phase 21B (DEF-096) — missing/unknown/malformed `configuredProvider` is DROPPED (consumers read UNKNOWN, never 'fake')", () => {
+    // The key is OMITTED from the parsed result — identical to an OLDER
+    // server that never emits the field — so a hostile reply can never
+    // fabricate the deterministic story through this field.
+    expect(parseGenerationCapabilities({ configuredProvider: "http://127.0.0.1:11434", modes: [] })).toEqual({ modes: [] });
+    expect(parseGenerationCapabilities({ configuredProvider: "LOCAL", modes: [] })).toEqual({ modes: [] });
+    expect(parseGenerationCapabilities({ configuredProvider: "shiny-new-ai", modes: [] })).toEqual({ modes: [] });
+    expect(parseGenerationCapabilities({ configuredProvider: 42, modes: [] })).toEqual({ modes: [] });
+    expect(parseGenerationCapabilities({ modes: [] })).toEqual({ modes: [] });
+    expect(parseGenerationCapabilities(null)).toEqual({ modes: [] });
+  });
 });
 
 describe("ADV-208 — duplicate mode ids are deduped FIRST-WINS for every consumer", () => {
@@ -411,10 +441,52 @@ describe("generationModeLine — Phase 21 F-03 the single READ-ONLY authoritativ
     expect(generationModeLine(both)).toBe("Generation mode: Cloud AI");
   });
 
-  it("unknown/unreachable/malformed payloads -> the safe deterministic-demo copy", () => {
-    expect(generationModeLine(null)).toBe("Generation mode: Deterministic demo");
-    expect(generationModeLine(caps({ modes: [] }))).toBe("Generation mode: Deterministic demo");
-    expect(generationModeLine(caps(null))).toBe("Generation mode: Deterministic demo");
+  it("DEF-097 — unknown/unreachable/malformed payloads -> the NEUTRAL reachability line (never a deterministic claim)", () => {
+    // Phase 21B / DEF-097: the frontend CANNOT know the provider when the DTO
+    // did not report (null, empty allowlist after a fetch failure, malformed),
+    // so the F-03 line must be neutral — the "Deterministic demo" copy is a
+    // provider claim and is reserved for a reported fake backend.
+    expect(generationModeLine(null)).toBe(
+      "Generation mode: Available once the service is reachable.",
+    );
+    expect(generationModeLine(caps({ modes: [] }))).toBe(
+      "Generation mode: Available once the service is reachable.",
+    );
+    expect(generationModeLine(caps(null))).toBe(
+      "Generation mode: Available once the service is reachable.",
+    );
+    // Never a fabricated "Deterministic demo" in the DTO-unavailable state.
+    expect(generationModeLine(null)).not.toContain("Deterministic demo");
+  });
+
+  it("DEF-096 — a configured local backend with a FAILED probe shows the truthful 'Unavailable' per-mode line, never 'Deterministic demo'", () => {
+    // Phase 21B / DEF-096: the DTO carries configuredProvider 'ollama' but the
+    // probe failed (local + demo both unavailable). The runtime WILL still run
+    // the Ollama provider on the next POST /cases, so the line must stay
+    // per-mode with the availability-appropriate tag — never the demo story.
+    const probeFailed = caps({
+      configuredProvider: "ollama",
+      modes: [
+        { id: "demo", available: false },
+        { id: "local", available: false, label: "Local AI", model: "llama3.2:3b" },
+      ],
+    });
+    expect(generationModeLine(probeFailed)).toBe(
+      "Generation mode: Local AI — llama3.2:3b — Unavailable",
+    );
+    expect(generationModeLine(probeFailed)).not.toContain("Deterministic demo");
+  });
+
+  it("DEF-096 — a configured live backend with a FAILED probe shows 'Cloud AI — Unavailable'", () => {
+    const probeFailed = caps({
+      configuredProvider: "live",
+      modes: [
+        { id: "demo", available: false },
+        { id: "live", available: false, label: "Cloud AI" },
+      ],
+    });
+    expect(generationModeLine(probeFailed)).toBe("Generation mode: Cloud AI — Unavailable");
+    expect(generationModeLine(probeFailed)).not.toContain("Deterministic demo");
   });
 
   it("hostile DTO material never reaches the line (frozen public fallbacks only)", () => {
@@ -433,27 +505,41 @@ describe("generationModeLine — Phase 21 F-03 the single READ-ONLY authoritativ
     expect(line).toBe("Generation mode: Cloud AI");
   });
 
-  it("agrees with effectiveProviderMode for every parsed allowlist (no contradiction)", () => {
-    const payloads: unknown[] = [
-      { modes: [{ id: "demo", available: true }] },
-      { modes: [{ id: "local", available: true, label: "Local AI", model: "x" }] },
-      { modes: [{ id: "live", available: true, label: "Cloud AI" }] },
-      { modes: [] },
-      null,
+  it("agrees with effectiveProviderMode for every REPORTED allowlist; unknown DTOs get the neutral line (no contradiction)", () => {
+    const payloads: Array<{ raw: unknown; lineSnippet: string }> = [
+      { raw: { modes: [{ id: "demo", available: true }] }, lineSnippet: "Deterministic demo" },
+      {
+        raw: { modes: [{ id: "local", available: true, label: "Local AI", model: "x" }] },
+        lineSnippet: "Local AI — x — Ready",
+      },
+      { raw: { modes: [{ id: "live", available: true, label: "Cloud AI" }] }, lineSnippet: "Cloud AI" },
+      {
+        raw: {
+          configuredProvider: "ollama",
+          modes: [
+            { id: "demo", available: false },
+            { id: "local", available: false, label: "Local AI", model: "llama3.2:3b" },
+          ],
+        },
+        lineSnippet: "Local AI — llama3.2:3b — Unavailable",
+      },
     ];
-    for (const raw of payloads) {
+    for (const { raw, lineSnippet } of payloads) {
       const parsed = caps(raw);
       const provider = effectiveProviderMode(parsed);
       const line = generationModeLine(parsed);
       if (provider === "fake") {
-        expect(line).toContain("Deterministic demo");
-      } else if (provider === "local") {
-        expect(line).toContain("Local AI");
-        expect(line).toContain("Ready");
-      } else {
-        expect(line).toContain("Cloud AI");
+        expect(line).toBe("Generation mode: Deterministic demo");
       }
+      expect(line).toBe(`Generation mode: ${lineSnippet}`);
       expect(line.startsWith("Generation mode: ")).toBe(true);
+    }
+    // DTO-unavailable states stay on the NEUTRAL line — never the
+    // deterministic story (DEF-097), which would contradict the neutral CTA.
+    for (const raw of [{ modes: [] }, null]) {
+      expect(generationModeLine(caps(raw))).toBe(
+        "Generation mode: Available once the service is reachable.",
+      );
     }
   });
 });
@@ -663,7 +749,7 @@ describe("demoCtaState — Phase 21B Finding 3 truthful example-case CTA resolut
 describe("demoCtaState — Phase 21B hosted-demo deterministic fallback (backend authority)", () => {
   const caps = (raw: unknown) => parseGenerationCapabilities(raw);
 
-  it("when demo-only, the journey mode/labels stay demo and match the backend capability report", () => {
+  it("when demo-only (older server — configuredProvider absent), the journey mode/labels stay demo and match the backend capability report", () => {
     const demoOnly = caps({ modes: [{ id: "demo", available: true }] });
     // The backend is authoritative -> effective provider is fake.
     expect(effectiveProviderMode(demoOnly)).toBe("fake");
@@ -676,6 +762,59 @@ describe("demoCtaState — Phase 21B hosted-demo deterministic fallback (backend
     expect(demoCtaState(demoOnly)).toBe("demo");
     expect(demoCtaLabel(demoOnly)).toBe("Try Demo Case");
     expect(demoCtaNote(demoOnly)).toBe("Deterministic demo — no API keys, no cost.");
+  });
+
+  it("DEF-096 — a probe-FAILED ollama backend (configuredProvider 'ollama', demo+local unavailable) yields NOT-'demo' CTA, NOT-'fake' mode and a truthful Unavailable line", () => {
+    // The ADV-233 probe-failed DTO (new backend shape): demo.available false
+    // + local.available false + configuredProvider "ollama". The configured
+    // provider is AUTHORITATIVE: the runtime will still build the Ollama
+    // provider on POST /cases, so the deterministic story must never appear.
+    const probeFailed = caps({
+      configuredProvider: "ollama",
+      modes: [
+        { id: "demo", available: false },
+        { id: "local", available: false, label: "Local AI", model: "llama3.2:3b" },
+      ],
+    });
+    expect(probeFailed.configuredProvider).toBe("ollama");
+    expect(effectiveProviderMode(probeFailed)).not.toBe("fake");
+    expect(effectiveProviderMode(probeFailed)).toBe("local");
+    expect(demoCtaState(probeFailed)).not.toBe("demo");
+    expect(demoCtaState(probeFailed)).toBe("local");
+    expect(demoCtaLabel(probeFailed)).toBe("Try an example case");
+    expect(demoCtaNote(probeFailed)).not.toBe("Deterministic demo — no API keys, no cost.");
+    expect(demoCtaNote(probeFailed)).toContain("Not the free deterministic demo");
+    // The F-03 line stays per-mode with the availability-appropriate tag.
+    expect(generationModeLine(probeFailed)).toBe(
+      "Generation mode: Local AI — llama3.2:3b — Unavailable",
+    );
+  });
+
+  it("configuredProvider 'fake' stays byte-identical to the availability-based fake backend (server-enforced deterministic)", () => {
+    const withFake = caps({
+      configuredProvider: "fake",
+      modes: [{ id: "demo", available: true }],
+    });
+    expect(effectiveProviderMode(withFake)).toBe("fake");
+    expect(demoCtaState(withFake)).toBe("demo");
+    expect(demoCtaLabel(withFake)).toBe("Try Demo Case");
+    expect(demoCtaNote(withFake)).toBe("Deterministic demo — no API keys, no cost.");
+    expect(generationModeLine(withFake)).toBe("Generation mode: Deterministic demo");
+  });
+
+  it("configuredProvider 'live' resolves the live CTA even when the probe is down", () => {
+    const liveDown = caps({
+      configuredProvider: "live",
+      modes: [
+        { id: "demo", available: false },
+        { id: "live", available: false, label: "Cloud AI" },
+      ],
+    });
+    expect(effectiveProviderMode(liveDown)).toBe("live");
+    expect(demoCtaState(liveDown)).toBe("live");
+    expect(demoCtaLabel(liveDown)).toBe("Try an example case");
+    expect(demoCtaNote(liveDown)).toContain("runs the cloud AI provider");
+    expect(generationModeLine(liveDown)).toBe("Generation mode: Cloud AI — Unavailable");
   });
 
   it("a local/live backend can never make the journey claim deterministic demo", () => {
@@ -704,7 +843,17 @@ describe("demoCtaState — Phase 21B hosted-demo deterministic fallback (backend
 describe("demoCtaLabel — Phase 21B Finding 3 truthful CTA label", () => {
   const caps = (raw: unknown) => parseGenerationCapabilities(raw);
 
-  it("keeps 'Try Demo Case' ONLY for the known demo-only backend", () => {
+  it("keeps 'Try Demo Case' ONLY for a fake-configured backend (server-enforced deterministic) or the older-server availability-derived demo-only shape", () => {
+    // configuredProvider present: only "fake" keeps the deterministic CTA
+    // (DEF-096 — the demo promise is truthful ONLY when the backend actually
+    // server-enforces the deterministic path).
+    expect(
+      demoCtaLabel(
+        caps({ configuredProvider: "fake", modes: [{ id: "demo", available: true }] }),
+      ),
+    ).toBe("Try Demo Case");
+    // Older server (configuredProvider absent): the availability-derived
+    // demo-only shape stays the deterministic CTA (backward compatible).
     expect(demoCtaLabel(caps({ modes: [{ id: "demo", available: true }] }))).toBe("Try Demo Case");
     expect(
       demoCtaLabel(
@@ -716,6 +865,24 @@ describe("demoCtaLabel — Phase 21B Finding 3 truthful CTA label", () => {
         }),
       ),
     ).toBe("Try Demo Case");
+  });
+
+  it("ADV-233 — a probe-FAILED ollama backend DTO (configuredProvider 'ollama', demo+local unavailable) MUST NOT keep 'Try Demo Case'", () => {
+    // The ADV-233 lock: this DTO is an OLLAMA-CONFIGURED box with a
+    // temporarily unreachable /api/tags — it is NOT demo-only. The configured
+    // provider is authoritative, so the CTA is the neutral rename, never the
+    // deterministic promise (the action would run the Ollama provider).
+    expect(
+      demoCtaLabel(
+        caps({
+          configuredProvider: "ollama",
+          modes: [
+            { id: "demo", available: false },
+            { id: "local", available: false, label: "Local AI" },
+          ],
+        }),
+      ),
+    ).toBe("Try an example case");
   });
 
   it("renames the CTA for a local/live backend (never overclaims determinism)", () => {

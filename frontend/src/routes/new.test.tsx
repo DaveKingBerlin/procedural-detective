@@ -284,17 +284,24 @@ describe("/new form rendering", () => {
     const markup = html();
     // The form intro is the natural-language prompt emphasising copy.
     expect(markup).toContain("Write your own detective scenario");
-    // Default fake build: the provider note must not claim live-AI behavior.
+    // Default DTO-unavailable render: DEF-097 — the note must NOT claim the
+    // deterministic generator (the frontend cannot know the provider) and must
+    // not claim live-AI behavior either.
     expect(markup).toContain('data-testid="generate-provider-note"');
-    expect(markup).toContain("uses the built-in deterministic generator in this demo build");
+    expect(markup).toContain(
+      "runs through the backend-configured generation pipeline once the service is reachable",
+    );
+    expect(markup).not.toContain("uses the built-in deterministic generator in this demo build");
   });
 
   it("renders the honest provider qualifier next to the primary CTA (ADV-152)", () => {
     const markup = html();
-    // Same spot + wording as the landing. Phase 18A: capability-driven — with
-    // no capabilities injected the honest deterministic-demo default is shown.
+    // Same spot + wording as the landing. Phase 18A + Phase 21B DEF-097:
+    // capability-driven — with no capabilities injected the qualifier is the
+    // NEUTRAL reachability copy (the frontend cannot know the provider).
     expect(markup).toContain('data-testid="provider-qualifier"');
     expect(markup).toContain(providerQualifierFromCapabilities(null));
+    expect(markup).toContain("Generation is available once the service is reachable.");
     // Phase 21B Finding 3: the demo note is capability-driven too — with the
     // DTO unavailable (null) it is the neutral line, NOT the old always-on
     // deterministic promise (which is reserved for a known demo-only backend).
@@ -543,11 +550,19 @@ describe("/new — Phase 18A capability-driven provider notes", () => {
     expect(markup).not.toContain("uses the built-in deterministic generator in this demo build");
   });
 
-  it("unknown backend (capabilities still loading) -> honest deterministic default", () => {
+  it("unknown backend (capabilities still loading) -> NEUTRAL qualifier + note (no deterministic / live / local claim)", () => {
+    // Phase 21B / DEF-097: while the DTO is unavailable (null — the probe is
+    // pending/unreachable) the frontend CANNOT know the provider, so every
+    // provider claim is suppressed: the qualifier and note are the neutral
+    // reachability copy, never the "Demo build" deterministic story.
     const markup = renderWith(null);
-    expect(markup).toContain("uses the built-in deterministic generator in this demo build");
+    expect(markup).toContain("Generation is available once the service is reachable.");
+    expect(markup).toContain(
+      "runs through the backend-configured generation pipeline once the service is reachable",
+    );
     expect(markup).not.toContain("Live AI provider");
     expect(markup).not.toContain("Local AI is available");
+    expect(markup).not.toContain("uses the built-in deterministic generator in this demo build");
   });
 
   it("the demo link CTA is TRUTHFUL per the backend capability report (Phase 21B Finding 3)", () => {
@@ -587,5 +602,50 @@ describe("/new — Phase 18A capability-driven provider notes", () => {
     );
     expect(demoOnly).not.toContain('data-testid="local-ai-showcase-note"');
     expect(demoOnly).toContain('data-testid="local-ai-unavailable"');
+  });
+});
+
+describe("/new — DEF-096 / DEF-097 (Phase 21B) truthful surfaces for probe-down and DTO-unavailable states", () => {
+  const renderWithCaps = (capabilities: GenerationCapabilitiesResponse | null): string =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={capabilities} />
+      </MemoryRouter>,
+    );
+
+  it("DEF-096 — a probe-FAILED ollama backend (configuredProvider 'ollama', demo+local unavailable) shows NO deterministic story ANYWHERE on /new", () => {
+    const markup = renderWithCaps({
+      configuredProvider: "ollama",
+      modes: [
+        { id: "demo", available: false },
+        { id: "local", available: false, label: "Local AI", model: "llama3.2:3b" },
+      ],
+    });
+    // CTA: renamed, never the deterministic promise.
+    expect(markup).toContain("Try an example case");
+    expect(markup).not.toContain("Try Demo Case");
+    const demoMarkup = markup.match(/data-testid="try-demo-note"[\s\S]*?<\/p>/)?.[0] ?? "";
+    expect(demoMarkup).toContain("Not the free deterministic demo");
+    expect(demoMarkup).not.toContain("Deterministic demo — no API keys, no cost.");
+    // F-03 mode line: truthful per-mode with the availability tag.
+    expect(markup).toContain("Generation mode: Local AI — llama3.2:3b — Unavailable");
+    expect(markup).not.toContain("Generation mode: Deterministic demo");
+    expect(markup).not.toContain("Demo mode active");
+    // Qualifier keeps the truthful local-configuration copy.
+    expect(markup).toContain("Local AI is available");
+    expect(markup).not.toContain("Demo build: deterministic built-in generator");
+  });
+
+  it("DEF-097 — DTO-unavailable payload (empty allowlist) shows the neutral qualifier + note + mode line on /new", () => {
+    const markup = renderWithCaps({ modes: [] });
+    expect(markup).toContain("Generation is available once the service is reachable.");
+    expect(markup).toContain(
+      "runs through the backend-configured generation pipeline once the service is reachable",
+    );
+    expect(markup).toContain("Generation mode: Available once the service is reachable.");
+    expect(markup).not.toContain("Generation mode: Deterministic demo");
+    expect(markup).not.toContain("Demo mode active");
+    expect(markup).not.toContain('data-testid="generation-mode-demo-notice"');
+    expect(markup).not.toContain("uses the built-in deterministic generator in this demo build");
   });
 });

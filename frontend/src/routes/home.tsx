@@ -31,16 +31,19 @@ import {
  *
  * Phase 21B Finding 3 — the example/demo CTA is TRUTHFUL per the backend
  * capability DTO (src/journey/generationMode.ts demoCtaLabel/demoCtaNote):
- * the "Try Demo Case" + deterministic/no-cost promise appears ONLY when a
- * known demo-only allowlist says the backend will run the deterministic
- * path. When the backend reports the local or live provider available, the
- * SAME action (startDemo -> setJourneyParams({prompt: EXAMPLE_PROMPT,
- * difficulty: "medium"}) -> /generating -> runDemo POST /cases) is renamed
- * to "Try an example case" with the truthful per-mode note and an explicit
- * "not the free deterministic demo" warning; a null/unreachable capability
- * report downgrades the CTA to the neutral label and a provider-neutral
- * note — the frontend cannot know the provider when the DTO is unavailable.
- * No request field, mode switching or provider selection ever changes.
+ * the "Try Demo Case" + deterministic/no-cost promise appears ONLY when the
+ * backend actually server-enforces the deterministic path
+ * (`configuredProvider == "fake"` or, on older servers, the availability-
+ * derived demo-only shape). When the backend reports the local or live
+ * provider (including a configured ollama/live backend whose probe FAILED —
+ * DEF-096), the SAME action (startDemo -> setJourneyParams({prompt:
+ * EXAMPLE_PROMPT, difficulty: "medium"}) -> /generating -> runDemo POST
+ * /cases) is renamed to "Try an example case" with the truthful per-mode
+ * note and an explicit "not the free deterministic demo" warning; a
+ * null/unreachable capability report downgrades the CTA to the neutral
+ * label and a provider-neutral note — the frontend cannot know the provider
+ * when the DTO is unavailable. No request field, mode switching or provider
+ * selection ever changes.
  *
  * The legacy "New Investigation" entry stays as-is (it reaches the same
  * /new screen). The backend status indicator stays visible (data-testid
@@ -125,9 +128,12 @@ export default function Home(overrides: HomeProps = {}) {
           backend, whose provider is process-global). The line is driven
           solely by the backend-generation-capabilities DTO: a demo-only
           backend shows "Demo mode active" + "Generation mode: Deterministic
-          demo"; a configured local/live provider shows its truthful line.
-          No host/IP, credentials, prompts or diagnostics are ever rendered —
-          only frozen public labels — and no click changes the provider. */}
+          demo"; a configured local/live provider shows its truthful line
+          (with an "Unavailable" tag while its probe is down — DEF-096); a
+          DTO-unavailable state shows the neutral reachability line, never a
+          provider claim (DEF-097). No host/IP, credentials, prompts or
+          diagnostics are ever rendered — only frozen public labels — and no
+          click changes the provider. */}
       <GenerationModeDisplay capabilities={capabilities} />
 
       <div className="landing-panel">

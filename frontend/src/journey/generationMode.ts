@@ -1,9 +1,10 @@
 import type {
+  ConfiguredProvider,
   GenerationCapabilitiesResponse,
   GenerationModeDTO,
   GenerationModeId,
 } from "../api/types";
-import { effectiveProviderMode } from "./providerMode";
+import { effectiveProviderMode, providerIsReported } from "./providerMode";
 
 /**
  * Phase 16 Track B — generation-mode capabilities (parse / display).
@@ -54,6 +55,20 @@ export const GENERATION_MODE_STORAGE_KEY = "pd_generation_mode";
 
 /** The three frozen mode ids, in the order the selector offers them. */
 const MODE_IDS: readonly GenerationModeId[] = ["demo", "local", "live"];
+
+/**
+ * Phase 21B (DEF-096/ADV-232) — the CLOSED enum of the backend-configured
+ * operator generation provider the DTO may carry. The client re-sanitizes the
+ * trust-boundary `configuredProvider` field to EXACTLY these three values and
+ * drops everything else (unknown/malformed -> treated as UNKNOWN — NEVER as
+ * "fake", so an older/hostile reply can never fabricate the deterministic
+ * story).
+ */
+const CONFIGURED_PROVIDER_IDS: readonly ConfiguredProvider[] = [
+  "fake",
+  "ollama",
+  "live",
+];
 
 /**
  * DEF-068-parity guard used for public display text all across the client:
@@ -193,6 +208,14 @@ export const DEMO_ONLY_CAPABILITIES: GenerationCapabilitiesResponse = Object.fre
  * FIRST occurrence wins; later duplicates are ignored), so every consumer
  * (`effectiveProviderMode`, `selectableGenerationModes`, `isLocalModeAvailable`,
  * ...) sees the identical mode set from the same parsed payload.
+ *
+ * Phase 21B (DEF-096/ADV-232): the new top-level `configuredProvider`
+ * (backend-authoritative operator-config generator provider, closed enum
+ * "fake" | "ollama" | "live") is re-sanitized to the closed enum as well — any
+ * MISSING or unknown value is DROPPED so consumers treat it as UNKNOWN (never
+ * as "fake", and never driving a deterministic claim). Unknown extra fields
+ * are ignored as before.
+ *
  * Never throws: a malformed reply resolves to an empty allowlist.
  */
 export function parseGenerationCapabilities(raw: unknown): GenerationCapabilitiesResponse {
@@ -221,6 +244,18 @@ export function parseGenerationCapabilities(raw: unknown): GenerationCapabilitie
       dto.model = model;
     }
     modes.push(dto);
+  }
+  // Phase 21B (DEF-096): the closed provider enum is re-sanitized here. An
+  // absent/unknown/malformed value is OMITTED from the parsed result — every
+  // consumer then reads it as UNKNOWN (backward compatible with older servers)
+  // and NEVER as "fake" (a hostile reply cannot fabricate the deterministic
+  // story from this field).
+  const configuredRaw = (raw as { configuredProvider?: unknown }).configuredProvider;
+  if (typeof configuredRaw === "string" && CONFIGURED_PROVIDER_IDS.includes(configuredRaw as ConfiguredProvider)) {
+    return {
+      modes,
+      configuredProvider: configuredRaw as ConfiguredProvider,
+    };
   }
   return { modes };
 }
@@ -384,25 +419,44 @@ function safeDisplay(value: string | undefined, fallback: string | null): string
  * never contradict the capability-driven provider qualifier / per-path note
  * rendered on the same page.
  *
- *   - demo-only (fake)    -> "Generation mode: Deterministic demo"
- *   - local available     -> "Generation mode: Local AI — <model> — Ready"
- *   - live available      -> "Generation mode: <DTO capability label>"
- *
- * Unknown/loading/unreachable payloads resolve to the deterministic-demo
- * copy — the deterministic path always exists and never implies a switch, so
- * it is the safe neutral line — never a fabricated provider claim.
+ *   - fake (deterministic, server-enforced or availability-derived)
+ *       -> "Generation mode: Deterministic demo"
+ *   - local available       -> "Generation mode: Local AI — <model> — Ready"
+ *   - local configured, probe down (DEF-096: configuredProvider "ollama" with
+ *     an unavailable local entry) -> the truthful per-mode line with the
+ *     availability tag, e.g. "Generation mode: Local AI — <model> —
+ *     Unavailable" — NEVER "Deterministic demo" on a non-fake backend;
+ *   - live available        -> "Generation mode: <DTO capability label>"
+ *   - live configured, probe down -> "Generation mode: <label> — Unavailable";
+ *   - DTO UNAVAILABLE (null, endpoint unreachable, empty/malformed allowlist —
+ *     DEF-097) -> the neutral reachability line, NEVER the deterministic-demo
+ *     copy: the frontend cannot know the provider when the DTO did not report.
  */
+const GENERATION_MODE_LINE_UNKNOWN =
+  "Generation mode: Available once the service is reachable.";
+
 export function generationModeLine(capabilities: GenerationCapabilitiesResponse | null): string {
+  // DEF-097: no DTO report -> no provider claim of ANY kind (the deterministic
+  // story is a provider claim too, and it is only true for a backend the DTO
+  // actually reports as fake).
+  if (!providerIsReported(capabilities)) return GENERATION_MODE_LINE_UNKNOWN;
   switch (effectiveProviderMode(capabilities)) {
     case "local": {
       const local = capabilities?.modes.find((mode) => mode.id === "local");
       const label = safeDisplay(local?.label, "Local AI");
       const model = safeDisplay(local?.model, null);
-      return `Generation mode: ${label}${model ? ` — ${model}` : ""} — Ready`;
+      const detail = model ? `${label} — ${model}` : label;
+      // DEF-096: the tag is availability-appropriate — a configured local
+      // backend with a FAILED probe must never claim "Ready".
+      const tag = local?.available === true ? "Ready" : "Unavailable";
+      return `Generation mode: ${detail} — ${tag}`;
     }
     case "live": {
       const live = capabilities?.modes.find((mode) => mode.id === "live");
-      return `Generation mode: ${safeDisplay(live?.label, "Cloud AI")}`;
+      const label = safeDisplay(live?.label, "Cloud AI");
+      if (live?.available === true) return `Generation mode: ${label}`;
+      // DEF-096: a configured live backend with the probe down stays truthful.
+      return `Generation mode: ${label} — Unavailable`;
     }
     case "fake":
     default:
@@ -422,16 +476,21 @@ export function generationModeLine(capabilities: GenerationCapabilitiesResponse 
  * exactly what the backend will do, and ONLY the capability DTO may decide
  * that:
  *
- *   - demo      (a known, non-empty report with demo available and NO
- *                local/live available — the genuine GENERATION_PROVIDER=fake
- *                backend): the historical "Try Demo Case" + deterministic
- *                no-cost claim is truthful, because the backend WILL run the
- *                deterministic path;
- *   - local     (backend reports the local AI pipeline available): the CTA is
+ *   - demo      (server-ENFORCED deterministic fallback, Phase 21B/DEF-096:
+ *                the DTO's `configuredProvider == "fake"` AND the demo mode is
+ *                available — the genuine GENERATION_PROVIDER=fake backend):
+ *                the historical "Try Demo Case" + deterministic no-cost claim
+ *                is truthful, because the backend WILL run the deterministic
+ *                path;
+ *   - local     (the DTO carries `configuredProvider == "ollama"`, OR the
+ *                backend reports the local AI pipeline available): the CTA is
  *                RENAMED to a neutral example label and the note names the
  *                local AI provider (label/model from the DTO) with an explicit
- *                "not the free deterministic demo" warning;
- *   - live      (backend reports the live provider available): the CTA is
+ *                "not the free deterministic demo" warning — an ollama-configured
+ *                backend is named local EVEN WHEN its probe is DOWN
+ *                (DEF-096), because the runtime will still run that provider;
+ *   - live      (the DTO carries `configuredProvider == "live"`, OR the
+ *                backend reports the live provider available): the CTA is
  *                RENAMED and the note names the cloud provider, never a
  *                deterministic/no-cost promise;
  *   - unknown   (capabilities null / empty allowlist / malformed — i.e. the
@@ -440,7 +499,7 @@ export function generationModeLine(capabilities: GenerationCapabilitiesResponse 
  *                note. The frontend CANNOT know the provider when the DTO is
  *                unavailable, so it must never claim deterministic / no-cost
  *                behavior in this state (that promise is shown only when the
- *                backend actually reports the demo-only allowlist).
+ *                backend actually reports a fake-configured enablement).
  *
  * The label/note functions are PURE and sanitize every DTO-supplied label /
  * model through `safeDisplay` — a hostile or malformed report can never smuggle
@@ -460,13 +519,24 @@ export const DEMO_CTA_NOTE_UNKNOWN =
   "Runs the same generation pipeline as a custom prompt.";
 
 /**
- * Resolve the truthful example-case CTA state from the capability DTO. A
- * KNOWN demo-only claim requires a non-empty allowlist with the demo mode
- * available and neither local nor live available (the genuine fake backend
- * always reports exactly this shape). Everything else — null, an empty
- * allowlist, a malformed payload, or a report where no demo mode is actually
- * available — resolves to "unknown": the deterministic/no-cost promise is
- * NEVER inferred from an absent or unreadable report.
+ * Resolve the truthful example-case CTA state from the capability DTO. The
+ * deterministic "demo" state requires the backend to ACTUALLY enforce the
+ * deterministic fallback (Phase 21B / DEF-096):
+ *   - `configuredProvider == "fake"` (server-enforced deterministic) with the
+ *     demo mode available -> "demo" (the no-cost promise is truthful);
+ *   - `configuredProvider == "ollama"` -> "local" — EVEN IF the probe failed
+ *     and the local entry is unavailable, because the runtime WILL run that
+ *     provider on the next POST /cases (an Ollama deploy is never relabelled
+ *     as deterministic demo);
+ *   - `configuredProvider == "live"` -> "live" (same probe-down rule);
+ *   - `configuredProvider` ABSENT (older server): the availability-based
+ *     derivation — "live"/"local" when the backend reports them available,
+ *     "demo" when the demo mode is available with no local/live available
+ *     (the genuine pre-21B fake-backend shape), backward compatible.
+ * Everything else — null, an empty allowlist, a malformed payload, or a report
+ * where no demo mode is actually available — resolves to "unknown": the
+ * deterministic/no-cost promise is NEVER inferred from an absent or unreadable
+ * report.
  */
 export function demoCtaState(capabilities: GenerationCapabilitiesResponse | null): DemoCtaState {
   if (capabilities === null || typeof capabilities !== "object") return "unknown";
@@ -476,6 +546,14 @@ export function demoCtaState(capabilities: GenerationCapabilitiesResponse | null
     const entry = modes.find((mode) => mode.id === id);
     return entry?.available === true;
   };
+  // DEF-096: the backend-configured provider is authoritative when present —
+  // an ollama/live deploy yields the renamed local/live CTA even while its
+  // probe is down (the runtime still runs that provider).
+  const configured = capabilities.configuredProvider;
+  if (configured === "fake") return available("demo") ? "demo" : "unknown";
+  if (configured === "ollama") return "local";
+  if (configured === "live") return "live";
+  // configuredProvider absent (older server): availability-based fallback.
   if (available("live")) return "live";
   if (available("local")) return "local";
   if (available("demo")) return "demo";

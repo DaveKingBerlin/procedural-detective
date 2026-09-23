@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { GenerationCapabilitiesResponse } from "../api/types";
 import { parseGenerationCapabilities, selectableGenerationModes } from "./generationMode";
 import {
+  PROVIDER_PATH_NOTE_UNKNOWN,
+  PROVIDER_QUALIFIER_UNKNOWN,
   effectiveProviderMode,
   parseAppProvider,
+  providerIsReported,
   providerPathNote,
   providerPathNoteFromCapabilities,
   providerQualifier,
@@ -202,14 +205,32 @@ describe("capability-driven notes — VITE_APP_PROVIDER can never contradict the
     expect(providerPathNoteFromCapabilities(DEMO_ONLY)).toBe(providerPathNote("fake"));
     expect(providerPathNoteFromCapabilities(LOCAL_READY)).toBe(providerPathNote("local"));
     expect(providerPathNoteFromCapabilities(LIVE_READY)).toBe(providerPathNote("live"));
-    expect(providerPathNoteFromCapabilities(null)).toBe(providerPathNote("fake"));
   });
 
   it("the qualifier derives from the DTO, not from any build env value", () => {
     expect(providerQualifierFromCapabilities(DEMO_ONLY)).toBe(providerQualifier("fake"));
     expect(providerQualifierFromCapabilities(LOCAL_READY)).toBe(providerQualifier("local"));
     expect(providerQualifierFromCapabilities(LIVE_READY)).toBe(providerQualifier("live"));
-    expect(providerQualifierFromCapabilities(null)).toBe(providerQualifier("fake"));
+  });
+
+  it("DEF-097 — a NULL/unreachable DTO yields the NEUTRAL qualifier + note (no deterministic/live claim)", () => {
+    // The frontend CANNOT know the provider when the DTO is unavailable, so
+    // NO provider claim of any kind is made — the page's neutral CTA is never
+    // contradicted by a "Demo build" / "Live AI" claim beside it.
+    expect(providerQualifierFromCapabilities(null)).toBe(PROVIDER_QUALIFIER_UNKNOWN);
+    expect(providerQualifierFromCapabilities(null)).not.toContain("Demo build");
+    expect(providerQualifierFromCapabilities(null)).not.toContain("Live AI");
+    expect(providerPathNoteFromCapabilities(null)).toBe(PROVIDER_PATH_NOTE_UNKNOWN);
+    expect(providerPathNoteFromCapabilities(null)).not.toContain("deterministic");
+  });
+
+  it("DEF-097 — the empty-allowlist fetch-failure payload is DTO-unavailable too (neutral, not deterministic)", () => {
+    const empty = { modes: [] } as GenerationCapabilitiesResponse;
+    const malformed = { modes: "nope" } as unknown as GenerationCapabilitiesResponse;
+    for (const unavailable of [empty, malformed]) {
+      expect(providerQualifierFromCapabilities(unavailable)).toBe(PROVIDER_QUALIFIER_UNKNOWN);
+      expect(providerPathNoteFromCapabilities(unavailable)).toBe(PROVIDER_PATH_NOTE_UNKNOWN);
+    }
   });
 
   it("a demo-only backend can never render a live or local claim, whatever the env says", () => {
@@ -222,5 +243,55 @@ describe("capability-driven notes — VITE_APP_PROVIDER can never contradict the
     expect(providerPathNoteFromCapabilities(LOCAL_READY)).not.toContain(
       "uses the built-in deterministic generator in this demo build",
     );
+  });
+});
+
+describe("effectiveProviderMode — Phase 21B configuredProvider is authoritative (DEF-096)", () => {
+  it("configuredProvider 'ollama' resolves 'local' EVEN when the probe failed (both modes unavailable)", () => {
+    const probeFailed: GenerationCapabilitiesResponse = {
+      configuredProvider: "ollama",
+      modes: [
+        { id: "demo", available: false },
+        { id: "local", available: false, label: "Local AI", model: "llama3.2:3b" },
+      ],
+    };
+    expect(effectiveProviderMode(probeFailed)).toBe("local");
+  });
+
+  it("configuredProvider 'live' resolves 'live' EVEN when the probe failed", () => {
+    const probeFailed: GenerationCapabilitiesResponse = {
+      configuredProvider: "live",
+      modes: [
+        { id: "demo", available: false },
+        { id: "live", available: false, label: "Cloud AI" },
+      ],
+    };
+    expect(effectiveProviderMode(probeFailed)).toBe("live");
+  });
+
+  it("configuredProvider 'fake' resolves 'fake' exactly like the availability-based logic", () => {
+    const withFake: GenerationCapabilitiesResponse = {
+      configuredProvider: "fake",
+      modes: [{ id: "demo", available: true }],
+    };
+    expect(effectiveProviderMode(withFake)).toBe("fake");
+  });
+
+  it("configuredProvider ABSENT falls back to the availability-based derivation (older server)", () => {
+    // No configuredProvider key: the pre-21B behavior holds unchanged.
+    expect(effectiveProviderMode(null)).toBe("fake");
+    expect(effectiveProviderMode({ modes: [] })).toBe("fake");
+    expect(effectiveProviderMode(DEMO_ONLY)).toBe("fake");
+    expect(effectiveProviderMode(LOCAL_READY)).toBe("local");
+    expect(effectiveProviderMode(LIVE_READY)).toBe("live");
+  });
+
+  it("providerIsReported — the DTO told us something ONLY for a non-null object with a non-empty modes array", () => {
+    expect(providerIsReported(null)).toBe(false);
+    expect(providerIsReported({ modes: [] })).toBe(false);
+    expect(providerIsReported({ modes: "nope" } as unknown as GenerationCapabilitiesResponse)).toBe(false);
+    expect(providerIsReported(DEMO_ONLY)).toBe(true);
+    expect(providerIsReported(LOCAL_READY)).toBe(true);
+    expect(providerIsReported(parseGenerationCapabilities({ configuredProvider: "ollama", modes: [] }))).toBe(false);
   });
 });
