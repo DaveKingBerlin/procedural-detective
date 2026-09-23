@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
 import type { GenerationCapabilitiesResponse } from "../api/types";
+import { demoCtaLabel, demoCtaNote } from "../journey/generationMode";
 import { providerQualifierFromCapabilities } from "../journey/providerMode";
 import Home from "./home";
 
@@ -40,14 +41,34 @@ describe("landing page", () => {
     expect(html).toMatch(/data-testid="new-investigation"[^>]*href="\/new"/);
   });
 
-  it("renders the Try Demo Case action with no external navigation", () => {
+  it("renders the example-case action with no external navigation (neutral label while capabilities are unknown)", () => {
+    // Phase 21B Finding 3: the default static render has NO capability DTO
+    // (null — the probe is pending / unreachable), so the CTA must use the
+    // neutral truthful label, NOT the historical always-on "Try Demo Case"
+    // + deterministic/no-cost promise (the frontend cannot know the provider
+    // when the DTO is unavailable).
     expect(html).toContain('data-testid="try-demo"');
-    expect(html).toContain("Try Demo Case");
+    expect(html).not.toContain('data-testid="try-demo" href=');
+    expect(html).toContain("Try an example case");
+    expect(html).not.toContain("Deterministic demo — no API keys, no cost.");
   });
 
-  it("labels the demo path as deterministic / zero-cost / no API keys (Phase 15)", () => {
-    expect(html).toContain('data-testid="try-demo-note"');
-    expect(html).toContain("Deterministic demo — no API keys, no cost.");
+  it("labels the demo path as deterministic / zero-cost / no API keys ONLY for a known demo-only backend (Phase 15 + Phase 21B)", () => {
+    // Phase 21B Finding 3: the deterministic/no-cost promise is truthful ONLY
+    // when the backend reports a demo-only allowlist (GENERATION_PROVIDER=fake);
+    // it must not be shown for the unknown-capabilities default render.
+    const demoHtml = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/"]}>
+        <Home
+          status={OK_STATUS}
+          capabilities={{ modes: [{ id: "demo", available: true }] }}
+        />
+      </MemoryRouter>,
+    );
+    expect(demoHtml).toContain('data-testid="try-demo-note"');
+    expect(demoHtml).toContain("Deterministic demo — no API keys, no cost.");
+    // The unknown default does not carry the promise.
+    expect(html).not.toContain("Deterministic demo — no API keys, no cost.");
   });
 
   it("renders the honest provider qualifier near the primary CTA (ADV-152)", () => {
@@ -233,17 +254,47 @@ describe("landing page — Phase 18A capability-driven provider notes", () => {
     expect(html).not.toContain("Local AI is available");
   });
 
-  it("the deterministic demo path stays separate and is NEVER labelled live AI", () => {
-    // Even when the backend reports Live AI available, the Try Demo Case
-    // action keeps its deterministic zero-cost label: it always runs the
-    // built-in deterministic generator through the demo prompt/difficulty.
+  it("the example-case CTA is TRUTHFUL per the backend capability report (Phase 21B Finding 3)", () => {
+    // Phase 21B Finding 3: the historical "Try Demo Case" + deterministic
+    // no-cost promise was always-on even when the backend ran a local/live
+    // provider. Now the CTA label + note must match what the backend will
+    // ACTUALLY do (the demo-only backend -> "Try Demo Case" + the
+    // deterministic promise; local/live -> renamed neutral CTA + per-mode
+    // note; unknown -> neutral label, no promise).
     for (const capabilities of [DEMO_ONLY, LOCAL_READY, LIVE_READY, null]) {
-      const html = renderWithCaps(capabilities);
-      const demoMarkup = html.match(/data-testid="try-demo-note"[\s\S]*?<\/p>/)?.[0] ?? "";
-      expect(demoMarkup).toContain("Deterministic demo — no API keys, no cost.");
+      const htmlText = renderWithCaps(capabilities);
+      const demoMarkup = htmlText.match(/data-testid="try-demo-note"[\s\S]*?<\/p>/)?.[0] ?? "";
+      const demoButton = htmlText.match(/data-testid="try-demo"[^>]*>[\s\S]*?<\/button>/)?.[0] ?? "";
+      expect(demoButton).toContain(demoCtaLabel(capabilities));
+      expect(demoMarkup).toContain(demoCtaNote(capabilities));
+      // No claim the deterministic demo runs the live AI provider.
       expect(demoMarkup).not.toContain("Live AI provider");
-      expect(demoMarkup).not.toContain("Local AI");
-      expect(html).toMatch(/data-testid="try-demo"[^>]*>\s*Try Demo Case\s*</);
     }
+  });
+
+  it("demo-only backend keeps the deterministic/no-cost promise (GENERATION_PROVIDER=fake)", () => {
+    const htmlText = renderWithCaps(DEMO_ONLY);
+    expect(htmlText).toMatch(/data-testid="try-demo"[^>]*>\s*Try Demo Case\s*</);
+    const demoMarkup = htmlText.match(/data-testid="try-demo-note"[\s\S]*?<\/p>/)?.[0] ?? "";
+    expect(demoMarkup).toContain("Deterministic demo — no API keys, no cost.");
+  });
+
+  it("local/live backend renames the CTA and NEVER shows the deterministic/no-cost promise", () => {
+    for (const capabilities of [LOCAL_READY, LIVE_READY]) {
+      const htmlText = renderWithCaps(capabilities);
+      expect(htmlText).toMatch(/data-testid="try-demo"[^>]*>\s*Try an example case\s*</);
+      const demoMarkup = htmlText.match(/data-testid="try-demo-note"[\s\S]*?<\/p>/)?.[0] ?? "";
+      expect(demoMarkup).not.toContain("Deterministic demo — no API keys, no cost.");
+      expect(demoMarkup).toContain("Not the free deterministic demo");
+    }
+  });
+
+  it("unknown/unreachable capabilities -> neutral CTA, no deterministic/no-cost promise", () => {
+    const htmlText = renderWithCaps(null);
+    expect(htmlText).toMatch(/data-testid="try-demo"[^>]*>\s*Try an example case\s*</);
+    const demoMarkup = htmlText.match(/data-testid="try-demo-note"[\s\S]*?<\/p>/)?.[0] ?? "";
+    expect(demoMarkup).not.toContain("Deterministic demo — no API keys, no cost.");
+    expect(demoMarkup).not.toContain("no API keys, no cost");
+    expect(demoMarkup).not.toContain("Live AI provider");
   });
 });

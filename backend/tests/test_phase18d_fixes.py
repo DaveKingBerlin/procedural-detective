@@ -355,6 +355,14 @@ def test_adv206_env_example_remains_sanctioned(scratch_repo):
     findings = release_check.run_all(scratch_repo, allow_hosted=True)
     fails = [f for f in findings if f.severity == "fail"]
     assert fails == [], [f.render() for f in fails]
+    # The production-DEPLOYMENT checks SKIP (never fail) on a tree that lacks
+    # the prod artifacts: this minimal repo plants only .env.example and must
+    # not be gate-blocked by prod-env-profile / prod-effective-config /
+    # compose-logging-bounds (test-isolation contract).
+    skips = {f.check for f in findings if f.severity == "skip"}
+    assert {"prod-env-profile", "prod-effective-config"} <= skips, [
+        f.render() for f in findings
+    ]
 
 
 # --------------------------------------------------------------------------- #

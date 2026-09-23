@@ -279,6 +279,40 @@ class Store:
                 finally:
                     session.close()
 
+    def _ensure_explicit_sqlite_transaction(self, session: Session) -> None:
+        """Guarantee a REAL, literal SQLite transaction before governing DDL.
+
+        Phase 21B Finding 1 — SQLAlchemy's ORM "autobegin" alone is NOT a
+        sufficient transaction boundary under this engine's default pysqlite
+        isolation mode (``isolation_level=''``): the DBAPI driver stays in
+        AUTOCOMMIT at the SQLite level until the FIRST DML statement, so a
+        ``DROP TRIGGER IF EXISTS`` executed as (or among) the first statements
+        of a session is committed IMMEDIATELY by SQLite and can NEVER be rolled
+        back. A failure after such a DROP therefore rolls back the row changes
+        but leaves the immutability trigger MISSING — the exact invariant the
+        audit found in the retention prune and operator deletion.
+
+        This helper establishes a literal, driver-level ``BEGIN`` when the
+        DBAPI connection is not already inside a real transaction, then FAILS
+        CLOSED (raises ``StoreError``) when it cannot PROVE the boundary is
+        open. Every governed maintenance path that drops/re-creates
+        immutability triggers calls it BEFORE its first ``DROP TRIGGER`` so the
+        DDL is atomic-with-rollback (SQLite DDL stays transactional inside a
+        real transaction — this does NOT weaken that guarantee).
+        """
+        connection = session.connection()
+        dbapi = connection.connection.dbapi_connection
+        if not getattr(dbapi, "in_transaction", False):
+            connection.exec_driver_sql("BEGIN")
+            # Re-read the driver truth after the literal BEGIN: the boundary
+            # only counts when the driver itself reports an open transaction.
+            dbapi = session.connection().connection.dbapi_connection
+        if not getattr(dbapi, "in_transaction", False):
+            raise StoreError(
+                "could not establish an explicit SQLite transaction before "
+                "governing trigger DDL; aborting (fail closed)"
+            )
+
     def _read_session(self) -> Session:
         """Read-only session (closed by the caller)."""
         return Session(self._engine)
@@ -908,10 +942,13 @@ class Store:
         that bypass the API caps on purpose). Enforcement is INSIDE this same
         transaction, so a concurrent create burst can never exceed a cap:
 
-        - ``max_active`` (ACTIVE = state in {CREATED, PLAYING}): when the
-          non-terminal count is already at the cap the create raises
-          ``PlaythroughCapacityError("active", ...)`` with ZERO side effects
-          (no row, no prune) — existing playthroughs are preserved;
+        - ``max_active`` (ACTIVE = non-terminal state {CREATED, PLAYING}
+          WHOSE TOKEN IS STILL VALID at the admission instant — a row whose
+          token has expired no longer consumes an active slot, see Finding
+          5/Phase21B-PAC §5): when the live non-terminal count is already at
+          the cap the create raises ``PlaythroughCapacityError("active", ...)``
+          with ZERO side effects (no row, no prune) — existing playthroughs
+          are preserved; expired rows remain retained but no longer block;
         - ``max_retained`` (total rows, all states): when the retained count
           is at the ceiling, the OLDEST COMPLETED ({ACCUSED, REVEALED}) rows
           are pruned (governed trigger carve-out — NEVER an active row) until
@@ -941,14 +978,35 @@ class Store:
                     f"case version ({case_id!r}, v{case_version}) is not published"
                 )
             if max_active is not None:
+                # Phase 21B Finding 5 — "active" is defined SEMANTICALLY, not
+                # purely by state. A {CREATED, PLAYING} row consumes an active
+                # slot ONLY while its player token is still valid at the
+                # admission instant: ``expires_at > created_at`` (the create's
+                # ``created_at`` IS the admission wall-clock instant — the API
+                # passes ``clock.now()`` as both ``created_at`` and the
+                # ``expires_at`` base). A row whose token has already EXPIRED at
+                # admission (``expires_at <= created_at``) is abandoned: it no
+                # longer blocks a new playthrough, the row + history stay
+                # retained (``max_retained`` still counts it), and its old token
+                # is still denied by auth (the auth dependency independently
+                # rejects ``now >= expires_at``). Query-based exclusion is used
+                # (NOT a new EXPIRED state) because the playthrough state
+                # vocabulary ({CREATED, PLAYING, ACCUSED, REVEALED}) is a
+                # closed enum used widely (bootstrap read states, accusation/reveal
+                # gating) and adding a state would ripple through every gate.
                 active = int(
                     session.execute(
                         text(
                             "SELECT count(*) FROM playthroughs WHERE case_id = :cid "
                             "AND case_version = :v "
-                            "AND state IN ('CREATED', 'PLAYING')"
+                            "AND state IN ('CREATED', 'PLAYING') "
+                            "AND expires_at > :at"
                         ),
-                        {"cid": case_id, "v": int(case_version)},
+                        {
+                            "cid": case_id,
+                            "v": int(case_version),
+                            "at": float(created_at),
+                        },
                     ).scalar_one()
                 )
                 if active >= int(max_active):
@@ -1052,6 +1110,16 @@ class Store:
             )
         ids: tuple[str, ...] = tuple(str(row[0]) for row in rows)
         from app.persistence.triggers import IMMUTABILITY_TRIGGERS
+
+        # Phase 21B Finding 1 — the immutability triggers are about to be DROPped
+        # and re-created inside this transaction. The rollback-safety of that
+        # DDL depends on a REAL SQLite transaction being open: under the
+        # pysqlite legacy isolation mode, ``DROP TRIGGER`` (DDL) is executed in
+        # AUTOCOMMIT unless a literal ``BEGIN`` has been emitted, so a failure
+        # after the DROP could commit the DROP while rolling back the row
+        # changes (missing trigger — invariant violation). Establish an
+        # explicit, verifiable transaction boundary FIRST and fail closed.
+        self._ensure_explicit_sqlite_transaction(session)
 
         for name, _event, table, _message in IMMUTABILITY_TRIGGERS:
             if table == "accusations":
@@ -1590,6 +1658,18 @@ class Store:
             # 2) drop the two no_delete guards (and their update twins) so the
             #    published payload / accusation rows of THIS case can be
             #    removed; they are re-created identically in step 4.
+            #
+            # Phase 21B Finding 1 — before ANY of the trigger DDL runs, an
+            # explicit, verifiable SQLite transaction MUST already be open.
+            # Under the pysqlite legacy isolation mode, a ``DROP TRIGGER``
+            # executed in autocommit (no real BEGIN) is committed IMMEDIATELY
+            # and could never be rolled back — a failure after the DROP would
+            # delete correctly (rollback restores rows) but leave the
+            # immutability guard missing.
+            # ``_ensure_explicit_sqlite_transaction`` emits the literal BEGIN
+            # when none is open and FAILS CLOSED if the boundary cannot be
+            # proven.
+            self._ensure_explicit_sqlite_transaction(session)
             for name, _event, _table, _message in IMMUTABILITY_TRIGGERS:
                 session.execute(
                     text(f"DROP TRIGGER IF EXISTS {name}")

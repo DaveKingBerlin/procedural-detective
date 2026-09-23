@@ -238,6 +238,13 @@ _OPERATOR_DOTENV_KEYS = (
     "OLLAMA_TEMPERATURE",
     "OLLAMA_NUM_CTX",
     "OLLAMA_TIMEOUT_SECONDS",
+    # Phase 21B §4 — the bounded capability-probe knobs are operator config
+    # too; a developer shell .env must never change probe/cache/rate behavior
+    # inside the suite.
+    "CAPABILITY_PROBE_TIMEOUT_SECONDS",
+    "CAPABILITY_CACHE_TTL_SECONDS",
+    "MAX_CONCURRENT_CAPABILITY_PROBES",
+    "CAPABILITY_REQUESTS_PER_IP_PER_MIN",
     "LIVE_PROVIDER_URL",
     "LLM_API_KEY",
     "LLM_MODEL",

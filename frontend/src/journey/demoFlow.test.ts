@@ -146,6 +146,27 @@ describe("runDemo — Phase 16 Track B generation-mode note", () => {
     expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined);
   });
 
+  it("Phase 21B Finding 3 — the POST /cases request is BYTE-IDENTICAL for every capability story (no provider/mode field ever)", async () => {
+    // The demo/example CTA copy changes with the capability DTO (the label /
+    // note are truthful per state), but the ACTION never changes: whatever the
+    // label claims, runDemo sends the exact same (token, prompt, difficulty)
+    // POST /cases request — no provider selection, no mode field, no fake
+    // mode switching. The backend's process-global GENERATION_PROVIDER decides
+    // the actual provider; the frontend never claims to control it here.
+    for (const mode of [null, "demo", "local", "live"] as const) {
+      const services = makeServices();
+      const result = await runDemo("Some mystery prompt", {
+        services,
+        difficulty: "medium",
+        mode,
+        wait: NO_WAIT,
+      });
+      expect(result.ok).toBe(true);
+      expect(services.createCase).toHaveBeenCalledTimes(1);
+      expect(services.createCase).toHaveBeenCalledWith(ANON, "Some mystery prompt", "medium");
+    }
+  });
+
   it("propagates the mode into every phase, including the polling loop", async () => {
     const poll = vi
       .fn()

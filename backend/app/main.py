@@ -669,6 +669,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         limit=settings.generation_limit_per_ip_per_hour,
         window_seconds=60 * 60,
     )
+    # Phase21B Finding 4 — small per-IP sliding window on the PUBLIC (no-auth)
+    # capability endpoint. The endpoint serves from a short-TTL cache already;
+    # this bounds scripted request volume. Same TRUST_PROXY-aware identity as
+    # every Phase 20/21 admission policy.
+    app.state.capability_ip_limiter = SlidingWindowRateLimiter(
+        clock=app.state.clock,
+        limit=settings.capability_requests_per_ip_per_min,
+        window_seconds=60,
+    )
     # Phase 21 F-02 — bounded playthrough creation budgets (in-memory rolling
     # 1-hour windows; the SAME single-process deployment mode as the Phase 20
     # rate state, and the SAME F-05 bounded identity map). The per-creator

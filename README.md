@@ -269,17 +269,37 @@ then deleted by the operator. Policy + operator deletion/backup procedures:
 
 ## Environment configuration
 
-Copy `.env.example` to `.env` — it documents every canonical variable
-(REQUIREMENTS §45). Key variables:
+Two documented example profiles — pick the one that matches what you deploy:
+
+- **Development** — copy `.env.example` to `.env`. It documents every canonical
+  variable (REQUIREMENTS §45) with the DEV profile
+  (`ENVIRONMENT=development`, `TRUST_PROXY=false`).
+- **Production** — copy `.env.production.example` to `.env` (or set it as the
+  compose `env_file`). It is the PRODUCTION profile
+  (`ENVIRONMENT=production`, `PD_DEV_TRACE=false`, `TRUST_PROXY=true` for the
+  shipped Caddy edge).
+
+> **WARNING — never copy the DEV example to a production deploy.** Doing so
+> sets `ENVIRONMENT=development` and `TRUST_PROXY=false`, which OVERRIDE the
+> safe production defaults of `docker-compose.prod.yml`: production-only
+> startup enforcement is disabled and every client behind the Caddy edge
+> collapses into ONE shared Caddy-peer rate-limit bucket (per-IP limits no
+> longer distinguish real clients). The production preflight
+> (`python -m tools.prod_preflight`) fails closed if the effective `.env`
+> carries those dev values.
+
+Key variables:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `DATABASE_URL` | SQLAlchemy URL | `sqlite:///<repo>/procedural_detective.db` (local) / `sqlite:////data/procedural_detective.db` (container) |
+| `ENVIRONMENT` | `development` / `production` (prod forces PD-SEC-06) | `development` (dev example) / `production` (prod example + prod compose) |
+| `TRUST_PROXY` | honor forwarded client IPs — `true` ONLY behind the shipped Caddy edge | `false` (dev) / `true` (prod, Caddy edge — NOT portable) |
 | `GENERATION_PROVIDER` | `fake` demo, `ollama` local AI, or `live` LLM | `fake` |
 | `LLM_API_KEY` / `LLM_MODEL` / `LIVE_PROVIDER_URL` | live-mode credentials (never committed) | unset |
 | `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | local-AI mode (Ollama) | `http://127.0.0.1:11434` / `llama3.2:3b` |
 | `CORS_ALLOWED_ORIGINS` | comma-separated allowlist (`*`/`null` rejected) | `http://localhost:5173` |
-| `MAX_*`, `*_TTL_SECONDS` | generation budgets, token TTLs | see `.env.example` |
+| `MAX_*`, `*_TTL_SECONDS` | generation budgets, token TTLs | see `.env.example` / `.env.production.example` |
 | `STATIC_DIR` | built frontend directory (SPA serving) | `/app/static` (container) |
 
 ## Testing

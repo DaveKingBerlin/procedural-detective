@@ -346,16 +346,22 @@ def ollama_available(settings: Any, transport: Any = None) -> tuple[bool, str]:
     transport error, HTTP error, capped/oversize body, unparsable body, model
     absent) degrades to the same sanitized ``"not available"`` detail.
 
-    The probe has its own timeout (the configured ``OLLAMA_TIMEOUT_SECONDS``,
-    bounded 5..300 by Settings) and a capped response
-    (``MAX_OLLAMA_RESPONSE_BYTES``).
+    The probe has its OWN small timeout (``CAPABILITY_PROBE_TIMEOUT_SECONDS``,
+    default 5.0, bounded 0..60 by Settings) which is INDEPENDENT of the
+    generation timeout (``OLLAMA_TIMEOUT_SECONDS``, 5..300): the generation
+    path (``OllamaProvider.generate`` / ``BudgetTracker``) keeps its own
+    timeout untouched. A slow or hung Ollama therefore never holds a capability
+    request longer than the small probe ceiling. The response is still capped
+    at ``MAX_OLLAMA_RESPONSE_BYTES``.
     """
     transport = transport if transport is not None else _HttpxOllamaTransport()
     base = str(
         getattr(settings, "ollama_base_url", None) or DEFAULT_OLLAMA_BASE_URL
     ).rstrip("/")
     model = str(getattr(settings, "ollama_model", "") or "")
-    timeout = float(getattr(settings, "ollama_timeout_seconds", 60.0) or 60.0)
+    timeout = float(
+        getattr(settings, "capability_probe_timeout_seconds", 5.0) or 5.0
+    )
     try:
         status, raw = transport.get(f"{base}{OLLAMA_TAGS_ENDPOINT}", timeout)
     except Exception:  # noqa: BLE001 - availability never raises

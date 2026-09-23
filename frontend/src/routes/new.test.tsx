@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
 import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
+import { demoCtaNote } from "../journey/generationMode";
 import { providerQualifierFromCapabilities } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
 import NewCasePage from "./new";
@@ -92,9 +93,13 @@ describe("/new — Phase 17D Bugfix PART B example-prompt selector (static rende
     // Phase 17E PART J — the redundant button is GONE (new contract).
     expect(markup).not.toContain('data-testid="use-example-prompt"');
     expect(markup).not.toContain("Use example prompt");
-    // The deterministic demo link remains separate and unchanged.
+    // The demo link remains separate. Phase 21B Finding 3: the default
+    // static render has NO capability DTO (null), so the CTA uses the
+    // NEUTRAL label — the historical always-on "Try the demo case" +
+    // deterministic promise is shown only for a known demo-only backend.
     expect(markup).toContain('data-testid="try-demo-from-new"');
-    expect(markup).toContain("Try the demo case");
+    expect(markup).toContain("Try an example case");
+    expect(markup).not.toContain("Deterministic demo — no API keys, no cost.");
   });
 });
 
@@ -151,12 +156,25 @@ describe("Phase 17E PART K — /new UI cleanup regression (static render)", () =
     expect(markup).toContain("Generation mode: Deterministic demo");
   });
 
-  it("K11 — the deterministic demo link remains unchanged", () => {
-    const markup = html();
-    expect(markup).toContain('data-testid="try-demo-from-new"');
-    expect(markup).toContain("Try the demo case");
-    expect(markup).toContain('data-testid="try-demo-note"');
-    expect(markup).toContain("Deterministic demo — no API keys, no cost.");
+  it("K11 — the demo link remains present with a truthful per-capability label + note (Phase 21B Finding 3)", () => {
+    // Phase 21B Finding 3: the copy is capability-driven now. The default
+    // static render (no capability DTO -> null) must use the NEUTRAL label
+    // and NEVER the deterministic/no-cost promise; the demo-only backend
+    // (GENERATION_PROVIDER=fake) keeps the historical deterministic claim.
+    const neutral = html();
+    expect(neutral).toContain('data-testid="try-demo-from-new"');
+    expect(neutral).toContain("Try an example case");
+    expect(neutral).not.toContain("Deterministic demo — no API keys, no cost.");
+
+    const demoOnly = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={{ modes: [{ id: "demo", available: true }] }} />
+      </MemoryRouter>,
+    );
+    expect(demoOnly).toContain('data-testid="try-demo-from-new"');
+    expect(demoOnly).toContain("Try Demo Case");
+    expect(demoOnly).toContain('data-testid="try-demo-note"');
+    expect(demoOnly).toContain("Deterministic demo — no API keys, no cost.");
   });
 });
 
@@ -239,13 +257,27 @@ describe("/new form rendering", () => {
     expect(markup).not.toContain('data-testid="use-example-prompt"');
     expect(markup).not.toContain("Use example prompt");
     expect(markup).toContain('data-testid="try-demo-from-new"');
-    expect(markup).toContain("Try the demo case");
+    // Phase 21B Finding 3: with no capability DTO (null) the demo link uses
+    // the neutral truthful label — the old always-on "Try the demo case" is
+    // reserved for a KNOWN demo-only backend.
+    expect(markup).toContain("Try an example case");
   });
 
-  it("labels the demo path as deterministic / zero-cost / no API keys (Phase 15)", () => {
-    const markup = html();
-    expect(markup).toContain('data-testid="try-demo-note"');
-    expect(markup).toContain("Deterministic demo — no API keys, no cost.");
+  it("labels the demo path as deterministic / zero-cost / no API keys ONLY for a known demo-only backend (Phase 15 + Phase 21B)", () => {
+    // Phase 21B Finding 3: the default static render has NO capability DTO,
+    // so the demo note must be the provider-neutral line — never the
+    // deterministic/no-cost promise. The promise is asserted for the
+    // demo-only capability below (the demo-only fixture keeps it truthful).
+    const neutral = html();
+    expect(neutral).toContain('data-testid="try-demo-note"');
+    expect(neutral).not.toContain("Deterministic demo — no API keys, no cost.");
+
+    const demoOnly = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={{ modes: [{ id: "demo", available: true }] }} />
+      </MemoryRouter>,
+    );
+    expect(demoOnly).toContain("Deterministic demo — no API keys, no cost.");
   });
 
   it("emphasises the custom prompt and keeps the generate path provider-honest (Phase 15)", () => {
@@ -263,8 +295,10 @@ describe("/new form rendering", () => {
     // no capabilities injected the honest deterministic-demo default is shown.
     expect(markup).toContain('data-testid="provider-qualifier"');
     expect(markup).toContain(providerQualifierFromCapabilities(null));
-    // The per-path demo note stays verbatim (additive copy, nothing removed).
-    expect(markup).toContain("Deterministic demo — no API keys, no cost.");
+    // Phase 21B Finding 3: the demo note is capability-driven too — with the
+    // DTO unavailable (null) it is the neutral line, NOT the old always-on
+    // deterministic promise (which is reserved for a known demo-only backend).
+    expect(markup).not.toContain("Deterministic demo — no API keys, no cost.");
   });
 });
 
@@ -516,16 +550,25 @@ describe("/new — Phase 18A capability-driven provider notes", () => {
     expect(markup).not.toContain("Local AI is available");
   });
 
-  it("the deterministic demo link stays separate and is NEVER labelled live AI", () => {
-    // Whatever the backend reports, "Try the demo case" keeps its
-    // deterministic zero-cost sub-note and never claims live behavior.
+  it("the demo link CTA is TRUTHFUL per the backend capability report (Phase 21B Finding 3)", () => {
+    // Phase 21B Finding 3: the old always-on "Try the demo case" +
+    // deterministic no-cost promise is shown ONLY for a KNOWN demo-only
+    // backend. Each state now carries the truthful label + note from
+    // src/journey/generationMode.ts (demoCtaLabel/demoCtaNote), and the link
+    // is never labelled live AI.
     for (const capabilities of [DEMO_ONLY, LOCAL_READY, LIVE_READY, null]) {
       const markup = renderWith(capabilities);
       const demoMarkup = markup.match(/data-testid="try-demo-note"[\s\S]*?<\/p>/)?.[0] ?? "";
-      expect(demoMarkup).toContain("Deterministic demo — no API keys, no cost.");
-      expect(demoMarkup).not.toContain("Live AI provider");
       expect(markup).toContain('data-testid="try-demo-from-new"');
+      expect(demoMarkup).toContain(demoCtaNote(capabilities));
+      expect(demoMarkup).not.toContain("Live AI provider");
     }
+    // The demo-only backend keeps the historical deterministic promise.
+    expect(renderWith(DEMO_ONLY)).toContain("Deterministic demo — no API keys, no cost.");
+    // The local/live backend and the unknown/null DTO can never show it.
+    expect(renderWith(LOCAL_READY)).not.toContain("Deterministic demo — no API keys, no cost.");
+    expect(renderWith(LIVE_READY)).not.toContain("Deterministic demo — no API keys, no cost.");
+    expect(renderWith(null)).not.toContain("Deterministic demo — no API keys, no cost.");
   });
 
   it("the §36 local showcase sentence still requires local mode ACTIVE + available", () => {

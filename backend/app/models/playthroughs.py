@@ -14,6 +14,15 @@ paths in ``app.persistence.store`` (``insert_accusation_if_unaccused`` moves
 only ``{CREATED, PLAYING} -> ACCUSED``; ``mark_playthrough_revealed`` moves
 only ``{ACCUSED, REVEALED} -> REVEALED``). REVEALED is terminal for the
 Milestone 1 gameplay loop.
+
+Phase 21B Finding 5 — ``active`` is defined SEMANTICALLY at the store level:
+a {CREATED, PLAYING} row consumes an active slot ONLY while its player token
+is still valid (``expires_at >`` the admission instant). The closed enum above
+is deliberately NOT extended with an EXPIRED/ABANDONED state — the active-cap
+query excludes expired credentials instead (documented in
+``Store.create_playthrough_if_published``), so every gate and bootstrap read
+state keeps this exact closed vocabulary while an expired/abandoned token can
+never hold a slot forever.
 """
 
 from __future__ import annotations

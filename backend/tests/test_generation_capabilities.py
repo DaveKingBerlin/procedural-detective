@@ -54,6 +54,11 @@ def test_capability_shape_with_default_fake_provider(database_url):
 
 
 def test_capability_never_leaks_base_url_or_credentials(database_url):
+    # The shared bounded-probe cache is module state; reset it so this test's
+    # real (loopback) probe starts from a clean window regardless of suite order.
+    from app.services.generation_capabilities import reset_capability_probe_cache
+
+    reset_capability_probe_cache()
     application = _app(
         Settings(
             database_url=database_url,

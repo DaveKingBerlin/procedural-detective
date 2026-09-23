@@ -4,6 +4,7 @@ import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import type { GenerationCapabilitiesResponse } from "../api/types";
 import { setJourneyParams } from "../journey/context";
 import { EXAMPLE_PROMPT } from "../journey/demoPrompt";
+import { demoCtaLabel, demoCtaNote } from "../journey/generationMode";
 import { GenerationModeDisplay } from "../journey/generationModeSelector";
 import {
   providerPathNoteFromCapabilities,
@@ -27,6 +28,19 @@ import {
  *      local AI pipeline or the configured live provider. A build-time env
  *      value can no longer contradict the backend's report, so the page never
  *      claims a provider that is not really running.
+ *
+ * Phase 21B Finding 3 — the example/demo CTA is TRUTHFUL per the backend
+ * capability DTO (src/journey/generationMode.ts demoCtaLabel/demoCtaNote):
+ * the "Try Demo Case" + deterministic/no-cost promise appears ONLY when a
+ * known demo-only allowlist says the backend will run the deterministic
+ * path. When the backend reports the local or live provider available, the
+ * SAME action (startDemo -> setJourneyParams({prompt: EXAMPLE_PROMPT,
+ * difficulty: "medium"}) -> /generating -> runDemo POST /cases) is renamed
+ * to "Try an example case" with the truthful per-mode note and an explicit
+ * "not the free deterministic demo" warning; a null/unreachable capability
+ * report downgrades the CTA to the neutral label and a provider-neutral
+ * note — the frontend cannot know the provider when the DTO is unavailable.
+ * No request field, mode switching or provider selection ever changes.
  *
  * The legacy "New Investigation" entry stays as-is (it reaches the same
  * /new screen). The backend status indicator stays visible (data-testid
@@ -73,7 +87,7 @@ export default function Home(overrides: HomeProps = {}) {
           data-testid="try-demo"
           onClick={startDemo}
         >
-          Try Demo Case
+          {demoCtaLabel(capabilities)}
         </button>
       </div>
       {/* ADV-152 — honest app-level provider qualifier right below the primary
@@ -83,8 +97,14 @@ export default function Home(overrides: HomeProps = {}) {
       <p className="provider-qualifier" data-testid="provider-qualifier">
         {providerQualifierFromCapabilities(capabilities)}
       </p>
+      {/* Phase 21B Finding 3 — the example-case note is capability-validated
+          (demoCtaNote in src/journey/generationMode.ts): an explicit
+          deterministic/no-cost promise ONLY for a KNOWN demo-only backend;
+          a renamed + "not the free deterministic demo" per-mode note for a
+          local/live backend; a provider-neutral note when the DTO is
+          unavailable. The action itself never changes (same runDemo path). */}
       <p className="landing-path-note landing-path-note--demo" data-testid="try-demo-note">
-        Deterministic demo — no API keys, no cost.
+        {demoCtaNote(capabilities)}
       </p>
 
       <div className="landing-actions landing-actions--generate">

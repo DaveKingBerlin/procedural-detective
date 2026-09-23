@@ -263,9 +263,13 @@ class Settings(BaseSettings):
     #
     #   MAX_ACTIVE_PLAYTHROUGHS_PER_CASE  — ACTIVE means the state column is
     #       one of the non-terminal vocabulary values {CREATED, PLAYING}
-    #       (REQUIREMENTS 40.6 / Phase7 A). Above this cap a new create is
+    #       (REQUIREMENTS 40.6 / Phase7 A) AT THE ADMISSION INSTANT, AND the
+    #       row's playthrough token is still valid (``expires_at`` is in the
+    #       future — an expired/abandoned token no longer consumes an active
+    #       slot; Phase 21B Finding 5). Above this cap a new create is
     #       REJECTED (429 PLAYTHROUGH_LIMIT_EXCEEDED): no row, no token, all
-    #       existing playthroughs preserved.
+    #       existing playthroughs preserved (expired rows stay retained but do
+    #       not block; their old tokens remain rejected by auth).
     #   MAX_RETAINED_PLAYTHROUGHS_PER_CASE — total rows kept for the pinned
     #       tuple (all states). Above this ceiling the create path first tries
     #       bounded retention: the OLDEST COMPLETED ({ACCUSED, REVEALED})
@@ -387,6 +391,56 @@ class Settings(BaseSettings):
             "OLLAMA_NUM_CTX: optional bounded context/token setting "
             "(512..32768)."
         ),
+    )
+    # -- Phase 21B §4 — bounded unauthenticated Ollama capability probing -----
+    # When GENERATION_PROVIDER=ollama, the PUBLIC ``GET /api/v1/generation-capabilities``
+    # drives a synchronous ``/api/tags`` probe. Finding 4 closes the unauthenticated
+    # amplification surface with four operator knobs:
+    #
+    #   CAPABILITY_PROBE_TIMEOUT_SECONDS — the probe's OWN socket/read timeout,
+    #       INDEPENDENT of OLLAMA_TIMEOUT_SECONDS (5..300, generation path). A
+    #       hung/unavailable Ollama now holds a capability request at most this
+    #       long instead of up to the generation timeout. The probe is a single
+    #       lightweight local /api/tags GET + model-name match, so a small
+    #       dedicated ceiling keeps the public page fast; default 5s (Phase21B
+    #       guidance 2-5s), hard-capped at 60s.
+    #   CAPABILITY_CACHE_TTL_SECONDS — SHORT in-memory result-TTL (positive AND
+    #       negative results alike: a failure is negative-cached for the SAME
+    #       window so a hung server is never re-probed by every request; it is
+    #       only re-probed when the window lapses). Default 15s (guidance
+    #       10-30s), hard-capped at 300s.
+    #   MAX_CONCURRENT_CAPABILITY_PROBES — single-flight ceiling: at most this
+    #       many probes run concurrently per (settings, transport) cache key;
+    #       concurrent requests share one in-flight probe and one cached result.
+    #       Default 1 (guidance 1-2): a public burst never fans out to N probes.
+    #   CAPABILITY_REQUESTS_PER_IP_PER_MIN — optional small per-IP sliding-window
+    #       rate limit on the PUBLIC capability endpoint (Phase 20
+    #       SlidingWindowRateLimiter + TRUST_PROXY-aware resolve_client_ip).
+    #       Default 60/min per peer: every legit page load is served (the cache
+    #       absorbs refetches) while scripted hammering is rejected with the
+    #       sanitized 429 envelope.
+    capability_probe_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=60,
+        description="CAPABILITY_PROBE_TIMEOUT_SECONDS (dedicated bounded probe timeout).",
+    )
+    capability_cache_ttl_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        le=300,
+        description="CAPABILITY_CACHE_TTL_SECONDS (short result-TTL cache window).",
+    )
+    max_concurrent_capability_probes: int = Field(
+        default=1,
+        gt=0,
+        le=8,
+        description="MAX_CONCURRENT_CAPABILITY_PROBES (single-flight ceiling).",
+    )
+    capability_requests_per_ip_per_min: int = Field(
+        default=60,
+        gt=0,
+        description="CAPABILITY_REQUESTS_PER_IP_PER_MIN (public endpoint per-IP limit).",
     )
     # -- Phase 8 production static serving (REQUIREMENTS 46 / Phase8 J/I) ----
     # When STATIC_DIR is set the app ALSO serves the built frontend at "/" with

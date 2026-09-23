@@ -4,6 +4,9 @@ import {
   LOCAL_AI_SHOWCASE_NOTE,
   availabilityTag,
   clearGenerationMode,
+  demoCtaLabel,
+  demoCtaNote,
+  demoCtaState,
   generationModeLine,
   generationModeOptionLabel,
   getGenerationMode,
@@ -24,6 +27,12 @@ import { effectiveProviderMode } from "./providerMode";
  * interactive provider selector (the selected mode was never sent to the
  * backend; the provider is process-global). Everything is pure (no DOM, no
  * network).
+ *
+ * Phase 21B Finding 3 — the example-case CTA (demoCtaLabel / demoCtaNote /
+ * demoCtaState) is TRUTHFUL per the capability DTO: the deterministic/no-cost
+ * promise is shown ONLY for a KNOWN demo-only allowlist; a local/live backend
+ * renames the CTA with a per-mode note; a null/unreachable DTO downgrades to
+ * the neutral label. The action itself never changes (same runDemo path).
  */
 
 function fakeStorage(): GenerationModeStorage & { entries: Map<string, string> } {
@@ -580,5 +589,222 @@ describe("LOCAL_AI_SHOWCASE_NOTE — §36 accurate showcase copy", () => {
     for (const overclaim of ["proves the case", "executes", "arbitrary", "perfectly", "http"]) {
       expect(LOCAL_AI_SHOWCASE_NOTE.toLowerCase()).not.toContain(overclaim);
     }
+  });
+});
+
+describe("demoCtaState — Phase 21B Finding 3 truthful example-case CTA resolution", () => {
+  const caps = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("resolves 'demo' ONLY for a known, non-empty demo-only allowlist (GENERATION_PROVIDER=fake)", () => {
+    // The genuine fake backend always reports a non-empty allowlist with the
+    // demo mode available and local/live absent-or-unavailable.
+    expect(
+      demoCtaState(caps({ modes: [{ id: "demo", available: true }] })),
+    ).toBe("demo");
+    expect(
+      demoCtaState(
+        caps({
+          modes: [
+            { id: "demo", available: true },
+            { id: "local", available: false, label: "Local AI" },
+          ],
+        }),
+      ),
+    ).toBe("demo");
+  });
+
+  it("resolves 'local' when the backend reports the local pipeline available", () => {
+    expect(
+      demoCtaState(
+        caps({
+          modes: [
+            { id: "demo", available: true },
+            { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+          ],
+        }),
+      ),
+    ).toBe("local");
+  });
+
+  it("resolves 'live' when the backend reports the live provider available (live wins)", () => {
+    expect(
+      demoCtaState(
+        caps({
+          modes: [
+            { id: "demo", available: true },
+            { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+            { id: "live", available: true, label: "Cloud AI" },
+          ],
+        }),
+      ),
+    ).toBe("live");
+  });
+
+  it("resolves 'unknown' for a null/unreachable/empty/malformed DTO — never a demo claim", () => {
+    // Phase 21B: the frontend cannot know the provider when the DTO is
+    // unavailable, so NO state may infer the deterministic promise from
+    // absence — an empty allowlist is the fetch-failure payload.
+    expect(demoCtaState(null)).toBe("unknown");
+    expect(demoCtaState(caps({ modes: [] }))).toBe("unknown");
+    expect(demoCtaState(caps(null))).toBe("unknown");
+    expect(demoCtaState(caps("olalam"))).toBe("unknown");
+    expect(
+      demoCtaState(caps({ modes: [{ id: "local", available: false, label: "Local AI" }] })),
+    ).toBe("unknown");
+  });
+
+  it("never resolves 'demo' when no demo mode is actually available (hostile payload)", () => {
+    expect(
+      demoCtaState(caps({ modes: [{ id: "demo", available: false }] })),
+    ).toBe("unknown");
+  });
+});
+
+describe("demoCtaState — Phase 21B hosted-demo deterministic fallback (backend authority)", () => {
+  const caps = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("when demo-only, the journey mode/labels stay demo and match the backend capability report", () => {
+    const demoOnly = caps({ modes: [{ id: "demo", available: true }] });
+    // The backend is authoritative -> effective provider is fake.
+    expect(effectiveProviderMode(demoOnly)).toBe("fake");
+    // The journey mode resolution keeps the demo/generic labels (nothing
+    // ever switches to a local/live claim on a demo-only backend).
+    expect(validatedJourneyMode(null, demoOnly)).toBeNull();
+    expect(validatedJourneyMode("demo", demoOnly)).toBe("demo");
+    // The read-only mode line and the CTA agree: deterministic demo.
+    expect(generationModeLine(demoOnly)).toBe("Generation mode: Deterministic demo");
+    expect(demoCtaState(demoOnly)).toBe("demo");
+    expect(demoCtaLabel(demoOnly)).toBe("Try Demo Case");
+    expect(demoCtaNote(demoOnly)).toBe("Deterministic demo — no API keys, no cost.");
+  });
+
+  it("a local/live backend can never make the journey claim deterministic demo", () => {
+    for (const raw of [
+      {
+        modes: [
+          { id: "demo", available: true },
+          { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+        ],
+      },
+      {
+        modes: [
+          { id: "demo", available: true },
+          { id: "live", available: true, label: "Cloud AI" },
+        ],
+      },
+    ]) {
+      const parsed = caps(raw);
+      expect(effectiveProviderMode(parsed)).not.toBe("fake");
+      expect(demoCtaState(parsed)).not.toBe("demo");
+      expect(demoCtaNote(parsed)).not.toBe("Deterministic demo — no API keys, no cost.");
+    }
+  });
+});
+
+describe("demoCtaLabel — Phase 21B Finding 3 truthful CTA label", () => {
+  const caps = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("keeps 'Try Demo Case' ONLY for the known demo-only backend", () => {
+    expect(demoCtaLabel(caps({ modes: [{ id: "demo", available: true }] }))).toBe("Try Demo Case");
+    expect(
+      demoCtaLabel(
+        caps({
+          modes: [
+            { id: "demo", available: true },
+            { id: "local", available: false, label: "Local AI" },
+          ],
+        }),
+      ),
+    ).toBe("Try Demo Case");
+  });
+
+  it("renames the CTA for a local/live backend (never overclaims determinism)", () => {
+    for (const raw of [
+      {
+        modes: [
+          { id: "demo", available: true },
+          { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+        ],
+      },
+      {
+        modes: [
+          { id: "demo", available: true },
+          { id: "live", available: true, label: "Cloud AI" },
+        ],
+      },
+    ]) {
+      expect(demoCtaLabel(caps(raw))).toBe("Try an example case");
+    }
+  });
+
+  it("downgrades to the neutral label when the DTO is unavailable (fetch failure / null)", () => {
+    // Phase 21B: capability fetch FAILURE must never present the historical
+    // "Try Demo Case" + deterministic no-cost promise — the frontend cannot
+    // know the provider when the DTO is unavailable.
+    expect(demoCtaLabel(null)).toBe("Try an example case");
+    expect(demoCtaLabel(caps({ modes: [] }))).toBe("Try an example case");
+  });
+});
+
+describe("demoCtaNote — Phase 21B Finding 3 truthful per-state note", () => {
+  const caps = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("keeps the deterministic/no-cost promise ONLY for the known demo-only backend", () => {
+    expect(demoCtaNote(caps({ modes: [{ id: "demo", available: true }] }))).toBe(
+      "Deterministic demo — no API keys, no cost.",
+    );
+  });
+
+  it("local available -> names the local AI provider + label/model from the DTO, never the no-cost promise", () => {
+    const note = demoCtaNote(
+      caps({
+        modes: [
+          { id: "demo", available: true },
+          { id: "local", available: true, label: "Local AI", model: "qwen2.5:7b" },
+        ],
+      }),
+    );
+    expect(note).toContain("runs the local AI provider");
+    expect(note).toContain("Local AI — qwen2.5:7b");
+    // The warning that this is NOT the free deterministic demo must appear.
+    expect(note).toContain("Not the free deterministic demo");
+    expect(note).not.toContain("Deterministic demo — no API keys, no cost.");
+    expect(note).not.toContain("no API keys, no cost");
+  });
+
+  it("live available -> names the cloud AI provider, never a deterministic claim", () => {
+    const note = demoCtaNote(
+      caps({
+        modes: [
+          { id: "demo", available: true },
+          { id: "live", available: true, label: "Cloud AI" },
+        ],
+      }),
+    );
+    expect(note).toContain("runs the cloud AI provider");
+    expect(note).toContain("Cloud AI");
+    expect(note).toContain("Not the free deterministic demo");
+    expect(note).not.toContain("Deterministic demo — no API keys, no cost.");
+    expect(note).not.toContain("no cost");
+  });
+
+  it("unknown DTO -> provider-neutral note with NO deterministic/no-cost promise", () => {
+    const note = demoCtaNote(null);
+    expect(note).not.toContain("Deterministic demo");
+    expect(note).not.toContain("no API keys, no cost");
+    expect(note).not.toContain("Demo Case");
+  });
+
+  it("hostile DTO material never reaches the note (frozen fallbacks only)", () => {
+    const hostile = caps({
+      modes: [
+        { id: "local", available: true, label: "http://127.0.0.1:11434", model: "llama3@10.0.0.7" },
+      ],
+    });
+    const note = demoCtaNote(hostile);
+    expect(note).not.toContain("127.0.0.1");
+    expect(note).not.toContain("11434");
+    expect(note).not.toContain("@");
+    expect(note).toContain("Local AI");
   });
 });

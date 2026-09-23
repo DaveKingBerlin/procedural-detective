@@ -12,7 +12,7 @@ import {
   selectExamplePrompt,
   type ExamplePromptId,
 } from "../journey/examplePrompts";
-import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE } from "../journey/generationMode";
+import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, demoCtaLabel, demoCtaNote } from "../journey/generationMode";
 import { GenerationModeDisplay } from "../journey/generationModeSelector";
 import {
   providerPathNoteFromCapabilities,
@@ -28,8 +28,8 @@ import { examplePromptText, validatePrompt } from "../journey/promptValidation";
  * label, and presses "Generate case". Validation is minimal and safe (non
  * empty, <= 4000 chars); the accepted journey is handed to /generating
  * through the in-memory journey context — no prompt/token ever enters the
- * URL. "Try the demo case" starts the same deterministic demo journey with
- * the REQUIREMENTS 48 example prompt.
+ * URL. "Try the demo case" starts the same journey with the REQUIREMENTS 48
+ * example prompt.
  *
  * Phase 15 Track B — the two paths are clearly labelled here too: this form
  * IS the "Generate a New Mystery" path (custom prompt emphasised, with a
@@ -44,6 +44,17 @@ import { examplePromptText, validatePrompt } from "../journey/promptValidation";
  * The interactive provider selector was removed because the "selected" mode
  * was never sent to the backend (process-global GENERATION_PROVIDER); the
  * page never implies that a click can switch the provider.
+ *
+ * Phase 21B Finding 3 — the demo link label + note are TRUTHFUL per the
+ * backend capability DTO (src/journey/generationMode.ts demoCtaLabel /
+ * demoCtaNote). The deterministic/no-cost promise appears ONLY when a known
+ * demo-only allowlist says the backend will run the deterministic path; a
+ * local/live backend renames the CTA to "Try an example case" with the
+ * truthful per-mode note + the "not the free deterministic demo" warning; a
+ * null/unreachable report downgrades to the neutral label and a
+ * provider-neutral note. The ACTION itself is byte-identical in every state
+ * (stageJourney(examplePromptText(), difficulty)) — no request field, no
+ * mode switching.
  */
 export interface NewCasePageProps {
   /**
@@ -289,10 +300,15 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
 
       <div className="new-case-demo">
         <Link data-testid="try-demo-from-new" to="/generating" onClick={handleDemoLink}>
-          Try the demo case
+          {demoCtaLabel(capabilities)}
         </Link>
+        {/* Phase 21B Finding 3 — capability-validated note (demoCtaNote in
+            src/journey/generationMode.ts): an explicit deterministic/no-cost
+            promise ONLY for a KNOWN demo-only backend; a renamed + "not the
+            free deterministic demo" per-mode line for a local/live backend; a
+            provider-neutral line when the DTO is unavailable. */}
         <p className="new-case-demo-note" data-testid="try-demo-note">
-          Deterministic demo — no API keys, no cost.
+          {demoCtaNote(capabilities)}
         </p>
       </div>
     </section>

@@ -95,60 +95,86 @@ docker compose -f docker-compose.prod.yml up --build -d
 
 The same works for the local dev stack: `docker compose down -v`.
 
-### 3.2 Single-case deletion — advanced operator procedure
+### 3.2 Single-case deletion — canonical audited command
 
-A single generated case and *its own* playthroughs/accusations can be removed
-by an operator. Two caveats (by design, not a bug):
+A single generated case and *its own* playthroughs/accusations are removed by
+the **audited maintenance command** (Phase 21 F-07), which replaces the old
+manual raw-SQL trigger-drop procedure (removed — it voided immutability and its
+"`alembic upgrade head` recreates dropped triggers" claim is NOT reliable once
+the migration head is already recorded; migration re-runs do not re-run a
+recorded head).
 
-- SQLite **immutability triggers** protect ``published_versions`` and
-  ``accusations`` (this is the publication-immutability guarantee —
-  REQUIREMENTS/Phase 7). A plain ``DELETE`` on those tables is **aborted** at
-  the database level. Removing a published case therefore requires dropping
-  the trigger first — **which voids that guarantee for the deleted rows.**
-- Only an operator with full control of the deployment should do this; it is
-  never exposed to players.
-
-Steps (run inside the running backend container):
-
-```bash
-docker compose -f docker-compose.prod.yml exec procedural-detective python - <<'PY'
-import sqlite3, sys
-
-DB = "/data/procedural_detective.db"
-CASE_ID = sys.argv[1] if len(sys.argv) > 1 else input("case_id to delete: ").strip()
-
-con = sqlite3.connect(DB)
-cur = con.cursor()
-cur.row_factory = sqlite3.Row
-
-# 0) Confidentiality of the operation: nothing is auto-committed until verified.
-# 1) Authoritative-only triggers: published-payload/accusation immutability is
-#    DB-enforced; removing a published case requires dropping those guards.
-cur.execute("DROP TRIGGER IF EXISTS published_versions_no_delete")
-cur.execute("DROP TRIGGER IF EXISTS accusations_no_delete")
-
-# 2) Delete in foreign-key order (child -> parent).
-cur.execute("DELETE FROM player_knowledge WHERE playthrough_id IN "
-            "(SELECT playthrough_id FROM playthroughs WHERE case_id = ?)", (CASE_ID,))
-cur.execute("DELETE FROM accusations      WHERE case_id = ?", (CASE_ID,))
-cur.execute("DELETE FROM playthroughs     WHERE case_id = ?", (CASE_ID,))
-cur.execute("DELETE FROM creator_credentials WHERE case_id = ?", (CASE_ID,))
-cur.execute("DELETE FROM generation_attempts WHERE case_id = ?", (CASE_ID,))
-cur.execute("DELETE FROM published_versions WHERE case_id = ?", (CASE_ID,))
-cur.execute("DELETE FROM case_versions     WHERE case_id = ?", (CASE_ID,))
-cur.execute("DELETE FROM cases             WHERE case_id = ?", (CASE_ID,))
-
-print("rows deleted for", CASE_ID, "->", con.total_changes)
-con.commit()
-con.close()
-PY
+```text
+python -m tools.delete_case <case_id> --yes
 ```
 
-Verify before/after with `SELECT count(*) FROM cases;`. Restarting the backend is
-not required. Dropped triggers are recreated only by applying migrations again
-(``alembic upgrade head`` re-runs are idempotent and recreate missing triggers)
-— do **not** run this procedure on a live contest deployment while immutability
-of active cases must be preserved.
+What the command does (in ONE transaction, fail-closed):
+
+1. validates the target `cases` row exists (a missing case aborts, changes
+   nothing — even with `--yes`);
+2. deletes in foreign-key order the exact table set of the documented
+   procedure (`player_knowledge`, `accusations`, `playthroughs`,
+   `creator_credentials`, `generation_attempts`, `published_versions`,
+   `case_versions`, `cases`) via `Store.delete_case_cascade` — the single
+   audited deletion unit;
+3. drops only the two publication/accusation immutability guards, runs the
+   deletion, then **re-creates the triggers identically and verifies 4/4**
+   before committing — any failure rolls the whole operation back to the
+   original guard set (SQLite DDL is transactional);
+4. verifies immutability protections still hold AFTER the deletion (a raw
+   UPDATE/DELETE on a remaining published case / accusation is still rejected
+   at the database level).
+
+It NEVER runs against the default/repository database unless `DATABASE_URL`
+points there — it uses the exact same single configuration source as the app.
+
+#### Where the operator runs it — HOST-side (tool availability)
+
+The runtime Docker image does **not** ship the `tools/` tree (the `Dockerfile`
+copies only `backend/`, `assets/` and the built frontend into the runtime
+stage), so `python -m tools.delete_case` is **not available inside the
+container**. The supported path is **host-side invocation against the mounted
+DB volume**, from a source checkout whose backend dependencies are installed
+(e.g. `pip install -e ./backend[dev]`).
+
+Procedure (back up FIRST, guarantee a single writer):
+
+```bash
+# 1) STOP the stack so the SQLite volume has no live writer (SQLite is
+#    single-writer; the app container must not hold a conflicting write lock).
+docker compose -f docker-compose.prod.yml down
+
+# 2) BACK UP the whole volume first (non-negotiable before ANY deletion).
+docker run --rm -v pd-data:/data -v "%CD%":/backup alpine \
+  tar czf /backup/pd-data-backup.tar.gz -C /data .
+
+# 3) Run the audited command ON THE HOST, pointing DATABASE_URL at the SQLite
+#    file inside the mounted volume. Linux hosts keep named-volume data under
+#    /var/lib/docker/volumes/pd-data/_data/:
+#    DATABASE_URL=sqlite:////var/lib/docker/volumes/pd-data/_data/procedural_detective.db python -m tools.delete_case <case_id> --yes
+#
+#    Docker Desktop (Windows/macOS) does not expose a stable host path into
+#    the volume, so use the portable copy-out flow instead (forward-slash
+#    absolute path in DATABASE_URL, e.g. sqlite:///C:/work/pd-maintenance.db):
+docker run --rm -v pd-data:/data -v "%CD%":/work alpine \
+  cp /data/procedural_detective.db /work/pd-maintenance.db
+DATABASE_URL=sqlite:///<path-to>/pd-maintenance.db \
+  python -m tools.delete_case <case_id> --yes
+#    then verify + copy the maintained file back into the volume:
+docker run --rm -v pd-data:/data -v "%CD%":/work alpine \
+  cp /work/pd-maintenance.db /data/procedural_detective.db
+
+# 4) Restart the deployment (migrations run automatically on startup).
+docker compose -f docker-compose.prod.yml up --build -d
+```
+
+Restarting is not required after a successful run; the command itself verifies
+the triggers. Do **not** fall back to a manual trigger-drop when the command
+is unavailable — that voids the immutability guarantee for the remaining
+active cases (there is NO supported "recreate by re-applying a migration" path;
+a recorded migration head is not re-run). Full workflow, including
+backup/restore details and the Linux vs Docker Desktop path difference, is in
+**`docs/OPERATIONS.md` §2**.
 
 ## 4. Player-facing exposure (what is never served)
 
@@ -178,9 +204,11 @@ of active cases must be preserved.
 
 ## 6. Privacy notice location
 
-- The operator note pointing here lives in ``.env.example`` (PD-SEC-05), and
-  this policy is linked from ``docs/DEPLOYMENT.md`` and the README security
-  section. Deployments that surface a notice to users near prompt submission
-  should link to this document.
+- The operator note pointing here lives in ``.env.example`` and the production
+  profile example ``.env.production.example`` (PD-SEC-05), and this policy is
+  linked from ``docs/DEPLOYMENT.md`` and the README security section. The
+  concrete maintenance runbook is ``docs/OPERATIONS.md`` (backup/restore,
+  deletion, log/hygiene checks). Deployments that surface a notice to users
+  near prompt submission should link to this document.
 - Nothing in this policy overrides the operator's own obligations; it is the
   project's honest statement of the current build's behavior.

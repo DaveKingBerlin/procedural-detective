@@ -77,8 +77,11 @@ export function providerPathNote(mode: AppProviderMode): string {
  *   - "local": the backend runs the local pipeline — model proposes,
  *     deterministic validators construct; live AI still explicitly off;
  *   - "live": the short enabled-provider wording.
- * The per-path notes (try-demo-note / generate-provider-note) stay unchanged;
- * this line is additive and never claims behavior the backend does not have.
+ * The per-path notes (generate-provider-note) stay unchanged; the
+ * example-case demo note (try-demo-note) is ALSO capability-driven since
+ * Phase 21B Finding 3 (src/journey/generationMode.ts demoCtaLabel /
+ * demoCtaNote). This line is additive and never claims behavior the backend
+ * does not have.
  */
 export function providerQualifier(mode: AppProviderMode): string {
   switch (mode) {

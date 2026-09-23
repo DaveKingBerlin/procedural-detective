@@ -60,8 +60,27 @@ backend port at all.
 
 ## 3. Environment variables
 
-Canonical names (REQUIREMENTS §45), exact one-per-setting. Full list with
-defaults: `.env.example`.
+Canonical names (REQUIREMENTS §45), exact one-per-setting. **Two documented
+example profiles** — copy the one that matches your deployment:
+
+| Example | Profile | When to copy to `.env` |
+| --- | --- | --- |
+| `.env.example` | DEV: `ENVIRONMENT=development`, `TRUST_PROXY=false`, dev budgets | **Local development only** |
+| `.env.production.example` | PROD: `ENVIRONMENT=production`, `PD_DEV_TRACE=false`, `TRUST_PROXY=true` (Caddy edge), generous-but-bounded budgets | **Production deployments** (copy to `.env`, or point the compose `env_file` at it) |
+
+> **Never copy the DEV example into a production deployment.** `.env.example`
+> carries `ENVIRONMENT=development` and `TRUST_PROXY=false`, which OVERRIDE the
+> safe production defaults of `docker-compose.prod.yml`: production-only
+> startup enforcement is disabled and `TRUST_PROXY=false` makes every client
+> behind the Caddy edge appear as the Caddy peer, collapsing per-IP limits into
+> ONE shared judge-wide bucket (PD-SEC-02 §6.2). `TRUST_PROXY=true` is the
+> production profile default and is valid ONLY behind the shipped Caddy edge
+> (or another independently verified ingress) — it is **not portable** (§7).
+> The production preflight `python -m tools.prod_preflight` fails closed when
+> the effective `.env` carries the dev values.
+
+Default values in the table below are the *container* defaults; the two
+.example files document every canonical variable.
 
 | Variable | Purpose | Container default |
 | --- | --- | --- |
@@ -88,7 +107,10 @@ docker compose -f docker-compose.prod.yml up --build -d
 curl -k https://localhost/api/v1/health
 curl -I -k https://localhost/          # 200 + Strict-Transport-Security
 
-# Real hosting: point CADDY_DOMAIN at the public host in .env / environment.
+# Real hosting: start from the PRODUCTION profile example (NEVER .env.example)
+# and point CADDY_DOMAIN at the public host:
+copy .env.production.example .env        # (Windows) — Linux/macOS: cp
+# then set in .env:
 CADDY_DOMAIN=detective.example.com
 CADDY_EMAIL=you@example.com
 docker compose -f docker-compose.prod.yml up --build -d
@@ -293,8 +315,8 @@ provider timeout  <  remaining backend generation deadline
 
 | Layer | Value | Where configured |
 | --- | --- | --- |
-| Provider per-call timeout | `OLLAMA_TIMEOUT_SECONDS`, bounded `5..300` — clamped to `remaining deadline − 0.1s` by `BudgetTracker.effective_provider_timeout` (`backend/app/generation/budgets.py`) | `.env.example` (`180`) |
-| Backend generation deadline | `CASE_GENERATION_DEADLINE_SECONDS`, default `60`, recommended showcase `300` (max supported by this envelope) | `.env.example` |
+| Provider per-call timeout | `OLLAMA_TIMEOUT_SECONDS`, bounded `5..300` — clamped to `remaining deadline − 0.1s` by `BudgetTracker.effective_provider_timeout` (`backend/app/generation/budgets.py`) | `.env.example` (`180`) / `.env.production.example` (`180`, line below) |
+| Backend generation deadline | `CASE_GENERATION_DEADLINE_SECONDS`, default `60`, recommended showcase `300` (max supported by this envelope) | `.env.example` / `.env.production.example` (`300`) |
 | Frontend request timeout | `360s` (`REQUEST_TIMEOUT_MS = 360000`, `frontend/src/api/client.ts`) | source constant |
 | Reverse-proxy upstream timeout | `420s` (`response_header_timeout 420s`, `docker/Caddyfile`) | `docker/Caddyfile` |
 
@@ -360,6 +382,32 @@ curl -I http://localhost/                          # 301 -> https
 # Platform-ingress alternative (only the private backend):
 docker compose -f docker-compose.prod.yml up -d procedural-detective
 
-# Release gate (includes the .dockerignore + production-bundle scans)
+# Production preflight (fail-closed effective-config check; strict
+# ready-to-host verdict — pass --allow-local ONLY for a local smoke):
+python -m tools.prod_preflight
+
+# Release gate (includes the .dockerignore + production-bundle scans + the
+# DEV/PROD env-example split + the effective-config assertions):
 python -m tools.release_check --allow-hosted-placeholders
 ```
+
+## 19. Operations & maintenance
+
+Operator maintenance for a live deployment lives in **`docs/OPERATIONS.md`** —
+full backup/restore, health checks, log inspection and the data-retention
+workflow. Key contacts:
+
+- **Single-case deletion (canonical path):** the audited maintenance command is
+  `python -m tools.delete_case <case_id> --yes`, run on the HOST against the
+  mounted SQLite volume (the runtime image does **not** ship `tools/`). The
+  SQLite volume must have no live writer (stop the app or accept
+  single-writer). **Always back up the volume/database FIRST** — the full
+  procedure, including the portability note for Docker Desktop volume paths,
+  is documented in `docs/OPERATIONS.md` §2 and `docs/PRIVACY.md` §3.
+- **Full reset at the end of the demo/hackathon period:** stop the stack and
+  delete the data volume after backing up (`docker compose -f
+  docker-compose.prod.yml down -v` — see §18 above).
+- **Production preflight before hosting:** `python -m tools.prod_preflight`
+  validates the EFFECTIVE `.env`-interpolated configuration (production
+  profile markers, P-02 timeout envelope, log bounds, private ports, real
+  `CADDY_DOMAIN`) and fails closed on any deviation.

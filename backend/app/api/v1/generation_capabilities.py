@@ -14,12 +14,21 @@ public-safe by definition. Availability failures degrade to ``available:false``
 with no reason detail beyond the sanitized probe result. The local mode is
 probed ONLY when ``GENERATION_PROVIDER == "ollama"`` so a misconfigured
 unselected provider can never block this endpoint (or anything else).
+The probe itself is BOUNDED at the service seam (``app.services.generation_capabilities``):
+short-TTL cache + single-flight + a dedicated small probe timeout independent of
+``OLLAMA_TIMEOUT_SECONDS`` + negative caching of failures (Phase21B Finding 4).
+``POST /sessions/anonymous``-style admission (PD-SEC-02) is mirrored here with a
+small per-IP sliding window (``CAPABILITY_REQUESTS_PER_IP_PER_MIN``) keyed on the
+TRUST_PROXY-aware resolved client IP — a spoofed ``X-Forwarded-For`` never bypasses
+it while ``TRUST_PROXY=false``.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
+from app.api.v1.errors import http_error
+from app.core.ratelimit import resolve_client_ip
 from app.services.generation_capabilities import ollama_available
 
 router = APIRouter(tags=["generation-capabilities"])
@@ -37,6 +46,29 @@ def _live_configured(settings: object) -> bool:
     )
 
 
+def _enforce_capability_rate_limit(request: Request) -> None:
+    """Phase21B Finding 4 — small per-IP sliding window on the PUBLIC endpoint.
+
+    The endpoint is unauthenticated and now serves from a short-TTL cache; the
+    per-IP window (``CAPABILITY_REQUESTS_PER_IP_PER_MIN``) still bounds scripted
+    request volume. Identity is the Phase 20 ``resolve_client_ip``
+    (direct socket peer by default; forwarded headers honored ONLY when
+    ``TRUST_PROXY=true``). Denial raises the sanitized 429 envelope with no
+    internal detail.
+    """
+    limiter = getattr(request.app.state, "capability_ip_limiter", None)
+    if limiter is None:  # defensive: create_app always wires it
+        return
+    trust_proxy = bool(request.app.state.settings.trust_proxy)
+    ip = resolve_client_ip(request, trust_proxy=trust_proxy)
+    if not limiter.allow(ip, request.app.state.clock.now()):
+        raise http_error(
+            429,
+            "TOO_MANY_REQUESTS",
+            "Too many capability requests; please try again later",
+        )
+
+
 @router.get(
     "/generation-capabilities",
     summary="Generation provider capabilities",
@@ -49,6 +81,7 @@ def _live_configured(settings: object) -> bool:
 )
 def generation_capabilities(request: Request) -> dict:
     """Player-safe mode list (exact shape: a top-level ``modes`` array)."""
+    _enforce_capability_rate_limit(request)
     settings = request.app.state.settings
     modes: list[dict] = [{"id": "demo", "available": True}]
 

@@ -409,3 +409,115 @@ export function generationModeLine(capabilities: GenerationCapabilitiesResponse 
       return "Generation mode: Deterministic demo";
   }
 }
+
+/* ======================================================================
+ * Phase 21B Finding 3 — truthful example-case CTA (the demo / example
+ * action that routes through the normal POST /cases journey).
+ *
+ * The provider selector was removed (Phase 21 F-03), so the example-case
+ * action is the ONLY front-end entry that stages a journey with a FIXED
+ * prompt. It uses the same `POST /cases` path as a custom prompt — the
+ * backend provider is process-global (GENERATION_PROVIDER) and the request
+ * never carries a mode/provider field. The CTA copy MUST therefore describe
+ * exactly what the backend will do, and ONLY the capability DTO may decide
+ * that:
+ *
+ *   - demo      (a known, non-empty report with demo available and NO
+ *                local/live available — the genuine GENERATION_PROVIDER=fake
+ *                backend): the historical "Try Demo Case" + deterministic
+ *                no-cost claim is truthful, because the backend WILL run the
+ *                deterministic path;
+ *   - local     (backend reports the local AI pipeline available): the CTA is
+ *                RENAMED to a neutral example label and the note names the
+ *                local AI provider (label/model from the DTO) with an explicit
+ *                "not the free deterministic demo" warning;
+ *   - live      (backend reports the live provider available): the CTA is
+ *                RENAMED and the note names the cloud provider, never a
+ *                deterministic/no-cost promise;
+ *   - unknown   (capabilities null / empty allowlist / malformed — i.e. the
+ *                DTO is UNAVAILABLE, fetch failed or unreachable): the CTA is
+ *                DOWNGRADED to a neutral truthful label with a provider-neutral
+ *                note. The frontend CANNOT know the provider when the DTO is
+ *                unavailable, so it must never claim deterministic / no-cost
+ *                behavior in this state (that promise is shown only when the
+ *                backend actually reports the demo-only allowlist).
+ *
+ * The label/note functions are PURE and sanitize every DTO-supplied label /
+ * model through `safeDisplay` — a hostile or malformed report can never smuggle
+ * a URL/IP/host token or a false deterministic claim into the DOM.
+ * ==================================================================== */
+
+/** The four truthful states the example-case CTA may be in. */
+export type DemoCtaState = "demo" | "local" | "live" | "unknown";
+
+/** Frozen public CTA labels (no DTO string can ever replace them). */
+export const DEMO_CTA_LABEL_DEMO = "Try Demo Case";
+export const DEMO_CTA_LABEL_EXAMPLE = "Try an example case";
+
+/** Frozen note copy (per state; see module doc). */
+export const DEMO_CTA_NOTE_DEMO = "Deterministic demo — no API keys, no cost.";
+export const DEMO_CTA_NOTE_UNKNOWN =
+  "Runs the same generation pipeline as a custom prompt.";
+
+/**
+ * Resolve the truthful example-case CTA state from the capability DTO. A
+ * KNOWN demo-only claim requires a non-empty allowlist with the demo mode
+ * available and neither local nor live available (the genuine fake backend
+ * always reports exactly this shape). Everything else — null, an empty
+ * allowlist, a malformed payload, or a report where no demo mode is actually
+ * available — resolves to "unknown": the deterministic/no-cost promise is
+ * NEVER inferred from an absent or unreadable report.
+ */
+export function demoCtaState(capabilities: GenerationCapabilitiesResponse | null): DemoCtaState {
+  if (capabilities === null || typeof capabilities !== "object") return "unknown";
+  const modes = capabilities.modes;
+  if (!Array.isArray(modes) || modes.length === 0) return "unknown";
+  const available = (id: GenerationModeId): boolean => {
+    const entry = modes.find((mode) => mode.id === id);
+    return entry?.available === true;
+  };
+  if (available("live")) return "live";
+  if (available("local")) return "local";
+  if (available("demo")) return "demo";
+  return "unknown";
+}
+
+/**
+ * The truthful example-case CTA label: "Try Demo Case" ONLY when the backend
+ * actually reports the demo-only deterministic allowlist; every other state
+ * (local / live / unknown) uses the neutral truthful rename.
+ */
+export function demoCtaLabel(capabilities: GenerationCapabilitiesResponse | null): string {
+  return demoCtaState(capabilities) === "demo"
+    ? DEMO_CTA_LABEL_DEMO
+    : DEMO_CTA_LABEL_EXAMPLE;
+}
+
+/**
+ * The truthful per-state note beside the example-case CTA. Never a claim the
+ * backend did not make: demo-only yields the deterministic/no-cost promise
+ * ONLY for a known demo-only report; local/live name the real provider with
+ * the yellow "not the free deterministic demo" warning; unknown / unavailable
+ * payloads fall back to the provider-neutral pipeline note.
+ */
+export function demoCtaNote(capabilities: GenerationCapabilitiesResponse | null): string {
+  switch (demoCtaState(capabilities)) {
+    case "local": {
+      const local = capabilities?.modes.find((mode) => mode.id === "local");
+      const label = safeDisplay(local?.label, "Local AI");
+      const model = safeDisplay(local?.model, null);
+      const detail = model ? `${label} — ${model}` : label;
+      return `Example case runs the local AI provider (${detail}). Not the free deterministic demo.`;
+    }
+    case "live": {
+      const live = capabilities?.modes.find((mode) => mode.id === "live");
+      const label = safeDisplay(live?.label, "Cloud AI");
+      return `Example case runs the cloud AI provider (${label}). Not the free deterministic demo.`;
+    }
+    case "demo":
+      return DEMO_CTA_NOTE_DEMO;
+    case "unknown":
+    default:
+      return DEMO_CTA_NOTE_UNKNOWN;
+  }
+}

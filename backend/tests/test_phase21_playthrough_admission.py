@@ -3,8 +3,13 @@
 Required behavior (Phase21-PHC.md §1 F-02):
 
 - ``MAX_ACTIVE_PLAYTHROUGHS_PER_CASE``: ACTIVE = state in {CREATED, PLAYING}
-  (the non-terminal vocabulary; REQUIREMENTS 40.6 / Phase7 A). At the cap the
-  next create answers the sanitized ``429 PLAYTHROUGH_LIMIT_EXCEEDED``
+  (the non-terminal vocabulary; REQUIREMENTS 40.6 / Phase7 A) WHOSE PLAYER
+  TOKEN IS STILL VALID at the admission instant (Phase21B-PAC Finding 5
+  redefined ``active`` semantically: a row whose token has expired no longer
+  consumes an active slot — the query excludes ``expires_at <= created_at``).
+  In THIS suite every row is created with a LIVE token, so the practical
+  cap behavior asserted below is unchanged by the Finding-5 definition. At the
+  cap the next create answers the sanitized ``429 PLAYTHROUGH_LIMIT_EXCEEDED``
   envelope — NO row created, NO token issued, existing playthroughs preserved.
 - ``MAX_RETAINED_PLAYTHROUGHS_PER_CASE``: total rows kept for the pinned
   (caseId, caseVersion). Above the ceiling the create first runs bounded
