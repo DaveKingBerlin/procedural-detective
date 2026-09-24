@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { EvidenceReadResultDTO } from "../api/types";
 import {
@@ -10,7 +13,14 @@ import {
 import EvidencePanel from "./evidencePanel";
 import ActivityLogEvidence from "./renderers/ActivityLogEvidence";
 import GenericEvidence from "./renderers/GenericEvidence";
-import { timeEntryItems } from "./renderers/shared";
+import { compactTimeOf, timeEntryItems } from "./renderers/shared";
+
+// React 19 act() support in the jsdom test environment.
+declare global {
+  /** Enabled by test harnesses to activate React's act() support. */
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
+}
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 /**
  * Phase 19G — Rich Evidence Rendering & player-readable time clues.
@@ -458,5 +468,174 @@ describe("reload determinism — Phase 19G §10", () => {
     const first = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
     const second = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
     expect(second).toBe(first);
+  });
+});
+
+describe("Phase 19H — Activity Log layout & time presentation (compact HH:mm, no overlap)", () => {
+  const ISO_ENTRIES = [
+    { time: "2026-09-11T23:41:50+02:00", text: "User login detected" },
+    { time: "2026-09-11T23:43:12+02:00", text: "File opened" },
+    { time: "2026-09-11T23:47:05+02:00", text: "Activity recorded at the scene" },
+    { time: "2026-09-11T23:50:33+02:00", text: "Session ended" },
+  ];
+
+  function count(html: string, needle: string): number {
+    let n = 0;
+    let from = 0;
+    for (;;) {
+      const i = html.indexOf(needle, from);
+      if (i < 0) break;
+      n += 1;
+      from = i + 1;
+    }
+    return n;
+  }
+
+  it("compactTimeOf — deterministic and NEVER fabricated (full ISO -> HH:mm, compact passthrough, malformed raw)", () => {
+    // Full ISO-8601-with-offset (the production payload shape): HH:mm of the
+    // LOCAL time the offset encodes — no conversion, no fabrication.
+    expect(compactTimeOf("2026-09-11T23:41:50+02:00")).toBe("23:41");
+    expect(compactTimeOf("2026-09-11T23:41:50Z")).toBe("23:41");
+    expect(compactTimeOf("2026-09-11T23:41+02:00")).toBe("23:41");
+    expect(compactTimeOf("2026-09-11 23:41:50+02:00")).toBe("23:41");
+    // Already-compact clock text passes through verbatim.
+    expect(compactTimeOf("23:41")).toBe("23:41");
+    expect(compactTimeOf("23:41:50")).toBe("23:41:50");
+    expect(compactTimeOf("9:41")).toBe("9:41");
+    // Malformed/hostile values fall back to the raw string — safely literal.
+    expect(compactTimeOf("not-a-time")).toBe("not-a-time");
+    expect(compactTimeOf("22")).toBe("22");
+    expect(compactTimeOf("2026-09-11")).toBe("2026-09-11");
+    expect(compactTimeOf("")).toBe("");
+    expect(compactTimeOf("<script>alert(1)</script>")).toBe("<script>alert(1)</script>");
+  });
+
+  it("renders the 4-entry production-shape fixture as FOUR distinct rows: compact times, canonical datetimes, no overlap cause left", () => {
+    const record = recordWith({
+      renderType: "ACTIVITY_LOG",
+      title: "Activity logged at the scene",
+      entries: ISO_ENTRIES,
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+
+    // (1) exactly four distinct rendered body rows (+ the header row).
+    expect(html.match(/<tr>/g) ?? []).toHaveLength(5);
+    expect(count(html, 'class="evidence-activity-time"')).toBe(4);
+    expect(count(html, 'class="evidence-activity-text"')).toBe(4);
+
+    // (2) four <time> elements; (3+4) each carries the canonical full ISO
+    // datetime while the VISIBLE value is the compact HH:mm clock.
+    expect(count(html, "<time ")).toBe(4);
+    expect(html).toContain('<time dateTime="2026-09-11T23:41:50+02:00">23:41</time>');
+    expect(html).toContain('<time dateTime="2026-09-11T23:43:12+02:00">23:43</time>');
+    expect(html).toContain('<time dateTime="2026-09-11T23:47:05+02:00">23:47</time>');
+    expect(html).toContain('<time dateTime="2026-09-11T23:50:33+02:00">23:50</time>');
+    for (const t of ["23:41", "23:43", "23:47", "23:50"]) {
+      expect(html).toContain(`>${t}</time>`);
+    }
+    // The full ISO appears ONLY as the dateTime attribute (exactly 4 times) —
+    // never as visible text (the pre-19H overlap cause).
+    expect(count(html, "+02:00")).toBe(4);
+    expect(html).not.toMatch(/>2026-09-11T23:41:50\+02:00</);
+
+    // (5) every activity text appears exactly once, on its own row.
+    for (const text of ["User login detected", "File opened", "Activity recorded at the scene", "Session ended"]) {
+      expect(count(html, text)).toBe(1);
+    }
+
+    // (6) NO inline positioning, and the row/cell class lists carry no rule
+    // that could absolutely-position or height-constrain a row (evidence-*
+    // layout classes only). The table is a normal in-flow semantic table:
+    // body rows follow the head directly inside <tbody>.
+    expect(html).not.toContain('style="');
+    expect(html).not.toContain("position:");
+    expect(html).not.toContain("absolute");
+    expect(html).toContain('<table class="evidence-table evidence-activity-log">');
+    expect(html).toContain("<thead>");
+    expect(html).toContain("</thead><tbody><tr>");
+    expect(html).toContain("</tbody>");
+  });
+
+  it("applies the SAME compact presentation to TIMELINE (general rule — no Laptop special-case)", () => {
+    const record = recordWith({
+      renderType: "TIMELINE",
+      events: [
+        { time: "2026-09-11T21:38:07+02:00", description: "A visitor enters the apartment" },
+        { time: "2026-09-11T22:03:41+02:00", description: "The visitor leaves in a hurry" },
+      ],
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain('<time dateTime="2026-09-11T21:38:07+02:00">21:38</time>');
+    expect(html).toContain('<time dateTime="2026-09-11T22:03:41+02:00">22:03</time>');
+    expect(html).not.toMatch(/>2026-09-11T21:38:07\+02:00</);
+  });
+});
+
+describe("Phase 19H — jsdom layout regression (live DOM: distinct rows, normal in-flow table, nothing absolute)", () => {
+  // jsdom ships NO layout engine, so getBoundingClientRect is uniformly
+  // (0,0,0,0) across elements. "Each row has its own bounding box" is
+  // therefore proven structurally here — four sibling table rows sharing no
+  // positioning — plus the computed UA-sheet display (table-row: a normal
+  // in-flow block). Real-browser geometry for this exact fixture is measured
+  // by the QA/Playwright layer (evidence policy); this suite pins the
+  // renderer/CSS contract that makes overlap structurally impossible (compact
+  // visible time, canonical datetime preserved, no absolute/height rules).
+  const ISO_ENTRIES = [
+    { time: "2026-09-11T23:41:50+02:00", text: "User login detected" },
+    { time: "2026-09-11T23:43:12+02:00", text: "File opened" },
+    { time: "2026-09-11T23:47:05+02:00", text: "Activity recorded at the scene" },
+    { time: "2026-09-11T23:50:33+02:00", text: "Session ended" },
+  ];
+
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    container.remove();
+  });
+
+  function mountActivityLog(entries: unknown[]): void {
+    const record = recordWith({
+      renderType: "ACTIVITY_LOG",
+      title: "Activity logged at the scene",
+      entries,
+    });
+    act(() => {
+      root = createRoot(container);
+      root.render(<EvidencePanel record={record} onClose={() => {}} />);
+    });
+  }
+
+  it("renders 4 DISTINCT table-row siblings whose cells keep compact visible times and canonical datetimes", () => {
+    mountActivityLog(ISO_ENTRIES);
+    const rows = Array.from(container.querySelectorAll("tbody tr"));
+    expect(rows).toHaveLength(4);
+    expect(Array.from(container.querySelectorAll("time"))).toHaveLength(4);
+    for (const row of rows) {
+      const cs = getComputedStyle(row);
+      expect(cs.display).toBe("table-row"); // normal in-flow block
+      expect(cs.position).toBe(""); // no author rule positions the row
+      expect(row.querySelectorAll("td.evidence-activity-time")).toHaveLength(1);
+      expect(row.querySelectorAll("td.evidence-activity-text")).toHaveLength(1);
+      const time = row.querySelector("time")!;
+      expect(time.textContent).toMatch(/^\d{2}:\d{2}$/); // compact visible time
+      expect(time.getAttribute("dateTime")).toMatch(/^2026-09-11T\d{2}:\d{2}:\d{2}\+02:00$/);
+    }
+    const table = container.querySelector("table.evidence-activity-log")!;
+    expect(getComputedStyle(table).display).toBe("table");
+    expect(getComputedStyle(table).position).toBe("");
+    // Rows sit DIRECTLY in <tbody> (no wrapper that could be positioned or
+    // floated between them) — the container height grows with the rows.
+    expect(container.querySelector("tbody")!.childElementCount).toBe(4);
+    // The full ISO is never the VISIBLE value any more (pre-19H overlap cause).
+    expect(container.querySelector("time")!.textContent).not.toContain("T");
   });
 });

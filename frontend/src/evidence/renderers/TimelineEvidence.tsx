@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import type { EvidenceRendererProps } from "./shared";
-import { timeEntryItems } from "./shared";
+import { compactTimeOf, timeEntryItems } from "./shared";
 import GenericEvidence from "./GenericEvidence";
 
 /**
@@ -11,6 +11,10 @@ import GenericEvidence from "./GenericEvidence";
  * activity log — accessible two-column table with a <time> per entry, plain
  * text only. An empty timeline falls back to the safe GenericEvidence
  * renderer; timestamps are never fabricated.
+ *
+ * Phase 19H — the player-facing time is the COMPACT local clock ("23:41");
+ * the canonical full ISO timestamp stays in <time dateTime="..."> (see
+ * compactTimeOf in shared.ts).
  */
 export default function TimelineEvidence({ record }: EvidenceRendererProps): ReactElement {
   const items = timeEntryItems(record.content, ["entries", "events"], ["text", "description"]);
@@ -31,7 +35,7 @@ export default function TimelineEvidence({ record }: EvidenceRendererProps): Rea
           {items.map((item, index) => (
             <tr key={`timeline-${index}`}>
               <td className="evidence-activity-time">
-                <time dateTime={item.time}>{item.time}</time>
+                <time dateTime={item.time}>{compactTimeOf(item.time)}</time>
               </td>
               <td className="evidence-activity-text">{item.text}</td>
             </tr>

@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import type { EvidenceRendererProps } from "./shared";
-import { timeEntryItems } from "./shared";
+import { compactTimeOf, timeEntryItems } from "./shared";
 import GenericEvidence from "./GenericEvidence";
 
 /**
@@ -12,6 +12,12 @@ import GenericEvidence from "./GenericEvidence";
  * semantics + a real <time> element. Entries are sorted chronologically
  * (defensively — stable for unparseable times). Every value is plain TEXT
  * (React escapes); no raw JSON, no horizontal overflow (fixed table layout).
+ *
+ * Phase 19H — TIME PRESENTATION: the PLAYER-FACING time is the COMPACT local
+ * clock ("23:41"), while the CANONICAL full ISO timestamp (with its offset)
+ * is preserved verbatim in the semantic <time dateTime="..."> attribute —
+ * the DTO keeps the full value, nothing is converted or discarded
+ * (compactTimeOf in shared.ts is deterministic and never fabricates).
  *
  * KEY INVARIANT (Phase 19G §16): concrete, player-visible timestamps the
  * server actually sent. If the payload carries no concrete entries the
@@ -37,7 +43,7 @@ export default function ActivityLogEvidence({ record }: EvidenceRendererProps): 
           {items.map((item, index) => (
             <tr key={`activity-${index}`}>
               <td className="evidence-activity-time">
-                <time dateTime={item.time}>{item.time}</time>
+                <time dateTime={item.time}>{compactTimeOf(item.time)}</time>
               </td>
               <td className="evidence-activity-text">{item.text}</td>
             </tr>

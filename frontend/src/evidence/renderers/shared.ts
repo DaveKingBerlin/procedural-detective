@@ -60,6 +60,37 @@ export function minutesOfTime(time: string): number | null {
   return hours * 60 + minutes;
 }
 
+/** True when `value` is already compact clock text ("23:41" or "23:41:50"). */
+export function isCompactClockTime(value: string): boolean {
+  return /^\d{1,2}:\d{2}(?::\d{2})?$/.test(value);
+}
+
+/**
+ * Phase 19H — compact PLAYER-FACING clock text from a canonical ISO-8601
+ * time string, e.g. "2026-09-11T23:41:50+02:00" -> "23:41".
+ *
+ * DETERMINISTIC and NEVER fabricated: the visible value is extracted
+ * VERBATIM from the string the server sent — no date arithmetic, no
+ * timezone conversion. The offset in the DTO IS the case/evidence LOCAL
+ * time, so the string's HH:MM segment is exactly that local clock time.
+ *
+ * - full ISO values ("T" or space separator, offset optional) collapse to
+ *   "HH:MM" (Phase 19H chooses HH:mm as the primary visible value);
+ * - already-compact clock text ("23:41" / "23:41:50") passes through;
+ * - malformed values fall back to the raw string, safely (never fabricated).
+ *
+ * The CANONICAL full value is what the caller keeps in the semantic
+ * <time dateTime=...> attribute, so no information is lost from the DTO.
+ */
+export function compactTimeOf(iso: string): string {
+  const trimmed = iso.trim();
+  if (trimmed === "") return trimmed;
+  if (isCompactClockTime(trimmed)) return trimmed;
+  // Full ISO-8601: take the HH:MM segment verbatim as the local clock time.
+  const match = /^(\d{4}-\d{2}-\d{2})[T ](\d{1,2}):(\d{2})/.exec(trimmed);
+  return match === null ? trimmed : `${match[2]}:${match[3]}`;
+}
+
 /**
  * Deterministic chronological comparator for time entries. Parseable "HH:MM"
  * times order numerically; anything else compares as text. STABLE: entries

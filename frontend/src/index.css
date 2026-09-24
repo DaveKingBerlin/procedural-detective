@@ -1818,7 +1818,17 @@ button {
 }
 
 /* Activity log / timeline tables: FIXED layout so wide payload text wraps
- * inside the panel instead of overflowing horizontally (Phase 19G §7). */
+ * inside the panel instead of overflowing horizontally (Phase 19G §7).
+ *
+ * Phase 19H — layout root cause: the FULL ISO timestamp kept white-space:
+ * nowrap overran the fixed 4.5rem time column into the Activity column (the
+ * time text was painted UNDER the activity text in every row). The fix keeps
+ * the semantic table + fixed layout, widens the time column to a STABLE
+ * narrow ~5.5rem that comfortably fits the compact HH:mm clock the renderers
+ * now show (<time dateTime=...> keeps the canonical ISO), lets the activity
+ * text wrap safely, and top-aligns both cells. No absolute positioning and
+ * no fixed row/body height anywhere — rows and the panel grow with content.
+ */
 .evidence-activity-log,
 .evidence-timeline {
   table-layout: fixed;
@@ -1827,11 +1837,17 @@ button {
 
 .evidence-activity-log th:first-child,
 .evidence-timeline th:first-child {
-  width: 4.5rem;
+  width: 5.5rem;
 }
 
 .evidence-activity-time {
+  width: 5.5rem;
   white-space: nowrap;
+  vertical-align: top;
+}
+
+.evidence-activity-text {
+  vertical-align: top;
   overflow-wrap: anywhere;
 }
 
