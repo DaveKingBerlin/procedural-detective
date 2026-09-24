@@ -1,0 +1,194 @@
+{
+  "gate": "Phase 19H FINAL residual retest (commit fcb1f79)",
+  "widths": {
+    "360": {
+      "rows": [
+        {
+          "timeText": "23:41",
+          "dateTime": "2026-09-11t23:41:50+02:00",
+          "rowTop": 133.58,
+          "rowBottom": 165.23,
+          "nextTop": 165.234375,
+          "timeRight": 125.5,
+          "actLeft": 125.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "23:43",
+          "dateTime": "2026-09-11T23:43:12+02:00",
+          "rowTop": 165.23,
+          "rowBottom": 196.89,
+          "nextTop": 196.890625,
+          "timeRight": 125.5,
+          "actLeft": 125.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "23:50",
+          "dateTime": "2026-09-11 23:50:05+02:00",
+          "rowTop": 196.89,
+          "rowBottom": 228.55,
+          "nextTop": 228.546875,
+          "timeRight": 125.5,
+          "actLeft": 125.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 98,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "This is a deliberately very long unexpected raw fallback string that far exceeds the narrow time column width and must clip inside it",
+          "dateTime": "This is a deliberately very long unexpected raw fallback string that far exceeds the narrow time column width and must clip inside it",
+          "rowTop": 228.55,
+          "rowBottom": 260.2,
+          "nextTop": null,
+          "timeRight": 125.5,
+          "actLeft": 125.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        }
+      ],
+      "noPageHScroll": true,
+      "timeCellComputed": {
+        "whiteSpace": "nowrap",
+        "overflow": "hidden",
+        "textOverflow": "ellipsis",
+        "maxWidth": "100%"
+      }
+    },
+    "600": {
+      "rows": [
+        {
+          "timeText": "23:41",
+          "dateTime": "2026-09-11t23:41:50+02:00",
+          "rowTop": 133.58,
+          "rowBottom": 165.23,
+          "nextTop": 165.234375,
+          "timeRight": 309.5,
+          "actLeft": 309.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "23:43",
+          "dateTime": "2026-09-11T23:43:12+02:00",
+          "rowTop": 165.23,
+          "rowBottom": 196.89,
+          "nextTop": 196.890625,
+          "timeRight": 309.5,
+          "actLeft": 309.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "23:50",
+          "dateTime": "2026-09-11 23:50:05+02:00",
+          "rowTop": 196.89,
+          "rowBottom": 228.55,
+          "nextTop": 228.546875,
+          "timeRight": 309.5,
+          "actLeft": 309.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 98,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "This is a deliberately very long unexpected raw fallback string that far exceeds the narrow time column width and must clip inside it",
+          "dateTime": "This is a deliberately very long unexpected raw fallback string that far exceeds the narrow time column width and must clip inside it",
+          "rowTop": 228.55,
+          "rowBottom": 260.2,
+          "nextTop": null,
+          "timeRight": 309.5,
+          "actLeft": 309.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        }
+      ],
+      "noPageHScroll": true,
+      "timeCellComputed": {
+        "whiteSpace": "nowrap",
+        "overflow": "hidden",
+        "textOverflow": "ellipsis",
+        "maxWidth": "100%"
+      }
+    },
+    "1280": {
+      "rows": [
+        {
+          "timeText": "23:41",
+          "dateTime": "2026-09-11t23:41:50+02:00",
+          "rowTop": 133.58,
+          "rowBottom": 165.23,
+          "nextTop": 165.234375,
+          "timeRight": 989.5,
+          "actLeft": 989.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "23:43",
+          "dateTime": "2026-09-11T23:43:12+02:00",
+          "rowTop": 165.23,
+          "rowBottom": 196.89,
+          "nextTop": 196.890625,
+          "timeRight": 989.5,
+          "actLeft": 989.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "23:50",
+          "dateTime": "2026-09-11 23:50:05+02:00",
+          "rowTop": 196.89,
+          "rowBottom": 228.55,
+          "nextTop": 228.546875,
+          "timeRight": 989.5,
+          "actLeft": 989.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 98,
+          "inkStartsAtOwnText": true
+        },
+        {
+          "timeText": "This is a deliberately very long unexpected raw fallback string that far exceeds the narrow time column width and must clip inside it",
+          "dateTime": "This is a deliberately very long unexpected raw fallback string that far exceeds the narrow time column width and must clip inside it",
+          "rowTop": 228.55,
+          "rowBottom": 260.2,
+          "nextTop": null,
+          "timeRight": 989.5,
+          "actLeft": 989.5,
+          "gapInk": 0,
+          "activityPadLeft": 8,
+          "firstActivityColOffset": 99,
+          "inkStartsAtOwnText": true
+        }
+      ],
+      "noPageHScroll": true,
+      "timeCellComputed": {
+        "whiteSpace": "nowrap",
+        "overflow": "hidden",
+        "textOverflow": "ellipsis",
+        "maxWidth": "100%"
+      }
+    }
+  }
+}
