@@ -9,15 +9,38 @@ export interface BodyObservationItem {
   text: string;
 }
 
+/** The DTO surface used for the summary-level fallback (title/description). */
+interface BodyObservationRecord {
+  title: string | null;
+  description: string | null;
+}
+
 /**
- * Parse the closed BODY_OBSERVATION payload (`observations` array). Accepts
- * string entries ("A cut on the left forearm") and object entries carrying a
- * label/bodyPart plus the observation text. Only non-empty observations are
- * kept — the payload is never invented.
+ * Deterministic BODY_OBSERVATION extraction (Phase 19G §8). Only the
+ * player-safe ALLOWLISTED fields of the DTO/content are read, in a fixed
+ * priority:
+ *
+ *  1. a structured `observations[]` array (string entries or object entries
+ *     carrying label/location/bodyPart + text/observation/description);
+ *  2. the allowlisted `statement` field, labelled by `speakerName` — the four
+ *     BODY_OBSERVATION kinds (testimonial / witness_statement / statement /
+ *     suspect_statement) expose exactly `speakerName` + `statement`;
+ *  3. the safe `content.summary` text, else the record's own
+ *     title/description — the same DTO text the player can already read.
+ *
+ * An empty `observations[]` does NOT block the later steps, and only
+ * non-empty values are ever kept — nothing is fabricated. When every field is
+ * empty/absent the result is `[]` and the caller falls back to
+ * GenericEvidence.
  */
-export function bodyObservationItems(content: unknown): BodyObservationItem[] {
-  if (!isRecord(content)) return [];
-  const raw = Array.isArray(content.observations) ? content.observations : [];
+export function bodyObservationItems(
+  content: unknown,
+  record: BodyObservationRecord | null = null,
+): BodyObservationItem[] {
+  const payload = isRecord(content) ? content : {};
+
+  // 1. Structured `observations[]` when the payload carries one.
+  const raw = Array.isArray(payload.observations) ? payload.observations : [];
   const items: BodyObservationItem[] = [];
   for (const entry of raw) {
     if (isRecord(entry)) {
@@ -30,16 +53,35 @@ export function bodyObservationItems(content: unknown): BodyObservationItem[] {
       items.push({ label: "", text });
     }
   }
-  return items;
+  if (items.length > 0) return items;
+
+  // 2. The allowlisted `statement` (+ `speakerName` label).
+  const statement = asText(payload.statement).trim();
+  if (statement !== "") {
+    return [{ label: asText(payload.speakerName).trim(), text: statement }];
+  }
+
+  // 3. Safe summary-level text (the render payload always carries `summary`),
+  //    else the record title/description.
+  const summary = firstText(
+    payload.summary,
+    record === null ? "" : record.description,
+    record === null ? "" : record.title,
+  ).trim();
+  if (summary !== "") return [{ label: "", text: summary }];
+  return [];
 }
 
 /**
  * Phase 19G §8 — BODY_OBSERVATION renderer. Observations are a labelled,
- * readable list (plain text; React escapes every value). No observations in
- * the payload -> safe GenericEvidence fallback.
+ * readable list (plain text; React escapes every value). The actual
+ * player-safe observation text is rendered deterministically from the
+ * ALLOWLISTED fields — `observations[]`, else `statement`
+ * (+ `speakerName`), else `summary`/DTO title/description. No readable
+ * text anywhere -> safe GenericEvidence fallback.
  */
 export default function BodyObservationEvidence({ record }: EvidenceRendererProps): ReactElement {
-  const items = bodyObservationItems(record.content);
+  const items = bodyObservationItems(record.content, record);
   if (items.length === 0) {
     return <GenericEvidence record={record} />;
   }

@@ -234,14 +234,27 @@ class ObjectInteractionRequest(BaseModel):
 
     interaction: str = Field(
         ...,
-        min_length=1,
+        # ADV-241 (HIGH): Phase 19F's decorative universal-inspection contract
+        # REQUIRES the browser to send the placement's OWN published
+        # interaction, which is "" for decorative/structural placements
+        # (door/table/lamp/vase; victim when unlinked). ``min_length=0`` makes
+        # that exact payload legal while keeping every OTHER validation as
+        # strict as before: the field stays a REQUIRED string type, so
+        # ``null`` / numeric / boolean payloads still answer 422 (pydantic
+        # string_type), and the SERVICE remains the interaction authority —
+        # an empty interaction is valid ONLY for a placement whose published
+        # interaction is "" (else the service's exact-match gate answers
+        # 409 INTERACTION_NOT_ALLOWED).
+        min_length=0,
         max_length=128,
         description=(
             "The interaction the player invoked; it must match the placement's "
             "published interaction exactly (mismatch -> 409) EXCEPT for a "
             "decorative placement (published interaction \"\"), which Phase "
             "19F accepts with ANY requested interaction and answers the "
-            "neutral inspection (no 409)."
+            "neutral inspection (no 409). The empty string is legal here "
+            "(ADV-241): the browser sends the published interaction verbatim, "
+            "and the service-side interaction gate stays authoritative."
         ),
     )
 
@@ -292,7 +305,11 @@ class InteractionResultDTO(BaseModel):
       interaction "") IS interactable and answers this 200 NEUTRAL inspection
       (this supersedes DEF-062's plain-text 409 dead-end for visible semantic
       placements — the no-leak semantics stay: the neutral inspection never
-      fabricates evidence and never exposes CaseTruth). A placement with NO
+      fabricates evidence and never exposes CaseTruth). ADV-243: an
+      EVIDENCE-LINKED placement ALWAYS runs the discovery flow even when its
+      published interaction is "" (a decorative-with-evidence placement is a
+      contradiction the service resolves in favor of the evidence — the link
+      must never become silently undiscoverable). A placement with NO
       player-visible representation stays non-interactable (the projection-
       gated 404), so no inspect-arbitrary-ID oracle exists.
     """

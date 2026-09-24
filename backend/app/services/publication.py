@@ -617,14 +617,19 @@ def placements_for_evidence(
 def placement_for_object(
     payload: Mapping[str, Any], object_id: str
 ) -> dict[str, Any] | None:
-    """THE placement of ``object_id`` (the FIRST in published placement order).
+    """THE placement of ``object_id`` (the FIRST in published placement order,
+    WITHOUT a visibility filter).
 
     Returns None when the object has no placement in the pinned version.
 
     DEF-050: for a legacy/crafted payload with duplicate placements of one
-    objectId, this resolves to the SAME placement that ``project_world_objects``
-    keeps (first in published order), so the interaction shown in the bootstrap
-    DTO is exactly the interaction the interact endpoint accepts.
+    objectId, this resolves the FIRST published entry. NOTE (ADV-242): the
+    runtime interact gate and the bootstrap projection use
+    ``visible_placement_for_object`` / ``project_world_objects`` — the FIRST
+    VISIBLE placement — so a crafted payload whose first duplicate is
+    non-visible projects/interacts on a LATER visible entry. This raw
+    first-entry resolver is kept for the tests/owners that need the raw
+    published entry; it is NOT the interact gate.
     """
     for placement in _placements_of(payload):
         if str(placement.get("object_id")) == object_id:
@@ -689,16 +694,27 @@ def visible_placement_for_object(
     asset / dangling evidence reference — e.g. an invisible collision-helper /
     non-object placement in a crafted payload) is NEVER interactable and must
     answer the same generic 404 as any unknown id (no inspect-arbitrary-ID
-    oracle). Properly published payloads contain only semantic-object
-    placements (``pipeline._world_graph_resolution_issues`` /
+    oracle). ADV-242: this gate resolves IDENTICALLY to the bootstrap
+    projection — a NON-VISIBLE duplicate placement is SKIPPED and the FIRST
+    VISIBLE placement of the object is returned, so exactly the placement the
+    bootstrap shows is the one the interact endpoint accepts (VISIBLE WORLD
+    OBJECT => INSPECTABLE). Properly published payloads contain only
+    semantic-object placements and NEVER duplicate objectIds
+    (``pipeline._world_graph_resolution_issues`` /
     ``safety.validate_world_graph`` prove every placement references a known
-    object + registered asset), so this gate is defensive fail-closed depth.
+    object + registered asset and reject duplicate placements at publish
+    time), so this gate is defensive fail-closed depth.
     """
     for placement in _placements_of(payload):
         if str(placement.get("object_id")) != object_id:
             continue
         if not _placement_is_visible(payload, placement):
-            return None
+            # ADV-242: skip a NON-VISIBLE duplicate exactly the way
+            # ``project_world_objects`` skips it — the FIRST VISIBLE
+            # placement is the one the bootstrap emits, so it is the one that
+            # must be interactable. (Before this fix the first non-visible
+            # entry returned None and a player-visible object answered 404.)
+            continue
         return placement
     return None
 
@@ -729,8 +745,10 @@ def project_world_objects(
       published evidence set — otherwise the placement is SKIPPED (never
       leak, never crash);
     - DEF-050: duplicate placements for one objectId (legacy/crafted payloads)
-      fold into ONE WorldObjectDTO — the FIRST placement in published order
-      wins, exactly matching ``placement_for_object``;
+      fold into ONE WorldObjectDTO — the FIRST *VISIBLE* placement in
+      published order wins (a non-visible first duplicate is SKIPPED),
+      exactly matching ``visible_placement_for_object`` (ADV-242: what the
+      bootstrap shows is precisely the placement the interact gate accepts);
     - ``evidenceId`` is exposed ONLY as a nullable id (never its content), and
       — PD-SEC-01 (Phase 20) — ONLY for evidence the player has already
       discovered: an UNDISCOVERED object's ``evidenceId`` is null (the id is
@@ -755,8 +773,11 @@ def project_world_objects(
         if object_id in emitted_object_ids:
             # DEF-050: a legacy/crafted payload may contain duplicate
             # placements for one objectId — the bootstrap MUST emit exactly
-            # one WorldObjectDTO per objectId (keep the FIRST placement in
-            # published order, matching ``placement_for_object``).
+            # one WorldObjectDTO per objectId (keep the FIRST VISIBLE
+            # placement in published order, matching
+            # ``visible_placement_for_object`` — ADV-242: a non-visible
+            # first duplicate is skipped, exactly as the interact gate skips
+            # it, so every shown object is inspectable).
             continue
         if object_id not in objects:
             continue  # unknown object -> skip the placement

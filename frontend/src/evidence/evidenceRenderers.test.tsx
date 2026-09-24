@@ -286,6 +286,89 @@ describe("other closed renderers — Phase 19G §8", () => {
     expect(html).toContain("Small puncture mark");
   });
 
+  it("BODY_OBSERVATION renders the allowlisted `statement` with the `speakerName` label — NOT the generic fallback", () => {
+    const record = recordWith({
+      renderType: "BODY_OBSERVATION",
+      speakerName: "Thomas Reed",
+      statement: "I saw the victim in the kitchen shortly before the noise.",
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain('aria-label="Body observations"');
+    expect(html).toContain("Thomas Reed:");
+    expect(html).toContain("I saw the victim in the kitchen shortly before the noise.");
+    // The rich body rendered (statement + speaker label); the panel description
+    // paragraph and the generic DTO-only section are not the body.
+    expect(html).not.toContain('aria-label="Evidence content"');
+    expect(html).not.toContain("Evidence description.");
+  });
+
+  it("BODY_OBSERVATION prefers a structured `observations[]` list over `statement`", () => {
+    const record = recordWith({
+      renderType: "BODY_OBSERVATION",
+      speakerName: "Thomas Reed",
+      statement: "A secondary statement that must NOT win.",
+      observations: [
+        { label: "Left wrist", text: "Bruising consistent with restraint" },
+        "A cut on the left forearm",
+      ],
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain("Bruising consistent with restraint");
+    expect(html).toContain("A cut on the left forearm");
+    expect(html).not.toContain("A secondary statement");
+    expect(html).not.toContain("Thomas Reed:");
+  });
+
+  it("BODY_OBSERVATION falls through an EMPTY `observations[]` to `statement` (no fabricated items)", () => {
+    const record = recordWith({
+      renderType: "BODY_OBSERVATION",
+      observations: [],
+      speakerName: "Thomas Reed",
+      statement: "I saw the victim in the kitchen shortly before the noise.",
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain('aria-label="Body observations"');
+    expect(html).toContain("Thomas Reed:");
+    expect(html).toContain("I saw the victim in the kitchen shortly before the noise.");
+  });
+
+  it("BODY_OBSERVATION falls back to `summary` then record title/description; fully empty stays safe", () => {
+    // `content.summary` alone (the backend always emits it).
+    const withSummary = recordWith({
+      renderType: "BODY_OBSERVATION",
+      summary: "A doctor note summarises the visible injuries.",
+    });
+    const html1 = renderToStaticMarkup(<EvidencePanel record={withSummary} onClose={() => {}} />);
+    expect(html1).toContain('aria-label="Body observations"');
+    expect(html1).toContain("A doctor note summarises the visible injuries.");
+
+    // No observations/statement/summary -> the DTO title/description serve.
+    const emptyPayload = recordWith({ renderType: "BODY_OBSERVATION" });
+    const html2 = renderToStaticMarkup(<EvidencePanel record={emptyPayload} onClose={() => {}} />);
+    expect(html2).toContain('aria-label="Body observations"');
+    expect(html2).toContain("Evidence description.");
+
+    // Nothing readable ANYWHERE -> graceful GenericEvidence fallback, no crash.
+    const bare = recordWith({ renderType: "BODY_OBSERVATION" }, { title: "", description: null });
+    const html3 = renderToStaticMarkup(<EvidencePanel record={bare} onClose={() => {}} />);
+    expect(html3).toContain("evidence-generic");
+    expect(html3).not.toContain("evidence-observations");
+  });
+
+  it("BODY_OBSERVATION keeps hostile statement/speaker text literal (React escapes)", () => {
+    const record = recordWith({
+      renderType: "BODY_OBSERVATION",
+      speakerName: "<img src=x onerror=alert(1)>",
+      statement: "<script>alert('body')</script> — ひらがな",
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).toContain("&lt;img");
+    expect(html).toContain("ひらがな");
+  });
+
   it("FORENSIC_COMPARISON renders the comparison result text (payload or DTO)", () => {
     const record = recordWith({
       renderType: "FORENSIC_COMPARISON",
