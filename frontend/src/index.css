@@ -1802,3 +1802,83 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+/* ======================================================================
+ * Phase 19G — Rich Evidence Rendering & player-readable time clues.
+ *
+ * Closed renderers emit plain text in simple semantic structures; these
+ * rules only lay them out. No animation anywhere (reduced-motion
+ * unaffected), no remote content, nothing interactive.
+ * ==================================================================== */
+
+/* Block heading used by every rich renderer (below the panel h3 title). */
+.evidence-block-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+/* Activity log / timeline tables: FIXED layout so wide payload text wraps
+ * inside the panel instead of overflowing horizontally (Phase 19G §7). */
+.evidence-activity-log,
+.evidence-timeline {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.evidence-activity-log th:first-child,
+.evidence-timeline th:first-child {
+  width: 4.5rem;
+}
+
+.evidence-activity-time {
+  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+
+/* Message labelled definition list. */
+.evidence-definition-list {
+  margin: 0.4rem 0 0;
+}
+
+.evidence-definition-list dt {
+  font-weight: 700;
+  margin: 0.4rem 0 0.1rem;
+}
+
+.evidence-definition-list dd {
+  margin: 0 0 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+/* Body observations — a labelled plain-text list. */
+.evidence-observations {
+  margin: 0.4rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.evidence-observations li {
+  margin: 0.25rem 0;
+  overflow-wrap: anywhere;
+}
+
+.evidence-observation-label {
+  font-weight: 700;
+}
+
+/* Document body renders line breaks as-is (plain text, CSP-safe). */
+.evidence-document-body {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Forensic comparison result / generic fallback copy. */
+.evidence-forensic-result,
+.evidence-generic-description {
+  margin: 0.35rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.evidence-generic-description {
+  color: var(--muted);
+}

@@ -33,6 +33,14 @@ Phase 6 adds the PLAYER-SAFE investigation projections (``project_world_objects`
 each is an explicit allowlist over the SAME frozen payload; no hidden section
 is ever read (REQUIREMENTS 41.4 — gameplay APIs return only PublicCase +
 PlayerKnowledge).
+
+Phase 19G adds RICH EVIDENCE RENDERING: ``project_read_content`` now returns the
+closed-render-model payload (``renderType`` + ``summary`` + type-specific
+fields, e.g. concrete ``entries`` with observed-at-derived times for
+ACTIVITY_LOG/TIMELINE records), so a discovered evidence panel shows the actual
+player-visible clue content — not only a generic one-line summary. The render
+projection is pure and deterministic (``app.domain.render``); zero provider
+calls, zero truth/solver material (Phase19G §3/§9/§10).
 """
 
 from __future__ import annotations
@@ -519,7 +527,10 @@ def _load_attempt_or_raise(session: Session, case_id: str, case_version: int) ->
 # ``solverProof``, ``universes``, ``report``, ``seed``, ``model``, ``prompt``,
 # ``locked``, ``reliability`` flags, ``source_ref`` / ``propositions`` of the
 # evidence) are NEVER read here. No blacklist logic — the DTO keys are the
-# explicit allowlist.
+# explicit allowlist. Phase 19G: ``project_read_content`` additionally consumes
+# ONLY the parsed ``observed_at`` strings of the published propositions to
+# synthesize concrete player-visible time entries — the proposition objects
+# themselves are never exposed.
 
 
 def _draft_of(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -621,6 +632,77 @@ def placement_for_object(
     return None
 
 
+def _placement_is_visible(
+    payload: Mapping[str, Any], placement: Mapping[str, Any]
+) -> bool:
+    """True when ``project_world_objects`` would EMIT this placement as a
+    player-visible WorldObjectDTO (the Phase 19F visibility gate).
+
+    Mirrors the bootstrap projection's per-placement validity rule exactly:
+    the object must exist in the published payload, the assetId must be
+    registered (AssetRegistry / catalog) or a valid CURRENT-version procedural
+    definition must exist, and a referenced evidenceId must exist in the
+    published evidence set. ANY mismatch means the object would NOT appear in
+    the player's scene -> it has no player-visible representation and is
+    therefore never inspectable (fail-closed; see rule 4 of Phase19F.md).
+    """
+    objects = _objects_by_id(payload)
+    evidence = _evidence_by_id(payload)
+    object_id = str(placement.get("object_id"))
+    if object_id not in objects:
+        return False
+    asset_id = placement.get("asset_id")
+    if not isinstance(asset_id, str):
+        return False
+
+    from app.generation.safety import AssetRegistry, is_procedural_asset_id
+
+    if is_procedural_asset_id(asset_id):
+        from app.assets.compiler import validate_embedded_definition
+
+        if validate_embedded_definition(
+            asset_id, placement.get("generated_definition")
+        ) is None:
+            return False
+    elif not AssetRegistry.is_allowed(asset_id):
+        from app.assets.catalog import load_catalog_from_repo
+
+        catalog = load_catalog_from_repo()
+        if asset_id not in catalog.by_id:
+            return False
+    evidence_id = placement.get("evidence_id")
+    if evidence_id is not None and str(evidence_id) not in evidence:
+        return False
+    return True
+
+
+def visible_placement_for_object(
+    payload: Mapping[str, Any], object_id: str
+) -> dict[str, Any] | None:
+    """THE placement of ``object_id`` (first in published order) IFF the
+    bootstrap projection would emit it as a player-visible WorldObjectDTO.
+
+    Phase 19F UNIVERSAL OBJECT INSPECTION gate: inspectability is derived from
+    PUBLICATION SEMANTICS — a published placement with a player-visible
+    representation is inspectable by default. A placement with NO player-
+    visible representation (unknown object / unregistered or unprojectable
+    asset / dangling evidence reference — e.g. an invisible collision-helper /
+    non-object placement in a crafted payload) is NEVER interactable and must
+    answer the same generic 404 as any unknown id (no inspect-arbitrary-ID
+    oracle). Properly published payloads contain only semantic-object
+    placements (``pipeline._world_graph_resolution_issues`` /
+    ``safety.validate_world_graph`` prove every placement references a known
+    object + registered asset), so this gate is defensive fail-closed depth.
+    """
+    for placement in _placements_of(payload):
+        if str(placement.get("object_id")) != object_id:
+            continue
+        if not _placement_is_visible(payload, placement):
+            return None
+        return placement
+    return None
+
+
 def _presentation_of(fact: dict[str, Any] | None) -> Mapping[str, Any]:
     if fact is None:
         return {}
@@ -639,10 +721,13 @@ def project_world_objects(
     Player-safe by construction:
 
     - NO coordinates, NO evidence content, NO propositions, NO hidden truth;
-    - every placement is re-validated: the object must exist in the published
-      payload, the assetId must be registered (AssetRegistry), and a
-      referenced evidenceId must exist in the published evidence set —
-      otherwise the placement is SKIPPED (never leak, never crash);
+    - every placement is re-validated (the SAME rule as
+      ``visible_placement_for_object``, which the Phase 19F interact gate
+      mirrors): the object must exist in the published payload, the assetId
+      must be registered (AssetRegistry) or carry a valid CURRENT-version
+      procedural definition, and a referenced evidenceId must exist in the
+      published evidence set — otherwise the placement is SKIPPED (never
+      leak, never crash);
     - DEF-050: duplicate placements for one objectId (legacy/crafted payloads)
       fold into ONE WorldObjectDTO — the FIRST placement in published order
       wins, exactly matching ``placement_for_object``;
@@ -765,10 +850,15 @@ def project_discovery(
 # Kind-specific read-content allowlists (frozen Phase 6 contract). Each entry
 # is the EXACT key set of the public ``content`` mapping for that kind; any
 # other key — raw proposition material included — can never reach the client.
+# Phase 19G adds the MESSAGE/DOCUMENT allowlisted readable fields for the
+# document/digital record kinds (sender/time/subject/body — Phase19G §8); the
+# same strict keys-only rule applies (absent fields are omitted).
 _READ_CONTENT_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "object": ("subtype", "locationId"),
     "email": ("fromPersonId", "toPersonIds", "subject", "body", "timestamp"),
     "financial": ("rows", "suspicious"),
+    "document": ("fromPersonId", "toPersonIds", "subject", "body", "timestamp"),
+    "digital": ("fromPersonId", "toPersonIds", "subject", "body", "timestamp"),
     "cctv": ("events", "cameraId"),
     "cctv_observation": ("events", "cameraId"),
     "view_record": ("events", "cameraId"),
@@ -797,17 +887,15 @@ def _filter_list_of_mappings(
     return out
 
 
-def project_read_content(payload: Mapping[str, Any], evidence_id: str) -> dict[str, Any]:
-    """The kind-allowlisted public ``content`` dict of one evidence record.
+def _allowlisted_content_of(fact: Mapping[str, Any]) -> dict[str, Any]:
+    """The kind-allowlisted public ``content`` dict of ONE evidence fact.
 
     Only the documented public presentation fields of the evidence may appear
     (one key per allowlist entry); every missing field is omitted, never
-    fabricated. Kinds without an allowlist map to ``{}`` (title/description
-    only appear at the DTO level, never inside ``content``).
+    fabricated. Kinds without an allowlist map to ``{}``. Phase 19G: this is
+    the ALLOWLIST HALF of the read projection — the render envelope built on
+    top of it lives in ``app.domain.render`` (the closed render-type model).
     """
-    fact = _evidence_by_id(payload).get(evidence_id)
-    if fact is None:
-        return {}
     kind = str(fact.get("kind"))
     allowed = _READ_CONTENT_ALLOWLIST.get(kind)
     if allowed is None:
@@ -829,6 +917,34 @@ def project_read_content(payload: Mapping[str, Any], evidence_id: str) -> dict[s
         else:
             content[key] = value
     return content
+
+
+def project_read_content(payload: Mapping[str, Any], evidence_id: str) -> dict[str, Any]:
+    """The Phase 19G player-safe render payload of one DISCOVERED evidence.
+
+    Deterministic and closed (Phase19G §3/§10):
+
+    - ``renderType`` — one of the frozen ``EvidenceRenderType`` values, derived
+      from the evidence kind (never from provider output);
+    - ``summary`` — the safe title/description-level text;
+    - type-specific fields (``entries`` for ACTIVITY_LOG/TIMELINE — whose
+      concrete times come from the ALLOWLISTED events/observed-at anchors, so a
+      WHEN record never renders as only "around the locked time"; ``comparison``
+      for FORENSIC_COMPARISON);
+    - the kind-allowlisted public keys (Phase 6 exact allowlist, no more).
+
+    Only the public presentation fields + parsed ``observed_at`` strings of the
+    published payload are read; the hidden sections (truth / solverProof /
+    universes / report / seed / model / prompt / locked) and the proposition
+    objects themselves are never touched. Unknown evidence maps to ``{}``
+    (the record-read boundary 404s long before this is reachable).
+    """
+    fact = _evidence_by_id(payload).get(evidence_id)
+    if fact is None:
+        return {}
+    from app.domain.render import render_payload_of
+
+    return render_payload_of(fact, content=_allowlisted_content_of(fact))
 
 
 def player_knowledge_snapshot(snapshot: Any) -> dict[str, list[str]]:
@@ -867,4 +983,5 @@ __all__ = [
     "public_case_dict_from_payload",
     "scene_spec_of",
     "serialize_published_payload",
+    "visible_placement_for_object",
 ]

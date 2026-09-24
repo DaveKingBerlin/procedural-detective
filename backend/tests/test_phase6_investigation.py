@@ -314,9 +314,13 @@ def test_missing_pinned_version_answers_404(phase5_app):
 
 
 # --------------------------------------------------------------------------- #
-# DEF-062 — payload-driven interaction affordances (the published interaction
-# is the single source: "" = decorative / NOT interactable, non-empty =
-# clickable, evidence-linked placements keep their interaction).
+# Phase 19F / DEF-062 — payload-driven interaction affordances (the published
+# interaction is the single source: "" = decorative / neutral-inspectable,
+# non-empty = clickable, evidence-linked placements keep their interaction).
+# Phase 19F UNIVERSAL OBJECT INSPECTION: every player-VISIBLE published
+# semantic placement (interaction "" included) is inspectable and answers a
+# NEUTRAL 200 inspection instead of the DEF-062 409; a placement with NO
+# player-visible representation stays non-interactable (fail-closed 404).
 # --------------------------------------------------------------------------- #
 
 ENV_OBJECT_IDS = (
@@ -353,20 +357,24 @@ def test_bootstrap_carries_empty_interaction_for_env_objects(phase5_app):
         assert by_id[object_id]["interaction"] == interaction, object_id
 
 
-def test_decorative_env_objects_are_not_interactable(phase5_app):
-    """Interacting with a decorative env object answers the safe 409
-    INTERACTION_NOT_ALLOWED envelope for ANY requested interaction, with NO
-    state change (nothing discovered, nothing visited)."""
+def test_decorative_env_objects_are_neutral_inspectable(phase5_app):
+    """Phase 19F: interacting with a decorative env object (published
+    interaction "") answers 200 with the NEUTRAL inspection for ANY requested
+    interaction — no evidence invented, nothing discovered. (Supersedes the
+    DEF-062 409 for VISIBLE semantic placements; the no-leak semantics stay.)"""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
     for object_id in ENV_OBJECT_IDS:
         for requested in ("inspect", "read", "open"):
             res = interact(phase5_app, pt_id, pt_token, object_id, requested)
-            assert res.status_code == 409, (object_id, requested)
-            assert res.json()["error"]["code"] == "INTERACTION_NOT_ALLOWED"
+            assert res.status_code == 200, (object_id, requested)
+            body = res.json()
+            assert body["evidenceId"] is None, (object_id, requested)
+            assert body["discovery"] is None, (object_id, requested)
+            assert body["inspection"]["relevant"] is False, (object_id, requested)
+            assert isinstance(body["inspection"]["label"], str)
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.discovered == ()
-    assert snap.visited == ()
 
 
 def test_evidence_objects_still_interactable(phase5_app):
@@ -387,15 +395,16 @@ def test_evidence_objects_still_interactable(phase5_app):
 
 
 def test_interact_decorative_env_object_never_mutates_knowledge(phase5_app):
-    """A decorative-object 409 does not disturb existing knowledge: after a
-    successful discovery the player's discovered/visited sets stay exact when
-    a later env-object interaction is refused."""
+    """A decorative-object NEUTRAL inspection (Phase 19F) does not disturb
+    existing knowledge: after a successful discovery the player's discovered
+    set stays exact when a later env-object inspection finds nothing on it."""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
     res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200
     res = interact(phase5_app, pt_id, pt_token, "apartment_table", "inspect")
-    assert res.status_code == 409
+    assert res.status_code == 200
+    assert res.json()["inspection"]["relevant"] is False
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.discovered == ("forensic_knife_match_01",)
     assert snap.visited == (SCENE_LOCATION,)
@@ -403,9 +412,11 @@ def test_interact_decorative_env_object_never_mutates_knowledge(phase5_app):
 
 def test_crafted_payload_decorative_vs_nonevidence_interactable(phase5_app):
     """The payload contract holds for arbitrary crafted payloads too: a
-    placement with interaction '' is 409 not-interactable; a NON-evidence
-    placement with a real interaction stays interactable (result 'interacted',
-    visited marked) — the branch the golden no longer exercises."""
+    VISIBLE placement with interaction '' is a neutral-inspection 200 (Phase
+    19F); a NON-evidence placement with a real interaction stays interactable
+    (result 'interacted', visited marked) — the branch the golden no longer
+    exercises. A placement WITH NO player-visible representation (object not
+    in the publication) stays non-interactable (404, fail-closed)."""
     store = phase5_app.state.store
     clock = phase5_app.state.clock
     from app.auth.tokens import issue_playthrough_access_token, verifier as v
@@ -476,10 +487,14 @@ def test_crafted_payload_decorative_vs_nonevidence_interactable(phase5_app):
         created_at=now, expires_at=now + 3600,
     )
 
-    # Decorative placement: NEVER interactable.
+    # Decorative visible placement: neutral-inspection 200 (Phase 19F).
     res = interact(phase5_app, pt_id, pt_token, "dec_thing", "inspect")
-    assert res.status_code == 409
-    assert res.json()["error"]["code"] == "INTERACTION_NOT_ALLOWED"
+    assert res.status_code == 200
+    dec = res.json()
+    assert dec["evidenceId"] is None
+    assert dec["discovery"] is None
+    assert dec["inspection"]["relevant"] is False
+    assert dec["inspection"]["label"] == "Dec Thing"
     # Non-evidence interactive placement: still works (no discovery, visited).
     res = interact(phase5_app, pt_id, pt_token, "btn_thing", "inspect")
     assert res.status_code == 200
@@ -487,6 +502,7 @@ def test_crafted_payload_decorative_vs_nonevidence_interactable(phase5_app):
     assert body["evidenceId"] is None
     assert body["discovery"] is None
     assert body["result"] == "interacted"
+    assert body["inspection"] == {"relevant": False, "label": "Btn Thing"}
     snap = store.snapshot_player_knowledge(pt_id)
     assert snap.discovered == ()
     assert snap.visited == (SCENE_LOCATION,)

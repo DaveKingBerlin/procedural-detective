@@ -121,15 +121,20 @@ def get_investigation(
     summary="Interact with one world object (validated by the placement)",
     description=(
         "Requires the playthrough's own playthroughAccessToken. The object "
-        "must exist in the PINNED version's placements (404 otherwise); a "
-        "DECORATIVE placement (published interaction \"\") is NOT "
-        "interactable and answers 409 INTERACTION_NOT_ALLOWED with no state "
-        "change (DEF-062); the requested interaction must otherwise equal "
-        "the placement's published interaction (mismatch -> 409 "
-        "INTERACTION_NOT_ALLOWED, no state change). An evidence-linked "
-        "placement runs the server-internal discovery logic (PD-SEC-01: the "
-        "direct client-facing discover route has been removed — this world "
-        "interaction is the ONLY discovery path) and returns its DTO."
+        "must be a VISIBLE published placement of the PINNED version's "
+        "world (404 otherwise — a placement with no player-visible "
+        "representation is never interactable, so no inspect-arbitrary-ID "
+        "oracle exists). Phase 19F: EVERY player-visible SEMANTIC object is "
+        "inspectable — a DECORATIVE placement (published interaction \"\") "
+        "answers 200 with the NEUTRAL inspection (supersedes the DEF-062 409 "
+        "for visible semantic placements; NO evidence is invented), a "
+        "non-evidence placement answers the neutral inspection, and the "
+        "requested interaction must otherwise equal the placement's published "
+        "interaction (mismatch -> 409 INTERACTION_NOT_ALLOWED, no state "
+        "change). An evidence-linked placement runs the server-internal "
+        "discovery logic (PD-SEC-01: the direct client-facing discover route "
+        "has been removed — this world interaction is the ONLY discovery "
+        "path) and returns its DTO."
     ),
 )
 def interact_with_object(

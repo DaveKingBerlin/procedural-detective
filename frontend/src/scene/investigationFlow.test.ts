@@ -9,7 +9,9 @@ import {
 } from "./investigationFlow";
 import {
   makeBootstrap,
+  makeCoffeeMugDefinition,
   makeEmailRecord,
+  makeRichWorldBootstrap,
   makeWitnessRecord,
   makeWorldObject,
   stripUndiscoveredEvidenceIds,
@@ -926,5 +928,291 @@ describe("PD-SEC-01 — pre-reveal evidence ids stripped from the bootstrap (Pha
     // The knowledge came ONLY from the server-confirmed interact response.
     const interactMock = services.interactObject as ReturnType<typeof vi.fn>;
     expect(interactMock).toHaveBeenCalledWith(PT_ID, "kitchen_knife", "inspect", TEST_TOKEN);
+  });
+});
+
+/* ======================================================================
+ * Phase 19F — UNIVERSAL OBJECT INSPECTION.
+ *
+ * Every published semantic world object is inspectable REGARDLESS of its
+ * published interaction (interactionWorks): v1 decorative/structural objects
+ * (door/table/lamp/vase/victim, published interaction "") and arbitrary
+ * procedural objects (fork, coffee mug, flower pot, ...) all reach
+ * POST /objects/{id}/interact with their OWN published interaction string.
+ * The backend answers 200: evidence placements run discovery as before;
+ * non-evidence placements return the safe inspection result
+ * (discovery:null, evidenceId:null) and the Phase 19C "Nothing relevant was
+ * found on the <label>." copy. INSPECTED (cosmetic, in-memory) and
+ * EVIDENCE_DISCOVERED (server-authoritative) are distinct states.
+ * ==================================================================== */
+
+describe("Phase 19F — universal object inspection (flow)", () => {
+  /** Server answers the SAFE inspection result for the given object ids. */
+  function inspectionServices(objectId: string): InvestigationServices {
+    return makeServices({
+      interactObject: vi.fn(
+        async (): Promise<InteractionResultDTO> => ({
+          objectId,
+          interaction: "",
+          evidenceId: null,
+          discovery: null,
+          result: "interacted",
+          // The confirmed Phase 19F wire shape for a non-evidence placement.
+          inspection: { relevant: false, label: "Nothing to see here" },
+        }),
+      ),
+    });
+  }
+
+  it("a decorative published object (vase): the published EMPTY interaction is sent, nothing-found toast, ZERO state mutation", async () => {
+    const services = inspectionServices("vase_01");
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+    expect(outcome.ok).toBe(true);
+
+    const feedback = await session.interact("vase_01");
+
+    // The request carries the PLACEMENT's OWN published string ("" for
+    // decorative placements — never a fabricated interaction).
+    expect(services.interactObject).toHaveBeenCalledWith(PT_ID, "vase_01", "", TEST_TOKEN);
+    expect(feedback.error).toBeNull();
+    expect(feedback.toast?.text).toBe("Nothing relevant was found on the Vase.");
+    expect(feedback.toast?.evidenceId).toBeNull();
+    expect(feedback.record).toBeNull();
+    expect(services.readRecord).not.toHaveBeenCalled();
+
+    // No discovery: knowledge, model flags, summary counter all untouched.
+    expect(session.discoveredEvidenceIdsSnapshot()).toEqual([]);
+    expect(session.readEvidenceIdsSnapshot()).toEqual([]);
+    const vase = session.sceneModel!.worldObjects.find((o) => o.objectId === "vase_01")!;
+    expect(vase.discovered).toBe(false);
+    expect(vase.read).toBe(false);
+    const summary = summaryFromSession(session, session.sceneModel!);
+    expect(summary.discoveredCount).toBe(0);
+    expect(summary.entries).toEqual([]);
+
+    // INSPECTED yes, EVIDENCE_DISCOVERED no — the two states are distinct.
+    expect(session.inspectedObjectIdsSnapshot()).toEqual(["vase_01"]);
+  });
+
+  it("every v1 decorative/structural object inspects with its own semantic label (door/lamp/table/victim)", async () => {
+    const services = inspectionServices("apartment_table");
+    const session = makeSession(services);
+    await session.start(null);
+
+    for (const [objectId, label] of [
+      ["apartment_door", "Door"],
+      ["apartment_lamp", "Lamp"],
+      ["apartment_table", "Table"],
+      ["victim_body_placeholder", "Victim"],
+    ] as const) {
+      const feedback = await session.interact(objectId);
+      expect(feedback.error, `${objectId} succeeds`).toBeNull();
+      expect(feedback.toast?.text, `${objectId} copy`).toBe(
+        `Nothing relevant was found on the ${label}.`,
+      );
+      expect(feedback.record, `${objectId} has no record`).toBeNull();
+      // The EMPTY published interaction is sent verbatim for every one.
+      expect(services.interactObject).toHaveBeenCalledWith(PT_ID, objectId, "", TEST_TOKEN);
+    }
+
+    expect(session.discoveredEvidenceIdsSnapshot()).toEqual([]);
+    expect(
+      session.inspectedObjectIdsSnapshot(),
+    ).toEqual(["apartment_door", "apartment_lamp", "apartment_table", "victim_body_placeholder"]);
+  });
+
+  it("INSPECTED vs EVIDENCE_DISCOVERED: knife -> both, vase -> inspected only", async () => {
+    const services = makeServices({
+      interactObject: vi.fn(
+        async (_pt: string, objectId: string): Promise<InteractionResultDTO> =>
+          objectId === "kitchen_knife"
+            ? knifeInteractResult()
+            : {
+                objectId,
+                interaction: "",
+                evidenceId: null,
+                discovery: null,
+                result: "interacted",
+                inspection: { relevant: false, label: "Vase" },
+              },
+      ),
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    // Vase first: inspected, not discovered.
+    const vaseFeedback = await session.interact("vase_01");
+    expect(vaseFeedback.toast?.text).toBe("Nothing relevant was found on the Vase.");
+    expect(session.inspectedObjectIdsSnapshot()).toEqual(["vase_01"]);
+    const vase = session.sceneModel!.worldObjects.find((o) => o.objectId === "vase_01")!;
+    expect(vase.discovered).toBe(false);
+
+    // Knife: inspected AND discovered (server-authoritative flags flip).
+    const knifeFeedback = await session.interact("kitchen_knife");
+    expect(knifeFeedback.toast?.text).toBe("Discovered: Kitchen knife");
+    expect(knifeFeedback.record).not.toBeNull();
+    expect(session.inspectedObjectIdsSnapshot()).toEqual(["kitchen_knife", "vase_01"]);
+    const knife = session.sceneModel!.worldObjects.find((o) => o.objectId === "kitchen_knife")!;
+    expect(knife.discovered).toBe(true);
+    expect(knife.read).toBe(true);
+
+    // Only the knife contributes to the evidence counter.
+    const summary = summaryFromSession(session, session.sceneModel!);
+    expect(summary.discoveredCount).toBe(1);
+  });
+
+  it("repeated decorative inspections are idempotent (no re-read, no duplicate inspected ids, no counter growth)", async () => {
+    const services = inspectionServices("vase_01");
+    const session = makeSession(services);
+    await session.start(null);
+
+    const first = await session.interact("vase_01");
+    const second = await session.interact("vase_01");
+
+    expect(first.toast?.text).toBe("Nothing relevant was found on the Vase.");
+    expect(second.toast?.text).toBe("Nothing relevant was found on the Vase.");
+    expect(services.readRecord).not.toHaveBeenCalled();
+    expect(session.inspectedObjectIdsSnapshot()).toEqual(["vase_01"]);
+    expect(session.discoveredEvidenceIdsSnapshot()).toEqual([]);
+    expect(summaryFromSession(session, session.sceneModel!).discoveredCount).toBe(0);
+  });
+
+  it("a FAILED interaction is NOT marked inspected and maps to the safe gameplay error", async () => {
+    const services = makeServices({
+      interactObject: vi.fn(async () => {
+        throw new ApiError(409, "INTERACTION_NOT_ALLOWED", "interaction forbidden", null);
+      }),
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    const feedback = await session.interact("vase_01");
+
+    expect(feedback.error?.message).toBe("That action is not allowed for this object right now.");
+    expect(session.inspectedObjectIdsSnapshot()).toEqual([]);
+    expect(session.discoveredEvidenceIdsSnapshot()).toEqual([]);
+  });
+
+  it("a hostile server inspection label NEVER reaches player-visible text (client-sanitized label wins)", async () => {
+    // Even though the Phase 19F response may carry a server label, the
+    // frontend toast derives from the client-sanitized semantic label — a
+    // hostile `proc.*` token in the inspection block must never be echoed.
+    const services = makeServices({
+      interactObject: vi.fn(
+        async (): Promise<InteractionResultDTO> => ({
+          objectId: "vase_01",
+          interaction: "",
+          evidenceId: null,
+          discovery: null,
+          result: "interacted",
+          inspection: { relevant: false, label: "proc.decor.a1b2c3d4e5f60718" },
+        }),
+      ),
+    });
+    const session = makeSession(services);
+    await session.start(null);
+
+    const feedback = await session.interact("vase_01");
+
+    expect(feedback.toast?.text).toBe("Nothing relevant was found on the Vase.");
+    expect(feedback.toast?.text).not.toContain("proc.");
+    expect(feedback.toast?.text).not.toContain("a1b2c3d4e5f60718");
+  });
+
+  it("Phase 19E compatibility: an UNKNOWN procedural object becomes inspectable after publication (NO whitelist)", async () => {
+    // A procedural "flower pot": proc.* asset id, valid generated definition,
+    // published interaction "" (decorative) — with universal inspection it is
+    // inspectable purely because it is a published semantic world object.
+    const bootstrap = makeBootstrap({
+      scene: {
+        ...makeBootstrap().scene,
+        worldObjects: [
+          ...makeBootstrap().scene.worldObjects,
+          makeWorldObject({
+            objectId: "flower_pot",
+            assetId: "proc.decor.f101d5a11e4b27c1",
+            assetType: "decor",
+            subtype: "flower_pot",
+            anchor: "dining_table",
+            interaction: "",
+            evidenceId: null,
+            generated: makeCoffeeMugDefinition({
+              assetId: "proc.decor.f101d5a11e4b27c1",
+              canonicalName: "Flower Pot",
+            }),
+          }),
+        ],
+      },
+    });
+    const services = makeServices({
+      getInvestigation: vi.fn(async () => bootstrap as never),
+      interactObject: vi.fn(
+        async (): Promise<InteractionResultDTO> => ({
+          objectId: "flower_pot",
+          interaction: "",
+          evidenceId: null,
+          discovery: null,
+          result: "interacted",
+          inspection: { relevant: false, label: "Flower Pot" },
+        }),
+      ),
+    });
+    const session = makeSession(services);
+    const outcome = await session.start(null);
+    expect(outcome.ok).toBe(true);
+
+    const feedback = await session.interact("flower_pot");
+
+    expect(services.interactObject).toHaveBeenCalledWith(PT_ID, "flower_pot", "", TEST_TOKEN);
+    expect(feedback.error).toBeNull();
+    expect(feedback.toast?.text).toBe("Nothing relevant was found on the Flower Pot.");
+    expect(feedback.record).toBeNull();
+    expect(session.inspectedObjectIdsSnapshot()).toEqual(["flower_pot"]);
+    expect(session.discoveredEvidenceIdsSnapshot()).toEqual([]);
+  });
+
+  it("unknown ids are still refused without a network call (model membership is the only gate)", async () => {
+    const services = makeServices();
+    const session = makeSession(services);
+    await session.start(null);
+
+    const feedback = await session.interact("not_a_published_object");
+
+    expect(feedback.error?.message).toBe("That object is not part of this scene.");
+    expect(services.interactObject).not.toHaveBeenCalled();
+    expect(session.inspectedObjectIdsSnapshot()).toEqual([]);
+  });
+
+  it("SOLVER ISOLATION: adding decorative inspectable objects does NOT change the candidate universe (scene model)", async () => {
+    // The rich world appends 8 decorative/structural objects (glass bottle,
+    // claw hammer, trophy, clock, desk lamp, wristwatch, fork, coffee mug)
+    // to the golden nine — ALL of them now inspectable. The accusation
+    // dimensions must be byte-identical: the candidate universe comes only
+    // from the bootstrap `candidates` block and is never augmented/derived
+    // from world objects (the accusation panel renders exactly these arrays).
+    const baseServices = makeServices();
+    const baseSession = makeSession(baseServices);
+    const baseOutcome = await baseSession.start(null);
+    expect(baseOutcome.ok).toBe(true);
+
+    const richServices = makeServices({
+      getInvestigation: vi.fn(async () => makeRichWorldBootstrap()),
+    });
+    const richSession = makeSession(richServices);
+    const richOutcome = await richSession.start(null);
+    expect(richOutcome.ok).toBe(true);
+
+    // The world genuinely grew...
+    expect(richSession.sceneModel!.worldObjects.length).toBeGreaterThan(
+      baseSession.sceneModel!.worldObjects.length,
+    );
+    expect(richSession.sceneModel!.worldObjects.length).toBe(17);
+    expect(baseSession.sceneModel!.worldObjects.length).toBe(9);
+    // ...but the accusation candidate universes are UNCHANGED, byte-for-byte.
+    expect(richSession.candidatesSnapshot).toEqual(baseSession.candidatesSnapshot);
+    expect(richSession.candidatesSnapshot!.suspects).toEqual(baseSession.candidatesSnapshot!.suspects);
+    expect(richSession.candidatesSnapshot!.motives).toEqual(baseSession.candidatesSnapshot!.motives);
+    expect(richSession.candidatesSnapshot!.weapons).toEqual(baseSession.candidatesSnapshot!.weapons);
   });
 });

@@ -315,6 +315,24 @@ export interface DiscoveryResultDTO {
   state: DiscoveryState;
 }
 
+/**
+ * Phase 19F — the universal object-inspection block of an interact response.
+ *
+ * For a NON-EVIDENCE published semantic object the backend answers the
+ * interact call with `inspection: { relevant: false, label: "<Humanized
+ * Label>" }` (discovery:null, evidenceId:null — the object was merely
+ * inspected; no evidence, no solver state). Evidence-linked interactions MAY
+ * also carry an inspection block (relevant:true + a label) but the frontend
+ * MUST treat it as optional — `discovery`/`evidenceId` remain the
+ * authoritative evidence path.
+ */
+export interface ObjectInspectionDTO {
+  /** False for decorative/non-evidence objects; true for evidence-linked ones. */
+  relevant: boolean;
+  /** The humanized semantic label ("Table", "Kitchen knife", ...) — null-safe. */
+  label: string | null;
+}
+
 /** 200 body of POST .../objects/{object_id}/interact. */
 export interface InteractionResultDTO {
   objectId: string;
@@ -322,6 +340,52 @@ export interface InteractionResultDTO {
   evidenceId: string | null;
   discovery: DiscoveryResultDTO | null;
   result: "interacted";
+  /**
+   * Phase 19F — universal inspection block. Optional: older/evidence-only
+   * interactions may omit it, and the frontend never depends on it for the
+   * discovery flow (evidenceId/discovery stay authoritative).
+   */
+  inspection?: ObjectInspectionDTO | null;
+}
+
+/* ======================================================================
+ * Phase 19G — closed evidence render-type contract (implemented in
+ * parallel by the backend agent).
+ *
+ * EvidenceReadResultDTO.content may now carry a closed `renderType` that
+ * the backend derives DETERMINISTICALLY. It is DECLARATIVE metadata only:
+ * a KEY into the frontend's own explicit renderer map — it can never map
+ * to code, dynamic component names, templates or HTML. Absence of
+ * `renderType` (an older server or a non-structure payload) is interpreted
+ * as the GENERIC_TEXT fallback and keeps the legacy kind-based viewers.
+ * Additive: every previous content shape stays valid.
+ * ==================================================================== */
+
+/** Closed evidence render-type universe (Phase 19G §3/§13). */
+export type EvidenceRenderType =
+  | "GENERIC_TEXT"
+  | "ACTIVITY_LOG"
+  | "FORENSIC_COMPARISON"
+  | "MESSAGE"
+  | "DOCUMENT"
+  | "BODY_OBSERVATION"
+  | "TIMELINE";
+
+/** One typed activity-log/timeline entry (Phase 19G §4/§7). `time` is the
+ *  concrete player-visible time text the server sent (e.g. "22:11"). */
+export interface EvidenceActivityLogEntryDTO {
+  time: string;
+  text: string;
+}
+
+/**
+ * The closed player-safe structured evidence payload. `renderType` is the
+ * only semantic key; every other field is plain text/array content that the
+ * matching closed renderer shows as TEXT (unknown keys are ignored).
+ */
+export interface EvidenceContentDTO {
+  renderType?: EvidenceRenderType | null;
+  [key: string]: unknown;
 }
 
 /**
@@ -335,7 +399,9 @@ export interface EvidenceReadResultDTO {
   description: string | null;
   openedAt: string;
   readByPlayer: true;
-  content: Record<string, unknown>;
+  /** Player-safe structured content; may carry a closed `renderType` (Phase
+   *  19G). Absent/unknown renderType falls back to GENERIC_TEXT rendering. */
+  content: EvidenceContentDTO;
 }
 
 /* ======================================================================

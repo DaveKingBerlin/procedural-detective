@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import type { EvidenceReadResultDTO } from "../api/types";
-import { evidenceContent, type EvidenceRow } from "./evidenceContent";
+import { evidenceContent, evidenceRendererFor, type EvidenceRow } from "./evidenceContent";
 import { evidenceHeaderTitle, type EvidencePreviewModel } from "./evidencePreview";
 
 export interface EvidencePanelProps {
@@ -34,9 +34,16 @@ export interface EvidencePanelProps {
  * visual preview swatch built from the PUBLIC registry color + label. All of
  * that data originates in the application-owned registries, never in the
  * record payload, so no-truth-leak guarantees hold.
+ *
+ * Phase 19G: when `record.content` carries a closed `renderType`, the content
+ * region is rendered by the matching closed renderer (see
+ * evidenceContent.evidenceRendererFor) — same plain-text, CSP-safe rules.
+ * Renderers emit no focusable controls, so the panel's Close button and the
+ * scene's Escape handling are completely unchanged.
  */
 export default function EvidencePanel({ record, onClose, objectLabel, preview }: EvidencePanelProps) {
   const { title, description, rows } = evidenceContent(record);
+  const RichEvidence = evidenceRendererFor(record);
   const header = evidenceHeaderTitle(objectLabel, title);
 
   return (
@@ -63,10 +70,21 @@ export default function EvidencePanel({ record, onClose, objectLabel, preview }:
           </span>
         </div>
       )}
-      {description !== null && description !== "" && (
+      {/* Phase 19G: a payload carrying a closed renderType routes the WHOLE
+          content region through that renderer (which owns the body, incl. the
+          DTO title/description in its GenericEvidence fallback). The legacy
+          description paragraph stays on the kind-based rows path only, so a
+          generic sentence can never crowd out concrete rich content. */}
+      {RichEvidence === null && description !== null && description !== "" && (
         <p className="evidence-description">{description}</p>
       )}
-      <div className="evidence-content">{rows.map((row, index) => renderRow(row, index))}</div>
+      <div className="evidence-content">
+        {RichEvidence !== null ? (
+          <RichEvidence record={record} />
+        ) : (
+          rows.map((row, index) => renderRow(row, index))
+        )}
+      </div>
       <footer className="evidence-panel-footer">
         <button
           type="button"

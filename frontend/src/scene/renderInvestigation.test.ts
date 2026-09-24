@@ -23,8 +23,9 @@ import {
 import {
   makeBootstrap,
   makeEmailRecord,
-  makeIcePickDefinition,
+  makeForkWorldObject,
   makeHotelSuiteBootstrap,
+  makeIcePickDefinition,
   makeOfficeBootstrap,
   makeProcWorldObject,
   makeTrophyDefinition,
@@ -309,15 +310,25 @@ describe("mesh click dispatch (Phase 8_1 A1/A4 + E)", () => {
     result.dispose();
   });
 
-  it("a NON-interactable click (victim) does NOT call onPick", () => {
-    const onPick = vi.fn();
-    const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions({ onPick }));
+  it("a NON-interactable semantic object click (victim) NOW dispatches onPick (Phase 19F universal inspection)", () => {
+    // Phase 19F: the victim is a PUBLISHED SEMANTIC world object (its DTO is
+    // in worldObjects even though interactionWorks is false — no published
+    // interaction). Universal object inspection makes every published
+    // semantic object a pick target: clicking the victim resolves to its
+    // objectId and dispatches onPick (the session then sends the published
+    // interaction; the backend decides discovery vs inspection).
+    const picked: string[] = [];
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      knifeModel(),
+      nullEngineOptions({ onPick: (id) => picked.push(id) }),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
 
     const victimRoot = result.scene.getNodeByName("pd_obj_victim_body_placeholder");
     result.scene.onPointerDown?.(pointerMove(0, 0) as never, pickInfo(victimRoot) as never, POINTER_TYPES);
-    expect(onPick).not.toHaveBeenCalled();
+    expect(picked).toEqual(["victim_body_placeholder"]);
     result.dispose();
   });
 
@@ -367,6 +378,149 @@ describe("mesh click dispatch (Phase 8_1 A1/A4 + E)", () => {
     );
     expect(feedback.error).toBeNull();
     expect(feedback.toast?.text).toBe("Nothing relevant was found on the Kitchen knife.");
+  });
+});
+
+/* ======================================================================
+ * Phase 19F — UNIVERSAL OBJECT INSPECTION (Babylon picking).
+ *
+ * Every published SEMANTIC world object must be pickable regardless of its
+ * published interaction (interactionWorks): door/lamp/table/vase/victim and
+ * generated decorative objects are all in `worldObjects` with a
+ * pd_obj_<id> root + pd_part_* / pd_hit_* children, and clicking ANY of
+ * those meshes dispatches onPick. The kit-shell/decor/floor/wall/light/ring
+ * meshes carry no pd_ identity and stay non-pickable by construction.
+ * ==================================================================== */
+
+describe("Phase 19F — universal picking for every published semantic object", () => {
+  it("clicks on EVERY golden v1 object (interactive AND decorative) dispatch onPick", () => {
+    const picked: string[] = [];
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      knifeModel(),
+      nullEngineOptions({ onPick: (id) => picked.push(id) }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    // All nine published world objects — including the v1 decorative/
+    // structural ones that used to be dead clicks (interactionWorks false).
+    for (const objectId of [
+      "apartment_door",
+      "apartment_lamp",
+      "apartment_laptop",
+      "apartment_table",
+      "kitchen_knife",
+      "letter_opener",
+      "scissors",
+      "vase_01",
+      "victim_body_placeholder",
+    ]) {
+      const root = scene.getNodeByName(meshNameFor(objectId)) as Mesh | null;
+      expect(root, `${objectId} root exists`).not.toBeNull();
+      scene.onPointerDown?.(
+        pointerMove(0, 0) as never,
+        pickInfo(root) as never,
+        POINTER_TYPES,
+      );
+    }
+    expect(picked.sort()).toEqual([
+      "apartment_door",
+      "apartment_lamp",
+      "apartment_laptop",
+      "apartment_table",
+      "kitchen_knife",
+      "letter_opener",
+      "scissors",
+      "vase_01",
+      "victim_body_placeholder",
+    ]);
+    result.dispose();
+  });
+
+  it("clicks on the vase CHILD part resolve to the vase semantic root and dispatch onPick", () => {
+    const picked: string[] = [];
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      knifeModel(),
+      nullEngineOptions({ onPick: (id) => picked.push(id) }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    // The vase is a single-part primitive: its pd_part_vase_01_0 child must
+    // parent-walk to pd_obj_vase_01 exactly like an evidence part would.
+    const part = scene.getNodeByName("pd_part_vase_01_0") as Mesh | null;
+    expect(part, "vase part exists").not.toBeNull();
+    expect(objectIdFromPickedMesh(part)).toBe("vase_01");
+    scene.onPointerDown?.(pointerMove(0, 0) as never, pickInfo(part) as never, POINTER_TYPES);
+    expect(picked).toEqual(["vase_01"]);
+    result.dispose();
+  });
+
+  it("fork child parts (Phase 19E procedural object) resolve to the semantic fork root and dispatch onPick", () => {
+    // Phase 19F §"Phase 19E compatibility": arbitrary procedural objects
+    // (fork = 2 generated parts: prongs + handle) become pickable after
+    // publication with NO whitelist — the pd_part_fork_* children resolve to
+    // the semantic "fork" root. In the golden scene the fork ALSO carries an
+    // evidence association, so the full click -> onPick -> session.interact
+    // chain reaches discovery via the SEMANTIC id.
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [...bootstrap.scene.worldObjects, makeForkWorldObject()];
+    const model = buildInvestigationScene(bootstrap);
+    const picked: string[] = [];
+    const result = createInvestigationScene(NOOP_CANVAS, model, nullEngineOptions({ onPick: (id) => picked.push(id) }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    for (const partName of ["pd_part_fork_0", "pd_part_fork_1"]) {
+      const part = scene.getNodeByName(partName) as Mesh | null;
+      expect(part, partName).not.toBeNull();
+      expect(objectIdFromPickedMesh(part)).toBe("fork");
+    }
+    scene.onPointerDown?.(
+      pointerMove(0, 0) as never,
+      pickInfo(scene.getNodeByName("pd_part_fork_1")) as never,
+      POINTER_TYPES,
+    );
+    expect(picked).toEqual(["fork"]);
+    result.dispose();
+  });
+
+  it("kit-shell and decor meshes never dispatch a pick (non-pickable by construction)", () => {
+    // Office kit shell (floor/wall/door_1/lamp_01) + Phase 18D decor props
+    // (decor_desk_01) carry NO pd_ identity — clicking them must NOT dispatch.
+    // The office SEMANTIC world objects (e.g. office_vase) stay pickable.
+    const picked: string[] = [];
+    const result = createInvestigationScene(
+      NOOP_CANVAS,
+      buildInvestigationScene(makeOfficeBootstrap()),
+      nullEngineOptions({ onPick: (id) => picked.push(id) }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const scene = result.scene;
+
+    for (const shellName of ["floor_01", "wall_north", "door_1", "lamp_01", "decor_desk_01", "decor_monitor_01", "light_01_point"]) {
+      const mesh = scene.getNodeByName(shellName) as Mesh | null;
+      expect(mesh, `${shellName} shell mesh exists`).not.toBeNull();
+      scene.onPointerDown?.(
+        pointerMove(0, 0) as never,
+        pickInfo(mesh) as never,
+        POINTER_TYPES,
+      );
+    }
+    expect(picked, "no shell/decor click may dispatch").toEqual([]);
+
+    // Sanity contrast: the semantic office vase (published, decorative) IS pickable.
+    const vase = scene.getNodeByName("pd_obj_office_vase") as Mesh | null;
+    expect(vase, "office semantic vase root exists").not.toBeNull();
+    scene.onPointerDown?.(pointerMove(0, 0) as never, pickInfo(vase) as never, POINTER_TYPES);
+    expect(picked).toEqual(["office_vase"]);
+    result.dispose();
   });
 });
 
@@ -895,7 +1049,13 @@ describe("Phase 13 — generated definition rendering (NullEngine)", () => {
     result.dispose();
   });
 
-  it("interaction remains payload-driven: a silent generated object has no ring and no onPick", () => {
+  it("interaction remains payload-driven: a silent generated object has no ring but IS pickable (Phase 19F)", () => {
+    // Phase 19F: the RING/affordance stays payload-driven (a silent generated
+    // object with interaction:"" and no evidence gets no ring — same as
+    // before), but universal inspection makes every published semantic object
+    // CLICKABLE: clicking the trophy root now dispatches onPick, and the
+    // session routes the published interaction to the backend (which answers
+    // the safe inspection result for non-evidence objects).
     const onPick = vi.fn();
     const result = createInvestigationScene(
       NOOP_CANVAS,
@@ -910,7 +1070,7 @@ describe("Phase 13 — generated definition rendering (NullEngine)", () => {
     expect(scene.getNodeByName("pd_ring_custom_trophy")).toBeNull();
     const root = scene.getNodeByName("pd_obj_custom_trophy");
     scene.onPointerDown?.(pointerMove(0, 0) as never, pickInfo(root) as never, POINTER_TYPES);
-    expect(onPick).not.toHaveBeenCalled();
+    expect(onPick).toHaveBeenCalledWith("custom_trophy");
     result.dispose();
   });
 

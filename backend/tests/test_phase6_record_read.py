@@ -9,12 +9,20 @@
       -> 404)
 - O11 v1 read unchanged after v2 publish
 - O15 read DTO contains only the allowed fields: exact top-level key set AND
-      exact kind-allowlisted ``content`` key set (email; default {} for
-      kinds without an allowlist)
-- project_read_content: every kind's allowlist is applied exactly, absent
-  fields are omitted (never fabricated), and no raw proposition material can
-  ever leak into ``content``
+      exact render-envelope ``content`` key set (Phase 19G: ``renderType`` +
+      ``summary`` + type-specific fields + the exact kind-allowlisted keys;
+      a known kind WITHOUT readable fields still carries the closed
+      ``renderType`` + safe ``summary`` — never breaks the UI)
+- project_read_content: every kind's allowlist is applied exactly (the render
+      envelope only ever carries allowlisted keys on top of the closed
+      metadata), absent fields are omitted (never fabricated), and no raw
+      proposition material can ever leak into ``content``
 - openedAt is ISO-8601 UTC and stable across repeat reads
+
+Phase 19G contract note: the content key sets below are the FROZEN Phase 19G
+contract (Rich Evidence Rendering) — ``renderType`` is always the closed
+derived enum value, ``summary`` is the safe title/description-level text, and
+the Phase-6 allowlisted keys are unchanged on top of them.
 """
 
 from __future__ import annotations
@@ -52,12 +60,28 @@ READ_KEYS = {
     "readByPlayer",
     "content",
 }
-EMAIL_CONTENT_KEYS = {"fromPersonId", "toPersonIds", "subject", "body", "timestamp"}
+# Phase 19G frozen render-envelope for the golden email: closed renderType +
+# summary + the exact Phase-6 allowlisted email keys.
+EMAIL_CONTENT_KEYS = {
+    "renderType",
+    "summary",
+    "fromPersonId",
+    "toPersonIds",
+    "subject",
+    "body",
+    "timestamp",
+}
 GOLDEN_EMAIL_BODY = (
     "Sarah, I reviewed the accounts again. I think we need to talk "
     "tonight before the board meeting, in person. Please do not involve "
     "the auditors until then. -Thomas"
 )
+GOLDEN_EMAIL_SUMMARY = "A short email Thomas sent the evening before the murder."
+GOLDEN_KNIFE_CONTENT = {
+    "renderType": "FORENSIC_COMPARISON",
+    "summary": "Structured evidence fact.",
+    "comparison": "Blood on the kitchen knife matches the victim",
+}
 
 
 def test_4_undiscovered_cannot_be_read(phase5_app):
@@ -93,8 +117,9 @@ def test_7_read_after_discover_succeeds(phase5_app):
     assert body["evidenceId"] == KNIFE_EVIDENCE
     assert body["kind"] == "forensic"
     assert body["readByPlayer"] is True
-    # "forensic" has no content allowlist -> empty mapping.
-    assert body["content"] == {}
+    # Phase 19G: forensic evidence renders the closed FORENSIC_COMPARISON
+    # envelope (renderType + safe summary + the player-visible comparison).
+    assert body["content"] == GOLDEN_KNIFE_CONTENT
     # Parsable ISO-8601 UTC.
     opened = datetime.datetime.fromisoformat(body["openedAt"])
     assert opened.tzinfo is not None and opened.utcoffset().total_seconds() == 0
@@ -157,8 +182,11 @@ def test_15_read_dto_exact_keys_and_email_allowlist(phase5_app):
     assert body["evidenceId"] == EMAIL_EVIDENCE
     assert body["kind"] == "email"
     assert body["title"] == "Re: the missing funds"
-    # The email content is EXACTLY the documented allowlist.
+    # The email content is EXACTLY the documented Phase 19G envelope: the
+    # closed renderType + safe summary + the exact email allowlist.
     assert set(body["content"].keys()) == EMAIL_CONTENT_KEYS
+    assert body["content"]["renderType"] == "MESSAGE"
+    assert body["content"]["summary"] == GOLDEN_EMAIL_SUMMARY
     assert body["content"]["fromPersonId"] == "thomas_reed"
     assert body["content"]["toPersonIds"] == ["sarah_miller"]
     assert body["content"]["subject"] == "We need to talk tonight"
@@ -181,7 +209,14 @@ def test_read_unknown_record_answers_404(phase5_app):
 # --------------------------------------------------------------------------- #
 
 
-def _payload_with(presentation: dict, kind: str) -> dict:
+def _payload_with(presentation: dict, kind: str, *, observed_at: str | None = None) -> dict:
+    proposition: dict = {"type": "OTHER", "structured": {"SECRET_SOLVER_ONLY": 1}}
+    if observed_at is not None:
+        proposition = {
+            "type": "CRIME_SCENE_OBSERVATION_AT",
+            "observed_at": observed_at,
+            "structured": {"SECRET_SOLVER_ONLY": 1},
+        }
     return {
         "draft": {
             "evidence": [
@@ -190,9 +225,7 @@ def _payload_with(presentation: dict, kind: str) -> dict:
                     "kind": kind,
                     "reliability": "high",
                     "presentation": presentation,
-                    "propositions": [
-                        {"type": "OTHER", "structured": {"SECRET_SOLVER_ONLY": 1}}
-                    ],
+                    "propositions": [proposition],
                 }
             ]
         }
@@ -200,13 +233,19 @@ def _payload_with(presentation: dict, kind: str) -> dict:
 
 
 def test_15_content_allowlist_exact_keys_per_kind():
-    """Every kind may emit ONLY its documented keys; absent fields are omitted
-    — never fabricated from propositions or anything else."""
+    """Every kind may emit ONLY its documented keys PLUS the closed Phase 19G
+    envelope keys (renderType + summary + type-specific fields); absent fields
+    are omitted — never fabricated from propositions or anything else."""
     cases = [
         (
             "object",
             {"subtype": "sharp_weapon", "locationId": "kitchen", "extra": "X"},
-            {"subtype": "sharp_weapon", "locationId": "kitchen"},
+            {
+                "renderType": "GENERIC_TEXT",
+                "summary": "",
+                "subtype": "sharp_weapon",
+                "locationId": "kitchen",
+            },
         ),
         (
             "email",
@@ -218,6 +257,8 @@ def test_15_content_allowlist_exact_keys_per_kind():
                 "timestamp": "2026-09-11T21:00:00+02:00",
             },
             {
+                "renderType": "MESSAGE",
+                "summary": "",
                 "fromPersonId": "a",
                 "toPersonIds": ["b"],
                 "subject": "s",
@@ -242,6 +283,8 @@ def test_15_content_allowlist_exact_keys_per_kind():
                 "suspicious": False,
             },
             {
+                "renderType": "DOCUMENT",
+                "summary": "",
                 "rows": [
                     {
                         "date": "2026-04-03",
@@ -269,6 +312,8 @@ def test_15_content_allowlist_exact_keys_per_kind():
                 "cameraId": "hall_cam_01",
             },
             {
+                "renderType": "ACTIVITY_LOG",
+                "summary": "",
                 "events": [
                     {
                         "time": "2026-09-11T21:38:12+02:00",
@@ -277,21 +322,51 @@ def test_15_content_allowlist_exact_keys_per_kind():
                     }
                 ],
                 "cameraId": "hall_cam_01",
+                # Phase 19G: the concrete, chronologically-ordered log entries
+                # projected from the ALLOWLISTED events (time + action).
+                "entries": [
+                    {"time": "2026-09-11T21:38:12+02:00", "text": "enter"}
+                ],
             },
         ),
         (
             "witness_statement",
             {"speakerName": "Emily Reed", "statement": "I heard shouting.", "honesty": 0},
-            {"speakerName": "Emily Reed", "statement": "I heard shouting."},
+            {
+                "renderType": "BODY_OBSERVATION",
+                "summary": "",
+                "speakerName": "Emily Reed",
+                "statement": "I heard shouting.",
+            },
         ),
         (
-            "forensic",  # no allowlist -> default {}
-            {"title": "t", "description": "d"},
-            {},
+            # Kind with NO allowlist: still renders the closed envelope with
+            # the player-safe forensic comparison result (Phase 19G §8).
+            "forensic",
+            {
+                "title": "Forensic comparison",
+                "description": "The object matches the wound pattern.",
+            },
+            {
+                "renderType": "FORENSIC_COMPARISON",
+                "summary": "The object matches the wound pattern.",
+                "comparison": "The object matches the wound pattern.",
+            },
+        ),
+        (
+            # Time-bearing evidence WITHOUT events: the deterministic
+            # observed-at synthesis guarantees a concrete player-visible time.
+            "cctv",
+            {"title": "Activity logged at the scene", "description": "log"},
+            {
+                "renderType": "ACTIVITY_LOG",
+                "summary": "log",
+                "entries": [{"time": "2026-09-11T22:16:50+02:00", "text": "Activity logged at the scene"}],
+            },
         ),
     ]
     for kind, presentation, expected in cases:
-        payload = _payload_with(presentation, kind)
+        payload = _payload_with(presentation, kind, observed_at="2026-09-11T22:16:50+02:00" if kind == "cctv" else None)
         content = project_read_content(payload, "ev_kind_probe")
         assert content == expected, kind
         # nothing solver-side ever leaks into content
@@ -303,8 +378,13 @@ def test_15_content_allowlist_exact_keys_per_kind():
 
 
 def test_15_absent_fields_are_omitted_not_fabricated():
+    # No allowlisted readable fields -> NO fabricated keys; the closed Phase 19G
+    # envelope still carries only renderType + the safe title text.
     payload = _payload_with({"title": "Only title"}, "email")
-    assert project_read_content(payload, "ev_kind_probe") == {}
+    assert project_read_content(payload, "ev_kind_probe") == {
+        "renderType": "MESSAGE",
+        "summary": "Only title",
+    }
 
 
 def test_unknown_evidence_projects_empty_content():

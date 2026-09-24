@@ -273,6 +273,14 @@ export function createInvestigationScene(
   let hoveredId: string | null = null;
   // Phase 15: at most one selected object at a time (the evidence-panel owner).
   let selectedId: string | null = null;
+  /**
+   * Phase 19F — the identity of EVERY published semantic world object in
+   * this scene. Each is rendered as a pd_obj_<id> root (with its
+   * pd_part_* / pd_hit_* children) and is a stable pick target that
+   * dispatches onPick; the kit-shell/decoration primitives are never members
+   * here (they carry no pd_ identity and stay non-pickable by construction).
+   */
+  const publishedObjectIds = new Set(model.worldObjects.map((o) => o.objectId));
 
   try {
     const engine = options.createEngine
@@ -555,14 +563,22 @@ export function createInvestigationScene(
     };
 
     // Picking: resolve the picked mesh (any composite child or the root)
-    // back to a deterministic object id via the parent chain. Only
-    // INTERACTABLE objects dispatch onPick — clicking the non-interactable
-    // victim never fires an interaction. Any pointer interaction also stops
+    // back to a deterministic object id via the parent chain.
+    // Phase 19F — UNIVERSAL OBJECT INSPECTION: the blocking issue was that
+    // onPick only fired when the object was inside the `interactables` map
+    // (interactionWorks === true), so clicking the v1 decorative/structural
+    // objects (vase, table, door, lamp, victim) never dispatched. Now ANY
+    // published semantic world object (visible, non-void — exactly the
+    // `model.worldObjects` set, each of which is rendered as a pd_obj_<id>
+    // root with pd_part_*/pd_hit_* children) dispatches onPick. The
+    // kit-shell/decoration primitives (floor/wall/door_1/lamp_01/decor_*,
+    // which carry NO pd_ identity) resolve to null from the parent walk and
+    // stay non-pickable by construction. Any pointer interaction also stops
     // the slow auto-orbit (turntable must halt the moment the player acts).
     scene.onPointerDown = (_evt, pickInfo) => {
       stopFocusOrbit();
       const objectId = objectIdFromPickedMesh(pickInfo.pickedMesh);
-      if (objectId !== null && interactables.has(objectId) && options.onPick) {
+      if (objectId !== null && publishedObjectIds.has(objectId) && options.onPick) {
         options.onPick(objectId);
       }
     };

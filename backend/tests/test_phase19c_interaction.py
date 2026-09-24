@@ -8,8 +8,11 @@ Covers the Phase 19C mandate end-to-end:
 2. repeated interaction is idempotent (second returns state
    "already-discovered" and never double-marks);
 3. non-evidence interact feedback (backend contract, §3):
-   - a DECORATIVE placement (vase; published interaction "") stays 409
-     INTERACTION_NOT_ALLOWED with no state change;
+   - EVERY player-visible SEMANTIC object is inspectable (Phase 19F): a
+     DECORATIVE placement (vase; published interaction "") answers 200 with
+     the neutral inspection ``{relevant:false, label}`` and no state change
+     (the Phase 19F universal-inspection rule supersedes DEF-062's plain 409
+     dead-end for visible semantic placements);
    - a NON-DECORATIVE interactable-but-no-evidence placement answers 200 with
      ``discovery: null`` and ``evidenceId: null`` (the frontend renders the
      "Nothing relevant was found on <X>." feedback);
@@ -55,6 +58,7 @@ from phase6_helpers import (  # noqa: E402
     KNIFE_OBJECT,
     LAPTOP_OBJECT,
     EMAIL_EVIDENCE,
+    SCENE_LOCATION,
     case_for,
     client,
     interact,
@@ -107,7 +111,15 @@ def test_1_evidence_linked_interaction_discovers_and_dto_is_lean(phase5_app):
     assert body["discovery"]["evidenceId"] == EMAIL_EVIDENCE
     assert body["discovery"]["kind"] == "email"
     assert body["discovery"]["interaction"] == "read"
-    assert set(body) == {"objectId", "interaction", "evidenceId", "discovery", "result"}
+    assert set(body) == {
+        "objectId",
+        "interaction",
+        "evidenceId",
+        "discovery",
+        "result",
+        "inspection",  # Phase 19F additive: {relevant: true, label}
+    }
+    assert body["inspection"] == {"relevant": True, "label": "Apartment Laptop"}
     assert set(body["discovery"]) == {"evidenceId", "kind", "title", "interaction", "state"}
     assert_no_pre_reveal_material(body, canonical_time="2026-09-11T22:17:00+02:00")
 
@@ -143,18 +155,31 @@ def test_2_repeated_interaction_is_idempotent(phase5_app):
     assert len(snap.discovered) == 1  # never double-marked
 
 
-def test_3_decorative_placement_stays_409_no_state_change(phase5_app):
-    """vase_01 (published interaction "") stays non-interactable: 409
-    INTERACTION_NOT_ALLOWED, no state change (DEF-062 keeps working)."""
+def test_3_decorative_placement_returns_neutral_inspection_no_state_change(phase5_app):
+    """vase_01 (published interaction "") is a player-VISIBLE semantic object,
+    so Phase 19F makes it inspectable: ANY requested interaction answers 200
+    with the neutral inspection ``{relevant: false, label: "Vase"}``, NO
+    evidence is invented and NO knowledge is discovered. (This supersedes the
+    DEF-062 409 for VISIBLE semantic placements; the no-leak semantics stay —
+    a neutral inspection never reveals evidence/truth.)"""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
 
-    res = interact(phase5_app, pt_id, pt_token, "vase_01", "inspect")
-    assert res.status_code == 409
-    assert res.json()["error"]["code"] == "INTERACTION_NOT_ALLOWED"
-    assert_sanitized_error(res.text)
+    for requested in ("inspect", "read", "open"):
+        res = interact(phase5_app, pt_id, pt_token, "vase_01", requested)
+        assert res.status_code == 200, (requested, res.json())
+        body = res.json()
+        assert body["objectId"] == "vase_01"
+        assert body["interaction"] == ""  # published decorative interaction
+        assert body["evidenceId"] is None
+        assert body["discovery"] is None
+        assert body["result"] == "interacted"
+        assert body["inspection"] == {"relevant": False, "label": "Vase"}
+        assert_sanitized_error(res.text)
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.discovered == ()
+    # the inspection is a successful interaction: the location is visited.
+    assert snap.visited == (SCENE_LOCATION,)
 
 
 def test_3b_non_decorative_interactable_without_evidence_200_nothing_found(phase5_app):
@@ -166,6 +191,10 @@ def test_3b_non_decorative_interactable_without_evidence_200_nothing_found(phase
 
     # Craft a v2 published world carrying an informational interactable
     # (interaction "inspect", no evidence) so the pinned playthrough sees it.
+    # NOTE (Phase 19F fail-closed): the crafted object uses a REGISTERED
+    # render asset (PROP_BOTTLE_01) so the placement IS player-visible — an
+    # object with an unregistered/unprojectable asset would have NO
+    # player-visible representation and would answer 404, never 200.
     store = phase5_app.state.store
     now = float(phase5_app.state.clock.now())
     payload = _published_payload(phase5_app, case_id, 1)
@@ -174,7 +203,7 @@ def test_3b_non_decorative_interactable_without_evidence_200_nothing_found(phase
     payload["draft"]["objects"].append(
         {
             "object_id": "info_globe_01",
-            "asset_id": "PROP_GLOBE_01",
+            "asset_id": "PROP_BOTTLE_01",
             "affordances": ["INSPECTABLE"],
             "subtype": "decor",
         }
@@ -182,7 +211,7 @@ def test_3b_non_decorative_interactable_without_evidence_200_nothing_found(phase
     payload["draft"]["world_graph"]["placements"].append(
         {
             "object_id": "info_globe_01",
-            "asset_id": "PROP_GLOBE_01",
+            "asset_id": "PROP_BOTTLE_01",
             "location_id": "miller_apartment_kitchen",
             "anchor": "shelf_01",
             "interaction": "inspect",
@@ -210,7 +239,15 @@ def test_3b_non_decorative_interactable_without_evidence_200_nothing_found(phase
     assert body["evidenceId"] is None
     assert body["discovery"] is None
     assert body["result"] == "interacted"
-    assert set(body) == {"objectId", "interaction", "evidenceId", "discovery", "result"}
+    assert set(body) == {
+        "objectId",
+        "interaction",
+        "evidenceId",
+        "discovery",
+        "result",
+        "inspection",  # Phase 19F additive: {relevant: false, label}
+    }
+    assert body["inspection"] == {"relevant": False, "label": "Info Globe"}
     assert_no_pre_reveal_material(body, canonical_time="2026-09-11T22:17:00+02:00")
     # no knowledge mutated, no leak, no crash
     snap = phase5_app.state.store.snapshot_player_knowledge(pt2_id)

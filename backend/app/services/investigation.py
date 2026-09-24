@@ -16,8 +16,13 @@ The service owns the PLAYER-SAFE investigation mechanics:
   ONLY INTERNALLY from ``interact_with_object``, so a player can never
   discover evidence by id without a preceding validated world interaction
   (the ADV-225 direct by-id discover contract is superseded);
-- ``interact_with_object``   — validated world-graph interaction (placement
-  membership + exact interaction match; 409 on mismatch, NO state change);
+- ``interact_with_object``   — validated world-graph interaction (visible
+  placement membership + exact interaction match for non-decorative
+  placements; Phase 19F: EVERY player-visible semantic placement is
+  inspectable — a decorative placement returns a NEUTRAL 200 inspection
+  instead of the DEF-062 409, an evidence-linked placement runs discovery,
+  a non-evidence placement returns the neutral "nothing found" inspection;
+  the interaction Echo is published-interaction-truthful, never evidence);
 - ``read_record``            — read of a DISCOVERED record (403 when not
   discovered; idempotent; never opens undiscovered content).
 
@@ -282,27 +287,65 @@ class InvestigationService:
         object_id: str,
         interaction: str,
     ) -> dict[str, Any]:
-        """One validated world interaction (REQUIREMENTS 27, Phase6 I).
+        """One validated world interaction (REQUIREMENTS 27, Phase6 I,
+        Phase 19F UNIVERSAL OBJECT INSPECTION).
 
-        - the object must exist in the pinned version's placements (404);
-        - a DECORATIVE placement (published interaction ``""``, DEF-062) is
-          NOT interactable -> 409 INTERACTION_NOT_ALLOWED, no state change;
-        - the interaction must equal the placement's allowed interaction
-          (409 INTERACTION_NOT_ALLOWED, NO state change);
-        - a placement that maps to evidence runs the discovery logic;
+        - the object must be a VISIBLE published placement of the pinned
+          version (``visible_placement_for_object`` -> 404 for unknown OR
+          non-visible placements; see fail-closed below);
+        - a DECORATIVE visible placement (published interaction ``""``)
+          answers 200 with a NEUTRAL inspection (Phase 19F supersedes
+          DEF-062's 409 dead-end for visible semantic placements: no evidence
+          is invented, no solver state is touched, nothing but PlayerKnowledge
+          visited-marking changes);
+        - for a NON-DECORATIVE placement the interaction must equal the
+          placement's allowed interaction (409 INTERACTION_NOT_ALLOWED, NO
+          state change);
+        - a placement that maps to evidence runs the discovery logic
+          (inspection.relevant=True in the DTO);
+        - a NON-EVIDENCE placement answers 200 with a NEUTRAL inspection
+          (inspection.relevant=False);
         - successful interactions mark the placement's location visited.
         """
         payload = self._pinned_payload(playthrough)
         self._require_playing(playthrough)
         seen_object_id = str(object_id)
-        placement = pub.placement_for_object(payload, seen_object_id)
+        placement = pub.visible_placement_for_object(payload, seen_object_id)
         if placement is None:
+            # Unknown OR non-visible object -> generic 404 (no inspect-
+            # arbitrary-ID oracle: only placements the bootstrap would show
+            # are reachable).
             raise InvestigationNotFoundError("unknown object id")
         published_interaction = placement.get("interaction")
+        label = self._inspection_label(placement, seen_object_id)
         if not isinstance(published_interaction, str) or not published_interaction:
-            # DEF-062: a decorative placement (published interaction "") is NOT
-            # interactable — the same safe 409 envelope, NO state change.
-            raise InteractionNotAllowedError("object is not interactable")
+            # Phase 19F: a DECORATIVE published VISIBLE semantic placement
+            # (interaction "") is inspectable by default. ANY requested
+            # interaction is accepted — this 200 NEUTRAL inspection
+            # supersedes DEF-062's plain-text 409 dead-end for visible
+            # semantic placements. The no-leak semantics stay INTACT (DEF-062
+            # was about not leaking evidence — the neutral inspection returns
+            # NO evidence and never touches truth/solver).
+            now = self._now()
+            self._store.get_or_create_player_knowledge(
+                playthrough.playthrough_id,
+                playthrough.case_id,
+                playthrough.case_version,
+                at=now,
+            )
+            self._store.mark_visited(
+                playthrough.playthrough_id,
+                str(placement.get("location_id")),
+                at=now,
+            )
+            return {
+                "objectId": seen_object_id,
+                "interaction": "",
+                "evidenceId": None,
+                "discovery": None,
+                "result": "interacted",
+                "inspection": {"relevant": False, "label": label},
+            }
         if str(interaction) != published_interaction:
             raise InteractionNotAllowedError(
                 "interaction does not match the placement"
@@ -319,6 +362,8 @@ class InvestigationService:
             str(evidence_id) if evidence_id is not None else None
         )
         if evidence_id_out is None:
+            # Non-decorative NON-EVIDENCE placement: a real interaction with
+            # nothing found -> neutral inspection (Phase 19C feedback).
             self._store.mark_visited(
                 playthrough.playthrough_id,
                 str(placement.get("location_id")),
@@ -330,6 +375,7 @@ class InvestigationService:
                 "evidenceId": None,
                 "discovery": None,
                 "result": "interacted",
+                "inspection": {"relevant": False, "label": label},
             }
         # Evidence-linked placement: discovery logic runs (reachable by
         # construction — the placement itself is the reachability proof).
@@ -340,7 +386,27 @@ class InvestigationService:
             "evidenceId": evidence_id_out,
             "discovery": discovery,
             "result": "interacted",
+            "inspection": {"relevant": True, "label": label},
         }
+
+    def _inspection_label(
+        self,
+        placement: Mapping[str, Any],
+        object_id: str,
+    ) -> str:
+        """The deterministic humanized SEMANTIC label of an inspected object.
+
+        Phase 19F: the inspection payload's ``label`` comes from the SAME
+        semantic-label path the reveal module uses for the public model (the
+        reveal ``weapon_label_of`` over the public object identity — e.g.
+        ``vase_01`` -> "Vase", ``kitchen_knife`` -> "Kitchen Knife",
+        ``victim_body_placeholder`` -> "Victim Body Placeholder"). It is
+        derived ONLY from the player-safe semantic identity, NEVER from a
+        render/proc asset id and never the raw object_id (DEF-081).
+        """
+        return reveal_projection.weapon_label_of(
+            placement.get("asset_id"), object_id=object_id
+        )
 
     # ------------------------------------------------------------------ #
     # record read

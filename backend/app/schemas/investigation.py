@@ -15,6 +15,14 @@ payload + PlayerKnowledge through ``app.services.investigation`` /
   CaseTruth/proof).
 - ``openedAt`` is an ISO-8601 (UTC) string of the FIRST time the record was
   read — stable across repeat reads (idempotent read contract).
+- Phase 19F UNIVERSAL OBJECT INSPECTION: every player-visible SEMANTIC world
+  object is inspectable through the object interaction endpoint. The
+  ``inspection`` block (``{relevant, label}``) is ALWAYS present on a 200
+  interaction response: ``relevant:false`` is the NEUTRAL inspection of a
+  non-evidence object, ``relevant:true`` marks the evidence-linked discovery
+  flow. ``label`` is the deterministic humanized SEMANTIC label (the same
+  semantic-label path the reveal module uses), never a render/proc id and
+  never a raw object_id.
 """
 
 from __future__ import annotations
@@ -230,26 +238,63 @@ class ObjectInteractionRequest(BaseModel):
         max_length=128,
         description=(
             "The interaction the player invoked; it must match the placement's "
-            "published interaction exactly (mismatch -> 409)."
+            "published interaction exactly (mismatch -> 409) EXCEPT for a "
+            "decorative placement (published interaction \"\"), which Phase "
+            "19F accepts with ANY requested interaction and answers the "
+            "neutral inspection (no 409)."
         ),
     )
+
+
+class ObjectInspectionDTO(BaseModel):
+    """The player-safe inspection block of a successful object interaction
+    (Phase 19F UNIVERSAL OBJECT INSPECTION).
+
+    Every player-visible SEMANTIC world object is inspectable by default
+    (derived from PUBLICATION SEMANTICS — a published placement with a
+    player-visible representation — never from an interactive role and never
+    from manual per-catalog entries). ``relevant`` mirrors the evidence state:
+
+    - ``False`` — a NON-EVIDENCE object: nothing was found, ``evidenceId``
+      and ``discovery`` are null and the frontend renders the neutral
+      "Nothing relevant was found on <label>." feedback. NO evidence is ever
+      invented, no solver state is touched;
+    - ``True`` — an evidence-linked object whose discovery block is returned
+      alongside (``relevant`` never marks truth — it only reflects the
+      placement's evidence association the player just interacted with).
+
+    ``label`` is the deterministic humanized SEMANTIC label of the object
+    (the SAME semantic-label path the reveal module uses over the public
+    object identity, e.g. ``vase_01`` -> "Vase"), never a render/proc id and
+    never the raw object_id.
+    """
+
+    relevant: bool = False
+    label: str
 
 
 class InteractionResultDTO(BaseModel):
     """POST .../objects/{object_id}/interact -> 200.
 
-    Phase 19C non-evidence contract (truthful discovery/feedback split):
+    Phase 19C + Phase 19F contract:
 
     - evidence discovered: ``discovery`` carries the ``{evidenceId, kind,
       title, interaction, state}`` block and ``evidenceId`` is non-null — the
       discovery DTO contains ONLY the newly player-known evidence;
-    - interacted, nothing found (a non-decorative informational object whose
+    - interacted, nothing found (a non-evidence informational object whose
       placement carries no evidence association): ``discovery`` is null and
       ``evidenceId`` is null — the frontend renders the Phase 19C "Nothing
-      relevant was found on <X>." feedback and the player can move on;
-    - a DECORATIVE placement (published interaction "") is NOT interactable:
-      the route answers 409 INTERACTION_NOT_ALLOWED with no state change (this
-      DTO is never produced for it).
+      relevant was found on <X>." feedback;
+    - ``inspection`` is ALWAYS present on a 200 (``{relevant, label}``): the
+      neutral inspection for every non-evidence object, the
+      evidence-mirroring block for an evidence-linked object;
+    - Phase 19F: a DECORATIVE published VISIBLE placement (published
+      interaction "") IS interactable and answers this 200 NEUTRAL inspection
+      (this supersedes DEF-062's plain-text 409 dead-end for visible semantic
+      placements — the no-leak semantics stay: the neutral inspection never
+      fabricates evidence and never exposes CaseTruth). A placement with NO
+      player-visible representation stays non-interactable (the projection-
+      gated 404), so no inspect-arbitrary-ID oracle exists.
     """
 
     objectId: str
@@ -257,6 +302,7 @@ class InteractionResultDTO(BaseModel):
     evidenceId: str | None = None
     discovery: DiscoveryResultDTO | None = None
     result: Literal["interacted"]
+    inspection: ObjectInspectionDTO
 
 
 class EvidenceReadResultDTO(BaseModel):

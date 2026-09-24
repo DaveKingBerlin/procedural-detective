@@ -304,6 +304,10 @@ export default function ScenePage() {
   };
 
   const knowledge = sessionRef.current?.knowledgeSnapshot;
+  // Phase 19F: the INSPECTED ids are cosmetic, in-memory session state
+  // (never persisted — EVIDENCE_DISCOVERED stays the server-authoritative
+  // `discovered` flag). Both states render as separate, honest list markers.
+  const inspectedIds = new Set(sessionRef.current?.inspectedObjectIdsSnapshot() ?? []);
   const summary = status.status === "ready" ? summaryFromSession(sessionRef.current, status.model) : null;
   const interacted =
     hasInteracted || (knowledge != null && knowledge.discoveredEvidenceIds.length > 0);
@@ -571,61 +575,74 @@ export default function ScenePage() {
               objects: click them directly.
             </p>
             <ul>
-              {status.model.worldObjects.map((obj) =>
-                obj.interactionWorks ? (
-                  <li key={obj.objectId}>
-                    <button
-                      type="button"
-                      data-testid={`object-${obj.objectId}`}
-                      className={
-                        obj.objectId === selectedObjectId
-                          ? "scene-object-button scene-object-button--selected"
-                          : "scene-object-button"
-                      }
-                      aria-pressed={obj.objectId === selectedObjectId}
-                      onClick={() => handleObjectAction(obj.objectId)}
-                    >
-                      {/* Phase 19E: the object list shows the SEMANTIC human
-                          label (registry label / humanized proc canonicalName),
-                          never the raw objectId/assetId/proc.* token. */}
-                      {evidenceLabelFor(obj)}
-                    </button>
+              {status.model.worldObjects.map((obj) => (
+                <li key={obj.objectId}>
+                  {/* Phase 19F: EVERY published semantic world object renders
+                      an interactive button — decorative/structural objects
+                      (vase, table, door, lamp, victim; published interaction
+                      "") included. There is no plain-text branch anymore:
+                      keyboard-only players can Enter/Space-activate every
+                      object in the room, and every button still shows the
+                      SEMANTIC human label (registry label / humanized proc
+                      canonicalName — never a raw objectId/assetId/proc.*
+                      token). */}
+                  <button
+                    type="button"
+                    data-testid={`object-${obj.objectId}`}
+                    className={
+                      obj.objectId === selectedObjectId
+                        ? "scene-object-button scene-object-button--selected"
+                        : "scene-object-button"
+                    }
+                    aria-pressed={obj.objectId === selectedObjectId}
+                    onClick={() => handleObjectAction(obj.objectId)}
+                  >
+                    {evidenceLabelFor(obj)}
+                  </button>
+                  <span
+                    className="object-label visually-hidden"
+                    data-testid={`object-label-${obj.objectId}`}
+                  >
+                    {evidenceLabelFor(obj)}
+                  </span>
+                  {/* Phase 19F state model: INSPECTED (cosmetic, in-memory) and
+                      EVIDENCE_DISCOVERED (server-authoritative `discovered`)
+                      are distinct and rendered as separate markers. The
+                      inspected marker uses an inline muted style (muted ≠ the
+                      ok-green discovered marker) so the two never conflate. */}
+                  {inspectedIds.has(obj.objectId) && (
                     <span
-                      className="object-label visually-hidden"
-                      data-testid={`object-label-${obj.objectId}`}
+                      className="object-inspected"
+                      data-testid={`object-inspected-${obj.objectId}`}
+                      style={{ color: "var(--muted)", fontSize: "0.85rem" }}
                     >
-                      {evidenceLabelFor(obj)}
+                      {" "}
+                      · inspected
                     </span>
-                    {obj.discovered && (
-                      <span className="object-discovered" data-testid={`object-discovered-${obj.objectId}`}>
-                        {" "}
-                        · discovered
-                      </span>
-                    )}
-                    {obj.discovered && obj.read && (
-                      <span className="object-discovered" data-testid={`object-read-${obj.objectId}`}>
-                        {" "}
-                        · read
-                      </span>
-                    )}
-                    {obj.discovered && obj.evidenceId !== null && discoveredTitles.has(obj.evidenceId) && (
-                      <span
-                        className="object-label-discovered"
-                        data-testid={`object-discovered-label-${obj.objectId}`}
-                      >
-                        {" "}
-                        — {discoveredTitles.get(obj.evidenceId)}
-                      </span>
-                    )}
-                  </li>
-                ) : (
-                  <li key={obj.objectId}>
-                    {/* Phase 19E: decorative/label-less objects also render the
-                        semantic human label, never the raw objectId/assetId. */}
-                    <span data-testid={`object-label-${obj.objectId}`}>{evidenceLabelFor(obj)}</span>
-                  </li>
-                ),
-              )}
+                  )}
+                  {obj.discovered && (
+                    <span className="object-discovered" data-testid={`object-discovered-${obj.objectId}`}>
+                      {" "}
+                      · discovered
+                    </span>
+                  )}
+                  {obj.discovered && obj.read && (
+                    <span className="object-discovered" data-testid={`object-read-${obj.objectId}`}>
+                      {" "}
+                      · read
+                    </span>
+                  )}
+                  {obj.discovered && obj.evidenceId !== null && discoveredTitles.has(obj.evidenceId) && (
+                    <span
+                      className="object-label-discovered"
+                      data-testid={`object-discovered-label-${obj.objectId}`}
+                    >
+                      {" "}
+                      — {discoveredTitles.get(obj.evidenceId)}
+                    </span>
+                  )}
+                </li>
+              ))}
             </ul>
           </div>
 

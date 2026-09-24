@@ -104,7 +104,14 @@ def test_5b_valid_discover_via_object_interact(phase5_app):
     res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200
     body = res.json()
-    assert set(body.keys()) == {"objectId", "interaction", "evidenceId", "discovery", "result"}
+    assert set(body.keys()) == {
+        "objectId",
+        "interaction",
+        "evidenceId",
+        "discovery",
+        "result",
+        "inspection",  # Phase 19F additive: {relevant: true, label}
+    }
     assert body["objectId"] == KNIFE_OBJECT
     assert body["interaction"] == "inspect"
     assert body["evidenceId"] == KNIFE_EVIDENCE
@@ -192,20 +199,23 @@ def test_11_v1_evidence_still_discoverable_and_readable_after_v2(phase5_app):
 def test_12_client_cannot_discover_non_reachable_evidence(phase5_app):
     """O12a: an UNLINKED evidence fact has NO placement, so NO object
     interaction in the world can ever return it (the removed direct route
-    already 404s every id). O12b: an interaction on a decorative object — the
-    vase's published interaction is "" (not interactable, DEF-062) — answers
-    409 with NO state change for ANY requested interaction."""
+    already 404s every id). O12b: the vase is a player-VISIBLE semantic
+    object (Phase 19F) so it returns the neutral INSPECTION 200 for ANY
+    requested interaction — but it carries NO evidence association, so it can
+    NEVER discover anything (no leak, no fabricated evidence)."""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
-    # The vase is DECORATIVE (published interaction ""): every interaction
-    # request is refused with the same safe 409 envelope, no state change.
+    # The vase is DECORATIVE (published interaction "") yet VISIBLE — any
+    # interaction is a neutral inspection, never a discovery.
     for requested in ("read", "inspect"):
         res = interact(phase5_app, pt_id, pt_token, "vase_01", requested)
-        assert res.status_code == 409
-        assert res.json()["error"]["code"] == "INTERACTION_NOT_ALLOWED"
+        assert res.status_code == 200, (requested, res.json())
+        body = res.json()
+        assert body["evidenceId"] is None
+        assert body["discovery"] is None
+        assert body["inspection"]["relevant"] is False
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.discovered == ()
-    assert snap.visited == ()
     # Evidence objects remain interactable: the knife's inspect discovers it.
     res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200
@@ -268,19 +278,28 @@ def test_18_concurrent_duplicate_discovery_consistent(phase5_app):
 
 def test_visited_locations_only_via_valid_interactions(phase5_app):
     """visitedLocationIds grow ONLY through valid interactions: failed
-    interactions (409 — including decorative env objects, DEF-062) and the
-    removed direct-discover route (404) add nothing."""
+    interactions (409/404) add NOTHING, while every SUCCESSFUL interaction —
+    evidence discovery AND the Phase 19F neutral inspection of a visible
+    semantic object — marks the location visited."""
     case_id, creator = case_for(phase5_app)
     pt_id, pt_token = playthrough(phase5_app, case_id, creator)
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.visited == ()
-    # Failed attempts add nothing: mismatch 409, decorative object 409, 404.
-    interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "read")  # 409
-    interact(phase5_app, pt_id, pt_token, "vase_01", "inspect")  # 409 decorative
+    # Failed attempts add nothing: interaction mismatch 409, unknown object
+    # 404 and the removed direct-discover route (404).
+    interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "read")  # 409 mismatch
+    interact(phase5_app, pt_id, pt_token, "ghost_object_99", "inspect")  # 404
     discover(phase5_app, pt_id, pt_token, "EV-FAKE")  # removed route -> 404
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
     assert snap.visited == ()
-    # A successful interaction (evidence discovery) marks the location visited.
+    # A neutral inspection of a visible semantic object (vase, decorative) is
+    # a SUCCESSFUL interaction (Phase 19F) -> the location is visited.
+    res = interact(phase5_app, pt_id, pt_token, "vase_01", "inspect")
+    assert res.status_code == 200
+    assert res.json()["inspection"]["relevant"] is False
+    snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)
+    assert snap.visited == (SCENE_LOCATION,)
+    # A successful evidence discovery marks the location visited (already set).
     res = interact(phase5_app, pt_id, pt_token, KNIFE_OBJECT, "inspect")
     assert res.status_code == 200
     snap = phase5_app.state.store.snapshot_player_knowledge(pt_id)

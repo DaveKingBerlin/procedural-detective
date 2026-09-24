@@ -89,6 +89,15 @@ export class InvestigationSession {
   private toastSeq = 0;
   private readonly playthroughId: string;
   private sceneHandle: InvestigationSceneHandle | null = null;
+  /**
+   * Phase 19F — the ids of the world objects this session has INSPECTED
+   * (a server-confirmed 200 interaction, evidence or not). Cosmetic,
+   * in-memory, NEVER persisted and NEVER sent back: it exists only so the
+   * live UI can distinguish INSPECTED from EVIDENCE_DISCOVERED (the
+   * server-authoritative `discovered` flags) — e.g. vase -> inspected +
+   * not discovered; knife -> inspected + discovered.
+   */
+  private readonly inspectedIds = new Set<string>();
 
   constructor(
     private readonly services: InvestigationServices,
@@ -130,6 +139,17 @@ export class InvestigationSession {
   /** Sorted snapshot of the server-derived read evidence ids. */
   readEvidenceIdsSnapshot(): string[] {
     return this.knowledge ? [...this.knowledge.readEvidenceIds] : [];
+  }
+
+  /**
+   * Phase 19F — sorted snapshot of the inspected (server-confirmed 200
+   * interaction) world object ids. Cosmetic in-memory state, never
+   * persisted: distinguishes INSPECTED from EVIDENCE_DISCOVERED purely for
+   * live UI markers ("· inspected" vs the server-authoritative
+   * "· discovered" flag).
+   */
+  inspectedObjectIdsSnapshot(): string[] {
+    return [...this.inspectedIds].sort();
   }
 
   /** Titles of the read records cached by this session (id -> title). */
@@ -262,10 +282,19 @@ export class InvestigationSession {
   }
 
   /**
-   * Dispatch an object interaction. Only the object's own published
-   * interaction string is ever sent; wrong/disallowed interactions arrive as
-   * ApiErrors and are mapped to a safe gameplay message (409 -> "not
-   * allowed", 401/403 -> invalid access, anything else -> generic).
+   * Dispatch an object interaction. Phase 19F — UNIVERSAL OBJECT INSPECTION:
+   * EVERY published semantic world object is inspectable, regardless of
+   * `interactionWorks`. The old pre-19F gate returned "That object cannot be
+   * interacted with." for decorative/structural objects (vase, table, door,
+   * lamp, victim) whose published interaction is "". The backend now answers
+   * the interact call for ANY published semantic object: an evidence-linked
+   * placement runs discovery as before, and a non-evidence placement returns
+   * the safe inspection result (discovery:null, evidenceId:null). Only the
+   * object's OWN published interaction string is ever sent (empty for
+   * decorative placements — the exact string the placement publishes);
+   * wrong/disallowed interactions still arrive as ApiErrors and are mapped
+   * to a safe gameplay message (409 -> "not allowed", 401/403 -> invalid
+   * access, anything else -> generic).
    */
   async interact(objectId: string): Promise<InteractionFeedback> {
     const model = this.model;
@@ -276,9 +305,6 @@ export class InvestigationSession {
     if (!worldObject) {
       return { objectId, toast: null, record: null, error: { message: "That object is not part of this scene." } };
     }
-    if (!worldObject.interactionWorks) {
-      return { objectId, toast: null, record: null, error: { message: "That object cannot be interacted with." } };
-    }
 
     let result: InteractionResultDTO;
     try {
@@ -286,6 +312,10 @@ export class InvestigationSession {
     } catch (error) {
       return { objectId, toast: null, record: null, error: { message: this.safeInteractionError(error) } };
     }
+
+    // The server validated the interaction (200): the object was INSPECTED.
+    // Cosmetic only — idempotent Set add, never persisted.
+    this.inspectedIds.add(objectId);
 
     const feedback: InteractionFeedback = { objectId, toast: null, record: null, error: null };
 
