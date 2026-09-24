@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import type { EvidenceRendererProps } from "./shared";
-import { asText, isRecord, textList } from "./shared";
+import { asText, compactTimeOf, isRecord, textList } from "./shared";
 import GenericEvidence from "./GenericEvidence";
 
 /**
@@ -10,6 +10,12 @@ import GenericEvidence from "./GenericEvidence";
  * body — as a labelled plain-text list (React escapes every value). Empty
  * allowlisted fields are dropped; a message with nothing readable falls back
  * to the safe GenericEvidence renderer.
+ *
+ * Phase 19H / DEF-103 — TIME PRESENTATION: the visible Timestamp value is the
+ * COMPACT local clock ("21:04"), never the raw full ISO. The canonical full
+ * ISO stays in the DTO AND in the semantic <time dateTime="..."> of the
+ * Timestamp row (compactTimeOf in shared.ts is deterministic, never
+ * fabricates and accepts any ISO/compact/malformed input safely).
  */
 export default function MessageEvidence({ record }: EvidenceRendererProps): ReactElement {
   const content = isRecord(record.content) ? record.content : {};
@@ -46,7 +52,9 @@ export default function MessageEvidence({ record }: EvidenceRendererProps): Reac
         {timestamp !== "" && (
           <>
             <dt>Timestamp</dt>
-            <dd>{timestamp}</dd>
+            <dd>
+              <time dateTime={timestamp}>{compactTimeOf(timestamp)}</time>
+            </dd>
           </>
         )}
         {body !== "" && (

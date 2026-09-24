@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -258,10 +260,52 @@ describe("other closed renderers — Phase 19G §8", () => {
     expect(html).toContain("<dt>Subject</dt>");
     expect(html).toContain("Weekend plans");
     expect(html).toContain("<dt>Timestamp</dt>");
-    expect(html).toContain("2026-09-10T18:04:00+02:00");
+    // Phase 19H/DEF-103: the VISIBLE Timestamp value is the COMPACT local
+    // clock; the canonical full ISO is preserved in the semantic <time dateTime>.
+    expect(html).toContain('<time dateTime="2026-09-10T18:04:00+02:00">18:04</time>');
+    expect(html).not.toContain(">2026-09-10T18:04:00+02:00<");
     expect(html).toContain("<dt>Body</dt>");
     expect(html).toContain("let us talk");
     expect(html).not.toContain('"fromPersonId"');
+  });
+
+  it("DEF-103 — MESSAGE Timestamp row shows the COMPACT local time (never the raw full ISO); the canonical value stays in the DTO", () => {
+    const record = recordWith({
+      renderType: "MESSAGE",
+      fromPersonId: "thomas_reed",
+      toPersonIds: ["sarah_miller"],
+      subject: "Re: the weekend",
+      timestamp: "2026-09-11T21:04:00+02:00",
+      body: "See you at the station.",
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    // Player-facing text: compact HH:mm clock — the raw ISO is NEVER visible.
+    expect(html).toContain(">21:04</time>");
+    expect(html).not.toContain(">2026-09-11T21:04:00+02:00<");
+    expect(html).not.toMatch(/>2026-09-11T21:04:00\+02:00</);
+    // The canonical full ISO is preserved in the semantic <time dateTime> and
+    // unchanged in the DTO (the renderer is a pure function — no mutation).
+    expect(html).toContain('dateTime="2026-09-11T21:04:00+02:00"');
+    expect(record.content.timestamp).toBe("2026-09-11T21:04:00+02:00");
+  });
+
+  it("DEF-103 — DOCUMENT has no raw-ISO surface: a timestamp-bearing document payload renders title+body only, never the full ISO", () => {
+    const record = recordWith({
+      renderType: "DOCUMENT",
+      title: "Financial record",
+      body: "Monthly statement.",
+      timestamp: "2026-09-11T21:04:00+02:00",
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain("Financial record");
+    expect(html).toContain("Monthly statement.");
+    // The DOCUMENT renderer has no bare Timestamp row, so the allowlisted
+    // timestamp can never surface as raw ISO player text either.
+    expect(html).not.toContain("Timestamp");
+    expect(html).not.toContain("2026-09-11T21:04:00+02:00");
+    expect(html).not.toContain("21:04");
+    // The canonical value stays in the DTO.
+    expect(record.content.timestamp).toBe("2026-09-11T21:04:00+02:00");
   });
 
   it("DOCUMENT renders title + body as plain text (no HTML injection)", () => {
@@ -498,10 +542,23 @@ describe("Phase 19H — Activity Log layout & time presentation (compact HH:mm, 
     expect(compactTimeOf("2026-09-11T23:41:50Z")).toBe("23:41");
     expect(compactTimeOf("2026-09-11T23:41+02:00")).toBe("23:41");
     expect(compactTimeOf("2026-09-11 23:41:50+02:00")).toBe("23:41");
+    // ADV-245: a VALID ISO with a LOWERCASE "t" separator (the RFC-3339 case-
+    // insensitive "T") must collapse the same way — never fall through to the
+    // ~25-char raw fallback that re-entered the nowrap ink overlap.
+    expect(compactTimeOf("2026-09-11t23:41:50+02:00")).toBe("23:41");
+    expect(compactTimeOf("2026-09-11t23:41:50Z")).toBe("23:41");
+    expect(compactTimeOf("2026-09-11t23:41+02:00")).toBe("23:41");
     // Already-compact clock text passes through verbatim.
     expect(compactTimeOf("23:41")).toBe("23:41");
     expect(compactTimeOf("23:41:50")).toBe("23:41:50");
     expect(compactTimeOf("9:41")).toBe("9:41");
+    // ADV-246: null / undefined / number inputs coerce safely (like asText) —
+    // never a crash, never a fabricated time.
+    expect(compactTimeOf(null)).toBe("");
+    expect(compactTimeOf(undefined)).toBe("");
+    expect(compactTimeOf(42)).toBe("42");
+    expect(compactTimeOf(20260911)).toBe("20260911");
+    expect(compactTimeOf(false)).toBe("false");
     // Malformed/hostile values fall back to the raw string — safely literal.
     expect(compactTimeOf("not-a-time")).toBe("not-a-time");
     expect(compactTimeOf("22")).toBe("22");
@@ -568,6 +625,69 @@ describe("Phase 19H — Activity Log layout & time presentation (compact HH:mm, 
     expect(html).toContain('<time dateTime="2026-09-11T21:38:07+02:00">21:38</time>');
     expect(html).toContain('<time dateTime="2026-09-11T22:03:41+02:00">22:03</time>');
     expect(html).not.toMatch(/>2026-09-11T21:38:07\+02:00</);
+  });
+
+  it("ADV-245 — a VALID lowercase-t ISO renders as a compact clock in the table (no ~100px raw fallback in the nowrap cell)", () => {
+    const record = recordWith({
+      renderType: "ACTIVITY_LOG",
+      entries: [{ time: "2026-09-11t23:41:50+02:00", text: "User login detected" }],
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain('<time dateTime="2026-09-11t23:41:50+02:00">23:41</time>');
+    expect(html).not.toMatch(/>2026-09-11t23:41:50\+02:00</);
+  });
+
+  it("ADV-247 — mixed compact clock shapes normalize to ONE granularity (HH:mm:ss when any entry needs seconds) with logical order", () => {
+    const record = recordWith({
+      renderType: "TIMELINE",
+      events: [
+        { time: "22:11:30", description: "Half past the hour" },
+        { time: "22:11", description: "On the hour" },
+      ],
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    // BOTH rows render at HH:mm:ss — never a bare seconds-less clock beside a
+    // seconds-full clock. dateTime keeps the canonical value verbatim.
+    expect(html).toContain('<time dateTime="22:11">22:11:00</time>');
+    expect(html).toContain('<time dateTime="22:11:30">22:11:30</time>');
+    expect(html).not.toContain(">22:11</time>");
+    // Ordering runs on the normalized time string: 22:11:00 before 22:11:30 —
+    // textual AND logical, not lexicographic luck.
+    const first = html.indexOf("22:11:00");
+    const second = html.indexOf("22:11:30");
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(first);
+  });
+
+  it("ADV-247 — a compact HH:mm:ss passthrough beside a full-ISO entry normalizes BOTH to HH:mm:ss; dateTime stays canonical", () => {
+    const record = recordWith({
+      renderType: "ACTIVITY_LOG",
+      entries: [
+        { time: "2026-09-11T20:00+02:00", text: "Camera line" },
+        { time: "20:00:30", text: "Door sensor line" },
+      ],
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain('<time dateTime="2026-09-11T20:00+02:00">20:00:00</time>');
+    expect(html).toContain('<time dateTime="20:00:30">20:00:30</time>');
+    expect(html).not.toContain(">20:00</time>");
+    // "20:00:00" < "20:00:30" — the normalized string orders logically.
+    expect(html.indexOf("20:00:00</time>")).toBeGreaterThan(-1);
+    expect(html.indexOf("20:00:30</time>")).toBeGreaterThan(html.indexOf("20:00:00</time>"));
+  });
+
+  it("ADV-247 — a uniform full-ISO payload stays HH:mm (Phase 19H contract): ISO seconds never force ':00' padding by themselves", () => {
+    const record = recordWith({
+      renderType: "TIMELINE",
+      events: [
+        { time: "2026-09-11T21:38:07+02:00", description: "A visitor enters the apartment" },
+        { time: "2026-09-11T22:03:41+02:00", description: "The visitor leaves in a hurry" },
+      ],
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain('<time dateTime="2026-09-11T21:38:07+02:00">21:38</time>');
+    expect(html).toContain('<time dateTime="2026-09-11T22:03:41+02:00">22:03</time>');
+    expect(html).not.toContain("21:38:00");
   });
 });
 
@@ -637,5 +757,67 @@ describe("Phase 19H — jsdom layout regression (live DOM: distinct rows, normal
     expect(container.querySelector("tbody")!.childElementCount).toBe(4);
     // The full ISO is never the VISIBLE value any more (pre-19H overlap cause).
     expect(container.querySelector("time")!.textContent).not.toContain("T");
+  });
+
+  it("ADV-245 — the PRODUCTION time-cell rule clips a long raw fallback inside its 5.5rem column (overflow:hidden + ellipsis, nowrap kept for the compact clock)", () => {
+    // A well-formed compact entry + a LONG non-matching value: compactTimeOf
+    // keeps malformed text VERBATIM (never fabricated), so without the clip
+    // the raw fallback would repaint the pre-19H ~100px ink overlap. This test
+    // asserts the ACTUAL shipped stylesheet (read from src/index.css, so the
+    // assertion can never drift from production) resolves the cell to a
+    // bleed-proof rule inside a fixed 5.5rem column.
+    const longRaw = "23:41:50 heavy-probe-line-2026-09-11t23:41:50+02:00-extra";
+    mountActivityLog([
+      { time: "23:41", text: "User login detected" },
+      { time: longRaw, text: "Hostile long non-clock value" },
+    ]);
+
+    const style = document.createElement("style");
+    // The actual SHIPPED stylesheet. (In the jsdom test environment the global
+    // URL class is jsdom's — it resolves relative URLs against a stub
+    // http://localhost:3000 — so the stylesheet path is resolved from the
+    // vitest working directory, which is the frontend/ package root under the
+    // documented `cd frontend && npm test` invocation.)
+    style.textContent = readFileSync(join(process.cwd(), "src", "index.css"), "utf8");
+    document.head.appendChild(style);
+    try {
+      const cells = Array.from(
+        container.querySelectorAll("td.evidence-activity-time"),
+      ) as HTMLElement[];
+      expect(cells).toHaveLength(2);
+      for (const cell of cells) {
+        const cs = getComputedStyle(cell);
+        // The last-resort clip: the cell box bounds the ink and truncates
+        // with an ellipsis — ink can NEVER bleed over the Activity column...
+        expect(cs.overflow).toBe("hidden");
+        expect(cs.textOverflow).toBe("ellipsis");
+        expect(cs.maxWidth).toBe("100%");
+        // ...while the normal compact clock keeps its nowrap presentation.
+        expect(cs.whiteSpace).toBe("nowrap");
+        // The time column itself is a fixed, static 5.5rem box.
+        expect(cs.width).toBe("5.5rem");
+        expect(cs.position).toBe("");
+      }
+      // Fixed table layout + a 5.5rem first column bound the cell width.
+      const table = container.querySelector("table.evidence-activity-log")!;
+      expect(getComputedStyle(table).tableLayout).toBe("fixed");
+      expect(getComputedStyle(table).width).toBe("100%");
+      const th = container.querySelector("th")!;
+      expect(getComputedStyle(th).width).toBe("5.5rem");
+      // Visible text contract: the compact entry shows its compact clock; the
+      // raw fallback stays VERBATIM (never fabricated) and is CLIPPED by the
+      // resolved cell rule. (jsdom ships no layout engine — scrollWidth and
+      // clientWidth are uniformly 0, so clipping is proven by the resolved
+      // CSS contract above; real ink geometry is QA/Playwright's domain.)
+      const times = Array.from(container.querySelectorAll("time"));
+      expect(times.map((t) => t.textContent)).toEqual(["23:41", longRaw]);
+      for (const cell of cells) {
+        const t = cell.querySelector("time")!;
+        expect(t.scrollWidth).toBeLessThanOrEqual(t.clientWidth);
+        expect(cell.scrollWidth).toBeLessThanOrEqual(cell.clientWidth);
+      }
+    } finally {
+      style.remove();
+    }
   });
 });

@@ -1,0 +1,73 @@
+{
+  "gate": "Phase 19H activity-log layout & time presentation",
+  "commit": "8b8e92d9149cf42b663de6623b1699fd81976034",
+  "qa": "independent QA (e2e/artifacts/qa19h harness + real cases)",
+  "browser": "project-local Playwright Chromium (headless)",
+  "method": "REAL EvidencePanel (product component + product CSS + product toolchain, same CSS asset hash as frontend/dist) rendered with a 4-entry ACTIVITY_LOG payload in a browser-loadable harness at 1280 / 600 / 360. Real stacked panels in real published cases additionally measured (laptop ACTIVITY_LOG + fork FORENSIC on the hermetic driver seam lane :8010; email MESSAGE + victim TIMELINE + knife FORENSIC on the golden fake lane :8011).",
+  "note": "A REAL published case cannot be forced to 4 entries in one panel: the driver's published evidence is always the deterministic canonical d_ev_* algebra whose cctv records carry exactly one observed-at anchor (verified in-process and on the live seam stack). QA therefore validated the 4-row geometry on the packaged component (below) + the real stacked panels present in the cases.",
+  "rows_expected": [
+    { "time": "23:38", "dateTime": "2026-09-11T23:38:10+02:00", "text": "User login detected" },
+    { "time": "23:43", "dateTime": "2026-09-11T23:43:00+02:00", "text": "Research file opened" },
+    { "time": "23:47", "dateTime": "2026-09-11T23:47:30+02:00", "text": "Activity recorded at the scene" },
+    { "time": "23:50", "dateTime": "2026-09-11T23:50:00+02:00", "text": "Session ended" }
+  ],
+  "geometry": {
+    "1280": {
+      "rows": [
+        { "i": 0, "top": 160.84375, "bottom": 192.5, "height": 31.65625, "position": "static", "timeText": "23:38" },
+        { "i": 1, "top": 192.5, "bottom": 224.15625, "height": 31.65625, "position": "static", "timeText": "23:43" },
+        { "i": 2, "top": 224.15625, "bottom": 255.8125, "height": 31.65625, "position": "static", "timeText": "23:47" },
+        { "i": 3, "top": 255.8125, "bottom": 287.46875, "height": 31.65625, "position": "static", "timeText": "23:50" }
+      ],
+      "adjacency_deltas_px": [0, 0, 0],
+      "table": { "top": 128.6875, "bottom": 287.96875, "height": 159.28125, "width": 342 },
+      "panel": { "top": 16, "bottom": 357.34375, "height": 341.34375, "width": 384 },
+      "pageHorizontalScroll": false
+    },
+    "600": {
+      "rows": [
+        { "i": 0, "top": 160.84375, "bottom": 192.5, "height": 31.65625, "position": "static", "timeText": "23:38" },
+        { "i": 1, "top": 192.5, "bottom": 224.15625, "height": 31.65625, "position": "static", "timeText": "23:43" },
+        { "i": 2, "top": 224.15625, "bottom": 255.8125, "height": 31.65625, "position": "static", "timeText": "23:47" },
+        { "i": 3, "top": 255.8125, "bottom": 287.46875, "height": 31.65625, "position": "static", "timeText": "23:50" }
+      ],
+      "adjacency_deltas_px": [0, 0, 0],
+      "table": { "top": 128.6875, "bottom": 287.96875, "height": 159.28125, "width": 342 },
+      "panel": { "top": 16, "bottom": 357.34375, "height": 341.34375, "width": 384 },
+      "pageHorizontalScroll": false
+    },
+    "360": {
+      "rows": [
+        { "i": 0, "top": 160.84375, "bottom": 192.5, "height": 31.65625, "position": "static", "timeText": "23:38" },
+        { "i": 1, "top": 192.5, "bottom": 224.15625, "height": 31.65625, "position": "static", "timeText": "23:43" },
+        { "i": 2, "top": 224.15625, "bottom": 255.8125, "height": 31.65625, "position": "static", "timeText": "23:47" },
+        { "i": 3, "top": 255.8125, "bottom": 287.46875, "height": 31.65625, "position": "static", "timeText": "23:50" }
+      ],
+      "adjacency_deltas_px": [0, 0, 0],
+      "table": { "top": 128.6875, "bottom": 287.96875, "height": 159.28125, "width": 286 },
+      "panel": { "top": 16, "bottom": 357.34375, "height": 341.34375, "width": 328 },
+      "pageHorizontalScroll": false
+    }
+  },
+  "all_widths": {
+    "row[i].bottom <= row[i+1].top": "PASS (delta 0 at all widths; tolerance 2px)",
+    "visible time compact ^\\d{1,2}:\\d{2}$": "PASS (23:38 / 23:43 / 23:47 / 23:50)",
+    "time.dateTime == canonical full ISO": "PASS (all 4 at all widths)",
+    "each activity text exactly once": "PASS",
+    "no row position absolute": "PASS (computed position = static)",
+    "container height grows": "PASS (table.bottom 287.97 >= last row bottom 287.47)",
+    "no page horizontal scroll at 360": "PASS (scrollWidth <= viewport at 360/600/1280)"
+  },
+  "real_panels": {
+    "driver_laptop_activity_log": { "renderType": "ACTIVITY_LOG", "rows": 1, "timeText": "23:41", "dateTime": "2026-09-11T23:41:50+02:00", "text": "Activity logged at the scene", "widths": [1280, 600, 360], "noISO": true, "reloadDeterministic": true },
+    "driver_fork_forensic": { "renderType": "FORENSIC_COMPARISON", "noISO": true },
+    "golden_email_message": { "renderType": "MESSAGE", "isoTokensVisible": ["2026-09-11T21:04:00+02:00"], "defect": "DEF-103 (LOW) - message Timestamp row renders the raw full ISO as visible text" },
+    "golden_victim_timeline": { "renderType": "TIMELINE", "rows": 1, "timeText": "22:18", "dateTime": "2026-09-11T22:18:31+02:00", "text": "Body found in the kitchen at 22:18", "widths": [1280, 600, 360], "noISO": true },
+    "golden_knife_forensic": { "renderType": "FORENSIC_COMPARISON", "noISO": true }
+  },
+  "screenshots": [
+    "screenshots/evidence/phase19h-harness-4row-1280.png",
+    "screenshots/evidence/phase19h-harness-4row-360.png",
+    "screenshots/evidence/phase19h-real-laptop-activity.png"
+  ]
+}

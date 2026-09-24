@@ -1828,6 +1828,15 @@ button {
  * now show (<time dateTime=...> keeps the canonical ISO), lets the activity
  * text wrap safely, and top-aligns both cells. No absolute positioning and
  * no fixed row/body height anywhere — rows and the panel grow with content.
+ *
+ * ADV-245 — last-resort bleed guard: `compactTimeOf` accepts every valid ISO
+ * separator (case-insensitive "T"/space), but an unexpected LONG raw fallback
+ * (a malformed value is kept verbatim, never fabricated) must NOT repaint the
+ * ~100px ink overlap the phase removed. The time cell therefore keeps
+ * nowrap for the normal compact clock AND adds overflow:hidden +
+ * text-overflow:ellipsis + max-width:100%: an unexpectedly long value clips
+ * deterministically INSIDE its 5.5rem column (ellipsis marker) and can never
+ * bleed into the adjacent Activity column.
  */
 .evidence-activity-log,
 .evidence-timeline {
@@ -1843,6 +1852,9 @@ button {
 .evidence-activity-time {
   width: 5.5rem;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
   vertical-align: top;
 }
 
