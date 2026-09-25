@@ -478,6 +478,71 @@ def test_person_name_generic_words_accepted():
 
 
 # --------------------------------------------------------------------------- #
+# 8e — ADV-254 residual (ADV-260): concatenated-username needles, Unicode
+#     Cf-format (ZWSP) splits and plural surnames are rejected; neutral rows
+#     stay accepted. Full homoglyph/transliteration coverage is a DOCUMENTED
+#     bounded residual (ADV-260 stays LOW-accepted for those forms).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "pbecker authenticated",                 # first-initial + surname
+        "paulbecker authenticated",              # first + surname concatenated
+        "beckerpaul synced the mail",            # surname + first concatenated
+        "p4ulb3ck3r authenticated",              # leet concatenated username
+        "Pau\u200bl B\u200becker logged in",     # ZWSP-split full name
+        "Bec\u200bker synced the mail",          # ZWSP-split surname
+        "the Beckers' workstation",              # plural surname + possessive
+        "the Beckers\u2019 workstation",         # plural surname + curly quote
+        "b3ck3r5 synced",                        # plural surname (leet marker)
+    ),
+)
+def test_person_username_and_format_variants_rejected(text):
+    """ADV-254 residual (ADV-260 a/b/c): concatenated-username forms,
+    Cf-format (ZWSP) splits and plural surnames of canonical persons are now
+    rejected by the full validator."""
+    entries = _valid_entries()
+    entries[8] = _entry(CANONICAL, activity=text)
+    codes = validate_activity_log(
+        _as_log(entries),
+        canonical_time=CANONICAL,
+        person_names=(
+            "Dr. Anna Weiss", "Paul Becker", "Marcus Fischer",
+            "Sophie Hoffmann", "Lisa König",
+        ),
+    )
+    assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK in codes, repr(text)
+
+
+def test_person_username_and_format_variants_neutral_words_accepted():
+    """ADV-254 residual guard: the bounded username/format/plural extensions
+    never over-block generic log vocabulary that does not coincide with a
+    canonical person."""
+    for text in (
+        "the operator ran a scan",
+        "a colleague logged off",
+        "user initiated a backup",
+        "the case file was archived",
+        "New letter received",
+        "the kitchen was cleaned",
+    ):
+        entries = _valid_entries()
+        entries[8] = _entry(CANONICAL, activity=text)
+        codes = validate_activity_log(
+            _as_log(entries),
+            canonical_time=CANONICAL,
+            person_names=(
+                "Dr. Anna Weiss", "Paul Becker", "Marcus Fischer",
+                "Sophie Hoffmann", "Lisa König",
+            ),
+        )
+        assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK not in codes, text
+        assert codes == (), (text, codes)
+
+
+# --------------------------------------------------------------------------- #
 # 8c — ADV-255: weapon/motive paraphrases are rejected (§24/§25)
 # --------------------------------------------------------------------------- #
 
@@ -533,6 +598,63 @@ def test_weapon_motive_generic_rows_not_overblocked():
             motive_names=("wanted to steal the research data",),
         )
         assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK not in codes, text
+
+
+# --------------------------------------------------------------------------- #
+# 8d — ADV-258: the weapon word-token layer must NEVER over-block harmless rows
+#     when the canonical weapon shares ordinary words ("computer case",
+#     "letter opener", "kitchen knife"); distinctive weapon content words must
+#     STILL reject (ADV-255 guard).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "weapon,text",
+    (
+        ("computer case", "In case of error, retry"),
+        ("computer case", "the case file was archived"),
+        ("computer case", "Computer activity detected"),
+        ("letter opener", "New letter received"),
+        ("kitchen knife", "the kitchen was cleaned"),
+        ("glass bottle", "a bottle of water was spilled"),
+        ("paper shredder", "a new paper order arrived"),
+        ("computer case", "Mail client synchronized"),
+        ("letter opener", "Document autosaved"),
+    ),
+)
+def test_weapon_shared_words_do_not_overblock(weapon, text):
+    """ADV-258: a canonical weapon whose name contains ordinary words must not
+    make otherwise-neutral log rows fail ENTITY_LEAK — the weapon-token layer
+    keeps only DISTINCTIVE content words as forbidden needles."""
+    entries = _valid_entries()
+    entries[8] = _entry(CANONICAL, activity=text)
+    codes = validate_activity_log(
+        _as_log(entries), canonical_time=CANONICAL, weapon_names=(weapon,)
+    )
+    assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK not in codes, (weapon, text)
+    assert codes == (), (weapon, text, codes)
+
+
+@pytest.mark.parametrize(
+    "weapon,text",
+    (
+        ("bronze ceremonial ice pick", "a ceremonial pick was seized"),
+        ("bronze ceremonial ice pick", "a sharp bronze instrument was wiped"),
+        ("bronze ceremonial ice pick", "the bronze ceremonial ice pick was wiped"),
+        ("kitchen knife", "the knife"),
+        ("kitchen knife", "a knife was found by the counter"),
+    ),
+)
+def test_weapon_paraphrase_rejects_still_hold_after_carve_out(weapon, text):
+    """ADV-258 guard: the neutral carve-out must NOT weaken ADV-255 — rows that
+    name a DISTINCTIVE weapon content word (or the exact weapon) still fail
+    ENTITY_LEAK."""
+    entries = _valid_entries()
+    entries[8] = _entry(CANONICAL, activity=text)
+    codes = validate_activity_log(
+        _as_log(entries), canonical_time=CANONICAL, weapon_names=(weapon,)
+    )
+    assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK in codes, (weapon, text)
 
 
 # --------------------------------------------------------------------------- #

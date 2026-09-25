@@ -26,9 +26,13 @@ Rules implemented here (Phase19J §8/§11/§15/§16/§17/§21/§22/§23/§24/§2
 - no duplicate entries (same timestamp + text);
 - no direct truth-leak language (answer-like tokens);
 - no entity/weapon/motive/location leakage (app-owned name set, strict-by-
-  default; ADV-254/ADV-255: person-name matching folds case/ASCII/titles and
-  compares first/last/full tokens + leet variants, weapon/motive paraphrases
-  are rejected via word-token and de-genericized content-word needles).
+  default; ADV-254/ADV-255/ADV-258/ADV-260: person-name matching folds
+  case/ASCII/NFKC, strips honorifics and Unicode Cf-format chars, and compares
+  first/last/full tokens, leet variants, concatenated-username forms and plural
+  surnames; weapon/motive paraphrases are rejected via word-token and
+  de-genericized content-word needles with the shared bounded neutral
+  computer-log carve-out so canonical weapons sharing ordinary words never
+  over-block harmless rows).
 
 Purity: this module is pure — zero provider calls, zero network, never reads
 CaseTruth or solver material, and never touches raw prompts. Every function is
@@ -266,12 +270,20 @@ def truth_leak_tokens(value: str) -> tuple[str, ...]:
 
 
 # --------------------------------------------------------------------------- #
-# ADV-254/ADV-255 — deterministic bounded normalization for the entity/weapon/
-# motive leak filter. The FIRST-VERSION filter matched only the exact canonical
-# token, so surname/bare-first-name/ASCII-folded/leet person variants and
-# weapon/motive paraphrases passed. The layer below folds BOTH the canonical
-# name set and the log text identically (case + ASCII + NFKC + title/punctuation
-# stripping) and compares word tokens — bounded, deterministic, no stemmer.
+# ADV-254/ADV-255/ADV-258/ADV-260 — deterministic bounded normalization for the
+# entity/weapon/motive leak filter. The FIRST-VERSION filter matched only the
+# exact canonical token, so surname/bare-first-name/ASCII-folded/leet person
+# variants and weapon/motive paraphrases passed. The layers below fold BOTH the
+# canonical name set and the log text identically (case + ASCII + NFKC +
+# title/punctuation stripping; Unicode Cf-format chars are removed so invisible
+# ZWSP/ZWNJ splits resolve) and compare word tokens — bounded, deterministic,
+# no stemmer. ADV-260: person needles additionally cover concatenated username
+# forms ("pbecker" / "paulbecker" / "beckerpaul") and plural surnames
+# ("Beckers" -> "becker"). ADV-258: the weapon layer shares the motive layer's
+# bounded neutral computer-log carve-out, so a canonical weapon whose name
+# contains ordinary words ("computer case", "letter opener", "kitchen knife")
+# never over-blocks harmless log rows; only DISTINCTIVE weapon content words
+# stay forbidden.
 # --------------------------------------------------------------------------- #
 
 _HONORIFIC_TOKENS: frozenset[str] = frozenset(
@@ -308,12 +320,19 @@ def _fold_ascii(value: str) -> str:
     """Deterministic bounded ASCII fold: NFKC -> casefold -> transliteration.
 
     ``"Lisa König"`` -> ``"lisa konig"``; ``"P4UL B3CK3R"`` -> ``"p4ul b3ck3r"``.
+    Unicode Cf-format characters (U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ,
+    U+200E/U+200F LRM/RLM, U+FEFF BOM, ...) are dropped (ADV-260) so invisible
+    splits like "Pau\\u200bl" fold to "paul" and resolve to the canonical name.
     """
     text = unicodedata.normalize("NFKC", str(value or ""))
     text = text.casefold()
     text = text.translate(_ASCII_TRANSLIT)
     text = unicodedata.normalize("NFKD", text)
-    return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    # Mn = combining marks (existing); Cf = Unicode format/zero-width class
+    # (ADV-260 / ADV-254 residual, defense-in-depth).
+    return "".join(
+        ch for ch in text if unicodedata.category(ch) not in ("Mn", "Cf")
+    )
 
 
 def _fold_name_tokens(value: str) -> tuple[str, ...]:
@@ -327,36 +346,6 @@ def _fold_name_tokens(value: str) -> tuple[str, ...]:
     return tuple(part for part in parts if part not in _HONORIFIC_TOKENS)
 
 
-def _person_leak_keys(names: Iterable[str]) -> frozenset[str]:
-    """Person-name leak needles: first/last/full word tokens + leet variants.
-
-    Bounded: every canonical person name/id contributes at most 2*T keys where
-    T is its (small) folded token count.
-    """
-    keys: set[str] = set()
-    for raw in names:
-        for token in _fold_name_tokens(raw):
-            if len(token) >= 2:
-                keys.add(token)
-                keys.add(_leet_key(token))
-    return frozenset(keys)
-
-
-def _weapon_leak_keys(names: Iterable[str]) -> frozenset[str]:
-    """Weapon-name word tokens (the near-paraphrase needle set).
-
-    "bronze ceremonial ice pick" -> {bronze, ceremonial, ice, pick} — a row
-    naming ANY of the weapon's distinctive words ("a ceremonial pick was
-    seized", "a sharp bronze instrument was wiped") is rejected.
-    """
-    keys: set[str] = set()
-    for raw in names:
-        for token in _fold_name_tokens(raw):
-            if len(token) >= 3:
-                keys.add(token)
-    return frozenset(keys)
-
-
 _MOTIVE_FUNCTION_WORDS: frozenset[str] = frozenset(
     {
         "a", "an", "and", "as", "at", "be", "been", "being", "but", "by",
@@ -368,15 +357,21 @@ _MOTIVE_FUNCTION_WORDS: frozenset[str] = frozenset(
     }
 )
 
-# Neutral computer-log vocabulary: generic words that legitimately appear in
-# ordinary activity-log rows and must NEVER trip the motive filter ("Research
-# document accessed", "opened a document", "data synced"). Bounded and
-# documented; keeps the motive content-word needle set distinctive.
+# Neutral computer-log vocabulary (ADV-258): generic words that legitimately
+# appear in ordinary activity-log rows and must NEVER trip the weapon/motive
+# word-token filters ("Research document accessed", "opened a document", "data
+# synced", "the case file was archived", "New letter received", "the kitchen
+# was cleaned"). Bounded and documented; keeps the weapon/motive content-word
+# needle sets distinctive. The ADV-258 additions cover the generic/shared nouns
+# a realistic canonical weapon can contain ("computer case", "letter opener",
+# "kitchen knife", "glass bottle", "paper shredder", ...) — a row is only
+# blocked when it carries a weapon-DISTINCTIVE token outside this list.
 _NEUTRAL_COMPUTER_WORDS: frozenset[str] = frozenset(
     {
         "access", "accessed", "activity", "application", "applications",
         "autosave", "autosaved", "backup", "background", "browser", "client",
-        "cloud", "completed", "copied", "data", "detected", "document",
+        "cloud", "completed", "computer", "copied", "data", "detected",
+        "document",
         "documents", "editor", "entered", "explorer", "file", "files",
         "folder", "folders", "foreground", "keyboard", "local", "login",
         "logged", "mail", "network", "office", "opened", "opening",
@@ -385,8 +380,72 @@ _NEUTRAL_COMPUTER_WORDS: frozenset[str] = frozenset(
         "sync", "synced", "synchronization", "synchronized", "system",
         "task", "tasks", "update", "updated", "user", "users", "view",
         "viewed", "window", "workspace", "written",
+        # ADV-258: generic shared words a canonical weapon name may contain.
+        "case", "letter", "opener", "kitchen", "error", "retry", "new",
+        "received", "cleaned", "archived", "cable", "glass", "bottle",
+        "chain", "pipe", "belt", "wire", "paper", "pillow", "frame",
     }
 )
+
+
+def _person_leak_keys(names: Iterable[str]) -> frozenset[str]:
+    """Person-name leak needles: first/last/full tokens, leet variants and the
+    ADV-260 concatenated-username / family forms.
+
+    Every canonical person name/id contributes:
+    - each folded word token (len >= 2) + its leet form ("becker"/"b3ck3r");
+    - the concatenated first+last and last+first needles ("paulbecker",
+      "beckerpaul") + leet forms ("p4ulb3ck3r");
+    - the first-initial+surname needle ("pbecker") + leet form.
+    Bounded: at most ~6 keys per canonical name (T <= 3 tokens).
+    """
+    keys: set[str] = set()
+    for raw in names:
+        tokens = _fold_name_tokens(raw)
+        for token in tokens:
+            if len(token) >= 2:
+                keys.add(token)
+                keys.add(_leet_key(token))
+        if len(tokens) >= 2:
+            joined = "".join(tokens)
+            keys.add(joined)
+            keys.add(_leet_key(joined))
+            last_first = "".join(reversed(tokens))
+            keys.add(last_first)
+            keys.add(_leet_key(last_first))
+            initial_surname = tokens[0][0] + tokens[-1]
+            keys.add(initial_surname)
+            keys.add(_leet_key(initial_surname))
+    return frozenset(keys)
+
+
+def _weapon_leak_keys(names: Iterable[str]) -> frozenset[str]:
+    """Weapon-name DISTINCTIVE content words (the near-paraphrase needle set).
+
+    ADV-255 (a): "bronze ceremonial ice pick" -> {bronze, ceremonial, ice,
+    pick} — a row naming ANY of the weapon's distinctive words ("a ceremonial
+    pick was seized", "a sharp bronze instrument was wiped") is rejected.
+    ADV-258: the SAME bounded neutral carve-out the motive layer uses —
+    function words and ``_NEUTRAL_COMPUTER_WORDS`` are dropped, so a canonical
+    weapon that shares ordinary words with harmless rows ("computer case" ->
+    "the case file was archived", "letter opener" -> "New letter received",
+    "kitchen knife" -> "the kitchen was cleaned") NEVER over-blocks them; only
+    the weapon's DISTINCTIVE content words stay forbidden. "kitchen knife" ->
+    {"knife"} (the distinctive weapon-family word remains; the static
+    forbidden-content list independently enforces knife/blade/shaft/gun).
+    """
+    keys: set[str] = set()
+    for raw in names:
+        for token in _fold_name_tokens(raw):
+            if len(token) < 3:
+                continue
+            if (
+                token in _MOTIVE_FUNCTION_WORDS
+                or token in _NEUTRAL_COMPUTER_WORDS
+            ):
+                continue
+            keys.add(token)
+    return frozenset(keys)
 
 
 def _motive_leak_keys(names: Iterable[str]) -> frozenset[str]:
@@ -469,15 +528,26 @@ def entity_leak_tokens(
     Strict-by-default stance (Phase19J §23/§24/§25/§26): the case's own
     canonical names are forbidden in log text by default.
 
-    - **person names / ids** (ADV-254): the canonical name set (first/last/full
-      word tokens) is folded (case+ASCII+NFKC, titles/punctuation stripped) and
-      leet-canonicalized on BOTH sides, so bare first names, surname-only,
-      ASCII-transliterated, title-less and leet spellings are rejected with
-      word-boundary token equality. Generic words ("user", "operator",
-      "colleague") are untouched unless they coincide with a canonical name.
-    - **weapon names / ids** (ADV-255): the whole name is rejected on ANY
-      occurrence (v1) AND any distinctive word-token of the weapon name rejects
-      ("ceremonial pick", "sharp bronze instrument").
+    - **person names / ids** (ADV-254/ADV-260): the canonical name set
+      (first/last/full word tokens) is folded on BOTH sides (case+ASCII+NFKC,
+      titles/punctuation + Unicode Cf-format stripped) and leet-canonicalized,
+      so bare first names, surname-only, ASCII-transliterated, title-less and
+      leet spellings are rejected with word-boundary token equality; ADV-260
+      additionally rejects concatenated-username forms ("pbecker" /
+      "paulbecker" / "beckerpaul" / leet "p4ulb3ck3r"), ZWSP/ZWNJ-split names
+      ("Pau\\u200bl B\\u200becker") and plural/possessive surnames ("the
+      Beckers' workstation"). Generic words ("user", "operator", "colleague",
+      "case file") are untouched unless they coincide with a canonical name.
+      Documented bounded residual (LOW, tracked as ADV-260): non-Latin
+      homoglyphs and morphological forms beyond a single trailing plural marker
+      (e.g. "paulus") stay outside this deterministic needle set.
+    - **weapon names / ids** (ADV-255/ADV-258): the whole name is rejected on
+      ANY occurrence (v1) AND any DISTINCTIVE word-token of the weapon name
+      rejects ("ceremonial pick", "sharp bronze instrument"). ADV-258: weapon
+      tokens inside the shared neutral computer-log vocabulary never trip, so
+      a canonical weapon that shares ordinary words ("computer case", "letter
+      opener", "kitchen knife") never over-blocks harmless rows ("the case
+      file was archived", "New letter received", "the kitchen was cleaned").
     - **motive labels / ids** (ADV-255): the whole label is rejected on ANY
       occurrence (v1) AND the label's significant content words (after dropping
       function words + the neutral computer-log vocabulary) are forbidden.
@@ -509,8 +579,21 @@ def entity_leak_tokens(
     hits.extend(_exact_phrase_hits(motive_names, scan))
     hits.extend(_exact_phrase_hits(location_ids, scan))
 
-    # person-name first/last/full + leet token set (ADV-254)
-    if _person_leak_keys(person_names) & text_keys:
+    # person-name first/last/full + leet + concatenated-username + Cf-stripped
+    # token set (ADV-254 / ADV-260 a+b)
+    person_keys = _person_leak_keys(person_names)
+    if person_keys & text_keys:
+        hits.append("<person-name-token>")
+    elif any(
+        # ADV-260 (c): plural-surname defense — "Beckers" or leet "b3ck3r5"
+        # collapse to the canonical surname/leet form by dropping ONE trailing
+        # plural marker; the singular base must itself be a canonical key, so
+        # generic "users"/"operators" rows never trip.
+        len(t) >= 3
+        and (t.endswith("s") or t.endswith("5"))
+        and t[:-1] in person_keys
+        for t in text_token_set
+    ):
         hits.append("<person-name-token>")
     # weapon word-token near-paraphrase (ADV-255 a)
     for token in sorted(_weapon_leak_keys(weapon_names) & text_token_set):
