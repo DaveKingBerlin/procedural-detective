@@ -1085,10 +1085,17 @@ describe("Phase 19J §33 — width-independent responsive contracts (1280/600/36
   // panel width (same approach as the ADV-245 regression test; real-pixel
   // geometry stays the QA/Playwright layer's domain). Every assertion reads
   // src/index.css directly, so the contract can never drift from production.
-  const css = readFileSync(join(process.cwd(), "src", "index.css"), "utf8");
+  // The worktree stylesheet is LF or CRLF depending on git autocrlf, so the
+  // regex must never depend on line endings: normalize before matching.
+  const css = readFileSync(join(process.cwd(), "src", "index.css"), "utf8")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
 
   function rule(selectorPattern: string): string {
-    const match = new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`).exec(css);
+    // Multi-selector patterns span real (possibly CRLF) newlines in this file;
+    // collapse separator whitespace to \s* so the match is line-ending agnostic.
+    const source = selectorPattern.replace(/\s*\n\s*/g, "\\s*");
+    const match = new RegExp(`${source}\\s*\\{([^}]*)\\}`).exec(css);
     if (!match) throw new Error(`missing shipped rule matching ${selectorPattern}`);
     return match[1];
   }
