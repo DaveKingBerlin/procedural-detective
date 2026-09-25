@@ -67,16 +67,23 @@ Waiting for generation jobs...
 ```
 
 Reconnect: after a link drop the bridge reconnects automatically with bounded
-backoff (1s → 2s → 4s cap), presenting the persisted bridge session token.
-Start the bridge after pairing once with:
+backoff (1s → 2s → 4s cap). The bridge session token is **memory-only by
+default**: it never touches disk, so reconnect works only while this process
+keeps running. If the CLI restarts, the memory-only token is gone and you
+re-pair with a fresh code.
 
 ```bash
-pd-ollama-bridge connect PD-X7K4-92QP --memory-only
+pd-ollama-bridge connect PD-X7K4-92QP
 ```
 
-`--memory-only` never writes the session token to disk (default writes it under
-the user's temp/home directory as a 0600 file; override with
-`--token-file PATH`).
+To make reconnect survive CLI restarts, **explicitly** opt in with
+`--token-file PATH`. The file is then created with the strongest practical
+permissions (0600 on POSIX; on Windows an owner-only read/write ACL is
+attempted via `icacls` — Windows does not enforce POSIX mode bits, and if the
+ACL cannot be applied you get a printed warning). Tradeoff: a reusable secret
+on disk versus having to re-pair after every CLI restart.
+
+`--memory-only` is the default and never writes the session token to disk.
 
 Operator helpers:
 
@@ -132,8 +139,10 @@ any instruction besides the prompt to send to the already-configured Ollama.
   `LOCAL_PROVIDER_TIMEOUT`, `LOCAL_PROVIDER_INVALID_OUTPUT`, `BRIDGE_BUSY`,
   `BRIDGE_PROTOCOL_ERROR`.
 - The pairing code is single-use and never persisted. The bridge session token
-  is kept in memory (optionally 0600 token file) and is the only reconnect
-  credential. A rejected/expired session stops the bridge — re-pair.
+  is kept **in memory by default** and is the only reconnect credential; with
+  an explicit `--token-file PATH` it is also persisted with the strongest
+  practical permissions (0600 on POSIX; best-effort owner-only ACL on Windows).
+  A rejected/expired session stops the bridge — re-pair.
 
 ## Privacy note
 

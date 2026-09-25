@@ -22,7 +22,7 @@ from typing import Optional, Sequence
 
 from . import protocol
 from .bridge_client import BridgeClient
-from .config import Config, DEFAULT_TOKEN_FILE_DIR, TokenStore
+from .config import Config, TokenStore
 from .ollama_client import OllamaClient
 from .urls import UrlValidationError
 
@@ -60,11 +60,27 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=protocol.DEFAULT_CONNECT_TIMEOUT_SECONDS,
         help="connect/check timeout in seconds",
     )
-    connect.add_argument("--token-file", type=Path, default=None, help="persist the bridge session token here")
+    connect.add_argument(
+        "--token-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "EXPLICIT opt-in: persist the bridge session token to this file "
+            "so reconnect works across CLI restarts. The file is created with "
+            "the strongest practical permissions (0600 on POSIX; an owner-only "
+            "ACL is attempted on Windows). Without this flag the token is "
+            "memory-only: it never touches disk and reconnect survives only "
+            "while this process keeps running."
+        ),
+    )
     connect.add_argument(
         "--memory-only",
         action="store_true",
-        help="never write the session token to disk",
+        help=(
+            "keep the session token in memory only (this is the default). "
+            "Never writes a token file; if the CLI restarts you must re-pair."
+        ),
     )
     connect.add_argument(
         "--lan",
@@ -132,10 +148,20 @@ async def _list_models(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_token_file(args: argparse.Namespace) -> Optional[Path]:
+    """Session-token file path, or ``None`` for the default memory-only mode.
+
+    A token file is used ONLY when the operator explicitly passes
+    ``--token-file PATH``; ``--memory-only`` (now the default) also wins over
+    an accidentally combined ``--token-file``.
+    """
+    if args.memory_only:
+        return None
+    return args.token_file
+
+
 async def _connect(args: argparse.Namespace) -> int:
-    token_file: Optional[Path] = None
-    if not args.memory_only:
-        token_file = args.token_file or (DEFAULT_TOKEN_FILE_DIR / "session_token")
+    token_file: Optional[Path] = _resolve_token_file(args)
     store = TokenStore(token_file)
     stored_token = store.load()
 

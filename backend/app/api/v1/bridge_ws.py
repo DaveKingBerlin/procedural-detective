@@ -39,6 +39,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.observability import emit_event
+from app.core.ratelimit import resolve_client_ip
 from app.services.bridge_session import (
     CLOSE_IDLE_TIMEOUT,
     CLOSE_MESSAGE_TOO_BIG,
@@ -62,6 +63,56 @@ router = APIRouter(tags=["bridge-ws"])
 _WS_PATH = "/api/v1/bridge/ws"
 
 
+class BridgeMessageSizeGuard:
+    """ADV-251 — enforce the WS frame byte bound at the ASGI transport edge.
+
+    uvicorn's transport default ``ws_max_size`` is 16 MiB (verified against
+    the installed uvicorn 0.52.4: ``uvicorn.Config.ws_max_size =
+    16 * 1024 * 1024``) — 64x the documented ``BRIDGE_MAX_MESSAGE_BYTES``
+    (256 KiB default), so without this guard a frame of up to ~16 MiB is FULLY
+    BUFFERED before the app's decode-time check (``websocket.receive_text()``)
+    ever runs. This middleware intercepts the inbound message stream of the
+    bridge WebSocket scope and answers ANY frame whose UTF-8 byte size exceeds
+    ``max_bytes`` with a 1009 close WITHOUT reaching the endpoint decode — the
+    FIRST (pre-auth) frame included.
+
+    Every repo-controlled uvicorn launch additionally passes
+    ``ws_max_size``/``--ws-max-size`` (the REAL transport bound); this guard is
+    the app-owned enforcement that holds under ANY uvicorn version/configuration
+    (and in TestClient, which bypasses the uvicorn transport entirely).
+    """
+
+    def __init__(self, app: Any, *, max_bytes: int = 256 * 1024) -> None:
+        self.app = app
+        self._max_bytes = int(max_bytes)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "websocket" or not str(
+            scope.get("path", "")
+        ).startswith(_WS_PATH):
+            await self.app(scope, receive, send)
+            return
+
+        async def guarded_receive() -> dict[str, Any]:
+            message = await receive()
+            if message.get("type") == "websocket.receive":
+                text = message.get("text")
+                if isinstance(text, str) and len(text.encode("utf-8")) > self._max_bytes:
+                    await send(
+                        {
+                            "type": "websocket.close",
+                            "code": CLOSE_MESSAGE_TOO_BIG,
+                            "reason": "message too large",
+                        }
+                    )
+                    raise WebSocketDisconnect(
+                        CLOSE_MESSAGE_TOO_BIG, "message too large"
+                    )
+            return message
+
+        await self.app(scope, guarded_receive, send)
+
+
 async def _close_later(websocket: WebSocket, code: int, reason: str) -> None:
     try:
         await websocket.close(code=code, reason=reason)
@@ -69,11 +120,21 @@ async def _close_later(websocket: WebSocket, code: int, reason: str) -> None:
         return
 
 
-def _handshake_gate_blocked(request: Any) -> bool:
-    gate = getattr(request.app.state, "bridge_handshake_gate", None)
+def _client_ip(websocket: WebSocket) -> str:
+    """The TRUST_PROXY-aware bridge-connect identity (same rule as every other
+    per-IP admission budget in the app — DEF-094/PD-SEC-02)."""
+    settings = websocket.app.state.settings
+    trust_proxy = bool(getattr(settings, "trust_proxy", False))
+    return resolve_client_ip(websocket, trust_proxy=trust_proxy)
+
+
+def _record_failed_handshake(state: Any, ip: str, now: float) -> None:
+    """ADV-252: count ONE failed handshake against the PER-IP failed-handshake
+    window (best-effort accounting; never raises)."""
+    gate = getattr(state, "bridge_failed_handshake_gate", None)
     if gate is None:
-        return False
-    return not gate.allow("global", request.app.state.clock.now())
+        return
+    gate.record(str(ip) if ip else "<unknown>", now)
 
 
 async def _read_first_frame(websocket: WebSocket, settings: Any) -> str | None:
@@ -98,7 +159,15 @@ async def bridge_ws_endpoint(websocket: WebSocket) -> None:
     if registry is None or pairing_service is None:
         await _close_later(websocket, CLOSE_POLICY_VIOLATION, "bridge disabled")
         return
-    if _handshake_gate_blocked(websocket):
+    now = float(websocket.app.state.clock.now())
+    ip = _client_ip(websocket)
+    # ADV-252 — the failed-handshake bound is a PER-IP window of failures: only
+    # an IP that already burned ITS OWN failed-handshake budget is refused
+    # pre-accept. No other IP is ever throttled by a foreign brute-force flurry
+    # and a legitimate reconnect is never counted against the failure window
+    # (successful handshakes consume the SEPARATE admission budget below).
+    failed_gate = getattr(websocket.app.state, "bridge_failed_handshake_gate", None)
+    if failed_gate is not None and failed_gate.over_limit(ip, now):
         await _close_later(
             websocket, CLOSE_POLICY_VIOLATION, "bridge handshake rate limit"
         )
@@ -106,6 +175,7 @@ async def bridge_ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     raw = await _read_first_frame(websocket, settings)
     if raw is None:
+        _record_failed_handshake(websocket.app.state, ip, now)
         await _close_later(websocket, CLOSE_POLICY_VIOLATION, "unauthorized")
         return
     try:
@@ -113,9 +183,11 @@ async def bridge_ws_endpoint(websocket: WebSocket) -> None:
             raw, max_bytes=settings.bridge_max_message_bytes
         )
     except BridgeFrameRejected as exc:
+        _record_failed_handshake(websocket.app.state, ip, now)
         await _close_later(websocket, exc.close_code, exc.reason)
         return
     if not is_handshake_frame(frame):
+        _record_failed_handshake(websocket.app.state, ip, now)
         await _close_later(websocket, CLOSE_UNSUPPORTED_TYPE, "unknown message type")
         return
     try:
@@ -126,16 +198,37 @@ async def bridge_ws_endpoint(websocket: WebSocket) -> None:
             settings=settings,
             websocket=websocket,
             loop=asyncio.get_running_loop(),
-            now=float(websocket.app.state.clock.now()),
+            now=now,
         )
     except BridgeFrameRejected as exc:
+        _record_failed_handshake(websocket.app.state, ip, now)
         await _close_later(websocket, exc.close_code, exc.reason)
         return
+    # ADV-252 — SUCCESSFUL pairings/connections consume the SEPARATE global
+    # admission budget. A brute-force flurry of FAILED attempts never touches
+    # it, so legitimate bridge reconnects are never throttled by failed
+    # attempts from any source.
+    admission_gate = getattr(websocket.app.state, "bridge_admission_gate", None)
+    if admission_gate is not None and not admission_gate.allow("global", now):
+        registry.detach(
+            conn.bridge_session_id,
+            now=now,
+            epoch=conn.connection_epoch,
+        )
+        await _close_later(
+            websocket, CLOSE_POLICY_VIOLATION, "bridge handshake rate limit"
+        )
+        return
+    # This handler's OWN generation: a LATE detach is a no-op once a newer
+    # connection (same bridge session) has superseded it (ADV-248).
+    connection_epoch = conn.connection_epoch
     try:
         await websocket.send_text(ack)
     except Exception:  # noqa: BLE001 - peer vanished during handshake
         registry.detach(
-            conn.bridge_session_id, now=float(websocket.app.state.clock.now())
+            conn.bridge_session_id,
+            now=float(websocket.app.state.clock.now()),
+            epoch=connection_epoch,
         )
         return
 
@@ -195,7 +288,7 @@ async def bridge_ws_endpoint(websocket: WebSocket) -> None:
             break
     finally:
         now = float(websocket.app.state.clock.now())
-        registry.detach(conn.bridge_session_id, now=now)
+        registry.detach(conn.bridge_session_id, now=now, epoch=connection_epoch)
         emit_event(
             "bridge.disconnected",
             bridgeSessionId=conn.bridge_session_id,
@@ -203,4 +296,4 @@ async def bridge_ws_endpoint(websocket: WebSocket) -> None:
         )
 
 
-__all__ = ["router", "bridge_ws_endpoint"]
+__all__ = ["BridgeMessageSizeGuard", "router", "bridge_ws_endpoint"]

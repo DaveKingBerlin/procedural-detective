@@ -12,6 +12,19 @@ This module owns the SERVER-side bridge lifecycle:
   are lazily cleaned; the map is bounded by
   ``BRIDGE_MAX_REGISTRY_SESSIONS``.
 
+Generation semantics (ADV-248): EVERY ``bind()`` creates a NEW
+``BridgeConnection`` for the new physical link and stamps it with its own
+monotonically increasing ``connection_epoch`` — even a ``bridge_hello``
+reconnect that reuses the same ``bridge_session_id``. A new binding
+SUPERSEDES the previous generation: the old generation's in-flight job (if
+any) fails typed ``BRIDGE_DISCONNECTED`` and its socket is closed
+best-effort. Because the OLD connection object (still referenced by the old
+receive-loop handler) is no longer the registry's current binding, that
+handler's LATE ``detach(sid, epoch=old_epoch)`` is an epoch-guarded NO-OP and
+can never null the NEWER socket — no zombie bridge. A stale job result that
+arrives after the supersede finds no current job on the new generation and is
+DISCARDED.
+
 Threading model (the sync-over-async seam):
 
 - The WebSocket endpoint runs on uvicorn's event loop (async receiver).
@@ -122,7 +135,15 @@ class BridgeJobWaiter:
 
 
 class BridgeConnection:
-    """One registry entry: the live socket binding + the single-job gate."""
+    """One registry entry: the live socket binding + the single-job gate.
+
+    Each registry entry corresponds to ONE PHYSICAL connection generation:
+    ``connection_epoch`` monotonically increases on every ``bind()`` (even for
+    a same-session reconnect), so a superseded generation can be told apart
+    from the current one. The old handler still holds the OLD object; its
+    later ``detach`` is a NO-OP because the registry's current binding is a
+    newer epoch (ADV-248 — never null a newer socket with a late teardown).
+    """
 
     __slots__ = (
         "bridge_session_id",
@@ -136,6 +157,7 @@ class BridgeConnection:
         "disconnected_at",
         "socket",
         "loop",
+        "connection_epoch",
         "current_job_id",
         "current_waiter",
         "_db_touch",
@@ -151,6 +173,7 @@ class BridgeConnection:
         capabilities: tuple[str, ...],
         expires_at: float,
         now: float,
+        connection_epoch: int,
     ) -> None:
         self.bridge_session_id = bridge_session_id
         self.session_scope = session_scope
@@ -163,6 +186,7 @@ class BridgeConnection:
         self.disconnected_at: float | None = None
         self.socket: Any = None
         self.loop: Any = None
+        self.connection_epoch = int(connection_epoch)
         self.current_job_id: str | None = None
         self.current_waiter: BridgeJobWaiter | None = None
         self._db_touch: float = 0.0
@@ -177,11 +201,14 @@ class BridgeRegistry:
     """Bounded in-memory registry of live/recent bridge connections.
 
     One connection per bridge session; a scope maps to at most one active
-    bridge (a newer binding supersedes the older one). The registry is bounded
-    (``bridge_max_registry_sessions``) and lazily cleaned: disconnected entries
-    are dropped after ``bridge_reconnect_grace_seconds`` (or expiry, whichever
-    comes first), so dead sessions never accumulate and the map never grows
-    without bound.
+    bridge (a newer binding supersedes the older one). Every physical
+    connection is its OWN generation: ``bind`` always creates a fresh
+    ``BridgeConnection`` carrying a new ``connection_epoch``, so a same-session
+    reconnect cannot reuse (and later corrupt) the old generation's record.
+    The registry is bounded (``bridge_max_registry_sessions``) and lazily
+    cleaned: disconnected entries are dropped after
+    ``bridge_reconnect_grace_seconds`` (or expiry, whichever comes first), so
+    dead sessions never accumulate and the map never grows without bound.
     """
 
     def __init__(self, *, settings: Any, store: Any, clock: Any | None = None) -> None:
@@ -193,6 +220,9 @@ class BridgeRegistry:
         self._lock = threading.RLock()
         self._by_id: dict[str, BridgeConnection] = {}
         self._last_cleanup_at: float = 0.0
+        # Monotonic generation counter: every bind stamps its connection with
+        # the next value, giving each physical link its own epoch.
+        self._connection_seq: int = 0
 
     def _maybe_cleanup(self, now: float) -> None:
         """Cadence-gated lazy cleanup (never an O(n) pass on every call)."""
@@ -219,50 +249,47 @@ class BridgeRegistry:
     ) -> BridgeConnection:
         """Bind/re-bind a fresh (or reconnecting) bridge to its session.
 
-        A NEW binding for a scope that already has a live connection
-        SUPERSEDES it: the previous connection's in-flight job (if any) fails
-        typed ``BRIDGE_DISCONNECTED`` and the previous socket is closed
-        best-effort (its handler then exits its receive loop and detaches a
-        no-op). The registry stays bounded: the oldest disconnected/expired
-        entry is dropped when at capacity.
+        EVERY physical connection is its OWN generation: ``bind`` always
+        creates a fresh ``BridgeConnection`` stamped with a NEW monotonically
+        increasing ``connection_epoch`` — even for a ``bridge_hello`` reconnect
+        that reuses the SAME ``bridge_session_id``. A NEW binding SUPERSEDES
+        the previous one: the previous connection's in-flight job (if any)
+        fails typed ``BRIDGE_DISCONNECTED`` (it belongs to the OLD generation —
+        never fulfilled or delivered on the new socket) and the previous socket
+        is closed best-effort. Because the registry's current binding is now
+        the NEW object, the OLD handler's later ``detach`` is an epoch-guarded
+        NO-OP (ADV-248): a late teardown can never null the newer socket. The
+        registry stays bounded: the oldest disconnected/expired entry is
+        dropped when at capacity.
         """
         with self._lock:
+            self._connection_seq += 1
+            epoch = self._connection_seq
             prior = self._by_id.get(bridge_session_id)
-            if prior is None:
-                prior_by_scope = self._by_scope_locked(session_scope)
-                if prior_by_scope is not None and prior_by_scope.bridge_session_id != bridge_session_id:
-                    # A second bridge for the SAME scope supersedes the first.
-                    old_socket = prior_by_scope.socket
-                    old_loop = prior_by_scope.loop
-                    self._fail_inflight_locked(prior_by_scope, GenerationFailureCode.BRIDGE_DISCONNECTED.value)
-                    prior_by_scope.state = BRIDGE_STATE_DISCONNECTED
-                    prior_by_scope.socket = None
-                    prior_by_scope.connected_at = None
-                    prior_by_scope.disconnected_at = float(now)
-                    self._by_id.pop(prior_by_scope.bridge_session_id, None)
-                    if old_socket is not None and old_loop is not None:
-                        try:
-                            future = asyncio_run_coroutine_threadsafe(
-                                old_socket.close(), old_loop
-                            )
-                            future.result(timeout=5.0)
-                        except Exception:  # noqa: BLE001 - supersede never blocks
-                            pass
-                conn = BridgeConnection(
-                    bridge_session_id=bridge_session_id,
-                    session_scope=session_scope,
-                    model=model,
-                    capabilities=capabilities,
-                    expires_at=expires_at,
-                    now=now,
-                )
-                self._by_id[bridge_session_id] = conn
+            if prior is not None:
+                # Reconnect to the SAME session while the old socket's handler
+                # has not detached yet (half-open link / delayed FIN): the new
+                # physical link is a NEW generation that supersedes the old one.
+                self._supersede_locked(prior, float(now))
             else:
-                conn = prior
-                conn.session_scope = session_scope
-                conn.model = model if model is not None else conn.model
-                conn.capabilities = tuple(capabilities) or conn.capabilities
-                conn.expires_at = expires_at
+                prior_by_scope = self._by_scope_locked(session_scope)
+                if (
+                    prior_by_scope is not None
+                    and prior_by_scope.bridge_session_id != bridge_session_id
+                ):
+                    # A second bridge for the SAME scope supersedes the first.
+                    self._supersede_locked(prior_by_scope, float(now))
+                    self._by_id.pop(prior_by_scope.bridge_session_id, None)
+            conn = BridgeConnection(
+                bridge_session_id=bridge_session_id,
+                session_scope=session_scope,
+                model=model,
+                capabilities=capabilities,
+                expires_at=expires_at,
+                now=now,
+                connection_epoch=epoch,
+            )
+            self._by_id[bridge_session_id] = conn
             conn.state = BRIDGE_STATE_CONNECTED
             conn.socket = socket
             conn.loop = loop
@@ -273,16 +300,32 @@ class BridgeRegistry:
             self.expiry_cleanup(now)
             return conn
 
-    def detach(self, bridge_session_id: str, *, now: float) -> BridgeConnection | None:
+    def detach(
+        self,
+        bridge_session_id: str,
+        *,
+        now: float,
+        epoch: int | None = None,
+    ) -> BridgeConnection | None:
         """Mark a bridge session disconnected (socket closed) and fail any
         in-flight job typed ``BRIDGE_DISCONNECTED``. Returns the connection.
 
         Called by the WebSocket endpoint's finally block — the same async
         context that owns the socket, so no cross-thread send is attempted.
+
+        GENERATION GUARD (ADV-248): the detaching handler passes the
+        ``epoch`` of ITS OWN physical connection. When the registry's current
+        binding for this session is a NEWER generation (``epoch`` differs from
+        the current ``connection_epoch``), the call is a NO-OP and returns
+        None — a LATE detach from a superseded socket must never null the
+        newer socket (zombie bridge). With ``epoch=None`` (no identity
+        supplied) the current binding is torn down as before.
         """
         with self._lock:
             conn = self._by_id.get(bridge_session_id)
             if conn is None:
+                return None
+            if epoch is not None and conn.connection_epoch != epoch:
                 return None
             conn.state = BRIDGE_STATE_DISCONNECTED
             conn.socket = None
@@ -480,6 +523,33 @@ class BridgeRegistry:
             conn.current_job_id = None
             conn.current_waiter = None
         waiter.resolve("error", code)
+
+    def _supersede_locked(self, conn: BridgeConnection, now: float) -> None:
+        """Supersede ``conn`` as the live binding (registry lock held).
+
+        The OLD generation's in-flight job (if any) fails typed
+        ``BRIDGE_DISCONNECTED`` — it was bound to the superseded connection and
+        must never be fulfilled or delivered on the new socket. The record is
+        marked disconnected and its socket is closed best-effort; the old
+        handler then exits its receive loop and detaches a generation-guarded
+        no-op (ADV-248).
+        """
+        self._fail_inflight_locked(conn, GenerationFailureCode.BRIDGE_DISCONNECTED.value)
+        conn.state = BRIDGE_STATE_DISCONNECTED
+        old_socket = conn.socket
+        old_loop = conn.loop
+        conn.socket = None
+        conn.loop = None
+        conn.connected_at = None
+        conn.disconnected_at = float(now)
+        if old_socket is not None and old_loop is not None:
+            try:
+                future = asyncio_run_coroutine_threadsafe(
+                    old_socket.close(), old_loop
+                )
+                future.result(timeout=5.0)
+            except Exception:  # noqa: BLE001 - supersede never blocks
+                pass
 
     def _by_scope_locked(self, session_scope: str) -> BridgeConnection | None:
         for conn in self._by_id.values():

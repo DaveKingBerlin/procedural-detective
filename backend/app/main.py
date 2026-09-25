@@ -663,13 +663,22 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         app.state.bridge_pairing_service = BridgePairingService(
             settings=settings, store=app.state.store, clock=app.state.clock
         )
-        # Bounded bridge handshake surface (per-window connection attempts) and
-        # per-IP pairing-mint window (same in-memory single-process mode as the
-        # Phase 20/21 rate state).
-        app.state.bridge_handshake_gate = SlidingWindowRateLimiter(
+        # Bounded bridge connect surface — ADV-252 SPLITS the public connect
+        # budget: FAILED handshake attempts are counted in a dedicated PER-IP
+        # window (only an IP that burns its own window is refused pre-accept),
+        # while SUCCESSFUL pairings/connections consume a SEPARATE global
+        # admission budget — a brute-force flurry can never starve legitimate
+        # reconnects. Plus the per-IP pairing-mint window (same in-memory
+        # single-process mode as the Phase 20/21 rate state).
+        app.state.bridge_failed_handshake_gate = SlidingWindowRateLimiter(
             clock=app.state.clock,
             limit=settings.bridge_failed_handshake_limit,
             window_seconds=settings.bridge_failed_handshake_window_seconds,
+        )
+        app.state.bridge_admission_gate = SlidingWindowRateLimiter(
+            clock=app.state.clock,
+            limit=settings.bridge_connect_admission_limit_per_window,
+            window_seconds=settings.bridge_connect_admission_window_seconds,
         )
         app.state.bridge_pairing_ip_limiter = SlidingWindowRateLimiter(
             clock=app.state.clock,
@@ -757,8 +766,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # /api/v1/bridge/* path on the normal 404 envelope.
     if settings.enable_bridge:
         from app.api.v1.bridge import router as bridge_rest_router
+        from app.api.v1.bridge_ws import BridgeMessageSizeGuard
         from app.api.v1.bridge_ws import router as bridge_ws_router
 
+        # ADV-251 — the transport-level WS frame bound (BRIDGE_MAX_MESSAGE_BYTES)
+        # on the bridge endpoint: oversized frames are rejected with 1009 at the
+        # ASGI transport edge BEFORE any application decode (first/pre-auth
+        # frame included). uvicorn's own default ``ws_max_size`` is 16 MiB; every
+        # repo-controlled uvicorn launch also passes ``--ws-max-size``, and this
+        # app-owned guard enforces the same bound under any server configuration.
+        app.add_middleware(
+            BridgeMessageSizeGuard,
+            max_bytes=settings.bridge_max_message_bytes,
+        )
         app.include_router(bridge_rest_router)
         app.include_router(bridge_ws_router)
     _configure_static_serving(app, settings)

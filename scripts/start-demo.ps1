@@ -190,6 +190,10 @@ try {
     # --no-proxy-headers is load-bearing (DEF-094): uvicorn's platform default
     # --proxy-headers trusts loopback and rewrites request.client from a
     # hostile X-Forwarded-For BEFORE the app's TRUST_PROXY=false identity gate.
+    # --ws-max-size (ADV-251) pins the transport-level WebSocket frame bound
+    # to BRIDGE_MAX_MESSAGE_BYTES (default 256 KiB; uvicorn's default is 16 MiB).
+    $wsMaxSize = "262144"
+    if ($env:BRIDGE_MAX_MESSAGE_BYTES) { $wsMaxSize = $env:BRIDGE_MAX_MESSAGE_BYTES }
     $distAbs = (Resolve-Path -LiteralPath (Join-Path $frontendDir "dist")).Path
     if (-not $env:STATIC_DIR) { $env:STATIC_DIR = $distAbs }
     if (-not $env:PD_FILE_LOGS) { $env:PD_FILE_LOGS = "true" }
@@ -213,7 +217,7 @@ try {
             --port $Port `
             --meta $metaPath `
             $logArgs `
-            --args -m uvicorn app.main:app --host 127.0.0.1 --port $Port --no-proxy-headers
+            --args -m uvicorn app.main:app --host 127.0.0.1 --port $Port --no-proxy-headers --ws-max-size $wsMaxSize
         if ($LASTEXITCODE -ne 0) { throw "launch failed (see output above)" }
     } finally {
         Pop-Location

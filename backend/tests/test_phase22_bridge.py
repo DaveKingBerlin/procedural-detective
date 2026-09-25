@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -775,6 +776,204 @@ def test_reconnect_after_connection_drop_restores_availability(stack):
     assert result2.json()["status"] == "PUBLISHED"
     assert bridge2.job_count == 4
     bridge2.close()
+
+
+class _TestLoopThread:
+    """A dedicated running asyncio loop in a background thread (the cross-thread
+    target for ``run_coroutine_threadsafe`` during registry-level tests)."""
+
+    def __init__(self) -> None:
+        import asyncio
+
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        import asyncio
+
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=3)
+
+
+class _FakeBridgeSocket:
+    """Socket-shaped stand-in for registry-level bridge tests: a real running
+    event loop so the supersede/close + cross-thread sends actually run."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._thread = _TestLoopThread()
+        self.closed = False
+
+    @property
+    def loop(self):
+        return self._thread.loop
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def send_text(self, data: str) -> None:
+        raise AssertionError(f"stale socket {self.name} must never be written")
+
+
+def test_adv248_reconnect_before_detach_keeps_new_generation(database_url):
+    """ADV-248 regression (registry-level, deterministic): a REBIND for the
+    SAME bridge_session_id that lands while the OLD socket's detach has not run
+    yet (half-open link + immediate reconnect) is a generation SUPERSEDE.
+
+    - the old generation's in-flight job fails typed BRIDGE_DISCONNECTED at
+      supersede (never fulfilled or delivered on the new socket);
+    - the OLD handler's LATE ``detach(epoch)`` is a NO-OP: the registry still
+      reports the session CONNECTED with the NEW socket (no zombie bridge);
+    - a late job result for the stale job is DISCARDED and the new generation
+      serves a fresh dispatch normally.
+    """
+    from app.models.bridge import BRIDGE_STATE_CONNECTED
+    from app.persistence.store import Store
+    from app.services.bridge import BridgeRegistry
+
+    store = Store(database_url)
+    registry = BridgeRegistry(
+        settings=Settings(database_url=database_url, bridge_reconnect_grace_seconds=5.0),
+        store=store,
+    )
+    sockets = []
+    try:
+        now = float(time.time())
+        sid = "PS-ADV248-1"
+        scope = "SCOPE-ADV248-1"
+        expires_at = now + 600.0
+        caps = ("STRUCTURED_MODEL_INFERENCE",)
+
+        # (a) connect socket A on session S (pairing accepted/generation 1).
+        socket_a = _FakeBridgeSocket("A")
+        sockets.append(socket_a)
+        conn_a = registry.bind(
+            bridge_session_id=sid,
+            session_scope=scope,
+            model="hermes3:8b",
+            capabilities=caps,
+            expires_at=expires_at,
+            socket=socket_a,
+            loop=socket_a.loop,
+            now=now,
+        )
+        assert conn_a.connection_epoch == 1
+        assert registry.lookup_for_scope(scope) is conn_a
+        # A job is dispatched to A (its provider thread is blocked on the waiter).
+        waiter_a = registry.begin_job(conn_a, "JOB-STALE-ON-A")
+        assert waiter_a is not None
+
+        # (c) IMMEDIATELY reconnect socket B (bridge_hello) — accepted while A's
+        # handler has NOT detached yet. B's bind SUPERSEDES generation A.
+        socket_b = _FakeBridgeSocket("B")
+        sockets.append(socket_b)
+        conn_b = registry.bind(
+            bridge_session_id=sid,
+            session_scope=scope,
+            model="hermes3:8b",
+            capabilities=caps,
+            expires_at=expires_at,
+            socket=socket_b,
+            loop=socket_b.loop,
+            now=now + 0.01,
+        )
+        assert conn_b is not conn_a  # a FRESH generation object (own epoch)
+        assert conn_b.connection_epoch > conn_a.connection_epoch
+        # Supersede closed the old socket best-effort AND failed the old job
+        # typed BRIDGE_DISCONNECTED — never delivered on B, never blocking B.
+        assert socket_a.closed
+        assert waiter_a.wait(1.0)
+        kind, value = waiter_a.result
+        assert kind == "error"
+        assert value == GenerationFailureCode.BRIDGE_DISCONNECTED.value
+        with conn_b._job_lock:
+            assert conn_b.current_job_id is None
+        assert registry.lookup_for_scope(scope) is conn_b
+
+        # A's LATE detach runs AFTER B was accepted and MUST be a no-op.
+        assert registry.detach(sid, now=now + 0.1, epoch=conn_a.connection_epoch) is None
+        live = registry.lookup_for_scope(scope, now=now + 0.1)
+        assert live is conn_b
+        assert conn_b.state == BRIDGE_STATE_CONNECTED
+        assert conn_b.socket is socket_b
+        assert registry.status_for_scope(scope, now=now + 0.1)["connected"] is True
+        # A's own record was logically detached (it can never be looked up).
+        assert conn_a.socket is None and conn_a.state != BRIDGE_STATE_CONNECTED
+
+        # A late job result for the STALE (old-generation) job is DISCARDED:
+        # it must not be applied to B and must not mutate B's socket.
+        assert registry.resolve_job(conn_b, "JOB-STALE-ON-A", "content", {"hijack": True}) is False
+        kind, value = waiter_a.result
+        assert (kind, value) == ("error", GenerationFailureCode.BRIDGE_DISCONNECTED.value)
+
+        # B serves a fresh dispatch normally — no zombie bridge state.
+        waiter_b = registry.begin_job(conn_b, "JOB-ON-B")
+        assert waiter_b is not None
+        assert registry.resolve_job(conn_b, "JOB-ON-B", "content", {"ok": 1}) is True
+        kind_b, value_b = waiter_b.result
+        assert kind_b == "content" and value_b == {"ok": 1}
+    finally:
+        for sock in sockets:
+            sock._thread.close()
+        store.dispose()
+
+
+def test_adv248_reconnect_before_detach_no_zombie_integration(stack):
+    """ADV-248 regression (integration, real endpoint): a ``bridge_hello``
+    reconnect that lands while the OLD socket is still handled (half-open /
+    delayed FIN) must supersede the old generation. The old handler's LATE
+    detach (its finally) is an epoch-guarded no-op: the status stays
+    CONNECTED, the registry keeps the NEW socket, and a generation is served
+    EXCLUSIVELY by the new socket — the dead socket never serves and no zombie
+    bridge state remains."""
+    from app.models.bridge import BRIDGE_STATE_CONNECTED
+    from app.auth.tokens import verifier as _verifier
+
+    base = stack["base_url"]
+    token = new_anonymous_session(base)["anonymousSessionToken"]
+    pairing = create_pairing(base, token)
+    bridge_a = TestBridge(stack["server"].ws_url)
+    ack_a = bridge_a.connect_pairing(pairing["pairingCode"], model=_OLLAMA)
+    secret = ack_a["bridgeSessionToken"]
+    session_id = ack_a["bridgeSessionId"]
+    registry = stack["server"].app.state.bridge_registry
+    scope = stack["server"].app.state.store.get_session_by_verifier(
+        _verifier(token)
+    ).session_id
+    conn_a = registry.lookup_for_scope(scope)
+    assert conn_a is not None and conn_a.socket is not None
+
+    # IMMEDIATELY reconnect socket B (bridge_hello) while A's server-handler
+    # has NOT detached yet (A is still open from the server's point of view).
+    bridge_b = TestBridge(stack["server"].ws_url)
+    ack_b = bridge_b.connect_reconnect(secret)
+    assert ack_b["type"] == "pairing_accepted"
+    assert ack_b["bridgeSessionId"] == session_id
+    conn_b = registry.lookup_for_scope(scope)
+    assert conn_b is not None
+    assert conn_b is not conn_a  # the reconnect created a NEW generation
+    assert conn_b.connection_epoch > conn_a.connection_epoch
+
+    # The supersede closes A; its handler then runs its finally -> LATE detach.
+    # Wait for that teardown to actually land on the server registry.
+    assert bridge_a.wait_for(lambda: bridge_a.close_code is not None, timeout=10)
+    time.sleep(0.3)  # allow the server-side finally (detach) to complete
+
+    # NO zombie: the registry still reports S connected with B's socket.
+    assert bridge_status(base, token)["remoteLocalAi"]["connected"] is True
+    live = registry.lookup_for_scope(scope)
+    assert live is conn_b
+    assert live is not conn_a
+    assert live.socket is not None
+    assert live.state == BRIDGE_STATE_CONNECTED
+
+    # A generation dispatched to S is served by B — NEVER by A's dead socket.
+    result = _generate(stack, token)
+    assert result.json()["status"] == "PUBLISHED"
+    assert bridge_b.job_count == 4
+    assert bridge_a.job_count == 0  # A never served the generation
+    bridge_b.close()
 
 
 def test_reconnect_rejects_expired_or_revoked_token(stack):

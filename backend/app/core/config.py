@@ -39,6 +39,10 @@ from pydantic_settings import (
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import ArgumentError
 
+from app.core.timeout_envelope import (  # noqa: E402  (no circular import)
+    BRIDGE_JOB_DEADLINE_MAX_SECONDS,
+)
+
 SERVICE_NAME = "procedural-detective"
 SERVICE_VERSION = "0.1.0"
 
@@ -482,12 +486,20 @@ class Settings(BaseSettings):
         ),
     )
     # Per-job deadline cap. The dispatch timeout is min(effective remaining
-    # generation deadline, BRIDGE_JOB_DEADLINE_SECONDS).
+    # generation deadline, BRIDGE_JOB_DEADLINE_SECONDS). ADV-250: the value is
+    # additionally HARD-CAPPED at config time to the maximum generation
+    # deadline the app allows (the timeout-envelope showcase bound) and a
+    # documented 1800s ceiling — so even a hostile/oversized configured value
+    # can never reach a job frame (``timeoutMs``) on the wire; the provider
+    # re-clamps at dispatch for defense-in-depth.
     bridge_job_deadline_seconds: float = Field(
         default=120.0,
         gt=0,
-        le=600,
-        description="BRIDGE_JOB_DEADLINE_SECONDS (per-job cap, bounded 0..600).",
+        le=BRIDGE_JOB_DEADLINE_MAX_SECONDS,
+        description=(
+            "BRIDGE_JOB_DEADLINE_SECONDS (per-job cap, bounded 0..%s; "
+            "ADV-250 hard ceiling)." % BRIDGE_JOB_DEADLINE_MAX_SECONDS
+        ),
     )
     # Reconnect grace: after a bridge disconnect the session stays
     # re-connectable via bridge_hello for this long (and until expiry);
@@ -529,17 +541,38 @@ class Settings(BaseSettings):
         gt=0,
         description="BRIDGE_FRAME_WINDOW_SECONDS.",
     )
-    # Global failed-handshake gate: after this many rejected first frames in the
-    # window, new WS connections are refused (bounds pairing brute force).
+    # ADV-252 — bridge-connect admission is SPLIT into two budgets. FAILED
+    # handshake attempts are counted ONLY in a dedicated PER-IP window
+    # (bridge_failed_handshake_*): an IP that burns the window is refused
+    # pre-accept, and no other IP is ever throttled by it. SUCCESSFUL pairings
+    # and reconnects consume a SEPARATE global admission budget
+    # (bridge_connect_admission_*) — a brute-force flurry of failed attempts
+    # can never starve legitimate bridge reconnects.
     bridge_failed_handshake_limit: int = Field(
         default=20,
         gt=0,
-        description="BRIDGE_FAILED_HANDSHAKE_LIMIT (bounded auth-failure gate).",
+        description=(
+            "BRIDGE_FAILED_HANDSHAKE_LIMIT (ADV-252: PER-IP failed-handshake "
+            "window — only an IP that burns the budget is refused)."
+        ),
     )
     bridge_failed_handshake_window_seconds: float = Field(
         default=60.0,
         gt=0,
-        description="BRIDGE_FAILED_HANDSHAKE_WINDOW_SECONDS.",
+        description="BRIDGE_FAILED_HANDSHAKE_WINDOW_SECONDS (ADV-252 per-IP window).",
+    )
+    bridge_connect_admission_limit_per_window: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "BRIDGE_CONNECT_ADMISSION_LIMIT_PER_WINDOW (ADV-252: SEPARATE "
+            "global admission budget consumed by SUCCESSFUL pairings/connections)."
+        ),
+    )
+    bridge_connect_admission_window_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="BRIDGE_CONNECT_ADMISSION_WINDOW_SECONDS (ADV-252).",
     )
     # -- Phase 21B §4 — bounded unauthenticated Ollama capability probing -----
     # When GENERATION_PROVIDER=ollama, the PUBLIC ``GET /api/v1/generation-capabilities``

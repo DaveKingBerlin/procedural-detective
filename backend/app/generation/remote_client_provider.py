@@ -25,10 +25,12 @@ Design rules (Phase22 §2/§10/§16/§17 — the server stays authoritative):
   (``consume_call``) for every dispatch exactly like every other provider call
   — a bridge job == one regular provider call, no extra accounting here.
 - Deadline clamp: ``job.timeoutMs`` = min(effective remaining generation
-  deadline carried by ``request.timeout_seconds``, ``BRIDGE_JOB_DEADLINE_SECONDS``).
-  On timeout the provider best-effort sends ``job_cancel`` and fails typed
-  ``LOCAL_PROVIDER_TIMEOUT``. Any later result finds no current job and is
-  DISCARDED (Phase22 §17/§18).
+  deadline carried by ``request.timeout_seconds``, ``BRIDGE_JOB_DEADLINE_SECONDS``)
+  and NEVER exceeds the ADV-250 hard ceiling (the maximum generation deadline
+  the app allows / 1800s) — an oversized configured value can never reach the
+  wire. On timeout the provider best-effort sends ``job_cancel`` and fails
+  typed ``LOCAL_PROVIDER_TIMEOUT``. Any later result finds no current job and
+  is DISCARDED (Phase22 §17/§18).
 - Typed failure mapping (never raw text): bridge absent -> BRIDGE_NOT_CONNECTED;
   connection died mid-job -> BRIDGE_DISCONNECTED; busy slot ->
   BRIDGE_BUSY; bridge-reported failureCode projected onto the closed
@@ -46,6 +48,7 @@ import time
 from typing import Any
 
 from app.core.observability import emit_event
+from app.core.timeout_envelope import BRIDGE_JOB_DEADLINE_MAX_SECONDS
 from app.generation.bridge_protocol import (
     encode_frame,
     generate_job_id,
@@ -220,6 +223,13 @@ class RemoteClientProvider:
         configured = float(
             getattr(self._settings, "bridge_job_deadline_seconds", 120.0) or 120.0
         )
+        # ADV-250 defense-in-depth: ``BRIDGE_JOB_DEADLINE_SECONDS`` is
+        # HARD-CAPPED at config validation (Settings le=...), but the wire
+        # clamp must hold even for a settings object constructed WITHOUT
+        # pydantic validation (or any future non-validating caller): the
+        # dispatched ``job.timeoutMs`` may NEVER exceed
+        # min(remaining generation deadline, this cap).
+        configured = min(configured, float(BRIDGE_JOB_DEADLINE_MAX_SECONDS))
         requested = (
             float(request.timeout_seconds)
             if request.timeout_seconds is not None

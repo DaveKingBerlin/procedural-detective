@@ -273,6 +273,37 @@ class SlidingWindowRateLimiter:
             cutoff = current - self._window
             return sum(1 for ts in bucket if ts >= cutoff)
 
+    def record(self, key: str, now: float | None = None) -> None:
+        """Best-effort accounting: record ONE hit for ``key`` (no under-limit gate).
+
+        Used for FAILED-attempt accounting (ADV-252): the caller records a
+        failure AFTER it happened; the pre-accept refusal is a separate
+        ``over_limit`` query that records NOTHING. Honors the same F-05 bounds
+        as ``allow``: expired hits are lazily pruned and an active window is
+        never evicted to admit a new identity. When the hard key ceiling is
+        reached, a NEW key's failure is simply NOT recorded (the map stays
+        bounded; the key identities are already denied by ``allow`` semantics).
+        """
+        with self._lock:
+            current = float(self._clock.now() if now is None else now)
+            key = str(key)
+            self._sweep_expired(current)
+            self._prune_key(key, current)
+            bucket = self._hits.get(key)
+            if bucket is None:
+                if len(self._hits) >= self._max_keys:
+                    return
+                bucket = []
+                self._hits[key] = bucket
+            bucket.append(current)
+
+    def over_limit(self, key: str, now: float | None = None) -> bool:
+        """True when ``key`` already has >= ``limit`` in-window hits (query only).
+
+        Records NOTHING — used for the pre-accept gate so a refused attempt
+        does not itself consume a budget slot (ADV-252)."""
+        return self.count(key, now) >= self._limit
+
     def remaining(self, key: str, now: float | None = None) -> int:
         """Remaining allowance for ``key`` inside the current window."""
         return max(0, self._limit - self.count(key, now))

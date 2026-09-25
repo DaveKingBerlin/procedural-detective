@@ -1,10 +1,11 @@
 """Hermetic integration tests for the bridge client: real asyncio loop, a fake
 WSS server, and an in-process MockOllama. Nothing touches the network.
 
-Covered: pairing + reconnect handshakes, token file, one-job-at-a-time,
-bounded-backoff reconnect, ping/pong, job_cancel abort, typed failure mapping
-and hostile-frame rejection (unknown types / oversized / deep-nested /
-extra-fields / bad version / malformed JSON / idle timeout).
+Covered: pairing + reconnect handshakes, memory-only reconnect within one
+process, the optional ``--token-file`` store, one-job-at-a-time, bounded-backoff
+reconnect, ping/pong, job_cancel abort, typed failure mapping and hostile-frame
+rejection (unknown types / oversized / deep-nested / extra-fields / bad version
+/ malformed JSON / idle timeout).
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ async def _harness(
 
 
 # --------------------------------------------------------------------------- #
-# handshake: pairing + reconnect + token file
+# handshake: pairing + memory-only reconnect + optional token file
 # --------------------------------------------------------------------------- #
 
 
@@ -104,7 +105,10 @@ def test_pairing_handshake_and_job_success():
     asyncio.run(_harness(scenario, mock=mock, post=post))
 
 
-def test_reconnect_uses_persisted_token_with_bounded_backoff():
+def test_memory_only_reconnect_within_same_process_with_bounded_backoff():
+    """Memory-only mode reconnects within one process: the token just saved to
+    the in-memory store on pairing is replayed as bridge_hello — no file ever
+    involved (the store is the default path-less TokenStore)."""
     mock = MockOllama()
 
     async def scenario(conn, server):
@@ -163,6 +167,9 @@ def test_reconnect_uses_persisted_token_with_bounded_backoff():
 
 
 def test_token_file_saved_with_0600(tmp_path: Path):
+    """The ``--token-file`` opt-in: an explicit path is honored across runs
+    (a fresh store reloads the token), with 0600 on POSIX and a best-effort
+    owner-only ACL applied on Windows."""
     path = tmp_path / "tokens" / "session_token"
     store = make_token_store(path)
     store.save(TEST_TOKEN)

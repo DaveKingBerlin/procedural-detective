@@ -8,16 +8,16 @@ remote server never contributes a configuration value.
 
 from __future__ import annotations
 
+import getpass
 import os
-import tempfile
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from . import protocol
 from .urls import UrlValidationError, resolve_server_ws_url, validate_ollama_url
-
-DEFAULT_TOKEN_FILE_DIR = Path(tempfile.gettempdir()) / "pd-ollama-bridge"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,12 +74,59 @@ class Config:
         return self
 
 
-class TokenStore:
-    """Memory-only bridge session token persistence with an optional 0600 file.
+def _token_permission_warning(path: Path, detail: str) -> None:
+    print(
+        f"WARNING: could not apply restrictive permissions to token file "
+        f"{path} ({detail}). The token may be readable by other local users. "
+        "Prefer a private directory, or delete the token file after use.",
+        file=sys.stderr,
+    )
 
-    The token is kept in memory for the process lifetime. When ``path`` is
-    given it is also persisted with 0600 permissions (best-effort; the file
-    mode cannot be enforced on all platforms, notably Windows).
+
+def _apply_restrictive_permissions(path: Path) -> None:
+    """Best-effort strongest-practical permissions for a token file.
+
+    POSIX: ``0600`` (owner read/write only). Windows: inherited ACLs are
+    removed and the current owner is granted read/write only, via ``icacls``.
+    If the ACL cannot be applied, a warning is printed and the file is left
+    as-is (Windows does not enforce POSIX mode bits).
+    """
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return
+    try:
+        user = getpass.getuser()
+        result = subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"{user}:(R,W)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            _token_permission_warning(
+                path, f"icacls failed: {result.stderr.strip() or 'unknown error'}"
+            )
+    except Exception as exc:  # noqa: BLE001 - best-effort only
+        _token_permission_warning(path, str(exc))
+
+
+class TokenStore:
+    """Memory-only bridge session token persistence with an optional file.
+
+    By default the token is kept in memory for the process lifetime only; no
+    file is written. When ``path`` is given (the CLI ``--token-file`` opt-in)
+    it is also persisted with the strongest practical permissions: ``0600`` on
+    POSIX, best-effort owner-only ACL on Windows (with a warning if the ACL
+    cannot be applied).
     """
 
     def __init__(self, path: Optional[Path] = None) -> None:
@@ -116,12 +163,9 @@ class TokenStore:
                 os.write(fd, token.encode("utf-8"))
             finally:
                 os.close(fd)
-            try:
-                os.chmod(self._path, 0o600)
-            except OSError:
-                pass
         except OSError:
-            pass
+            return
+        _apply_restrictive_permissions(self._path)
 
     def clear(self) -> None:
         self._token = None
@@ -132,4 +176,4 @@ class TokenStore:
                 pass
 
 
-__all__ = ["Config", "DEFAULT_TOKEN_FILE_DIR", "TokenStore"]
+__all__ = ["Config", "TokenStore"]

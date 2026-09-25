@@ -33,6 +33,15 @@ class LiveTestServer:
 
     def __init__(self, app: Any) -> None:
         self.app = app
+        # ADV-251 — the transport-level WebSocket frame bound: uvicorn's default
+        # ``ws_max_size`` is 16 MiB (uvicorn 0.52.4 Config), which is 64x the
+        # documented BRIDGE_MAX_MESSAGE_BYTES. The harness pins the REAL
+        # uvicorn transport to the app's configured bound so oversized frames are
+        # rejected by the transport itself (1009) BEFORE application decode.
+        settings = getattr(app.state, "settings", None)
+        ws_max_size = int(
+            getattr(settings, "bridge_max_message_bytes", 256 * 1024) or 256 * 1024
+        )
         config = uvicorn.Config(
             app,
             host="127.0.0.1",
@@ -41,6 +50,7 @@ class LiveTestServer:
             log_config=None,
             ws="websockets",
             loop="asyncio",
+            ws_max_size=ws_max_size,
             timeout_graceful_shutdown=2,
         )
         self._server = uvicorn.Server(config)
@@ -440,6 +450,10 @@ def make_bridge_settings(database_url: str, **overrides) -> Any:
         bridge_max_registry_sessions=16,
         bridge_max_frames_per_window=60,
         bridge_failed_handshake_limit=50,
+        # ADV-252 — the module-scoped stacks share ONE loopback peer identity
+        # for the per-IP failed-handshake window; a generous admission budget
+        # keeps the SEPARATE successful-connect budget out of the suite's way.
+        bridge_connect_admission_limit_per_window=500,
         # A module-scoped server shares ONE loopback client IP: the public
         # per-IP admission windows must stay out of the way of the suite.
         anon_session_limit_per_ip_per_10_min=10000,

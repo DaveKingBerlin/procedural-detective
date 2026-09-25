@@ -85,6 +85,20 @@ MAX_RECOMMENDED_GENERATION_DEADLINE_SECONDS = 300
 # bound (a 300 == 300 showcase config is fine; effective timeout is 299.9).
 MAX_OLLAMA_TIMEOUT_SECONDS = 300.0
 
+# --------------------------------------------------------------------------- #
+# ADV-250 — the BRIDGE_JOB_DEADLINE_SECONDS ceiling (Phase 22 BYO-Ollama).
+# The per-job deadline the server puts on a bridge job frame (``timeoutMs``)
+# is clamped to min(remaining generation deadline, BRIDGE_JOB_DEADLINE_SECONDS
+# configured by the operator). The CONFIGURED value is additionally bounded by
+# BOTH the maximum generation deadline the app allows (the envelope showcase
+# bound) AND a hard 1800s cap, so a hostile/oversized configured value can
+# never reach a job frame even if the transport-level clamp were bypassed.
+BRIDGE_JOB_DEADLINE_HARD_CAP_SECONDS = 1800.0
+BRIDGE_JOB_DEADLINE_MAX_SECONDS: float = min(
+    MAX_RECOMMENDED_GENERATION_DEADLINE_SECONDS,
+    BRIDGE_JOB_DEADLINE_HARD_CAP_SECONDS,
+)
+
 
 def provider_timeout_violation(configured_seconds: float) -> bool:
     """True when an operator configured the provider timeout ABOVE the deadline
@@ -154,6 +168,8 @@ __all__ = [
     "PROVIDER_CLASSIFICATION_MARGIN_SECONDS",
     "MAX_RECOMMENDED_GENERATION_DEADLINE_SECONDS",
     "MAX_OLLAMA_TIMEOUT_SECONDS",
+    "BRIDGE_JOB_DEADLINE_HARD_CAP_SECONDS",
+    "BRIDGE_JOB_DEADLINE_MAX_SECONDS",
     "envelope_violations",
     "provider_timeout_violation",
 ]
