@@ -64,6 +64,7 @@ from test_ollama_driver import (  # noqa: E402
     _run,
     _staged,
     _world,
+    _alog_posts,
 )
 
 CLOSED_RENDER_TYPES = frozenset(render_type.value for render_type in EvidenceRenderType)
@@ -187,6 +188,7 @@ def _medium_payload() -> dict:
     posts = [
         _j(cp),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T21:18:00+02:00'),
         _j(_world("kitchen knife")),
     ]
     prompt = (
@@ -356,14 +358,20 @@ def test_when_invariant_easy_medium_hard(phase5_app):
 
 def test_driver_when_facts_render_concrete_time_payloads():
     """The driver d_ev_when_* canonical facts: d_ev_when_obs (the laptop
-    activity record) -> ACTIVITY_LOG with synthetic entries built from the
-    allowlisted observed-at anchor + presentation text; the witness
-    observations -> TIMELINE with concrete times."""
+    activity record) -> ACTIVITY_LOG whose entries are the persisted Phase 19J
+    generated log rows (15..20 realistic rows with the canonical observed-at
+    time appearing exactly once); the witness observations -> TIMELINE with
+    concrete times."""
     for payload in (_medium_payload(), _hard_payload()):
         obs = project_read_content(payload, "d_ev_when_obs")
         assert obs["renderType"] == "ACTIVITY_LOG"
         assert obs["entries"], "d_ev_when_obs must expose concrete log entries"
-        assert obs["entries"][0]["text"] == "Activity logged at the scene"
+        assert len(obs["entries"]) >= 15, "Phase 19J generated log must be realistic"
+        # the canonical observe time of d_ev_when_obs appears exactly once.
+        fact = {f["id"]: f for f in payload["draft"]["evidence"]}["d_ev_when_obs"]
+        canonical_obs = fact["propositions"][0]["observed_at"]
+        canon_rows = [e for e in obs["entries"] if e["time"] == canonical_obs]
+        assert len(canon_rows) == 1, "canonical time must appear exactly once"
         assert _has_concrete_time(obs)
         assert _entries_chronological(obs)
 

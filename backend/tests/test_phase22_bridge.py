@@ -430,7 +430,9 @@ def test_ws_job_dispatch_result_and_late_duplicate_discard(stack):
     assert result.status_code == 201
     assert result.json()["status"] == "PUBLISHED"
     seen = [job["schemaId"] for job in bridge.jobs]
-    assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1", "WORLD_REQUIREMENTS_v1", "ASSET_SPEC_v1"]
+    assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1",
+                    "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1",
+                    "ACTIVITY_LOG_v1", "WORLD_REQUIREMENTS_v1", "ASSET_SPEC_v1"]
     # Registry-level discard semantics.
     registry = stack["server"].app.state.bridge_registry
     conn = registry.lookup_for_scope(
@@ -465,11 +467,14 @@ def test_integration_full_generation_publishes_with_same_solver(stack):
     assert body["status"] == "PUBLISHED"
     assert body.get("failureCode") is None
     assert body["caseId"]
-    # The bridge saw EXACTLY the authoritative four stage jobs (catalog=3
-    # plus the ASSET_SPEC procedural call = 4 for this instrumental world).
+    # The bridge saw EXACTLY the authoritative stage jobs: case/evidence +
+    # the four Phase 19J activity logs + the world + the ASSET_SPEC call
+    # (8 for this instrumental world).
     seen = [job["schemaId"] for job in bridge.jobs]
-    assert len(bridge.jobs) == 4
-    assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1", "WORLD_REQUIREMENTS_v1", "ASSET_SPEC_v1"]
+    assert len(bridge.jobs) == 8
+    assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1", "ACTIVITY_LOG_v1",
+                     "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1",
+                     "WORLD_REQUIREMENTS_v1", "ASSET_SPEC_v1"]
     # Every dispatched job carried an AUTHORITATIVE schema id (strict contract)
     # and a bounded timeoutMs.
     for job in bridge.jobs:
@@ -522,6 +527,16 @@ def test_integration_catalog_world_three_calls_no_asset_spec(stack):
                 b,
                 {"status": "SUCCESS", "structuredOutput": _evidence(weapon_obj="kitchen_knife")},
             )
+        elif job["schemaId"] in ("ACTIVITY_LOG_v1", "ACTIVITY_LOG_REPAIR_v1"):
+            from test_ollama_driver import _alog
+            import re as _re
+            found = _re.search(r"Canonical evidence time:\s*([0-9T:+-Z]+)",
+                               job.get("prompt", ""))
+            b.mini.reply(
+                job,
+                b,
+                {"status": "SUCCESS", "structuredOutput": _alog(found.group(1) if found else "2026-09-11T23:42:00+02:00")},
+            )
         else:
             b.mini.reply(
                 job, b, {"status": "SUCCESS", "structuredOutput": _known_world()}
@@ -537,8 +552,10 @@ def test_integration_catalog_world_three_calls_no_asset_spec(stack):
     assert result.status_code == 201, result.json()
     assert result.json()["status"] == "PUBLISHED"
     seen = [job["schemaId"] for job in bridge.jobs]
-    assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1", "WORLD_REQUIREMENTS_v1"]
-    assert len(bridge.jobs) == 3
+    assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1",
+                     "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1",
+                     "ACTIVITY_LOG_v1", "WORLD_REQUIREMENTS_v1"]
+    assert len(bridge.jobs) == 7
     bridge.close()
 
 
@@ -759,7 +776,7 @@ def test_reconnect_after_connection_drop_restores_availability(stack):
     result = _generate(stack, token)
     assert result.json()["status"] == "PUBLISHED"
     before = bridge.job_count
-    assert before == 4
+    assert before == 8
     # Drop the socket and reconnect with the bridge token (bridge_hello).
     bridge.close()
     time.sleep(0.2)
@@ -774,7 +791,7 @@ def test_reconnect_after_connection_drop_restores_availability(stack):
     # stale ones never revive, §18).
     result2 = _generate(stack, token)
     assert result2.json()["status"] == "PUBLISHED"
-    assert bridge2.job_count == 4
+    assert bridge2.job_count == 8
     bridge2.close()
 
 
@@ -971,7 +988,7 @@ def test_adv248_reconnect_before_detach_no_zombie_integration(stack):
     # A generation dispatched to S is served by B — NEVER by A's dead socket.
     result = _generate(stack, token)
     assert result.json()["status"] == "PUBLISHED"
-    assert bridge_b.job_count == 4
+    assert bridge_b.job_count == 8
     assert bridge_a.job_count == 0  # A never served the generation
     bridge_b.close()
 
@@ -1033,7 +1050,7 @@ def test_pairing_does_not_serve_other_sessions_bridge(stack):
     r2 = _generate(stack, t2)
     assert r1.json()["status"] == "PUBLISHED"
     assert r2.json()["status"] == "PUBLISHED"
-    assert b1.job_count == 4 and b2.job_count == 4
+    assert b1.job_count == 8 and b2.job_count == 8
     # Cross-session replies: b1 answers a JOB id dispatched to b2's session —
     # the server discards it (no waiter with that id on b1's connection) and
     # the b2 generation is unaffected.
@@ -1073,7 +1090,7 @@ def test_second_binding_for_same_scope_supersedes_old_socket(stack):
     assert registry.lookup_for_scope(scope).bridge_session_id == ack2["bridgeSessionId"]
     result = _generate(stack, token)
     assert result.json()["status"] == "PUBLISHED"
-    assert bridge2.job_count == 4
+    assert bridge2.job_count == 8
     bridge1.close()
     bridge2.close()
 

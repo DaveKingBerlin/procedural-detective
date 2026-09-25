@@ -87,12 +87,25 @@ class LiveTestServer:
 
 _CANNED: dict[str, Callable[[], dict[str, Any]]] = {}
 
+# Schema ids whose canned producer is prompt-aware (receives the full job
+# prompt so a server-owned locked value, e.g. the Phase 19J canonical activity
+# log time, yields a valid fixture regardless of the fact).
+_CANNED_PROMPT_AWARE: frozenset[str] = frozenset(
+    {"ACTIVITY_LOG_v1", "ACTIVITY_LOG_REPAIR_v1"}
+)
+
 
 def _register_canned() -> None:
     """Import the SAME canned stage payloads the ollama-driver suite uses so the
     bridge path proves byte-identical stage data -> validation -> solver."""
     # Imported lazily: the helper module lives in the tests dir.
-    from test_ollama_driver import ICEPICK_SPEC, _case_people, _evidence, _world
+    from test_ollama_driver import (
+        ICEPICK_SPEC,
+        _alog,
+        _case_people,
+        _evidence,
+        _world,
+    )
 
     def _case():
         return _case_people()
@@ -109,6 +122,22 @@ def _register_canned() -> None:
     def _asset_spec_repair():
         return json.loads(ICEPICK_SPEC)
 
+    def _activity_log(prompt: str | None = None):
+        # Phase 19J — deterministic valid log around the LOCKED canonical time
+        # the driver embeds in the job prompt (server-owned; appears exactly
+        # once). One canned fixture serves every activity-log fact regardless
+        # of its canonical time.
+        import re
+
+        match = re.search(
+            r"Canonical evidence time:\s*([0-9T:+\-Z]+)", prompt or ""
+        )
+        canonical = match.group(1) if match else "2026-09-11T23:42:00+02:00"
+        return _alog(canonical)
+
+    def _activity_log_repair(prompt: str | None = None):
+        return _activity_log(prompt)
+
     def _repair():
         # A minimal structurally valid full-draft repair is never reached on
         # the happy path; keep the mapping complete per Phase22 §9.
@@ -121,17 +150,28 @@ def _register_canned() -> None:
             "WORLD_REQUIREMENTS_v1": _world_out,
             "ASSET_SPEC_v1": _asset_spec,
             "ASSET_SPEC_REPAIR_v1": _asset_spec_repair,
+            "ACTIVITY_LOG_v1": _activity_log,
+            "ACTIVITY_LOG_REPAIR_v1": _activity_log_repair,
             "REPAIR_v1": _repair,
         }
     )
 
 
-def canned_output(schema_id: str) -> dict[str, Any] | None:
-    """The MiniOllama canned structuredOutput for an authoritative schemaId."""
+def canned_output(schema_id: str, prompt: str | None = None) -> dict[str, Any] | None:
+    """The MiniOllama canned structuredOutput for an authoritative schemaId.
+
+    A prompt-aware producer (e.g. the Phase 19J activity log, whose locked
+    canonical time is server-owned and embedded in the job prompt) receives the
+    full job prompt so the canned fixture is valid for ANY canonical time.
+    """
     if not _CANNED:
         _register_canned()
     producer = _CANNED.get(schema_id)
-    return producer() if producer is not None else None
+    if producer is None:
+        return None
+    if schema_id in _CANNED_PROMPT_AWARE:
+        return producer(prompt)
+    return producer()
 
 
 class MiniOllama:
@@ -152,7 +192,7 @@ class MiniOllama:
         self.reply_success(job, bridge)
 
     def reply_success(self, job: dict[str, Any], bridge: "TestBridge") -> None:
-        output = canned_output(job.get("schemaId", ""))
+        output = canned_output(job.get("schemaId", ""), prompt=job.get("prompt"))
         if output is None:
             self.reply_fail(job, bridge, "LOCAL_MODEL_UNAVAILABLE")
             return

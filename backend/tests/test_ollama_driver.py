@@ -139,6 +139,95 @@ def _known_world():
     }
 
 
+# --------------------------------------------------------------------------- #
+# Phase 19J — deterministic activity-log fixtures for the driver worlds.
+# The driver generates ONE structured log per ACTIVITY_LOG-rendered
+# time-bearing fact, in evidence order:
+#   d_ev_when_obs            observed_at = crime_time - 10s
+#   d_ev_opp_<suspect> x2    observed_at = crime_time - 120s
+#   d_ev_presence            observed_at = crime_time - 20s
+# --------------------------------------------------------------------------- #
+
+_ALOG_TYPES = (
+    "SYSTEM_RESUME", "LOGIN", "MAIL_SYNC", "BROWSER_ACTIVITY", "DOCUMENT_ACCESS",
+    "FILE_OPEN", "APPLICATION_OPEN", "CLOUD_SYNC", "BACKGROUND_SYNC", "NETWORK_ACTIVITY",
+    "DOCUMENT_AUTOSAVE", "SESSION_UNLOCK", "FILE_WRITE", "LOCAL_ACTIVITY", "FILE_COPY",
+    "LOCAL_ACTIVITY", "DOCUMENT_AUTOSAVE", "BROWSER_ACTIVITY", "MAIL_SYNC", "SYSTEM_IDLE",
+)
+_ALOG_TEXTS = (
+    "System resumed from sleep", "User session login recorded", "Mail client synchronized",
+    "Browser tab opened", "Research document accessed", "File explorer opened",
+    "Text editor application opened", "Cloud synchronization completed",
+    "Background synchronization started", "Network activity detected",
+    "Document autosaved", "User session unlocked", "Local file written",
+    "Keyboard activity detected", "File copied to local workspace",
+    "Local user activity detected", "Document autosaved", "Browser activity detected",
+    "Mail client synchronized", "System entered idle state",
+)
+
+
+def _alog(canonical, count=17):
+    """A deterministic VALID activity-log provider payload around ``canonical``.
+
+    The canonical time appears EXACTLY once at the middle row (deliberately
+    ordinary: "Local user activity detected"); every timestamp is unique and
+    strictly chronological (+3 minute step); text is neutral/harmless.
+    """
+    from app.domain.time_interval import epoch_to_iso, parse_iso8601
+
+    tick, offset = parse_iso8601(canonical)
+    mid = (count - 1) // 2
+    start = tick - mid * 180
+    entries = []
+    for i in range(count):
+        t = start + i * 180
+        entries.append({
+            "timestamp": epoch_to_iso(t, offset),
+            "activityType": _ALOG_TYPES[i % len(_ALOG_TYPES)],
+            "activity": _ALOG_TEXTS[i % len(_ALOG_TEXTS)],
+        })
+    # the canonical row is deliberately ordinary (Phase19J §12)
+    entries[mid] = {
+        "timestamp": epoch_to_iso(tick, offset),
+        "activityType": "LOCAL_ACTIVITY",
+        "activity": "Local user activity detected",
+    }
+    assert 15 <= count <= 20
+    assert all(e["timestamp"] != canonical for i, e in enumerate(entries) if i != mid)
+    assert entries[mid]["timestamp"] == canonical
+    return {"entries": entries}
+
+
+def _alog_posts(crime_canonical):
+    """The four activity-log responses in EXACT driver evidence order."""
+    from app.domain.time_interval import epoch_to_iso, parse_iso8601
+
+    tick, offset = parse_iso8601(crime_canonical)
+
+    def iso(delta_seconds):
+        return epoch_to_iso(tick + delta_seconds, offset)
+
+    anchors = (
+        iso(-10),    # d_ev_when_obs (scene observation)
+        iso(-120),   # d_ev_opp_marcus_fischer
+        iso(-120),   # d_ev_opp_sophie_hoffmann
+        iso(-20),    # d_ev_presence
+    )
+    return [_j(_alog(anchor)) for anchor in anchors]
+
+
+def _driver_posts(cp_json, evidence_json, world_json, crime_canonical, *, known=False):
+    """The full ordered driver transport post queue (Phase 19J layout).
+
+    Order of provider calls: case_truth, evidence, activity_log x4 (the four
+    time-bearing cctv facts of the deterministic evidence algebra), world_graph,
+    and — when the weapon is an unknown object — the ASSET_SPEC response (added
+    by the caller via ``_staged``/explicit posts).
+    """
+    posts = [cp_json, evidence_json, *_alog_posts(crime_canonical), world_json]
+    return posts
+
+
 ICEPICK_SPEC = """{
   "canonicalName": "Bronze Ceremonial Ice Pick",
   "category": "decor",
@@ -183,7 +272,7 @@ class MockOllamaTransport:
 
 def _staged(unknown=True, icepick_spec=ICEPICK_SPEC):
     wp = _world() if unknown else _known_world()
-    posts = [_j(_case_people()), _j(_evidence()), _j(wp)]
+    posts = _driver_posts(_j(_case_people()), _j(_evidence()), _j(wp), "2026-09-11T23:42:00+02:00")
     if unknown:
         posts.append(icepick_spec)
     return posts
@@ -285,14 +374,18 @@ def test_18a_malformed_evidence_uses_local_projection_without_remote_retry(caplo
     raw = _j(_invalid_raw_evidence(semantic=semantic))
     with caplog.at_level(logging.INFO, logger="procedural-detective"):
         record, transport = _run(
-            [_j(_case_people()), raw, _j(_world()), ICEPICK_SPEC],
+            _driver_posts(
+                _j(_case_people()), raw, _j(_world()),
+                "2026-09-11T23:42:00+02:00",
+            )
+            + [ICEPICK_SPEC],
             max_llm_calls_per_generation=8,
         )
 
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 4
-    assert record.budget.calls == 4
-    assert "world_requirements_v1" in transport.prompt_of_call(2)
+    assert transport.call_count == 8
+    assert record.budget.calls == 8
+    assert "world_requirements_v1" in transport.prompt_of_call(6)
     assert record.deferred_structural == ()
     assert record.last_validation.valid is True
     assert record.last_validation.validation.all_true is True
@@ -340,13 +433,15 @@ def test_18a_malformed_evidence_uses_local_projection_without_remote_retry(caplo
 
 
 def test_18b_valid_evidence_keeps_existing_ollama_path_without_local_projection(caplog):
-    """Valid Ollama evidence remains the same four-call published flow."""
+    """Valid Ollama evidence remains the published flow without local projection."""
     with caplog.at_level(logging.INFO, logger="procedural-detective"):
-        record, transport = _run(_staged(), max_llm_calls_per_generation=8)
+        record, transport = _run(_staged(), max_llm_calls_per_generation=12)
 
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 4
-    assert record.budget.calls == 4
+    # 4 staged calls (case/evidence/world/asset) + 4 deterministic activity-log
+    # calls for the time-bearing cctv facts (Phase 19J driver-internal stage).
+    assert transport.call_count == 8
+    assert record.budget.calls == 8
     assert record.deferred_structural == ()
     assert not any(
         getattr(event, "pd_event", None) == "evidence.local_projection.used"
@@ -382,7 +477,8 @@ def test_18c_invalid_deterministic_projection_stays_fail_closed(monkeypatch, cap
 def test_19_world_requirements_stage():
     record, transport = _run(_staged())
     assert record.state is GenerationState.PUBLISHED
-    assert "world_requirements_v1" in transport.prompt_of_call(2)
+    # the world stage runs after the four Phase 19J activity-log calls.
+    assert "world_requirements_v1" in transport.prompt_of_call(6)
     # the office environment was selected via the LLM world-requirements.
     assert record.draft.scene is not None
     assert record.draft.scene.environment_id == "office"
@@ -432,7 +528,13 @@ def test_23_conflicting_model_matches_are_deterministically_completed():
         if entry["id"] == "forensic_knife_match_01":
             entry["propositions"][0]["structured"]["match"] = True
     amb_evidence["evidence"] = amb_props
-    transport = MockOllamaTransport(posts=[_j(_case_people()), _j(amb_evidence), _j(_world()), ICEPICK_SPEC])
+    transport = MockOllamaTransport(
+        posts=_driver_posts(
+            _j(_case_people()), _j(amb_evidence), _j(_world()),
+            "2026-09-11T23:42:00+02:00",
+        )
+        + [ICEPICK_SPEC]
+    )
     clock, ids = ManualClock(), IdSource()
     admission = _admission(clock, ids)
     session = admission.create_anonymous_quota_session()
@@ -484,8 +586,8 @@ def test_24_known_asset_does_not_call_asset_spec_provider():
 def test_25_unknown_asset_calls_provider():
     record, transport = _run(_staged())
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 4
-    assert "asset_spec_v1" in transport.prompt_of_call(3)
+    assert transport.call_count == 8
+    assert "asset_spec_v1" in transport.prompt_of_call(7)
     # the proc.* object appears in the published world.
     assert any(
         p.asset_id.startswith("proc.")
@@ -510,8 +612,9 @@ def test_27_unit_regression_25_vs_025_meters():
     bad = json.loads(ICEPICK_SPEC)
     bad["dimensions"] = {"x": 25, "y": 0.1, "z": 0.1}  # 25 meters-ish — out of bounds
     good = json.loads(ICEPICK_SPEC)  # plausible dims
-    record, transport = _run([
-        _j(_case_people()), _j(_evidence()), _j(_world()),
+    record, transport = _run(_driver_posts(
+        _j(_case_people()), _j(_evidence()), _j(_world()), "2026-09-11T23:42:00+02:00"
+    ) + [
         json.dumps(bad),      # ASSET_SPEC (invalid)
         json.dumps(good),     # ASSET_SPEC_REPAIR (valid)
     ])
@@ -524,7 +627,9 @@ def test_28_scale_below_lower_bound_rejected():
     bad = json.loads(ICEPICK_SPEC)
     bad["parts"][0]["transform"]["scale"] = {"x": 0.0001, "y": 0.0001, "z": 0.0001}  # below 0.001
     good = json.loads(ICEPICK_SPEC)
-    transport = MockOllamaTransport(posts=[_j(_case_people()), _j(_evidence()), _j(_world()), json.dumps(bad), json.dumps(good)])
+    transport = MockOllamaTransport(posts=_driver_posts(
+        _j(_case_people()), _j(_evidence()), _j(_world()), "2026-09-11T23:42:00+02:00"
+    ) + [json.dumps(bad), json.dumps(good)])
     record, _t = _run(transport.posts)
     assert record.state is GenerationState.PUBLISHED
 
@@ -533,7 +638,9 @@ def test_29_invalid_role_grammar_rejected():
     bad = json.loads(ICEPICK_SPEC)
     bad["parts"][0]["role"] = "onload"  # event-handler-shaped role -> rejected
     good = json.loads(ICEPICK_SPEC)
-    transport = MockOllamaTransport(posts=[_j(_case_people()), _j(_evidence()), _j(_world()), json.dumps(bad), json.dumps(good)])
+    transport = MockOllamaTransport(posts=_driver_posts(
+        _j(_case_people()), _j(_evidence()), _j(_world()), "2026-09-11T23:42:00+02:00"
+    ) + [json.dumps(bad), json.dumps(good)])
     record, _t = _run(transport.posts)
     assert record.state is GenerationState.PUBLISHED
 
@@ -542,7 +649,9 @@ def test_30_duplicate_part_ids_rejected():
     bad = json.loads(ICEPICK_SPEC)
     bad["parts"][1]["id"] = "part_00"  # duplicate
     good = json.loads(ICEPICK_SPEC)
-    transport = MockOllamaTransport(posts=[_j(_case_people()), _j(_evidence()), _j(_world()), json.dumps(bad), json.dumps(good)])
+    transport = MockOllamaTransport(posts=_driver_posts(
+        _j(_case_people()), _j(_evidence()), _j(_world()), "2026-09-11T23:42:00+02:00"
+    ) + [json.dumps(bad), json.dumps(good)])
     record, _t = _run(transport.posts)
     assert record.state is GenerationState.PUBLISHED
 
@@ -564,7 +673,9 @@ def test_31_parent_depth_violation_rejected():
         ],
     }
     good = json.loads(ICEPICK_SPEC)
-    transport = MockOllamaTransport(posts=[_j(_case_people()), _j(_evidence()), _j(_world()), json.dumps(spec), json.dumps(good)])
+    transport = MockOllamaTransport(posts=_driver_posts(
+        _j(_case_people()), _j(_evidence()), _j(_world()), "2026-09-11T23:42:00+02:00"
+    ) + [json.dumps(spec), json.dumps(good)])
     record, _t = _run(transport.posts)
     assert record.state is GenerationState.PUBLISHED
 
@@ -573,7 +684,9 @@ def test_32_unsupported_material_rejected():
     bad = json.loads(ICEPICK_SPEC)
     bad["parts"][0]["material"] = "bronze"  # NOT allowlisted
     good = json.loads(ICEPICK_SPEC)
-    transport = MockOllamaTransport(posts=[_j(_case_people()), _j(_evidence()), _j(_world()), json.dumps(bad), json.dumps(good)])
+    transport = MockOllamaTransport(posts=_driver_posts(
+        _j(_case_people()), _j(_evidence()), _j(_world()), "2026-09-11T23:42:00+02:00"
+    ) + [json.dumps(bad), json.dumps(good)])
     record, _t = _run(transport.posts)
     assert record.state is GenerationState.PUBLISHED
 
@@ -582,7 +695,9 @@ def test_33_unsupported_primitive_rejected():
     bad = json.loads(ICEPICK_SPEC)
     bad["parts"][0]["primitive"] = "capsule"  # NOT supported
     good = json.loads(ICEPICK_SPEC)
-    transport = MockOllamaTransport(posts=[_j(_case_people()), _j(_evidence()), _j(_world()), json.dumps(bad), json.dumps(good)])
+    transport = MockOllamaTransport(posts=_driver_posts(
+        _j(_case_people()), _j(_evidence()), _j(_world()), "2026-09-11T23:42:00+02:00"
+    ) + [json.dumps(bad), json.dumps(good)])
     record, _t = _run(transport.posts)
     assert record.state is GenerationState.PUBLISHED
 
@@ -599,13 +714,14 @@ def test_33_degenerate_same_origin_geometry_is_repaired():
     issues = validate_asset_spec(same_origin)
     assert not issues  # structurally valid — Phase 17 geometry gate decides
     repaired = json.loads(ICEPICK_SPEC)  # coherent geometry
-    record, transport = _run([
-        _j(_case_people()), _j(_evidence()), _j(_world()),
+    record, transport = _run(_driver_posts(
+        _j(_case_people()), _j(_evidence()), _j(_world()), "2026-09-11T23:42:00+02:00"
+    ) + [
         json.dumps(same_origin),  # ASSET_SPEC — fails the geometry gate
         json.dumps(repaired),     # ASSET_SPEC_REPAIR — repaired candidate
     ])
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 5
+    assert transport.call_count == 9
     # the repair prompt restated the geometry rules.
     assert any(
         "Geometry-quality instructions" in transport.prompt_of_call(i)
@@ -653,11 +769,11 @@ def test_35_published_proc_object_immutable():
 
 
 def test_36_provider_call_uses_existing_budget():
-    record, _t = _run(_staged(), max_llm_calls_per_generation=4)
+    record, _t = _run(_staged(), max_llm_calls_per_generation=12)
     assert record.state is GenerationState.PUBLISHED
-    # 4 staged calls consumed from budget.calls; total budget was 12, but the
-    # call budget is authoritative.
-    assert record.budget.calls == 4
+    # 8 staged calls consumed from budget.calls: case/evidence/world/asset +
+    # the four Phase 19J activity-log calls (bounded by the same CORE budget).
+    assert record.budget.calls == 8
 
 
 def test_37_admission_happens_before_any_call():

@@ -419,6 +419,24 @@ class Settings(BaseSettings):
             "(512..32768)."
         ),
     )
+    # -- Phase 19J — deterministic activity-log temporal window --------------
+    # The generated computer activity log spans ``[canonical - BEFORE,
+    # canonical + AFTER]`` minutes around the app-owned canonical evidence
+    # time (Phase19J §15). App-level deterministic: the validator clamps the
+    # total span to WINDOW_HARD_MAX_TOTAL_MINUTES (120) regardless of the
+    # configured values, so a misconfiguration can never widen the window.
+    activity_log_window_before_minutes: int = Field(
+        default=60,
+        ge=0,
+        le=120,
+        description="ACTIVITY_LOG_WINDOW_BEFORE_MINUTES (default 60).",
+    )
+    activity_log_window_after_minutes: int = Field(
+        default=60,
+        ge=0,
+        le=120,
+        description="ACTIVITY_LOG_WINDOW_AFTER_MINUTES (default 60).",
+    )
     # -- Phase 22 — Bring Your Own Ollama / remote local-provider bridge ------
     # Feature flag. OFF by DEFAULT so the existing app is byte-identical:
     # ENABLE_BRIDGE=false -> every /api/v1/bridge/* route is 404, the provider

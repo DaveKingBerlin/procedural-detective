@@ -200,7 +200,16 @@ def _timeline_candidates_of(fact: Mapping[str, Any]) -> tuple[tuple[int, str], .
     """(epoch, iso-string) timestamps publicly attached to one evidence fact:
     the presentation ``timestamp``, ``events[*].time`` and every proposition
     ``observed_at``. Only ISO-8601-with-offset values parse (bare/unknown
-    values are skipped — the timeline stays verifiable and deterministic)."""
+    values are skipped — the timeline stays verifiable and deterministic).
+
+    Phase 19J (§28/§30): a fact whose ``events`` are an ACCEPTED generated
+    activity log (``presentation.activityLogVersion == ACTIVITY_LOG_v1``) is
+    ONE logical observation — its 15..20 rich rows NEVER flood the reveal
+    timeline. The timeline anchors on the fact's OWN public proposition
+    ``observed_at`` instead (the canonical time), exactly as before the log
+    enrichment, so the notebook keeps recording the evidence item, not the
+    log's rows.
+    """
     out: list[tuple[int, str]] = []
     presentation = fact.get("presentation")
     if isinstance(presentation, Mapping):
@@ -211,7 +220,7 @@ def _timeline_candidates_of(fact: Mapping[str, Any]) -> tuple[tuple[int, str], .
             except ValueError:
                 pass
         events = presentation.get("events")
-        if isinstance(events, list):
+        if isinstance(events, list) and not _is_generated_activity_log(presentation):
             for event in events:
                 if not isinstance(event, Mapping):
                     continue
@@ -231,6 +240,15 @@ def _timeline_candidates_of(fact: Mapping[str, Any]) -> tuple[tuple[int, str], .
             except ValueError:
                 pass
     return tuple(out)
+
+
+# The server-owned marker an ACCEPTED Phase 19J generated log persists under
+# (``app.domain.activity_log.ACTIVITY_LOG_VERSION_MARKER``).
+def _is_generated_activity_log(presentation: Mapping[str, Any]) -> bool:
+    return bool(
+        str(presentation.get("activityLogVersion") or "")
+        == "ACTIVITY_LOG_v1"
+    )
 
 
 _TL_MAX = 12

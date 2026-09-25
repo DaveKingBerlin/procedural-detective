@@ -890,6 +890,7 @@ def test_wave2_driver_reuses_case_across_passes_and_keeps_budget():
         MockOllamaTransport,
         PROMPT,
         _admission,
+        _alog_posts,
         _case_people,
         _controller,
         _evidence,
@@ -906,9 +907,11 @@ def test_wave2_driver_reuses_case_across_passes_and_keeps_budget():
         posts=[
             _j(_case_people()),
             _j(_evidence()),  # pass 1 evidence
+            *_alog_posts("2026-09-11T23:42:00+02:00"),
             _j(_world()),
             ICEPICK_SPEC,
-            _j(_evidence()),  # pass 2 evidence (cached case -> 3 more calls)
+            _j(_evidence()),  # pass 2 evidence (cached case -> fewer calls)
+            *_alog_posts("2026-09-11T23:42:00+02:00"),
             _j(_world()),
             ICEPICK_SPEC,
         ]
@@ -918,9 +921,10 @@ def test_wave2_driver_reuses_case_across_passes_and_keeps_budget():
     handle = controller.start_generation(PROMPT, anonymous_quota_session_id=session.session_id)
     record = controller.attempt(handle.attempt_id)
     assert record.state == "PUBLISHED" or record.state.value == "PUBLISHED"  # type: ignore[union-attr]
-    # pass 1: case+evidence+world+spec = 4 calls; pass 2 reuses case: +3 more.
-    assert transport.call_count <= 7
-    assert record.budget.calls <= 7
+    # pass 1 = case+evidence+4 activity logs+world+spec = 8 calls; a repaired
+    # pass 2 reuses the cached case (5 more calls inside the 12-call budget).
+    assert transport.call_count <= 13
+    assert record.budget.calls <= 13
 
 
 def test_wave2_reconcile_evidence_interaction_drops_resolved_issues():

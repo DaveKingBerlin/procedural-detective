@@ -147,6 +147,13 @@ AUTHORITATIVE_SCHEMA_IDS: frozenset[str] = frozenset(
         "ASSET_SPEC_v1",
         "REPAIR_v1",
         "ASSET_SPEC_REPAIR_v1",
+        # Phase 19J — the ACTIVITY_LOG stage travels the SAME provider
+        # abstraction as every other driver stage, so it must be dispatchable
+        # to a Phase 22 bridge (the bridge receives the structured-inference
+        # job with this schemaId; the raw structuredOutput is validated by the
+        # EXACT same Phase 19J server validators as Ollama output).
+        "ACTIVITY_LOG_v1",
+        "ACTIVITY_LOG_REPAIR_v1",
     }
 )
 
@@ -526,6 +533,8 @@ STAGE_TO_SCHEMA_ID: Mapping[str, str] = {
     "world_graph": "WORLD_REQUIREMENTS_v1",
     "asset_spec": "ASSET_SPEC_v1",
     "asset_spec_repair": "ASSET_SPEC_REPAIR_v1",
+    "activity_log": "ACTIVITY_LOG_v1",
+    "activity_log_repair": "ACTIVITY_LOG_REPAIR_v1",
     "repair": "REPAIR_v1",
 }
 

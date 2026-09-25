@@ -26,6 +26,15 @@ import GenericEvidence from "./GenericEvidence";
  * server actually sent. If the payload carries no concrete entries the
  * renderer falls back to the DTO title/description — it NEVER fabricates a
  * timestamp.
+ *
+ * Phase 19J §32/§34 — 15–20 row logs: the table lives inside a bounded
+ * keyboard-scrollable region (`.evidence-activity-scroll`, max-height +
+ * overflow-y:auto — engages ONLY when the rows outgrow the cap) so the panel
+ * header, the fixed "Activity log" heading and the Close button all stay
+ * accessible while the rows scroll. The region is a labelled `role="region"`
+ * with tabIndex 0 for keyboard scrolling; reading order stays
+ * heading -> table -> Close, and every row stays visible inside the region
+ * (nothing is hidden). No animation — prefers-reduced-motion compliant.
  */
 export default function ActivityLogEvidence({ record }: EvidenceRendererProps): ReactElement {
   const items = timeEntryItems(record.content, ["entries"], ["text"]);
@@ -35,24 +44,31 @@ export default function ActivityLogEvidence({ record }: EvidenceRendererProps): 
   return (
     <section className="evidence-activities" aria-label="Activity log">
       <h4 className="evidence-block-title">Activity log</h4>
-      <table className="evidence-table evidence-activity-log">
-        <thead>
-          <tr>
-            <th scope="col">Time</th>
-            <th scope="col">Activity</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item, index) => (
-            <tr key={`activity-${index}`}>
-              <td className="evidence-activity-time">
-                <time dateTime={item.time}>{item.displayTime}</time>
-              </td>
-              <td className="evidence-activity-text">{item.text}</td>
+      <div
+        className="evidence-activity-scroll"
+        role="region"
+        tabIndex={0}
+        aria-label="Activity log entries"
+      >
+        <table className="evidence-table evidence-activity-log">
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">Activity</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {items.map((item, index) => (
+              <tr key={`activity-${index}`}>
+                <td className="evidence-activity-time">
+                  <time dateTime={item.time}>{item.displayTime}</time>
+                </td>
+                <td className="evidence-activity-text">{item.text}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

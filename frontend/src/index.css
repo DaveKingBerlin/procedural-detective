@@ -1863,6 +1863,28 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* Phase 19J §32 — BOUNDED internal scroll region for long activity-log /
+ * timeline tables (15–20 rows, §54). The WRAPPER is the only scrolling
+ * element inside the evidence section, so the section heading (the table's
+ * caption-equivalent A/V label) and the panel header/Close all stay FIXED
+ * and reachable while rows scroll. max-height engages ONLY when the table
+ * outgrows the cap: a short table keeps its natural height (automatic, no
+ * scrollbar — the cap is a ceiling, not a forced box), while a 15–20 row
+ * table caps and scrolls internally, so the panel never becomes awkwardly
+ * oversized and NO page-level scrollbar appears. overflow-y:auto shows the
+ * scrollbar only when needed; overflow-x:hidden bounds the fixed-layout
+ * table (never a horizontal page scroll / table bleed). The region is made
+ * keyboard-focusable via the tabIndex attribute on the element (markup, not
+ * CSS) so keyboard users can scroll it with PageUp/PageDown/arrows, and
+ * there is NO animation of any kind — prefers-reduced-motion is respected
+ * by construction.
+ */
+.evidence-activity-scroll {
+  max-height: 24rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
 /* Message labelled definition list. */
 .evidence-definition-list {
   margin: 0.4rem 0 0;

@@ -29,6 +29,7 @@ import { makeBootstrap, makeForkWorldObject } from "../scene/testFixtures";
 const holders = vi.hoisted(() => ({
   bootstrap: null as ReturnType<typeof makeBootstrap> | null,
   lastOnPick: null as ((objectId: string) => void) | null,
+  laptopClicks: 0,
 }));
 
 vi.mock("../api/playthroughToken", () => ({
@@ -66,6 +67,25 @@ vi.mock("../api/client", async (importOriginal) => {
           inspection: { relevant: true, label: "Kitchen knife" },
         };
       }
+      // Phase 19J: the laptop discovery (a device that will publish
+      // ACTIVITY_LOG content) — first click "discovered", later "already-
+      // discovered", mirroring the server's state transition.
+      if (objectId === "apartment_laptop" && interaction === "read") {
+        return {
+          objectId,
+          interaction,
+          evidenceId: "email_thomas_01",
+          discovery: {
+            evidenceId: "email_thomas_01",
+            kind: "email",
+            title: "Laptop activity log",
+            interaction,
+            state: ++holders.laptopClicks === 1 ? "discovered" : "already-discovered",
+          },
+          result: "interacted",
+          inspection: { relevant: true, label: "Laptop" },
+        };
+      }
       // Phase 19F: EVERY other published semantic object (incl. the empty-
       // interaction decoratives vase/door/lamp/table/victim and the fork)
       // answers the safe inspection result — no discovery, no evidence.
@@ -80,15 +100,30 @@ vi.mock("../api/client", async (importOriginal) => {
     },
   );
   const readRecord = vi.fn(
-    async (): Promise<EvidenceReadResultDTO> => ({
-      evidenceId: "forensic_knife_match_01",
-      kind: "forensic",
-      title: "Kitchen knife",
-      description: null,
-      openedAt: "2026-09-11T22:20:00+02:00",
-      readByPlayer: true,
-      content: {},
-    }),
+    async (_pt: string, recordId: string): Promise<EvidenceReadResultDTO> => {
+      // Phase 19J laptop record (ACTIVITY_LOG-shaped content) — its notebook/
+      // counter footprint is exactly ONE evidence item like any other.
+      if (recordId === "email_thomas_01") {
+        return {
+          evidenceId: "email_thomas_01",
+          kind: "email",
+          title: "Laptop activity log",
+          description: null,
+          openedAt: "2026-09-11T22:20:00+02:00",
+          readByPlayer: true,
+          content: { renderType: "ACTIVITY_LOG", entries: [] },
+        };
+      }
+      return {
+        evidenceId: "forensic_knife_match_01",
+        kind: "forensic",
+        title: "Kitchen knife",
+        description: null,
+        openedAt: "2026-09-11T22:20:00+02:00",
+        readByPlayer: true,
+        content: {},
+      };
+    },
   );
   return {
     ...actual,
@@ -205,6 +240,7 @@ describe("Phase 19F — /scene accessibility fallback (universal inspectable but
   beforeEach(() => {
     holders.bootstrap = makeSceneBootstrap();
     holders.lastOnPick = null;
+    holders.laptopClicks = 0;
     mounted = mountScene();
   });
 
@@ -331,6 +367,32 @@ describe("Phase 19F — /scene accessibility fallback (universal inspectable but
     expect(container().querySelector('[data-testid="object-read-kitchen_knife"]')).not.toBeNull();
     // The selected (panel-owner) state is reflected on the button.
     expect(objectButton(container(), "kitchen_knife").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("Phase 19J — clicking the LAPTOP discovers its evidence ONCE (counter/strip/panel) and a repeat click is idempotent (§29)", async () => {
+    await flushAsync();
+    await waitForReady(container());
+
+    // First click: exactly one discovery — panel opens, counter/strip shows
+    // exactly the ONE laptop evidence item (an ACTIVITY_LOG laptop publishes
+    // 15–20 visible rows but discovers ONE evidence, §28/§29).
+    clickObject(container(), "apartment_laptop");
+    await flushAsync();
+
+    expect(toastText(container())).toBe("Discovered: Laptop activity log");
+    expect(container().querySelector('[data-testid="evidence-panel"]')).not.toBeNull();
+    expect(container().querySelector('[data-testid="discovered-entry-email_thomas_01"]')).not.toBeNull();
+    expect(container().querySelectorAll('[data-testid^="discovered-entry-"]')).toHaveLength(1);
+    expect(objectButton(container(), "apartment_laptop").getAttribute("aria-pressed")).toBe("true");
+
+    // Second click: the server answer "already-discovered" — still the SAME
+    // one entry, no counter growth, no duplicate panel data (idempotent).
+    clickObject(container(), "apartment_laptop");
+    await flushAsync();
+
+    expect(toastText(container())).toBe("Already discovered: Laptop activity log");
+    expect(container().querySelector('[data-testid="evidence-panel"]')).not.toBeNull();
+    expect(container().querySelectorAll('[data-testid^="discovered-entry-"]')).toHaveLength(1);
   });
 
   it("a 3D pick (onPick) of the vase routes to the SAME nothing-found toast (universal picking round-trip)", async () => {

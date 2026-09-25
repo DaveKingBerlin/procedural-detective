@@ -16,6 +16,12 @@ import GenericEvidence from "./GenericEvidence";
  * the canonical full ISO timestamp stays in <time dateTime="..."> (see
  * compactTimeOf in shared.ts). DISPLAY granularity is normalized per payload
  * (ADV-247): when any entry needs seconds, every entry renders HH:mm:ss.
+ *
+ * Phase 19J §32/§34 — long timelines get the SAME bounded keyboard-scrollable
+ * region as the activity log (`.evidence-activity-scroll`, max-height +
+ * overflow-y:auto, labelled `role="region"` + tabIndex 0 for keyboard
+ * scrolling; engages only when the rows outgrow the cap). Reading order stays
+ * heading -> table -> Close; no rows are hidden; no animation.
  */
 export default function TimelineEvidence({ record }: EvidenceRendererProps): ReactElement {
   const items = timeEntryItems(record.content, ["entries", "events"], ["text", "description"]);
@@ -25,24 +31,31 @@ export default function TimelineEvidence({ record }: EvidenceRendererProps): Rea
   return (
     <section className="evidence-timeline-block" aria-label="Timeline">
       <h4 className="evidence-block-title">Timeline</h4>
-      <table className="evidence-table evidence-timeline">
-        <thead>
-          <tr>
-            <th scope="col">Time</th>
-            <th scope="col">Event</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item, index) => (
-            <tr key={`timeline-${index}`}>
-              <td className="evidence-activity-time">
-                <time dateTime={item.time}>{item.displayTime}</time>
-              </td>
-              <td className="evidence-activity-text">{item.text}</td>
+      <div
+        className="evidence-activity-scroll"
+        role="region"
+        tabIndex={0}
+        aria-label="Timeline entries"
+      >
+        <table className="evidence-table evidence-timeline">
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">Event</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {items.map((item, index) => (
+              <tr key={`timeline-${index}`}>
+                <td className="evidence-activity-time">
+                  <time dateTime={item.time}>{item.displayTime}</time>
+                </td>
+                <td className="evidence-activity-text">{item.text}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

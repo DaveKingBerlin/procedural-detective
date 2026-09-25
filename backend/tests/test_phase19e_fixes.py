@@ -67,6 +67,7 @@ from test_ollama_driver import (  # noqa: E402
     _evidence,
     _j,
     _run,
+    _alog_posts,
 )
 from test_phase19e_semantic_pipeline import (  # noqa: E402
     FORk_SPEC,
@@ -167,6 +168,7 @@ def test_adv235_driver_unsafe_locked_weapon_fails_closed():
         [
             _j(_case_people(weapon="gun")),
             _j(_evidence(weapon_obj="gun", murderer="paul_becker")),
+            *_alog_posts('2026-09-11T23:42:00+02:00'),
             _j(world_smuggled),
         ],
         prompt=_weapon_prompt("gun"),
@@ -195,6 +197,7 @@ def test_adv235_driver_safe_locked_weapons_still_publish(weapon):
     posts = [
         _j(_case_people(weapon=weapon_id)),
         _j(_evidence(weapon_obj=weapon_id, murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world_with("kitchen knife")),
     ]
     if weapon == "fork":
@@ -232,6 +235,7 @@ def test_adv235_world_stage_cannot_smuggle_unsafe_noun():
         [
             _j(_case_people(weapon="fork")),
             _j(_evidence(weapon_obj="fork", murderer="paul_becker")),
+            *_alog_posts('2026-09-11T23:42:00+02:00'),
             _j(world),
             FORk_SPEC,
         ],
@@ -375,6 +379,7 @@ def test_adv237_long_weapon_publishes_with_truncated_semantic_id():
         [
             _j(_case_people(weapon=_LONG_ID)),
             _j(_evidence(weapon_obj=_LONG_ID, murderer="paul_becker")),
+            *_alog_posts('2026-09-11T23:42:00+02:00'),
             _j(_world_with(_LONG_WEAPON)),
             GENERIC_SPEC,
         ],
@@ -504,16 +509,18 @@ def test_adv239_decorative_over_ceiling_never_fails_a_publishable_case():
     posts = [
         _j(_case_people(weapon="fork")),
         _j(_evidence(weapon_obj="fork", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(world),
     ]
     posts.extend([GENERIC_SPEC] * 6)
     record, _transport = _run(
         posts, prompt=_weapon_prompt("fork"), max_repair_passes=0,
-        max_full_regenerations=0,
+        max_full_regenerations=0, max_llm_calls_per_generation=20,
     )
     assert record.state is GenerationState.PUBLISHED, record.reason
     assert record.solver_proof.weapon.winner == "fork"
-    assert record.budget.calls == 9  # 3 core + 6 asset (bounded provider cap)
+    # 7 core (case/evidence/4 activity logs/world) + 6 asset.
+    assert record.budget.calls == 13
     assert record.published is not None
     assert record.published.draft.composition_notes
     assert all("left out" in note for note in record.published.draft.composition_notes)

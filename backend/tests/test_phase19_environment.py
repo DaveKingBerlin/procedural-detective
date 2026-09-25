@@ -43,6 +43,7 @@ from test_ollama_driver import (  # noqa: E402
     _evidence,
     _j,
     _run,
+    _alog_posts,
 )
 
 
@@ -172,6 +173,7 @@ def _staged(bad_hint: bool):
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world(environmentHint=("hotel/suite" if bad_hint else "hotel_suite"))),
     ]
     return posts
@@ -179,14 +181,15 @@ def _staged(bad_hint: bool):
 
 @pytest.mark.parametrize("bad_hint", (True, False))
 def test_driver_pathlike_hint_cost_zero_extra_calls_and_falls_back(bad_hint):
-    """A path-like (or canonical) environmentHint costs the SAME three calls:
-    the local canonicalization/fallback NEVER consumes a provider call and
-    NEVER enters the remote-repair path."""
+    """A path-like (or canonical) environmentHint costs the SAME seven calls
+    (case/evidence + 4 Phase 19J activity logs + world): the local
+    canonicalization/fallback NEVER consumes a provider call and NEVER enters
+    the remote-repair path."""
     posts = _staged(bad_hint)
     record, transport = _run(posts, prompt=_hotel_suite_prompt())
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 3
-    assert record.budget.calls == 3
+    assert transport.call_count == 7
+    assert record.budget.calls == 7
     assert record.deferred_structural == ()
     # the user-prompt location (hotel suite) is authoritative after the local
     # repair; the rejected path token NEVER reaches a kit/file lookup.
@@ -200,12 +203,13 @@ def test_driver_canonicalized_spelling_costs_zero_extra_calls(caplog):
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world(environmentHint=" Hotel Suite ")),
     ]
     with caplog.at_level(logging.INFO, logger="procedural-detective"):
         record, transport = _run(posts, prompt=_hotel_suite_prompt())
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 3
+    assert transport.call_count == 7
     assert record.draft.scene.environment_id == "hotel_suite"
     events = [
         getattr(event, "pd_event", None)
@@ -226,11 +230,12 @@ def test_driver_rejected_hint_without_user_location_uses_default_kit():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world(environmentHint="office\\research_lab")),
     ]
     record, transport = _run(posts, prompt=prompt)
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 3
+    assert transport.call_count == 7
     assert record.draft.scene.environment_id == "apartment"
 
 

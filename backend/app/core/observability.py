@@ -38,6 +38,11 @@ _SAFE_FIELDS = frozenset(
         # Ollama URL or client IP.
         "bridgeSessionId", "pairingSessionId", "jobId", "schemaId",
         "timeoutMs", "latencyMs", "expiresInSeconds", "resultStatus",
+        # Phase 19J — safe activity-log lifecycle fields (§40). Sanitized
+        # counts/codes only: NEVER CaseTruth, raw provider responses, full log
+        # text, prompts or hidden evidence. ``evidenceIdSafe`` is the
+        # evidence id scrubbed through ``_sanitize_object_id_for_message``.
+        "evidenceIdSafe", "entryCount", "validatorCode",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

@@ -54,6 +54,7 @@ from test_ollama_driver import (  # noqa: E402
     _evidence,
     _j,
     _run,
+    _alog_posts,
 )
 from test_phase19_budgets import _tracker  # noqa: E402
 
@@ -92,6 +93,7 @@ def test_adv213a_per_asset_exhaustion_surfaces_narrow_code_via_real_path():
     posts = [
         _j(_case_people(weapon="mystery_weapon")),
         _j(_evidence(weapon_obj="mystery_weapon", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world_with("mystery weapon", criticality="required")),
         "<not-json>",  # ASSET_SPEC (invalid -> repair needed)
         "<not-json>",
@@ -118,6 +120,7 @@ def test_adv213b_global_exhaustion_remains_terminal():
     posts = [
         _j(_case_people(weapon="mystery_weapon")),
         _j(_evidence(weapon_obj="mystery_weapon", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world_with("mystery weapon", criticality="required")),
         "<not-json>",  # ASSET_SPEC (would be the 4th call -- global ceiling 4)
         "<not-json>",
@@ -151,6 +154,7 @@ def test_adv213c_decorative_budget_exhaustion_follows_bounded_fallback():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world_with("unusual trinket", criticality="decorative")),
         "<not-json>",  # ASSET_SPEC (invalid -> repair -> per-asset budget)
         "<not-json>",
@@ -177,6 +181,7 @@ def test_adv213d_essential_evidence_fails_closed_sanitized():
     posts = [
         _j(_case_people(weapon="mystery_weapon")),
         _j(_evidence(weapon_obj="mystery_weapon", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world_with("mystery weapon", criticality="required")),
         "<not-json>",
         "<not-json>",
@@ -205,6 +210,7 @@ def test_adv213e_failed_asset_accounting_increments_on_budget_exception():
     posts = [
         _j(_case_people(weapon="mystery_weapon")),
         _j(_evidence(weapon_obj="mystery_weapon", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world_with("mystery weapon", criticality="required")),
         "<not-json>",
         "<not-json>",
@@ -286,6 +292,7 @@ def test_adv220a_decorative_budget_exhaustion_below_ceiling_publishes():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_decor_world("unusual trinket")),
         "<not-json>",  # ASSET_SPEC (invalid -> repair -> per-asset budget)
         "<not-json>",
@@ -312,6 +319,7 @@ def test_adv220b_budget_decorative_over_ceiling_fails_with_max_failed():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(
             _decor_world(
                 "trinket one", "trinket two", "trinket three", "trinket four"
@@ -342,6 +350,7 @@ def test_adv220c_required_budget_exhaustion_still_fails_closed_narrow():
     posts = [
         _j(_case_people(weapon="mystery_weapon")),
         _j(_evidence(weapon_obj="mystery_weapon", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(
             {
                 "environmentHint": "office", "locationTokens": ["office"],
@@ -383,6 +392,7 @@ def test_adv220d_global_exhaustion_still_terminal_for_decorative_objects():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_decor_world("unusual trinket")),
         "<not-json>",  # ASSET_SPEC (would be the 4th call -- global ceiling 4)
         "<not-json>",
@@ -411,6 +421,7 @@ def test_adv220e_failed_asset_accounting_exactly_once_per_decorative_asset():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_decor_world("trinket one", "trinket two")),
     ]
     record, _transport = _run(
@@ -545,10 +556,12 @@ def test_adv216_tracker_object_named_core_charges_its_own_asset_bucket():
 def test_adv216_driver_object_named_core_attributed_to_asset_bucket():
     """Through the real driver, a procedural object whose requested_name is
     literally ``"core"`` is charged to the ASSET bucket (core_calls stays at
-    the canonical 3), never to the CORE bucket."""
+    the 7 staged core calls — case/evidence + 4 Phase 19J activity logs +
+    world), never to the CORE bucket."""
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(
             {
                 "environmentHint": "office", "locationTokens": ["office"],
@@ -560,10 +573,11 @@ def test_adv216_driver_object_named_core_attributed_to_asset_bucket():
     ]
     record, _transport = _run(posts, prompt=_KITCHEN_KNIFE_PROMPT)
     assert record.state is GenerationState.PUBLISHED
-    assert record.budget.core_calls == 3
+    # 7 core calls: case + evidence + 4 Phase 19J activity logs + world.
+    assert record.budget.core_calls == 7
     assert record.budget.asset_calls == 1
     assert record.budget.asset_calls_by_object == {"core": 1}
-    assert record.budget.calls == 4
+    assert record.budget.calls == 8
 
 
 # --------------------------------------------------------------------------- #
@@ -621,6 +635,7 @@ def test_adv218_hostile_weapon_id_yields_sanitized_guard_failure():
     posts = [
         _j(_case_people(weapon=hostile)),
         _j(_evidence(weapon_obj=hostile, murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(
             {
                 "environmentHint": "office", "locationTokens": ["office"],
@@ -676,6 +691,7 @@ def test_adv219_hotel_candidates_only_include_placed_objects():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_hotel_knife_world()),
     ]
     record, _transport = _run(posts, prompt=_HOTEL_SUITE_PROMPT)
@@ -718,6 +734,7 @@ def test_adv219_office_kit_keeps_spare_sharp_weapons_as_candidates():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(
             {
                 "environmentHint": "office", "locationTokens": ["office"],

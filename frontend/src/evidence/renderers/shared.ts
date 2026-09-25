@@ -11,6 +11,11 @@ import type { EvidenceReadResultDTO } from "../../api/types";
  *     markup (reload determinism, Phase 19G §10);
  *   - emits no focusable controls, so the panel's existing focus/close/ESC
  *     behavior (evidencePanel) and reduced-motion behavior are untouched.
+ *     Phase 19J §32/§34 EXCEPTION: the ACTIVITY_LOG / TIMELINE tables are
+ *     wrapped in a labelled, keyboard-scrollable scroll region (tabIndex 0,
+ *     role="region") — a deliberate, non-interactive focus target that adds
+ *     keyboard scrolling for long 15–20 row logs without adding any control
+ *     (no click handler, no state, no behavior change to Close/ESC).
  *
  * Phase 19H — TIME PRESENTATION (this module owns the compact clock rules):
  *   - the PLAYER-FACING time is the COMPACT local clock, extracted VERBATIM
