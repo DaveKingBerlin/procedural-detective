@@ -433,6 +433,14 @@ def _weapon_leak_keys(names: Iterable[str]) -> frozenset[str]:
     the weapon's DISTINCTIVE content words stay forbidden. "kitchen knife" ->
     {"knife"} (the distinctive weapon-family word remains; the static
     forbidden-content list independently enforces knife/blade/shaft/gun).
+    ADV-261 (INFO, bounded consequence): because the function-word and
+    neutral-vocabulary drops are absolute, a canonical weapon whose tokens are
+    ALL neutral — "computer case", "letter opener", "glass bottle" — produces
+    an EMPTY needle set, so neutral-only paraphrases of such a weapon are NOT
+    detected by this word-token layer. The literal exact-name layer and the
+    sharp-class ``_FORBIDDEN_CONTENT_WORDS`` set ("knife"/"blade"/"gun"/
+    "shaft") still apply, and ADV-256 guarantees the LLM never sees the
+    weapon name.
     """
     keys: set[str] = set()
     for raw in names:
