@@ -1,11 +1,13 @@
-"""Phase 5/6/7 — migration behavior (M28, M29, Phase5 L + Phase6 A + Phase7 A).
+"""Phase 5/6/7 + Phase 22 migration behavior (M28, M29, Phase5 L + Phase6 A +
+Phase7 A + Phase22 bridge persistence).
 
-- empty database -> head (alembic_version == 0004)
+- empty database -> head (alembic_version == 0005)
 - Phase 2 baseline (0001) -> head succeeds
 - constraint/index/trigger inventory exists (PKs, unique constraints,
   token_verifier indexes, published_versions/accusations immutability
-  triggers, player_knowledge/accusations FK + (case_id, case_version) index)
-- downgrade drops every Phase 5/6/7 table (registered downgrade policy)
+  triggers, player_knowledge/accusations FK + (case_id, case_version) index,
+  bridge pairing/session tables)
+- downgrade drops every Phase 5/6/7/22 table (registered downgrade policy)
 - application readiness confirms the expected migration head
 """
 
@@ -21,7 +23,7 @@ from sqlalchemy import create_engine, inspect, text
 from app.db.session import migration_head
 from conftest import downgrade_db, upgrade_db
 
-EXPECTED_HEAD = "0004"
+EXPECTED_HEAD = "0005"
 
 TABLES = (
     "anonymous_quota_sessions",
@@ -33,6 +35,8 @@ TABLES = (
     "playthroughs",
     "player_knowledge",
     "accusations",
+    "bridge_pairing_records",
+    "bridge_sessions",
 )
 
 

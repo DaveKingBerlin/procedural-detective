@@ -494,6 +494,31 @@ export interface GenerationModeDTO {
   model?: string;
 }
 
+/**
+ * Phase 22 — the sanitized BYO-Ollama remote-local-AI status block.
+ *
+ * Mirror of the server's `remoteLocalAi` object published in TWO places:
+ *   - the top-level `remoteLocalAi` of GET /api/v1/generation-capabilities
+ *     (present ONLY when the bridge feature is enabled — ENABLE_BRIDGE=true;
+ *     the pre-bridge DTO stays byte-identical and OMITS the key entirely);
+ *   - the body of GET /api/v1/bridge/status (session-scoped).
+ *
+ * It carries ONLY booleans and the sanitized model label — NEVER a token,
+ * secret, IP or Ollama URL. The client re-parses every crossing value
+ * through src/journey/generationMode.ts (strict booleans; `model` through the
+ * existing `safeDisplay` sanitizer; anything hostile is dropped).
+ */
+export interface RemoteLocalAiDTO {
+  /** Bridge feature enabled and usable for this caller. */
+  available: boolean;
+  /** A live bridge is bound to THIS requester's session. */
+  connected: boolean;
+  /** Sanitized model label reported by the bound bridge (never a URL/IP). */
+  model: string | null;
+  /** Connected and currently accepting a new job. */
+  ready: boolean;
+}
+
 /** 200 body of GET {base}/api/v1/generation-capabilities. */
 export interface GenerationCapabilitiesResponse {
   modes: GenerationModeDTO[];
@@ -506,4 +531,44 @@ export interface GenerationCapabilitiesResponse {
    * derivation (backward compatible with OLDER servers that omit the field).
    */
   configuredProvider?: ConfiguredProvider | null;
+  /**
+   * Phase 22 — BYO-Ollama bridge status scoped to the requester's anonymous
+   * session, present ONLY when ENABLE_BRIDGE=true (absent entirely when the
+   * feature is OFF, keeping the existing DTO byte-identical). Absence means
+   * the feature is not offered. Every field is re-sanitized by the client
+   * parser before any display (strict booleans; model through safeDisplay).
+   */
+  remoteLocalAi?: RemoteLocalAiDTO | null;
+}
+
+/* ======================================================================
+ * Phase 22 — BYO-Ollama bridge REST contract (implemented in parallel by
+ * the backend agent).
+ *
+ * POST {base}/api/v1/bridge/pairing (Bearer anonymousSessionToken) -> 201
+ *   {"pairingSessionId","pairingCode","expiresAt"} — the code (PD-XXXX-XXXX)
+ *   is short-lived, single-use and shown to the user as a display-only
+ *   secret; it is entered into the LOCAL BRIDGE CLI, never the browser↔
+ *   server WebSocket (the bridge<->server WS is bridge-owned only).
+ * GET {base}/api/v1/bridge/status (Bearer anonymousSessionToken) -> 200
+ *   {"remoteLocalAi": {available, connected, model, ready}} — sanitized,
+ *   session-scoped.
+ *
+ * Both are authenticated with the anonymous session bearer and exist ONLY
+ * when ENABLE_BRIDGE=true (otherwise 404 like every unmounted path).
+ * ==================================================================== */
+
+/** 201 body of POST {base}/api/v1/bridge/pairing. */
+export interface BridgePairingResponse {
+  /** Opaque server-side pairing record id. */
+  pairingSessionId: string;
+  /** Short-lived single-use pairing code (PD-XXXX-XXXX), shown exactly once. */
+  pairingCode: string;
+  /** UTC epoch seconds when the code expires. */
+  expiresAt: number;
+}
+
+/** 200 body of GET {base}/api/v1/bridge/status. */
+export interface BridgeStatusResponse {
+  remoteLocalAi: RemoteLocalAiDTO;
 }

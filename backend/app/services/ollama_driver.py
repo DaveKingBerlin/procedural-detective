@@ -1,4 +1,4 @@
-"""Phase 16_2 — the Local-Llama (Ollama) Stage Driver.
+"""Phase 16_2 â€” the Local-Llama (Ollama) Stage Driver.
 
 ``OllamaStageDriver`` walks the prompt-to-world pipeline with STRUCTURED
 per-stage LLM calls over the SAME ``GenerateRequest`` / ``ProviderResult``
@@ -17,7 +17,7 @@ whether a case is solvable. It assembles a normal ``GeneratedDraft`` so the
 EXISTING deterministic validation suite (safety, solver, world, truth,
 publication gate) runs unchanged, and it is invoked from inside the EXISTING
 ``GenerationController`` lifecycle (budget, repair/regenerate classification,
-publication CAS) — no parallel lifecycle is introduced.
+publication CAS) â€” no parallel lifecycle is introduced.
 
 The driver's outcome when any stage yields terminal-unrepairable output is
 classified by the existing controller: a provider-level failure
@@ -104,7 +104,7 @@ def _remaining_ms(attempt: Any) -> int | None:
     return int(budget.remaining_seconds() * 1000)
 
 # Bounded AssetSpec repair passes INSIDE one AssetSpec round-trip (Phase16_2
-# §13: "bounded ≤2 per driver").
+# Â§13: "bounded â‰¤2 per driver").
 MAX_SPEC_REPAIR_PASSES = 2
 
 # The four (non-AssetSpec) stage surfaces the driver walks (in order).
@@ -152,7 +152,7 @@ def _consumer_accepts_bucket(consumer: Callable[..., Any]) -> bool:
 
 def _parse_doc(content: str) -> dict[str, Any]:
     """Strict single-document parse with duplicate-key rejection (mirror of the
-    strict generation parser) — returns the dict or raises ``ValueError``.
+    strict generation parser) â€” returns the dict or raises ``ValueError``.
 
     PD-SEC-09: the decode runs behind the SAME bounded depth preflight as the
     generation parser (``bounded_json_loads``), so a deep nesting bomb in a
@@ -234,7 +234,7 @@ def _identity_slug(value: str | None) -> str:
     ``"anna_weiss"``. Long values are truncated to the SAME 40-character
     bound as ``semantic_object_id``/``composer._slugify`` (ADV-237: the id
     sheet must NEVER diverge from the composed semantic object id for a
-    >40-char locked weapon — the weapon line uses ``semantic_object_id``
+    >40-char locked weapon â€” the weapon line uses ``semantic_object_id``
     directly so sheet and composer ALWAYS agree).
     """
     words = [
@@ -263,7 +263,7 @@ def _locked_id_sheet(attempt: Any) -> str:
         ("witness", "witness_id"),
     )
     lines = [
-        "Locked identity sheet — use THESE exact id tokens for the locked "
+        "Locked identity sheet â€” use THESE exact id tokens for the locked "
         "people/objects in your JSON (never invent alternative ids):"
     ]
     any_token = False
@@ -272,7 +272,7 @@ def _locked_id_sheet(attempt: Any) -> str:
         if value is None:
             continue
         if key == "weapon":
-            # ADV-237 — the WEAPON id token IS the pipeline's semantic object
+            # ADV-237 â€” the WEAPON id token IS the pipeline's semantic object
             # id (``semantic_object_id`` = the same 40-char-bounded slug the
             # composer uses for the resolved semantic object). A locked weapon
             # longer than 40 characters therefore ALWAYS gets the SAME
@@ -286,7 +286,7 @@ def _locked_id_sheet(attempt: Any) -> str:
     time_value = fields.get("crime_time")
     if time_value and any_token:
         lines.append(
-            f"- crime_time: the locked time is {time_value} — write "
+            f"- crime_time: the locked time is {time_value} â€” write "
             f"crimeTime.canonical EXACTLY as {_today_date()}T{time_value}:00+02:00 "
             "(today's date at the locked time, timezone +02:00)"
         )
@@ -308,14 +308,14 @@ def _approved_public_material(public: Any) -> str:
     deterministic engine's referential integrity). The driver passes the
     parsed public people/locations/motives forward as an approved allowlist,
     PLUS the approved travel rules (the who solver can only exclude a suspect
-    through travel-rule-backed opportunity observations — a missing rule
+    through travel-rule-backed opportunity observations â€” a missing rule
     makes an observation useless): sanitized public draft material (id +
     name + role), never truth, never ids from hidden sections. Returns an
     empty string when nothing parsed.
     """
     lines = [
         "APPROVED PUBLIC MATERIAL (reference ONLY these ids in your "
-        "propositions — never invent ids):"
+        "propositions â€” never invent ids):"
     ]
     any_entry = False
     for tag, entries, id_attr, name_attr in (
@@ -385,7 +385,7 @@ def _weapon_evidence_id(attempt: Any, evidence_spec: Any) -> str:
         return ""
     from app.generation.constraints import normalize_identity
 
-    # ADV-237 — the needle is the SINGLE slug source: evidence propositions
+    # ADV-237 â€” the needle is the SINGLE slug source: evidence propositions
     # reference the id-sheet token = ``semantic_object_id(weapon)`` (the same
     # 40-char-bounded slug the composer materializes). ``normalize_identity``
     # is invariant to "_"/" ", so this equals the raw locked text for short
@@ -403,7 +403,7 @@ def _weapon_evidence_id(attempt: Any, evidence_spec: Any) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Phase17 Wave-2 — evidence algebra seeding + deterministic gap completion
+# Phase17 Wave-2 â€” evidence algebra seeding + deterministic gap completion
 # --------------------------------------------------------------------------- #
 #
 # The WHO/WHY/WEAPON solvers need a COMPLETE fact algebra before any dimension
@@ -411,12 +411,12 @@ def _weapon_evidence_id(attempt: Any, evidence_spec: Any) -> str:
 # An 8B-class model cannot be relied on to emit all ~16 solver-critical
 # propositions in one pass, so the driver does two things:
 #
-#  1. ``_deduction_seed`` — projects the EXACT ids/timestamps the evidence
+#  1. ``_deduction_seed`` â€” projects the EXACT ids/timestamps the evidence
 #     facts must reference into the evidence prompt (app-owned; derived from
 #     the model's own parsed people/motives/locations + the locked ids + the
 #     locked canonical time). Facts, never conclusions; no reveal.
 #
-#  2. ``_evidence_gap_facts`` — the deterministic acceptance path: after the
+#  2. ``_evidence_gap_facts`` â€” the deterministic acceptance path: after the
 #     model's evidence is parsed, the driver checks the required algebra and
 #     appends ONLY the missing solver-critical facts, derived exclusively from
 #     the model's own public tokens (persons/locations/motives/objects it
@@ -432,8 +432,8 @@ _BASE_SHARP_WEAPON_IDS: tuple[str, ...] = ("kitchen_knife", "letter_opener", "sc
 
 # The FULL golden base object id set carried by EVERY driver-assembled draft
 # (identical to the fake/live golden world's object set). Phase 19 Fix B
-# (§4.4): object IDENTITY exists independently of the per-kit PLACEMENT subset
-# (KIT_BASE_OBJECT_IDS) — a kit that cannot place letter_opener/scissors still
+# (Â§4.4): object IDENTITY exists independently of the per-kit PLACEMENT subset
+# (KIT_BASE_OBJECT_IDS) â€” a kit that cannot place letter_opener/scissors still
 # has them as world OBJECTS so weapon/evidence references stay valid.
 OBJECTS_BASE_ALL_KITS: tuple[str, ...] = (
     "kitchen_knife",
@@ -467,7 +467,7 @@ def _evidence_timeline(canonical: str) -> dict[str, str]:
     all_true) and the opportunity exclusions cover the whole window:
     victim last seen 110s before, body found 91s after (23:43:31 for a
     23:42:00 crime), scene observation 10s before (uncertainty 90 =>
-    [canonical-100, canonical+81) — the fixture-verified narrow window),
+    [canonical-100, canonical+81) â€” the fixture-verified narrow window),
     other-suspect observations 120s before (u 30), locked-person scene
     presence 20s before (u 60), alibi departure 32 minutes before.
     """
@@ -526,19 +526,19 @@ def _deduction_seed(attempt: Any, crime: Any, public: Any) -> str:
     ]
     travel = _approved_travel_sheet(public)
     lines = [
-        "DEDUCTION SEED (use THESE EXACT ids and timestamps — emit FACTS for "
+        "DEDUCTION SEED (use THESE EXACT ids and timestamps â€” emit FACTS for "
         "them, never conclusions):",
         f"- locked person (place AT the scene around the crime time): {murderer_id}",
         f"- scene location id: {scene_id}; victim id: {victim_id}",
         f"- locked motive id: {motive_id}; locked weapon id: {weapon_id}",
         (
             f"- exclude these motives (MOTIVE_FACT_CONTRADICTED): "
-            f"{', '.join(other_motives) if other_motives else '(none yet — the case needs at least two alt motives)'}"
+            f"{', '.join(other_motives) if other_motives else '(none yet â€” the case needs at least two alt motives)'}"
         ),
         (
             f"- observe these other suspects at DISTANT locations (impossible "
             f"opportunity, PERSON_OBSERVED_AT_LOCATION): "
-            f"{', '.join(other_suspects) if other_suspects else '(none yet — the case needs at least two alt suspects)'}"
+            f"{', '.join(other_suspects) if other_suspects else '(none yet â€” the case needs at least two alt suspects)'}"
         ),
         (
             f"- other sharp weapons needing FORENSIC_WEAPON_MATCH "
@@ -571,9 +571,9 @@ def _evidence_gap_facts(
 
     Hermes3:8b cannot be relied on to emit the complete solver-critical fact
     algebra in one stable pass (its fact subset/timestamps vary run to run;
-    a single contradictory proposition — a ``match:true`` on an alternative
+    a single contradictory proposition â€” a ``match:true`` on an alternative
     weapon, a false match on the locked weapon, an observation of the locked
-    person at a distant travel-rule-backed location, an off-seed time fact —
+    person at a distant travel-rule-backed location, an off-seed time fact â€”
     is enough to make the assembled evidence non-unique). The driver is the
     sole trust boundary, so under the accepted Wave-2 contract the model emits
     the CASE SKELETON and the driver OWNS the complete evidence algebra:
@@ -588,20 +588,20 @@ def _evidence_gap_facts(
       surface;
     - every generated fact is REAL discoverable evidence that passes the
       strict parser, the full referential validation AND the deterministic
-      solver — the solver still derives the unique winner from the assembled
+      solver â€” the solver still derives the unique winner from the assembled
       set (injection never bypasses the solver, never fakes: every fact
       references model-chosen people/locations/motives/objects).
 
     Returns ``(canonical_evidence_spec, extra_travel_rules, notes)``:
 
-    - ``canonical_evidence_spec`` — the complete EvidenceSetSpec (WHEN;
+    - ``canonical_evidence_spec`` â€” the complete EvidenceSetSpec (WHEN;
       impossible-opportunity for every other suspect; presence + alibi for
       the locked person; motive link + exclusions; weapon matches +
       fingerprint);
-    - ``extra_travel_rules`` — ``TravelRuleSpec`` objects the driver appends
+    - ``extra_travel_rules`` â€” ``TravelRuleSpec`` objects the driver appends
       to the draft public so an opportunity observation is travel-rule-backed
       (the who solver refuses to exclude without a rule);
-    - ``notes`` — sanitized audit lines (evidence id + fact kind) listing
+    - ``notes`` â€” sanitized audit lines (evidence id + fact kind) listing
       exactly what was built and why (the operator/QA trace; never served).
     """
     from app.domain.eligibility import SUSPECT_ELIGIBLE
@@ -926,7 +926,7 @@ def _evidence_set_summary(evidence_spec: Any) -> dict[str, Any]:
     """Deterministic sanitized evidence summary for operator diagnostics.
 
     Counts per proposition type PLUS per-object forensics match values PLUS
-    the evidence-item count — structure only, never content, never ids."
+    the evidence-item count â€” structure only, never content, never ids."
     """
     counts: dict[str, int] = {}
     match_vals: dict[str, list[bool]] = {}
@@ -961,7 +961,7 @@ def parse_world_requirements(
     """Strict-parse a WORLD_REQUIREMENTS stage response into the typed
     ``WorldRequirements`` (bounded ObjectRequests / PlacementRelations).
 
-    Phase 19 Fix A — canonical environment handling: the raw
+    Phase 19 Fix A â€” canonical environment handling: the raw
     ``environmentHint`` is canonicalized through ``app.world.environment``
     (trim/lowercase/space->underscore/hyphen->underscore + the closed five-id
     alias map). A REJECTED hint (path-like / ``..`` / absolute / URL scheme /
@@ -970,7 +970,7 @@ def parse_world_requirements(
     (``canonical_fallback``, e.g. "hotel_suite" from the prompt's "Location:
     hotel suite" line) is used when available, otherwise the hint stays None
     (the environment resolver falls back to the documented default kit). All
-    of this is LOCAL — zero provider calls, zero budget consumption. Only
+    of this is LOCAL â€” zero provider calls, zero budget consumption. Only
     genuine semantic content gaps (e.g. a malformed object/relation structure)
     raise and route through the bounded retry.
     """
@@ -987,10 +987,10 @@ def parse_world_requirements(
         name = item.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(f"world_requirements.objects[{index}]: name required")
-        # ADV-235 — the world stage parser applies the SAME KNOWN-UNSAFE gate
+        # ADV-235 â€” the world stage parser applies the SAME KNOWN-UNSAFE gate
         # as the extractor's safe-fail: a model-invented request whose name
         # matches UNSAFE_OBJECT_TERMS (word-boundary NFKC-casefold) is NEVER
-        # composed here — it is recorded as a sanitized note and skipped, so a
+        # composed here â€” it is recorded as a sanitized note and skipped, so a
         # hostile/unsafe noun cannot be smuggled into the composition through
         # the model's world response either.
         unsafe_term = unsafe_object_match(name)
@@ -1098,7 +1098,7 @@ def parse_world_requirements(
 
 
 # --------------------------------------------------------------------------- #
-# Phase 19E — DETERMINISTIC WEAPON-LOCK INJECTION (the GENERAL ``fork`` fix).
+# Phase 19E â€” DETERMINISTIC WEAPON-LOCK INJECTION (the GENERAL ``fork`` fix).
 # --------------------------------------------------------------------------- #
 #
 # A CaseTruth-declared weapon is a REQUIRED semantic world object REGARDLESS of
@@ -1108,7 +1108,7 @@ def parse_world_requirements(
 # never die at the fail-closed object-presence guard simply because the model
 # omitted the weapon or because the deterministic extractor could not emit it
 # (head word not in the noun lexicon / not in the known table). This is the
-# general rule — the SAME code path serves fork / hammer / screwdriver /
+# general rule â€” the SAME code path serves fork / hammer / screwdriver /
 # rolling pin / glass bottle / letter-opener variants / any locked weapon.
 # No fork / whitelist special-casing anywhere.
 
@@ -1116,13 +1116,13 @@ def parse_world_requirements(
 def inject_locked_weapon_request(
     world_reqs: WorldRequirements, attempt: Any
 ) -> WorldRequirements:
-    """Phase 19E §2 — merge the locked CaseTruth weapon into world requirements.
+    """Phase 19E Â§2 â€” merge the locked CaseTruth weapon into world requirements.
 
     Match is on SEMANTIC IDENTITY (the slug of the requested name normalizes to
     the locked weapon id):
 
       * a request already matching the locked weapon (e.g. the model emitted
-        ``"fork"`` or ``"kitchen knife"``) is upgraded to REQUIRED and kept —
+        ``"fork"`` or ``"kitchen knife"``) is upgraded to REQUIRED and kept â€”
         never a second request, never a duplicate placement;
       * otherwise a NEW ``ObjectRequest(requested_name=<locked weapon display
         name>, criticality="required")`` is appended. The semantic id (slug of
@@ -1133,10 +1133,10 @@ def inject_locked_weapon_request(
         dropping the last DECORATIVE unseen request (the REQUIRED weapon never
         loses its slot to optional decoration);
       * a hostile locked value (URL/path/control chars/oversized) is left
-        unchanged — the presence guard then FAILS CLOSED downstream (nothing
+        unchanged â€” the presence guard then FAILS CLOSED downstream (nothing
         publishes), exactly the safe behavior for an unrepresentable weapon.
       * ADV-235 (fail-closed safety): a locked weapon matching
-        ``UNSAFE_OBJECT_TERMS`` (word-boundary NFKC-casefold match — the SAME
+        ``UNSAFE_OBJECT_TERMS`` (word-boundary NFKC-casefold match â€” the SAME
         matching the extractor's safe-fail uses, shared via
         ``app.world.extract.unsafe_object_match``) is NEVER composed and NEVER
         upgraded. It is recorded as a sanitized ``unsafeUnsupported`` note and
@@ -1159,7 +1159,7 @@ def inject_locked_weapon_request(
     if not isinstance(weapon, str) or not weapon:
         return world_reqs
     if unsafe_object_match(weapon):
-        # ADV-235 — an unsafe locked weapon is NEVER materialized by the
+        # ADV-235 â€” an unsafe locked weapon is NEVER materialized by the
         # injection. Record the sanitized safe-fail note and drop any world
         # request whose semantic id equals the locked weapon (so nothing named
         # like the unsafe weapon survives the merge); the driver's presence
@@ -1270,7 +1270,7 @@ class OllamaAssetSpecProvider:
     budget via a provided ``budget_consumer`` (returns True when a call is
     available).
 
-    Phase 17 flow (Deterministic Geometry Quality Gate — Phase17 §2/§10):
+    Phase 17 flow (Deterministic Geometry Quality Gate â€” Phase17 Â§2/Â§10):
 
         LLM AssetSpec
           -> strict Phase 13 parse/validation
@@ -1287,21 +1287,21 @@ class OllamaAssetSpecProvider:
 
     Internal (non-API, non-player-facing) trace:
 
-    - ``last_geometry_report`` — the final ``GeometryReport`` (None when the
+    - ``last_geometry_report`` â€” the final ``GeometryReport`` (None when the
       round-trip never reached the geometry stage with a parsed spec);
-    - ``last_geometry_metrics`` — the sanitized metrics dict (see
+    - ``last_geometry_metrics`` â€” the sanitized metrics dict (see
       ``_record_geometry_metrics``): issueCountBeforeRepair, repairAttempts,
       finalPartCount, finalBoundingBox, declaredDimensions,
       silhouettePassed, generatedOnFirstPass / repaired;
-    - ``last_repair_trace`` — the sanitized per-pass diagnostics list (one
+    - ``last_repair_trace`` â€” the sanitized per-pass diagnostics list (one
       entry per validation pass, order preserved): every entry carries the
       Phase 13 structural issue strings and the Phase 17 geometry issues
       (code/classification/message/partId) for THAT pass. Never serialized,
       never served; read by the smoke CLI to report "each repair attempt's
       issues".
-    - ``request_calls`` — the true request-level provider-call count for the
+    - ``request_calls`` â€” the true request-level provider-call count for the
       last round-trip (initial + repairs); the smoke CLI reports this as
-      ``providerCalls`` (Phase17C §8).
+      ``providerCalls`` (Phase17C Â§8).
     """
 
     def __init__(
@@ -1316,6 +1316,7 @@ class OllamaAssetSpecProvider:
         configured_timeout_seconds: float | None = None,
         timeout_provider: Callable[[], float] | None = None,
         metrics_provider: Callable[[], Any] | None = None,
+        provider_label: str = "ollama",
     ) -> None:
         self._provider = provider
         self._attempt_id = attempt_id
@@ -1323,24 +1324,25 @@ class OllamaAssetSpecProvider:
         self._locked = locked
         self._seed = seed
         self._model_label = model_label
+        self._provider_label = provider_label if provider_label else "ollama"
         self._configured_timeout_seconds = configured_timeout_seconds
         self._timeout_provider = timeout_provider
         self._metrics_provider = metrics_provider
         # Phase 19 Fix C: the budget consumer may be bucket-aware
         # (``consumer(object_id)`` -> ASSET:<objectId> accounting) or a legacy
-        # zero-arg consumer (tests/older callers) — introspected once here.
+        # zero-arg consumer (tests/older callers) â€” introspected once here.
         self._bucket_aware = _consumer_accepts_bucket(budget_consumer)
         # Phase 19 Fix C ceiling flags: a procedural-asset-count ceiling or a
         # failed-asset ceiling hit is recorded here (the driver reads the flag
-        # AFTER composition and raises the specific typed code — the composer
+        # AFTER composition and raises the specific typed code â€” the composer
         # itself can never see the raw provider).
         self.procedural_asset_ceiling_hit = False
         self.failed_asset_threshold_hit = False
         # ``calls``: number of ``generate()`` invocations on THIS spec provider
-        # (always 1 — the outer AssetSpec round-trip). ``request_calls``: the
+        # (always 1 â€” the outer AssetSpec round-trip). ``request_calls``: the
         # number of REAL request-level provider calls (each ASSET_SPEC/REPAIR
-        # attempt is exactly one ``provider.generate`` transport request) —
-        # initial + N repairs = N + 1 (Phase17C §8 accounting). The smoke tool
+        # attempt is exactly one ``provider.generate`` transport request) â€”
+        # initial + N repairs = N + 1 (Phase17C Â§8 accounting). The smoke tool
         # reports ``request_calls`` so provider-consumption accounting matches
         # the true Ollama request count while ``calls`` keeps the outer
         # round-trip semantics.
@@ -1373,7 +1375,7 @@ class OllamaAssetSpecProvider:
         # Phase 19 Fix C: record this semantic object's entry into the
         # procedural-asset path (a DISTINCT-object ceiling guard, never a
         # model call). When the ceiling is already reached the object cannot
-        # enter the provider path — fail this asset, the driver sees the flag.
+        # enter the provider path â€” fail this asset, the driver sees the flag.
         budget = self._metrics_provider() if self._metrics_provider is not None else None
         if budget is not None and hasattr(budget, "consume_procedural_asset"):
             if not budget.consume_procedural_asset(concept):
@@ -1503,12 +1505,12 @@ class OllamaAssetSpecProvider:
         return exceeded
 
     def _record_budget_failure(self, exc: StageDriverProviderFailure) -> None:
-        """ADV-213/ADV-220 — classified failed-asset accounting for an
+        """ADV-213/ADV-220 â€” classified failed-asset accounting for an
         exception-style budget failure raised inside ``_roundtrip``.
 
         A PER-ASSET exhaustion is attributable to THIS semantic object: record
         the failed asset (mark_failed_asset + sanitized event) BEFORE the typed
-        failure propagates — exactly once per failed object (the tracker's
+        failure propagates â€” exactly once per failed object (the tracker's
         set-membership no-op prevents double counting). GLOBAL exhaustion is a
         terminal attempt condition never attributed to one object (no
         accounting). The typed failure then continues to the composer, which
@@ -1535,7 +1537,7 @@ class OllamaAssetSpecProvider:
         failure would exceed the threshold, the flag is raised so the driver
         fails the attempt with the narrow ``MAX_FAILED_ASSETS_EXCEEDED`` code
         (an essential/evidence asset must never silently disappear). Determin-
-        istic local repairs never reach this path — only a failed PROVIDER
+        istic local repairs never reach this path â€” only a failed PROVIDER
         round-trip does.
         """
         from app.assets.spec_provider import AssetSpecResponse
@@ -1550,8 +1552,8 @@ class OllamaAssetSpecProvider:
 
         Includes the structured INVALID_IDENTIFIER / MATERIAL_NOT_ALLOWED
         diagnostics for the RAW candidate (Phase 13 already validates grammar and
-        materials — this deterministic scan surfaces them in repair diagnostics
-        too, Phase17 §5/§7) plus the geometry-quality issues when the candidate
+        materials â€” this deterministic scan surfaces them in repair diagnostics
+        too, Phase17 Â§5/Â§7) plus the geometry-quality issues when the candidate
         parsed, plus the Phase 13 structural issue strings when it did not.
         """
         from app.assets.geometry_quality import (
@@ -1657,8 +1659,8 @@ class OllamaAssetSpecProvider:
         """One bounded budgeted Ollama call; returns raw content or None.
 
         Every invocation consumes exactly one modeling request: consumed the
-        per-attempt provider-call budget (CORE or ASSET:<objectId> bucket —
-        Phase 19 Fix C) AND counted on ``self.request_calls`` (Phase17C §8 — a
+        per-attempt provider-call budget (CORE or ASSET:<objectId> bucket â€”
+        Phase 19 Fix C) AND counted on ``self.request_calls`` (Phase17C Â§8 â€” a
         repair attempt is a REAL request-level provider call, never a free
         local reprocessing). A per-asset or global exhaustion surfaces the
         narrowest failure code (ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED vs
@@ -1718,7 +1720,7 @@ class OllamaAssetSpecProvider:
             "provider.call.start",
             generationAttemptId=self._attempt_id,
             stage=stage.value,
-            provider="ollama",
+            provider=self._provider_label,
             model=self._model_label or None,
             configuredProviderTimeoutMs=configured_timeout_ms,
             effectiveProviderTimeoutMs=int(effective_timeout * 1000),
@@ -1754,7 +1756,7 @@ class OllamaAssetSpecProvider:
                 "provider.call.timeout",
                 generationAttemptId=self._attempt_id,
                 stage=stage.value,
-                provider="ollama",
+                provider=self._provider_label,
                 failureCode=GenerationFailureCode.PROVIDER_TIMEOUT.value,
                 elapsedMs=int((time.perf_counter() - _t0) * 1000),
                 configuredProviderTimeoutMs=configured_timeout_ms,
@@ -1774,7 +1776,7 @@ class OllamaAssetSpecProvider:
                 "provider.call.error",
                 generationAttemptId=self._attempt_id,
                 stage=stage.value,
-                provider="ollama",
+                provider=self._provider_label,
                 failureCode=code.value,
                 elapsedMs=int((time.perf_counter() - _t0) * 1000),
                 configuredProviderTimeoutMs=configured_timeout_ms,
@@ -1793,7 +1795,7 @@ class OllamaAssetSpecProvider:
                 "provider.call.error",
                 generationAttemptId=self._attempt_id,
                 stage=stage.value,
-                provider="ollama",
+                provider=self._provider_label,
                 failureCode=GenerationFailureCode.PROVIDER_INVALID_RESPONSE.value,
                 elapsedMs=int((time.perf_counter() - _t0) * 1000),
                 configuredProviderTimeoutMs=configured_timeout_ms,
@@ -1811,7 +1813,7 @@ class OllamaAssetSpecProvider:
             "provider.call.complete",
             generationAttemptId=self._attempt_id,
             stage=stage.value,
-            provider="ollama",
+            provider=self._provider_label,
             model=self._model_label or None,
             success=True,
             elapsedMs=int((time.perf_counter() - _t0) * 1000),
@@ -1836,11 +1838,11 @@ deadlineRemainingMs=(
 
 
 # --------------------------------------------------------------------------- #
-# ADV-218 — sanitized semantic-object-id rendering for internal validation
+# ADV-218 â€” sanitized semantic-object-id rendering for internal validation
 # messages. Ids are only length-bounded upstream (``_str_field``), so hostile
 # weaponId / evidence object_id values (URLs, control characters) are scrubbed
 # before they are embedded in exception/log text. Failure-code semantics are
-# untouched — only the message text is sanitized and bounded.
+# untouched â€” only the message text is sanitized and bounded.
 # --------------------------------------------------------------------------- #
 
 _SAFE_MESSAGE_ID_CHARS: frozenset[str] = frozenset(
@@ -1863,7 +1865,7 @@ _MAX_MESSAGE_ID_LENGTH = 48
 def _sanitize_object_id_for_message(
     raw: Any, *, max_len: int = _MAX_MESSAGE_ID_LENGTH
 ) -> str:
-    """ADV-218 — sanitize ONE semantic object id before embedding it in an
+    """ADV-218 â€” sanitize ONE semantic object id before embedding it in an
     internal validation/log message.
 
     The sanitizer never echoes control characters or URL-scheme / scheme-slash
@@ -1871,7 +1873,7 @@ def _sanitize_object_id_for_message(
     ``"<url-suppressed>"`` placeholder), projects the remainder onto the safe
     id alphabet, bounds length, and returns a deterministic placeholder when
     nothing safe survives. The failure-code semantics (VALIDATION_FAILED) are
-    unchanged — only the message text is scrubbed.
+    unchanged â€” only the message text is scrubbed.
     """
     if not isinstance(raw, str) or not raw:
         return "<unknown>"
@@ -1893,7 +1895,7 @@ def _sanitize_object_id_for_message(
 
 
 def _sanitize_object_ids_for_message(missing: Iterable[Any]) -> str:
-    """ADV-218 — join the sanitized missing ids (bounded count + length)."""
+    """ADV-218 â€” join the sanitized missing ids (bounded count + length)."""
     rendered = ", ".join(
         _sanitize_object_id_for_message(oid) for oid in missing[:_MAX_MESSAGE_IDS]
     )
@@ -1913,7 +1915,7 @@ class OllamaStageDriver:
     ``provider_factory`` returns a FRESH ``OllamaProvider`` per attempt (the
     same factory the service uses for ollama) so transport state never leaks
     across attempts. ``oracle`` (Asset Oracle), ``spec_provider`` (an
-    ``AssetSpecProvider`` for the ASSET_SPEC path — normally an
+    ``AssetSpecProvider`` for the ASSET_SPEC path â€” normally an
     ``OllamaAssetSpecProvider``) and ``cache`` are shared.
     """
 
@@ -1925,27 +1927,41 @@ class OllamaStageDriver:
         generated_cache: Any = None,
         catalog: Any = None,
         spec_provider: Any = None,
+        session_scope: str | None = None,
+        provider_label: str = "ollama",
     ) -> None:
         from app.assets.generated_cache import GeneratedAssetCache
 
         self._settings = settings
         self._provider_factory = provider_factory
         # Fresh bounded generated-asset cache per driver so repeated prompt runs
-        # (and tests) stay isolated and deterministic — no cross-run pollution.
+        # (and tests) stay isolated and deterministic â€” no cross-run pollution.
         self._generated_cache = generated_cache if generated_cache is not None else GeneratedAssetCache()
         self._catalog = catalog
         self._spec_provider = spec_provider
+        # Phase 22 â€” the remote-client back-end is bound to the attempt's
+        # creator session scope (the provider then selects the bridge for that
+        # scope; see RemoteClientProvider.bind_session_scope).
+        self._session_scope = session_scope
+        # Truthful observability label: "ollama" for the server-local provider
+        # (byte-identical events), "remote_client" for the bridge transport.
+        self._provider_label = provider_label if provider_label else "ollama"
+        self._event_model = (
+            getattr(settings, "ollama_model", None)
+            if self._provider_label == "ollama"
+            else None
+        )
         # Phase17 Wave-2: parsed CASE/PEOPLE outputs cached per attempt id so a
-        # second pass (repair/regeneration) never re-pays the case call — the
+        # second pass (repair/regeneration) never re-pays the case call â€” the
         # public world the evidence was regenerated against stays identical.
         self._case_outputs: dict[str, tuple[Any, Any]] = {}
         # Phase17 Wave-2: audit trace of the deterministic evidence completion
-        # (sanitized "id: injected fact kind" lines; never serialized/served —
+        # (sanitized "id: injected fact kind" lines; never serialized/served â€”
         # read by the smoke CLI and operator tests).
         self.last_evidence_injections: tuple[str, ...] = ()
         self.last_evidence_completed: bool = False
         # Phase17 Wave-2: deterministic per-pass evidence summary (fact-type
-        # counts + match-value counts ONLY — never raw content, never the
+        # counts + match-value counts ONLY â€” never raw content, never the
         # prompt); read by the smoke CLI/operator tests.
         self.last_evidence_summary: dict[str, Any] = {}
 
@@ -1970,6 +1986,11 @@ class OllamaStageDriver:
             )
         deferred: list[str] = []
         provider = self._provider_factory()
+        # Phase 22 â€” bind the remote-client provider to the attempt's creator
+        # session scope so it can select the right bridge (a no-op for every
+        # other provider; ollama behavior is byte-identical).
+        if self._session_scope is not None and hasattr(provider, "bind_session_scope"):
+            provider.bind_session_scope(self._session_scope)
         budget_consumer = self._make_budget_consumer(attempt)
 
         locked_map = self._locked_map(attempt)
@@ -2067,7 +2088,7 @@ class OllamaStageDriver:
         )
         # Phase 19 Fix A: the DETERMINISTIC prompt extractor is the
         # authoritative fallback for a rejected LLM environmentHint (the user
-        # prompt's "Location: ..." line). This is LOCAL — zero provider calls.
+        # prompt's "Location: ..." line). This is LOCAL â€” zero provider calls.
         from app.world.extract import extract_world_requirements
 
         deterministic_hint = None
@@ -2101,7 +2122,7 @@ class OllamaStageDriver:
         if parsed_world is not None:
             world_reqs = parsed_world
 
-        # Phase 19E §2 — DETERMINISTIC WEAPON-LOCK INJECTION (the GENERAL
+        # Phase 19E Â§2 â€” DETERMINISTIC WEAPON-LOCK INJECTION (the GENERAL
         # rule, no fork/whitelist special-casing): the CaseTruth-declared
         # weapon is a REQUIRED semantic world object regardless of what the
         # model's world stage returned and regardless of catalog membership.
@@ -2160,7 +2181,7 @@ class OllamaStageDriver:
                 extra_travel_rules=tuple(extra_rules),
             )
         except SemanticObjectResolutionError as exc:
-            # Phase 19 Fix B.3 — fail closed with a SANITIZED typed message
+            # Phase 19 Fix B.3 â€” fail closed with a SANITIZED typed message
             # (public identifiers only) and a canonical code; never publish a
             # case with a dangling weapon/evidence id.
             raise StageDriverProviderFailure(
@@ -2168,7 +2189,7 @@ class OllamaStageDriver:
                 code=GenerationFailureCode.VALIDATION_FAILED,
             ) from None
         attempt._phase3_cache = None
-        # Phase 19 Fix C §8/§13 — sanitized monotonic accounting snapshot
+        # Phase 19 Fix C Â§8/Â§13 â€” sanitized monotonic accounting snapshot
         # (structure only; never raw prompts / truth / provider responses).
         budget = getattr(attempt, "budget", None)
         if budget is not None and hasattr(budget, "snapshot"):
@@ -2203,7 +2224,7 @@ class OllamaStageDriver:
         ``consumer(None)`` / ``consumer(CORE_BUCKET)`` reserves a CORE bucket
         call (case/evidence/world + repair/regeneration). The CORE bucket is
         the NON-STRING sentinel ONLY (ADV-216): ``consumer(object_id)`` with
-        ANY string — even the literal ``"core"`` — reserves an ASSET:<objectId>
+        ANY string â€” even the literal ``"core"`` â€” reserves an ASSET:<objectId>
         bucket call (procedural ASSET_SPEC / ASSET_SPEC_REPAIR / geometry).
         Deterministic local repairs never touch this consumer.
         """
@@ -2218,12 +2239,24 @@ class OllamaStageDriver:
 
         return _consume
 
+    def _configured_provider_timeout(self) -> float:
+        """The operator-configured PER-CALL timeout source.
+
+        Ollama -> OLLAMA_TIMEOUT_SECONDS; the remote-client bridge ->
+        BRIDGE_JOB_DEADLINE_SECONDS (the per-job cap the dispatch clamps to).
+        """
+        if getattr(self._settings, "generation_provider", None) == "remote_client":
+            return float(
+                getattr(self._settings, "bridge_job_deadline_seconds", 120.0) or 120.0
+            )
+        return float(getattr(self._settings, "ollama_timeout_seconds", 60.0) or 60.0)
+
     def _effective_timeout(self, attempt: Any | None = None) -> float:
         budget = getattr(attempt, "budget", None)
         if budget is None:
-            return max(0.0, float(getattr(self._settings, "ollama_timeout_seconds", 60.0)))
+            return max(0.0, self._configured_provider_timeout())
         return budget.effective_provider_timeout(
-            float(getattr(self._settings, "ollama_timeout_seconds", 60.0)),
+            self._configured_provider_timeout(),
             safety_margin_seconds=PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
         )
 
@@ -2237,7 +2270,7 @@ class OllamaStageDriver:
 
         On a repair/regeneration pass the previous validation's sanitized
         diagnostics are appended, plus the still-viable/unknown candidate ids
-        (PUBLIC candidate ids only — the id sheet/approved material already
+        (PUBLIC candidate ids only â€” the id sheet/approved material already
         carry them, never truth), so the second pass targets exactly the fact
         groups that were missing. Empty on the first run.
         """
@@ -2245,7 +2278,7 @@ class OllamaStageDriver:
             return ""
         lines = [
             "PREVIOUS-PASS FEEDBACK (from the deterministic validation of "
-            "your LAST evidence — re-emit the COMPLETE fact set, fixing "
+            "your LAST evidence â€” re-emit the COMPLETE fact set, fixing "
             "exactly these gaps):"
         ]
         for line in diagnostics:
@@ -2274,12 +2307,11 @@ class OllamaStageDriver:
             budget_consumer=budget,
             locked=attempt.locked,
             seed=attempt.seed,
-            model_label=getattr(self._settings, "ollama_model", ""),
-            configured_timeout_seconds=float(
-                getattr(self._settings, "ollama_timeout_seconds", 60.0)
-            ),
+            model_label=self._event_model or "",
+            configured_timeout_seconds=self._configured_provider_timeout(),
             timeout_provider=lambda: self._effective_timeout(attempt),
-metrics_provider=lambda: attempt.budget,
+            metrics_provider=lambda: attempt.budget,
+            provider_label=self._provider_label,
         )
 
     def _call(
@@ -2291,9 +2323,7 @@ metrics_provider=lambda: attempt.budget,
         budget: Callable[[str | None], bool],
     ) -> str | None:
         effective_timeout = self._effective_timeout(attempt)
-        configured_timeout_ms = int(
-            float(getattr(self._settings, "ollama_timeout_seconds", 60.0)) * 1000
-        )
+        configured_timeout_ms = int(self._configured_provider_timeout() * 1000)
         if effective_timeout <= 0:
             raise StageDriverProviderFailure(
                 "generation deadline exceeded",
@@ -2322,14 +2352,14 @@ metrics_provider=lambda: attempt.budget,
             caseId=getattr(attempt, "case_id", None),
             generationAttemptId=getattr(attempt, "attempt_id", None),
             stage=stage.value,
-            provider="ollama",
-            model=getattr(self._settings, "ollama_model", None),
+            provider=self._provider_label,
+            model=self._event_model,
             configuredGenerationDeadlineMs=(
                 int(attempt.budget.deadline_seconds * 1000)
                 if getattr(attempt, "budget", None) is not None else None
             ),
             deadlineRemainingMs=_remaining_ms(attempt),
-            configuredProviderTimeoutMs=int(float(getattr(self._settings, "ollama_timeout_seconds", 60.0)) * 1000),
+            configuredProviderTimeoutMs=int(self._configured_provider_timeout() * 1000),
             effectiveProviderTimeoutMs=int(effective_timeout * 1000),
             providerCallCount=getattr(attempt.budget, "calls", None),
             repairCount=getattr(attempt.budget, "repair_passes", None),
@@ -2362,7 +2392,7 @@ metrics_provider=lambda: attempt.budget,
                 caseId=getattr(attempt, "case_id", None),
                 generationAttemptId=getattr(attempt, "attempt_id", None),
                 stage=stage.value,
-                provider="ollama",
+                provider=self._provider_label,
                 failureCode=GenerationFailureCode.PROVIDER_TIMEOUT.value,
                 configuredProviderTimeoutMs=configured_timeout_ms,
                 effectiveProviderTimeoutMs=int(effective_timeout * 1000),
@@ -2379,7 +2409,7 @@ metrics_provider=lambda: attempt.budget,
                 caseId=getattr(attempt, "case_id", None),
                 generationAttemptId=getattr(attempt, "attempt_id", None),
                 stage=stage.value,
-                provider="ollama",
+                provider=self._provider_label,
                 failureCode=code.value,
                 configuredProviderTimeoutMs=configured_timeout_ms,
                 effectiveProviderTimeoutMs=int(effective_timeout * 1000),
@@ -2398,8 +2428,8 @@ metrics_provider=lambda: attempt.budget,
             caseId=getattr(attempt, "case_id", None),
             generationAttemptId=getattr(attempt, "attempt_id", None),
             stage=stage.value,
-            provider="ollama",
-            model=getattr(self._settings, "ollama_model", None),
+            provider=self._provider_label,
+            model=self._event_model,
             success=True,
             requestBytes=len(prompt.encode("utf-8")),
             responseBytes=len(result.content.encode("utf-8")),
@@ -2521,7 +2551,7 @@ metrics_provider=lambda: attempt.budget,
             )
         except StageDriverProviderFailure:
             # ADV-213: a TYPED provider failure (per-asset/global budget
-            # exhaustion, deadline, timeout) is the attempt's narrow cause —
+            # exhaustion, deadline, timeout) is the attempt's narrow cause â€”
             # never absorbed into a generic "world composition failed" deferral.
             raise
         except Exception:  # noqa: BLE001 - compose degrades safe
@@ -2549,7 +2579,7 @@ metrics_provider=lambda: attempt.budget,
         """Build the ``GeneratedDraft`` from the staged outputs + composition.
 
         ``projected_placements`` (when supplied by ``run_into``) are the
-        already-projected placements — the driver's single trust boundary
+        already-projected placements â€” the driver's single trust boundary
         computes them ONCE and reconciles the composer's stale interaction
         issues against them. ``extra_travel_rules`` are the deterministic
         travel rules the evidence completion added (merged into the draft's
@@ -2602,8 +2632,8 @@ metrics_provider=lambda: attempt.budget,
 
         # base public objects (full golden base set). The OBJECTS list carries
         # the complete golden base identity set on EVERY kit (the same set the
-        # fake/live golden world uses) so every evidence/identity reference —
-        # including the sharp-weapon forensics — stays valid on kits whose
+        # fake/live golden world uses) so every evidence/identity reference â€”
+        # including the sharp-weapon forensics â€” stays valid on kits whose
         # PLACEMENT subset omits a spare weapon (hotel_suite/warehouse). The
         # per-kit placement subset (KIT_BASE_OBJECT_IDS) is a PLACEMENT concern
         # (anchor capacity), the object identity set is not.
@@ -2613,7 +2643,7 @@ metrics_provider=lambda: attempt.budget,
         # A spare sharp object (letter_opener / scissors) that this kit cannot
         # place stays a WORLD identity object (forensic/evidence references on
         # those kits keep resolving, the presence guard stays clean) BUT is
-        # demoted to INSPECTABLE-only — it can never be a POTENTIAL_WEAPON
+        # demoted to INSPECTABLE-only â€” it can never be a POTENTIAL_WEAPON
         # candidate the player could not find in the scene. Kits that DO place
         # them (apartment/office/mansion) keep them as weapon candidates.
         placed_object_ids = {p.object_id for p in placements if getattr(p, "object_id", None)}
@@ -2655,11 +2685,11 @@ metrics_provider=lambda: attempt.budget,
                 dict.fromkeys(merged_travel + tuple(extra_travel_rules))
             )
 
-        # ---- Phase 19 Fix B.3 — fail-closed OBJECT PRESENCE GUARANTEE ----
+        # ---- Phase 19 Fix B.3 â€” fail-closed OBJECT PRESENCE GUARANTEE ----
         # Every semantic object the truth/evidence algebra references MUST be
         # present as exactly one public object. The canonical evidence algebra
         # is deterministic and complete by construction, so a missing reference
-        # is a genuine contract violation — never repairable, never silently
+        # is a genuine contract violation â€” never repairable, never silently
         # dropped. Raise a TYPED sanitized error (the caller fails closed and
         # nothing is published). Catalog alias / procedural resolution already
         # ran above (in the composer), so this guard only fires when no safe
@@ -2680,7 +2710,7 @@ metrics_provider=lambda: attempt.budget,
         if missing:
             # ADV-218: the referenced ids are only length-bounded upstream
             # (``_str_field``), so they are SANITIZED before embedding in this
-            # internal validation message — never a raw hostile URL / control
+            # internal validation message â€” never a raw hostile URL / control
             # character in the typed error text. The failure-code semantics
             # (VALIDATION_FAILED, fail closed, nothing published) are unchanged.
             raise SemanticObjectResolutionError(
@@ -2738,7 +2768,7 @@ def _reconcile_evidence_interaction(
     once the projection ran the invariant ('an evidence-linked placement must
     have a non-empty interaction') IS satisfied. This reconciliation removes
     only the issues for placements the projection actually fixed (deferred
-    world issues are the DRIVER's own sanitized bucket — the composer and the
+    world issues are the DRIVER's own sanitized bucket â€” the composer and the
     validators are untouched)."""
     if not projected_placements:
         return list(deferred)
@@ -2758,12 +2788,12 @@ def _reconcile_evidence_interaction(
     return out
 
 
-# ADV-222 (Phase 19C §5): the universally-placed DEVICE object of every kit
+# ADV-222 (Phase 19C Â§5): the universally-placed DEVICE object of every kit
 # base world (the golden "laptop") whose authored association does not survive
 # into a driver world (the canonical algebra carries no email read) is re-bound
 # to the canonical scene activity-log record (``d_ev_when_obs``,
 # CRIME_SCENE_OBSERVATION_AT). This makes a TIME-BEARING fact PLAYER-REACHABLE
-# in every published driver world — WHEN becomes derivable from discoverable
+# in every published driver world â€” WHEN becomes derivable from discoverable
 # evidence exactly like WHO/WHY/WEAPON. No showcase special-casing: the rule is
 # the general device-log anchor for the kit base world (laptop/terminal in
 # every kit), gated on the placement being AUTHORED as evidence-bearing.
@@ -2776,7 +2806,7 @@ _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID = "d_ev_when_obs"
 def _when_activity_log_evidence_id(evidence_spec: Any) -> str | None:
     """The canonical scene activity-log evidence id when the published world
     carries it (the driver's deterministic WHEN algebra always does), else
-    ``None`` (the device placement then stays decorative — never fabricated)."""
+    ``None`` (the device placement then stays decorative â€” never fabricated)."""
     if evidence_spec is None:
         return None
     for item in getattr(evidence_spec, "evidence", ()) or ():
@@ -2793,13 +2823,13 @@ def _evidence_bind_rank(item: Any, needle: str) -> int:
     pick the fact whose KIND/ROLE matches the object's published role, not an
     arbitrary id order. The documented priority list (lower wins):
 
-      0 — the evidence carries a ``FORENSIC_WEAPON_MATCH`` proposition for the
-          object (the weapon-match record — what a sharp weapon's published
+      0 â€” the evidence carries a ``FORENSIC_WEAPON_MATCH`` proposition for the
+          object (the weapon-match record â€” what a sharp weapon's published
           "forensic comparison" role points at);
-      1 — the evidence carries an ``OBJECT_CONTAINS_FINGERPRINT`` proposition
+      1 â€” the evidence carries an ``OBJECT_CONTAINS_FINGERPRINT`` proposition
           for the object (the latent-print forensics role);
-      2 — any other FORENSIC-kind evidence referencing the object;
-      3 — any other evidence (generic cctv/witness/email extras).
+      2 â€” any other FORENSIC-kind evidence referencing the object;
+      3 â€” any other evidence (generic cctv/witness/email extras).
 
     Ties break by evidence id order (``_first_evidence_referencing_object``).
     """
@@ -2829,10 +2859,10 @@ def _first_evidence_referencing_object(
     comparison records for the kit base sharp weapons
     (``d_ev_weapon_false_kitchenknife`` etc.), so a base sharp-object
     placement whose composer evidence id (``forensic_knife_match_01`` ...)
-    does not exist in the driver world is re-bound to that REAL record — the
+    does not exist in the driver world is re-bound to that REAL record â€” the
     same experience the golden world gives (knife -> forensic comparison).
 
-    ADV-223: the pick is SEMANTIC, not alphabetical — among the candidate
+    ADV-223: the pick is SEMANTIC, not alphabetical â€” among the candidate
     facts referencing the object the one whose kind/role best matches the
     object's published role wins (see ``_evidence_bind_rank`` for the
     documented priority list); ties break by evidence id. Deterministic and
@@ -2863,7 +2893,7 @@ def _project_placement_evidence(
     evidence_spec: Any,
     weapon_evidence_id: str,
 ) -> tuple[Any, ...]:
-    """Deterministic placement→evidence referential projection (Phase17D).
+    """Deterministic placementâ†’evidence referential projection (Phase17D).
 
     The model's world output may attach fabricated evidenceIds (or copy a
     sheet line) to placements; the strict engine REJECTS any evidenceId that
@@ -2879,7 +2909,7 @@ def _project_placement_evidence(
     the GOLDEN evidence associations onto the kit base placements
     (``_GOLDEN_OBJECT_FACTS``: knife -> forensic_knife_match_01, laptop ->
     email_thomas_01, ...) but the DRIVER replaces the published evidence with
-    its canonical ``d_ev_*`` algebra — those golden ids do not exist in the
+    its canonical ``d_ev_*`` algebra â€” those golden ids do not exist in the
     driver world. A placement whose composer evidence id is dropped must
     NEVER publish as an interactable-but-evidence-less dead-end. Resolution:
 
@@ -2890,16 +2920,16 @@ def _project_placement_evidence(
       ``d_ev_weapon_false_scissors``), exactly like the golden experience;
     - a placement that was AUTHORED as evidence-bearing (composer evidence id
       non-empty) but for which NO canonical evidence references the object
-      (e.g. a LAPTOP — a driver world carries no laptop email) is bound to
+      (e.g. a LAPTOP â€” a driver world carries no laptop email) is bound to
       the canonical scene activity-log record when one exists
-      (``d_ev_when_obs`` — ADV-222: the player can then derive WHEN from
+      (``d_ev_when_obs`` â€” ADV-222: the player can then derive WHEN from
       discoverable evidence), otherwise it is published DECORATIVE
       (interaction "") so it never misleads the player into an interaction
       with nothing to find;
     - a placement that was NEVER authored as evidence-bearing (composer
       evidence id ``None``) and carries an explicit requested interaction is
       an INFORMATIONAL object (ADV-224): it is NEVER rebound/upgraded to an
-      evidence object — its interaction stays (the frontend renders the
+      evidence object â€” its interaction stays (the frontend renders the
       Phase 19C "Nothing relevant was found on <X>." feedback for a 200
       ``discovery: null`` response), exactly as before.
     """
@@ -2937,8 +2967,8 @@ def _project_placement_evidence(
             # association does not survive into the driver world.
             #
             # ADV-224: only placements AUTHORED as evidence-bearing (composer
-            # evidence id non-empty, dropped by the driver) — or the locked
-            # weapon object — may be rebound/upgraded. A NEVER-authored
+            # evidence id non-empty, dropped by the driver) â€” or the locked
+            # weapon object â€” may be rebound/upgraded. A NEVER-authored
             # informational object that a canonical fact happens to reference
             # MUST stay informational (interaction unchanged, discovery null).
             is_locked_weapon_object = (
@@ -3002,7 +3032,7 @@ def _enhance_weapon(attempt: Any, obj: ObjectSpec) -> ObjectSpec:
     The LLM proposes the object; the DETERMINISTIC driver decides universe
     membership. When a procedural object's id normalizes to the LOCKED weapon
     it enters the weapon universe (POTENTIAL_WEAPON + POTENTIAL_SHARP_WEAPON)
-    so the solver can derive it — this is the showcase path that lets a
+    so the solver can derive it â€” this is the showcase path that lets a
     crime-critical unseen object be the actual weapon the deduction proves.
     """
     from app.generation.constraints import normalize_identity
@@ -3012,7 +3042,7 @@ def _enhance_weapon(attempt: Any, obj: ObjectSpec) -> ObjectSpec:
     weapon = getattr(locked, "weapon", None) if locked is not None else None
     if not isinstance(weapon, str) or not weapon:
         return obj
-    # ADV-237 — compare against the SINGLE slug source (semantic_object_id):
+    # ADV-237 â€” compare against the SINGLE slug source (semantic_object_id):
     # ``obj.object_id`` is the composed SEMANTIC id (40-char truncated for
     # long names); the raw locked text normalizes to the FULL string for a
     # >40-char weapon and would never match. The needle must be the SAME

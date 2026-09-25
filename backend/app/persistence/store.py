@@ -37,12 +37,18 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Sequence
 
-from sqlalchemy import bindparam, event, select, text
+from sqlalchemy import bindparam, event, func, select, text, update
 from sqlalchemy.engine import Engine, create_engine
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.models.accusations import Accusation
+from app.models.bridge import (
+    BRIDGE_STATE_CONNECTED,
+    BRIDGE_STATE_DISCONNECTED,
+    BridgePairingRecord,
+    BridgeSession,
+)
 from app.models.cases import Case, CaseVersion
 from app.models.credentials import CreatorCredential
 from app.models.generation import GenerationAttempt
@@ -419,6 +425,294 @@ class Store:
                 )
                 for r in rows
             ]
+
+    # ------------------------------------------------------------------ #
+    # Phase 22 — BYO-Ollama bridge pairing records + bridge sessions
+    # ------------------------------------------------------------------ #
+
+    def create_bridge_pairing(
+        self,
+        *,
+        pairing_session_id: str,
+        session_scope: str,
+        code_verifier: str,
+        created_at: float,
+        expires_at: float,
+    ) -> BridgePairingRecord:
+        """Create ONE expiring, single-use pairing record (never the raw code).
+        Raises ``DuplicateSession`` on a verifier collision."""
+        with self.transaction() as session:
+            row = BridgePairingRecord(
+                pairing_session_id=pairing_session_id,
+                session_scope=session_scope,
+                code_verifier=code_verifier,
+                created_at=float(created_at),
+                expires_at=float(expires_at),
+                consumed_at=None,
+                bound_bridge_session_id=None,
+            )
+            session.add(row)
+            try:
+                session.flush()
+            except IntegrityError:
+                raise DuplicateSession(
+                    "bridge pairing verifier already exists"
+                ) from None
+            return BridgePairingRecord(
+                pairing_session_id=row.pairing_session_id,
+                session_scope=row.session_scope,
+                code_verifier=row.code_verifier,
+                created_at=row.created_at,
+                expires_at=row.expires_at,
+                consumed_at=None,
+                bound_bridge_session_id=None,
+            )
+
+    def get_bridge_pairing_by_verifier(
+        self, code_verifier: str
+    ) -> BridgePairingRecord | None:
+        """Look up a pairing record by its code verifier (constant-time compare
+        happens at the caller against ``code_verifier``)."""
+        with self._read_session() as session:
+            row = session.execute(
+                select(BridgePairingRecord).where(
+                    BridgePairingRecord.code_verifier == code_verifier
+                )
+            ).scalar_one_or_none()
+            return (
+                BridgePairingRecord(
+                    pairing_session_id=row.pairing_session_id,
+                    session_scope=row.session_scope,
+                    code_verifier=row.code_verifier,
+                    created_at=row.created_at,
+                    expires_at=row.expires_at,
+                    consumed_at=row.consumed_at,
+                    bound_bridge_session_id=row.bound_bridge_session_id,
+                )
+                if row is not None
+                else None
+            )
+
+    def count_live_bridge_pairings(self, session_scope: str, now: float) -> int:
+        """Number of NOT-yet-consumed, not-yet-expired pairing records for one
+        creator session scope (bounds pairing-mint amplification)."""
+        with self._read_session() as session:
+            return int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(BridgePairingRecord)
+                    .where(
+                        BridgePairingRecord.session_scope == session_scope,
+                        BridgePairingRecord.consumed_at.is_(None),
+                        BridgePairingRecord.expires_at >= float(now),
+                    )
+                )
+                or 0
+            )
+
+    def consume_bridge_pairing(
+        self,
+        pairing_session_id: str,
+        *,
+        bound_bridge_session_id: str,
+        consumed_at: float,
+    ) -> bool:
+        """Atomic single-use CAS: consume the pairing ONLY when it is still
+        unconsumed. Returns True when THIS caller won the single-use race
+        (the pairing becomes bound to the given bridge session); False
+        otherwise (already consumed/unknown — a replayed or second bridge is
+        rejected)."""
+        with self.transaction() as session:
+            result = session.execute(
+                update(BridgePairingRecord)
+                .where(
+                    BridgePairingRecord.pairing_session_id == pairing_session_id,
+                    BridgePairingRecord.consumed_at.is_(None),
+                )
+                .values(
+                    consumed_at=float(consumed_at),
+                    bound_bridge_session_id=bound_bridge_session_id,
+                )
+            )
+            return bool(result.rowcount == 1)
+
+    def create_bridge_session(
+        self,
+        *,
+        bridge_session_id: str,
+        session_scope: str,
+        token_verifier: str,
+        pairing_session_id: str | None,
+        model: str | None,
+        capabilities: str,
+        connected_at: float | None,
+        last_seen: float,
+        expires_at: float,
+    ) -> BridgeSession:
+        """Create ONE bridge session row. Raises ``DuplicateSession`` on a
+        bridge-session-id / token-verifier collision."""
+        with self.transaction() as session:
+            row = BridgeSession(
+                bridge_session_id=bridge_session_id,
+                session_scope=session_scope,
+                token_verifier=token_verifier,
+                pairing_session_id=pairing_session_id,
+                model=model,
+                capabilities=capabilities,
+                connected_at=float(connected_at) if connected_at is not None else None,
+                last_seen=float(last_seen),
+                expires_at=float(expires_at),
+                revoked_at=None,
+                connection_state=BRIDGE_STATE_DISCONNECTED,
+            )
+            session.add(row)
+            try:
+                session.flush()
+            except IntegrityError:
+                raise DuplicateSession(
+                    "bridge session identity already exists"
+                ) from None
+            return BridgeSession(
+                bridge_session_id=row.bridge_session_id,
+                session_scope=row.session_scope,
+                token_verifier=row.token_verifier,
+                pairing_session_id=row.pairing_session_id,
+                model=row.model,
+                capabilities=row.capabilities,
+                connected_at=row.connected_at,
+                last_seen=row.last_seen,
+                expires_at=row.expires_at,
+                revoked_at=row.revoked_at,
+                connection_state=row.connection_state,
+            )
+
+    def get_bridge_session_by_verifier(
+        self, token_verifier: str
+    ) -> BridgeSession | None:
+        """Look up a bridge session by its token verifier (reconnect auth)."""
+        with self._read_session() as session:
+            row = session.execute(
+                select(BridgeSession).where(
+                    BridgeSession.token_verifier == token_verifier
+                )
+            ).scalar_one_or_none()
+            return (
+                BridgeSession(
+                    bridge_session_id=row.bridge_session_id,
+                    session_scope=row.session_scope,
+                    token_verifier=row.token_verifier,
+                    pairing_session_id=row.pairing_session_id,
+                    model=row.model,
+                    capabilities=row.capabilities,
+                    connected_at=row.connected_at,
+                    last_seen=row.last_seen,
+                    expires_at=row.expires_at,
+                    revoked_at=row.revoked_at,
+                    connection_state=row.connection_state,
+                )
+                if row is not None
+                else None
+            )
+
+    def get_bridge_session(self, bridge_session_id: str) -> BridgeSession | None:
+        with self._read_session() as session:
+            row = session.get(BridgeSession, bridge_session_id)
+            return (
+                BridgeSession(
+                    bridge_session_id=row.bridge_session_id,
+                    session_scope=row.session_scope,
+                    token_verifier=row.token_verifier,
+                    pairing_session_id=row.pairing_session_id,
+                    model=row.model,
+                    capabilities=row.capabilities,
+                    connected_at=row.connected_at,
+                    last_seen=row.last_seen,
+                    expires_at=row.expires_at,
+                    revoked_at=row.revoked_at,
+                    connection_state=row.connection_state,
+                )
+                if row is not None
+                else None
+            )
+
+    def touch_bridge_session(self, bridge_session_id: str, last_seen: float) -> bool:
+        """Refresh the session's last-seen tick (True when updated)."""
+        with self.transaction() as session:
+            row = session.get(BridgeSession, bridge_session_id)
+            if row is None:
+                return False
+            row.last_seen = float(last_seen)
+            return True
+
+    def set_bridge_session_connected(
+        self, bridge_session_id: str, *, connected_at: float, last_seen: float
+    ) -> bool:
+        """Mark a bridge session CONNECTED (fresh socket bound)."""
+        with self.transaction() as session:
+            row = session.get(BridgeSession, bridge_session_id)
+            if row is None:
+                return False
+            row.connection_state = BRIDGE_STATE_CONNECTED
+            row.connected_at = float(connected_at)
+            row.last_seen = float(last_seen)
+            row.revoked_at = None
+            return True
+
+    def set_bridge_session_disconnected(
+        self, bridge_session_id: str, *, last_seen: float
+    ) -> bool:
+        """Mark a bridge session DISCONNECTED (socket closed)."""
+        with self.transaction() as session:
+            row = session.get(BridgeSession, bridge_session_id)
+            if row is None:
+                return False
+            row.connection_state = BRIDGE_STATE_DISCONNECTED
+            row.connected_at = None
+            row.last_seen = float(last_seen)
+            return True
+
+    def revoke_bridge_session(self, bridge_session_id: str, revoked_at: float) -> bool:
+        """Revoke a bridge session (token replay is rejected afterwards)."""
+        with self.transaction() as session:
+            result = session.execute(
+                update(BridgeSession)
+                .where(BridgeSession.bridge_session_id == bridge_session_id)
+                .values(
+                    revoked_at=float(revoked_at),
+                    connection_state=BRIDGE_STATE_DISCONNECTED,
+                    connected_at=None,
+                )
+            )
+            return bool(result.rowcount == 1)
+
+    def cleanup_bridge_pairings(self, now: float, *, keep: int = 1000) -> int:
+        """Bounded retention for consumed/expired pairing records.
+
+        Removes OLDEST consumed/expired pairings beyond ``keep`` rows so the
+        operational table stays bounded (single-use records retain no audit
+        value; the bound session rows are never pruned by the runtime). Returns
+        the number of rows deleted."""
+        with self.transaction() as session:
+            stale_ids = list(
+                session.scalars(
+                    select(BridgePairingRecord.pairing_session_id)
+                    .where(
+                        (BridgePairingRecord.consumed_at.is_not(None))
+                        | (BridgePairingRecord.expires_at < float(now))
+                    )
+                    .order_by(BridgePairingRecord.expires_at.asc())
+                    .offset(int(keep))
+                    .limit(500)
+                )
+            )
+            if not stale_ids:
+                return 0
+            result = session.execute(
+                BridgePairingRecord.__table__.delete().where(
+                    BridgePairingRecord.pairing_session_id.in_(stale_ids)
+                )
+            )
+            return int(result.rowcount)
 
     # ------------------------------------------------------------------ #
     # cases / versions

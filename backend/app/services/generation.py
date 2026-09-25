@@ -558,11 +558,15 @@ class GenerationService:
         generate_unknown_assets: bool = False,
         generated_cache: Any = None,
         world_repair_provider: Any = None,
+        bridge_registry: Any = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._clock = clock if clock is not None else EpochClock()
         self._ids = _LockedIdSource(ids if ids is not None else OpaqueIdSource())
+        # Phase 22 — the shared BYO-Ollama bridge registry (None when the
+        # feature is disabled; remote_client selection fails closed on it).
+        self._bridge_registry = bridge_registry
         if admission is None:
             admission = DurableAdmissionController(
                 clock=self._clock,
@@ -797,11 +801,12 @@ class GenerationService:
                 % (case_id, generation_id, attempt_id, pre_state)
             )
         if record.state is GenerationState.PUBLISHED:
-            # Phase 16_2: in ollama mode the stage driver OWNS the composed
-            # world (LLM world-requirements -> environment -> oracle -> placer)
-            # inside the controller run; the deterministic re-composition below
-            # MUST NOT overwrite it. It still applies for fake/live unchanged.
-            if settings.generation_provider == "ollama":
+            # Phase 16_2/Phase 22: in ollama / remote_client driver mode the
+            # stage driver OWNS the composed world (LLM world-requirements ->
+            # environment -> oracle -> placer) inside the controller run; the
+            # deterministic re-composition below MUST NOT overwrite it. It
+            # still applies for fake/live unchanged.
+            if settings.generation_provider in ("ollama", "remote_client"):
                 pass
             elif self._last_environment_resolution is not None:
                 self._last_environment_resolution["compositionFailed"] = not (
@@ -812,10 +817,10 @@ class GenerationService:
             # Phase 13: OPT-IN declarative procedural assets for the explicit
             # unknown-object request list (after the kit composition, so the
             # golden set is already re-anchored and the generated set is placed
-            # into the SAME kit). In ollama driver mode the unknown objects go
+            # into the SAME kit). In the driver modes the unknown objects go
             # through the driver's ASSET_SPEC path instead.
             if (
-                settings.generation_provider != "ollama"
+                settings.generation_provider not in ("ollama", "remote_client")
                 and self._generate_unknown_assets
                 and self._spec_provider is not None
                 and unknown_asset_requests
@@ -1259,10 +1264,11 @@ class GenerationService:
             record
         )
         if record.state is GenerationState.PUBLISHED:
-            # Phase 16_2: skip the deterministic re-composition in ollama mode
-            # (the stage driver owns the composed world for the new version).
+            # Phase 16_2/Phase 22: skip the deterministic re-composition in
+            # the driver modes (the stage driver owns the composed world for
+            # the new version).
             if (
-                settings.generation_provider != "ollama"
+                settings.generation_provider not in ("ollama", "remote_client")
                 and self._last_environment_resolution is not None
             ):
                 self._last_environment_resolution["compositionFailed"] = not (
@@ -1313,10 +1319,15 @@ class GenerationService:
     ) -> tuple[Any, Any, float]:
         """Fresh per-request controller; admission inside; synchronous run."""
         settings = self._settings
-        # Phase 16_2: a selected local-Llama provider runs through the Ollama
-        # stage driver (structured per-stage calls producing a full draft),
-        # classified through the SAME controller lifecycle.
-        driver = self._build_stage_driver() if settings.generation_provider == "ollama" else None
+        # Phase 16_2/Phase 22: a selected local-Llama provider (ollama) or the
+        # BYO-Ollama bridge (remote_client) runs through the stage driver
+        # (structured per-stage calls producing a full draft), classified
+        # through the SAME controller lifecycle.
+        driver = (
+            self._build_stage_driver(anonymous_quota_session_id)
+            if settings.generation_provider in ("ollama", "remote_client")
+            else None
+        )
         controller = GenerationController(
             provider=self._provider_factory(),
             admission=self._admission,
@@ -1343,6 +1354,8 @@ class GenerationService:
             provider_timeout_seconds=(
                 settings.ollama_timeout_seconds
                 if settings.generation_provider == "ollama"
+                else settings.bridge_job_deadline_seconds
+                if settings.generation_provider == "remote_client"
                 else 30.0
                 if settings.generation_provider == "live"
                 else None
@@ -1704,6 +1717,30 @@ class GenerationService:
                 )
 
             return _ollama
+        if settings.generation_provider == "remote_client":
+            # Phase 22 — BYO-Ollama bridge back-end. FAIL CLOSED at factory
+            # build (startup/config time): the bridge feature flag must be on
+            # AND a bridge registry wired. A provider==remote_client deployment
+            # without ENABLE_BRIDGE is a misconfiguration, never a silent
+            # fallback to fake/demo.
+            if not getattr(settings, "enable_bridge", False):
+                raise ProviderConfigError(
+                    "generation_provider=remote_client requires ENABLE_BRIDGE=true"
+                )
+            if self._bridge_registry is None:
+                raise ProviderConfigError(
+                    "generation_provider=remote_client requires a configured "
+                    "bridge registry"
+                )
+            from app.generation.remote_client_provider import RemoteClientProvider
+
+            def _remote() -> Provider:
+                return RemoteClientProvider(
+                    registry=self._bridge_registry,
+                    settings=settings,
+                )
+
+            return _remote
         script = self._load_fake_script()
         if not script:
             raise ProviderConfigError("fake provider script is empty")
@@ -1713,13 +1750,15 @@ class GenerationService:
 
         return _fake
 
-    def _build_stage_driver(self) -> Any:
-        """Phase 16_2: an ``OllamaStageDriver`` for a selected local-Llama provider.
+    def _build_stage_driver(self, session_scope: str | None = None) -> Any:
+        """Phase 16_2 + Phase 22: a stage driver for a selected local-Llama
+        provider (ollama) or the BYO-Ollama bridge (remote_client).
 
-        Only the ollama branch is enabled; fake/live return None (their
-        deterministic composition is UNCHANGED). The driver shares the cached
-        generated-asset store; unknown REQUIRED objects route through its
-        ASSET_SPEC adapter (bound)."""
+        Fake/live return None (their deterministic composition is UNCHANGED).
+        The driver shares the cached generated-asset store; unknown REQUIRED
+        objects route through its ASSET_SPEC adapter (bound). The creator
+        session scope is passed through so a remote-client provider selects the
+        bridge bound to the generation attempt's session."""
         from app.services.ollama_driver import OllamaStageDriver
 
         return OllamaStageDriver(
@@ -1727,6 +1766,8 @@ class GenerationService:
             provider_factory=self._provider_factory,
             generated_cache=self._generated_cache,
             catalog=None,
+            session_scope=session_scope,
+            provider_label=str(self._settings.generation_provider),
         )
 
     def _load_fake_script(self) -> dict[GenerationStage, list[str]]:

@@ -20,9 +20,11 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
      ``127.0.0.1`` / ``localhost`` / ``host.docker.internal`` and
      ``.env.example`` are the sanctioned examples; the RFC1918 range
      DEFINITIONS inside ``backend/app/core/config.py`` (``ip_network(...)``)
-     and hermetic test vectors (``backend/tests/``, ``e2e/probes/``, frontend
-     ``*.test.*`` / ``*.spec.*``) are documented exceptions — they are the
-     allowlist definition and the environment-matrix regression tests.
+     and hermetic test vectors (``backend/tests/``, ``bridge/tests/``,
+     ``e2e/probes/``, frontend ``*.test.*`` / ``*.spec.*``) are documented
+     exceptions — they are the allowlist definition, the local-provider
+     bridge URL-rejection vectors (Phase 22) and the environment-matrix
+     regression tests.
   5. FRONTEND BUILD OUTPUT (frontend/dist, or ``--frontend-dir``) — the same
      private host/IP/URL literal scan plus the ``11434`` Ollama port and the
      provider configuration variable NAMES (``OLLAMA_BASE_URL`` / ``LLM_API_KEY``
@@ -517,8 +519,18 @@ _SANCTIONED_EXAMPLE_FILES = (".env.example", ".env.production.example")
 
 # Hermetic test vectors / QA contract audits: they MUST legitimately exercise
 # private/LAN hosts (the config validator accepts them), so they are the
-# documented exceptions for the *tracked-tree* leak scan.
-_SANCTIONED_TREE_PREFIXES = ("backend/tests/", "e2e/probes/")
+# documented exceptions for the *tracked-tree* leak scan. ``bridge/tests/`` is
+# the Phase 22 local-provider bridge test tree (ADV-249): its URL-validation
+# vectors use private/LAN literals as intended-to-be-REJECTED inputs — the
+# same bounded-test-vector status as ``backend/tests/`` / ``e2e/probes/`` /
+# frontend ``*.test.*`` / ``*.spec.*``. Production/tracked source (repo root,
+# backend/app, frontend/src, docs, docker, compose) is NOT exempted and still
+# fails on any private endpoint literal.
+_SANCTIONED_TREE_PREFIXES = (
+    "backend/tests/",
+    "bridge/tests/",
+    "e2e/probes/",
+)
 
 # The RFC1918 range DEFINITIONS inside the config allowlist (ip_network(...)).
 _RANGE_DEFINITION_LINE_RE = re.compile(r"ip_network\(")

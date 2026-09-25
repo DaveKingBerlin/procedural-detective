@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.models.accusations import Accusation
 from app.models.base import Base
+from app.models.bridge import BridgePairingRecord, BridgeSession
 from app.models.cases import Case, CaseVersion
 from app.models.credentials import CreatorCredential
 from app.models.generation import GenerationAttempt
@@ -21,6 +22,8 @@ __all__ = [
     "Accusation",
     "AnonymousQuotaSession",
     "Base",
+    "BridgePairingRecord",
+    "BridgeSession",
     "Case",
     "CaseVersion",
     "CreatorCredential",

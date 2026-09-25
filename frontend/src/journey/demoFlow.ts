@@ -117,6 +117,15 @@ export const DEMO_FAILURE_MESSAGES = Object.freeze({
   server: "The case service reported a temporary problem. Please try again.",
   tooSlow: "Generation is taking longer than expected. Please try again.",
   generic: "The case could not be created right now. Please try again.",
+  // Phase 22 — BYO-Ollama bridge typed failures (§21). The server projects
+  // bridge-reported reasons onto its CLOSED code set; the public UI maps each
+  // code to this frozen safe copy and NEVER surfaces the raw code text.
+  bridgeNotConnected: "Connect your local Ollama bridge first.",
+  bridgeDisconnected:
+    "Local AI disconnected — Reconnect the local bridge or use Deterministic Demo.",
+  localOllamaUnavailable: "Ollama is not reachable on this computer.",
+  localModelUnavailable: "The selected local model is not available.",
+  localProviderTimeout: "Local AI did not finish within the allowed time.",
 });
 
 export interface RunDemoOptions {
@@ -283,6 +292,14 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
  *  - MAX_PROCEDURAL_ASSETS_EXCEEDED / MAX_FAILED_ASSETS_EXCEEDED map to the
  *    SAME safe "could not be turned into a playable case" message class as the
  *    generic failed fallback. No internal limits are ever shown.
+ *
+ * Phase 22 notes (bridge typed failures, §21): BRIDGE_NOT_CONNECTED /
+ * BRIDGE_DISCONNECTED / LOCAL_OLLAMA_UNAVAILABLE / LOCAL_MODEL_UNAVAILABLE /
+ * LOCAL_PROVIDER_TIMEOUT map to distinct frozen safe copy (the local-Ollama
+ * user action each requires). The remaining Phase 22 codes
+ * (BRIDGE_PAIRING_EXPIRED / BRIDGE_BUSY / BRIDGE_PROTOCOL_ERROR /
+ * LOCAL_PROVIDER_INVALID_OUTPUT) and every unknown/hostile variant fall
+ * through to the generic failed message — no raw code is ever surfaced.
  */
 export function generationFailed(failureCode?: string | null): DemoFlowFailure {
   if (failureCode === "GENERATION_DEADLINE_EXCEEDED") {
@@ -309,6 +326,24 @@ export function generationFailed(failureCode?: string | null): DemoFlowFailure {
     failureCode === "MAX_FAILED_ASSETS_EXCEEDED"
   ) {
     return { kind: "failed", message: DEMO_FAILURE_MESSAGES.failed };
+  }
+  // Phase 22 — BYO-Ollama bridge typed failures (§21): exact-string matches
+  // only, each mapped to frozen safe copy — the raw code (or a hostile
+  // prefix/substring variant) can never surface.
+  if (failureCode === "BRIDGE_NOT_CONNECTED") {
+    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.bridgeNotConnected };
+  }
+  if (failureCode === "BRIDGE_DISCONNECTED") {
+    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.bridgeDisconnected };
+  }
+  if (failureCode === "LOCAL_OLLAMA_UNAVAILABLE") {
+    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.localOllamaUnavailable };
+  }
+  if (failureCode === "LOCAL_MODEL_UNAVAILABLE") {
+    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.localModelUnavailable };
+  }
+  if (failureCode === "LOCAL_PROVIDER_TIMEOUT") {
+    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.localProviderTimeout };
   }
   return { kind: "failed", message: DEMO_FAILURE_MESSAGES.failed };
 }

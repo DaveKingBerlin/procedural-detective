@@ -2,6 +2,8 @@ import type {
   AccusationRequest,
   AccusationResponse,
   AnonymousSessionResponse,
+  BridgePairingResponse,
+  BridgeStatusResponse,
   CreateCaseResponse,
   CreatePlaythroughResponse,
   ErrorEnvelope,
@@ -391,4 +393,40 @@ export function createPlaythrough(
     creatorAccessToken,
     { method: "POST", body: {} },
   );
+}
+
+/* ======================================================================
+ * Phase 22 — BYO-Ollama bridge endpoints.
+ *
+ * Both are authorized with the ANONYMOUS SESSION bearer (the same quota
+ * identity POST /sessions/anonymous issues) and exist ONLY when the backend
+ * runs with ENABLE_BRIDGE=true (404 otherwise). The browser NEVER talks to a
+ * local Ollama and NEVER opens a bridge WebSocket: the user pairs by running
+ * the local bridge CLI with the code this API returns, and the bridge<->server
+ * WS is bridge-owned only. These helpers are used ONLY from the /new creator
+ * pairing panel (player/playthrough routes never call them — the backend's own
+ * session-scoped auth enforces the same boundary).
+ * ==================================================================== */
+
+/**
+ * POST {base}/api/v1/bridge/pairing (Bearer anonymousSessionToken) -> 201
+ * BridgePairingResponse. Mints ONE short-lived, single-use pairing code
+ * (PD-XXXX-XXXX) scoped to the authenticating session. 429 TOO_MANY_REQUESTS
+ * surfaces the pairing admission bound; 401 surfaces a stale/expired session.
+ */
+export function createBridgePairing(anonymousToken: string): Promise<BridgePairingResponse> {
+  return authedRequest<BridgePairingResponse>("/api/v1/bridge/pairing", anonymousToken, {
+    method: "POST",
+    body: {},
+  });
+}
+
+/**
+ * GET {base}/api/v1/bridge/status (Bearer anonymousSessionToken) -> 200
+ * BridgeStatusResponse — the SANITIZED, session-scoped status (available /
+ * connected / model / ready), never a token/IP/URL. Polled by the /new
+ * pairing panel until the user's bridge binds.
+ */
+export function getBridgeStatus(anonymousToken: string): Promise<BridgeStatusResponse> {
+  return authedRequest<BridgeStatusResponse>("/api/v1/bridge/status", anonymousToken);
 }

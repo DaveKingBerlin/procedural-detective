@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     DotEnvSettingsSource,
@@ -38,6 +38,10 @@ from pydantic_settings import (
 )
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import ArgumentError
+
+from app.core.timeout_envelope import (  # noqa: E402  (no circular import)
+    BRIDGE_JOB_DEADLINE_MAX_SECONDS,
+)
 
 SERVICE_NAME = "procedural-detective"
 SERVICE_VERSION = "0.1.0"
@@ -341,8 +345,14 @@ class Settings(BaseSettings):
     playthrough_token_ttl_seconds: int = Field(
         default=14400, gt=0, description="PLAYTHROUGH_TOKEN_TTL_SECONDS."
     )
-    generation_provider: Literal["fake", "live", "ollama"] = Field(
-        default="fake", description="GENERATION_PROVIDER (fake|live|ollama)."
+    generation_provider: Literal["fake", "live", "ollama", "remote_client"] = Field(
+        default="fake",
+        description=(
+            "GENERATION_PROVIDER (fake|live|ollama|remote_client). "
+            "remote_client is the Phase 22 'Bring Your Own Ollama' bridge mode: "
+            "it requires ENABLE_BRIDGE=true and FAILS CLOSED at startup/config "
+            "time otherwise (ProviderConfigError)."
+        ),
     )
     llm_api_key: str | None = Field(
         default=None,
@@ -408,6 +418,161 @@ class Settings(BaseSettings):
             "OLLAMA_NUM_CTX: optional bounded context/token setting "
             "(512..32768)."
         ),
+    )
+    # -- Phase 22 — Bring Your Own Ollama / remote local-provider bridge ------
+    # Feature flag. OFF by DEFAULT so the existing app is byte-identical:
+    # ENABLE_BRIDGE=false -> every /api/v1/bridge/* route is 404, the provider
+    # enum value GENERATION_PROVIDER=remote_client FAILS CLOSED at startup
+    # (ProviderConfigError), the capability endpoint omits ``remoteLocalAi``
+    # entirely and no bridge state is ever created.
+    #
+    # When ENABLE_BRIDGE=true the server exposes the pairing REST surface, the
+    # WSS bridge endpoint and the remote-client provider transport. The bridge
+    # NEVER receives or leaks the owner's case material beyond the sanitized
+    # per-stage prompt, and the owner's browser NEVER receives the bridge token
+    # / IP / URL.
+    enable_bridge: bool = Field(
+        default=False, description="ENABLE_BRIDGE (OFF by default)."
+    )
+    # Pairing code lifetime (short: 2-5 minute band documented in Phase22 §4).
+    bridge_pairing_code_ttl_seconds: float = Field(
+        default=180.0,
+        gt=0,
+        description="BRIDGE_PAIRING_CODE_TTL_SECONDS (default ~180s).",
+    )
+    # Bridge session lifetime (bounded; e.g. hours). A bridge session token is
+    # hashed at rest, returned to the bridge exactly once and expires here.
+    bridge_session_ttl_seconds: float = Field(
+        default=14400.0,
+        gt=0,
+        description="BRIDGE_SESSION_TTL_SECONDS (default 4h).",
+    )
+    # Idle disconnect: the bridge socket is closed when no frame arrives for
+    # this long (heartbeat pings keep a healthy bridge under it).
+    bridge_idle_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        description="BRIDGE_IDLE_TIMEOUT_SECONDS (default ~300s).",
+    )
+    # Effective bridge concurrency is 1 per session (a client GPU is never
+    # flooded); this is the in-flight job ceiling per bridge session.
+    bridge_max_jobs_per_session: int = Field(
+        default=1,
+        gt=0,
+        le=4,
+        description="BRIDGE_MAX_JOBS_PER_SESSION (default 1 = MAX_BRIDGE_CONCURRENT_JOBS).",
+    )
+    # Maximum size of ONE WebSocket JSON frame (server and bridge both enforce
+    # this; default 256 KiB).
+    bridge_max_message_bytes: int = Field(
+        default=256 * 1024,
+        gt=0,
+        description="BRIDGE_MAX_MESSAGE_BYTES (default 256 KiB).",
+    )
+    # Heartbeat keep-alive interval (server pings; bridge replies pong).
+    bridge_heartbeat_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="BRIDGE_HEARTBEAT_INTERVAL_SECONDS (default ~30s).",
+    )
+    # Optional model allowlist for bridged inference: a comma-separated list of
+    # model labels (safe token set). EMPTY (default) = ANY model the bridge
+    # operator selected locally is accepted; non-empty = only bridges reporting
+    # an allowlisted model may receive jobs. Never a free-text remote selector.
+    bridge_model_allowlist: Annotated[list[str], NoDecode] | None = Field(
+        default=None,
+        description=(
+            "BRIDGE_MODEL_ALLOWLIST: optional comma-separated safe model labels."
+        ),
+    )
+    # Per-job deadline cap. The dispatch timeout is min(effective remaining
+    # generation deadline, BRIDGE_JOB_DEADLINE_SECONDS). ADV-250: the value is
+    # additionally HARD-CAPPED at config time to the maximum generation
+    # deadline the app allows (the timeout-envelope showcase bound) and a
+    # documented 1800s ceiling — so even a hostile/oversized configured value
+    # can never reach a job frame (``timeoutMs``) on the wire; the provider
+    # re-clamps at dispatch for defense-in-depth.
+    bridge_job_deadline_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        le=BRIDGE_JOB_DEADLINE_MAX_SECONDS,
+        description=(
+            "BRIDGE_JOB_DEADLINE_SECONDS (per-job cap, bounded 0..%s; "
+            "ADV-250 hard ceiling)." % BRIDGE_JOB_DEADLINE_MAX_SECONDS
+        ),
+    )
+    # Reconnect grace: after a bridge disconnect the session stays
+    # re-connectable via bridge_hello for this long (and until expiry);
+    # afterwards it is revoked and a fresh pairing is required.
+    bridge_reconnect_grace_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="BRIDGE_RECONNECT_GRACE_SECONDS (default ~60s).",
+    )
+    # Bounded in-memory bridge-session registry (dead sessions are lazily
+    # cleaned; the map never grows without bound).
+    bridge_max_registry_sessions: int = Field(
+        default=64,
+        gt=0,
+        le=1024,
+        description="BRIDGE_MAX_REGISTRY_SESSIONS (bounded in-memory registry).",
+    )
+    # Bounded pairing admission: per-IP hourly pairing ceiling + per-session
+    # pairing-code ceiling (a session token can never mint unlimited codes).
+    bridge_pairing_limit_per_ip_per_hour: int = Field(
+        default=60,
+        gt=0,
+        description="BRIDGE_PAIRING_LIMIT_PER_IP_PER_HOUR.",
+    )
+    bridge_max_pairings_per_session: int = Field(
+        default=10,
+        gt=0,
+        le=256,
+        description="BRIDGE_MAX_PAIRINGS_PER_SESSION.",
+    )
+    # Bounded WebSocket frame rate (per connection, sliding window).
+    bridge_max_frames_per_window: int = Field(
+        default=30,
+        gt=0,
+        description="BRIDGE_MAX_FRAMES_PER_WINDOW.",
+    )
+    bridge_frame_window_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="BRIDGE_FRAME_WINDOW_SECONDS.",
+    )
+    # ADV-252 — bridge-connect admission is SPLIT into two budgets. FAILED
+    # handshake attempts are counted ONLY in a dedicated PER-IP window
+    # (bridge_failed_handshake_*): an IP that burns the window is refused
+    # pre-accept, and no other IP is ever throttled by it. SUCCESSFUL pairings
+    # and reconnects consume a SEPARATE global admission budget
+    # (bridge_connect_admission_*) — a brute-force flurry of failed attempts
+    # can never starve legitimate bridge reconnects.
+    bridge_failed_handshake_limit: int = Field(
+        default=20,
+        gt=0,
+        description=(
+            "BRIDGE_FAILED_HANDSHAKE_LIMIT (ADV-252: PER-IP failed-handshake "
+            "window — only an IP that burns the budget is refused)."
+        ),
+    )
+    bridge_failed_handshake_window_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="BRIDGE_FAILED_HANDSHAKE_WINDOW_SECONDS (ADV-252 per-IP window).",
+    )
+    bridge_connect_admission_limit_per_window: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "BRIDGE_CONNECT_ADMISSION_LIMIT_PER_WINDOW (ADV-252: SEPARATE "
+            "global admission budget consumed by SUCCESSFUL pairings/connections)."
+        ),
+    )
+    bridge_connect_admission_window_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="BRIDGE_CONNECT_ADMISSION_WINDOW_SECONDS (ADV-252).",
     )
     # -- Phase 21B §4 — bounded unauthenticated Ollama capability probing -----
     # When GENERATION_PROVIDER=ollama, the PUBLIC ``GET /api/v1/generation-capabilities``
@@ -643,6 +808,55 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
+
+    @field_validator("bridge_model_allowlist", mode="before")
+    @classmethod
+    def _parse_bridge_model_allowlist(cls, value: object) -> object:
+        """Accept a comma-separated string or an already-split list (None/empty
+        stays None = no allowlist)."""
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",") if part.strip()]
+            return parts or None
+        if isinstance(value, (list, tuple)):
+            parts = [str(part).strip() for part in value if str(part).strip()]
+            return parts or None
+        return value
+
+    @field_validator("bridge_model_allowlist")
+    @classmethod
+    def _validate_bridge_model_allowlist(cls, value: list[str] | None) -> list[str] | None:
+        """Every allowlisted model must be a safe operator token (same token set
+        as OLLAMA_MODEL: 1..80 chars from [A-Za-z0-9._:-])."""
+        if not value:
+            return None
+        for entry in value:
+            if not _OLLAMA_MODEL_RE.fullmatch(entry):
+                raise ValueError(
+                    "BRIDGE_MODEL_ALLOWLIST entries may contain only "
+                    "[A-Za-z0-9._:-] characters"
+                )
+            if len(entry) > 80:
+                raise ValueError(
+                    "BRIDGE_MODEL_ALLOWLIST entries must be at most 80 characters"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_bridge_timings(self) -> "Settings":
+        """The heartbeat must fire BEFORE the idle disconnect so a healthy
+        bridge stays alive through pings (otherwise the idle timer would close
+        a reachable connection before any keep-alive)."""
+        if (
+            self.enable_bridge
+            and self.bridge_heartbeat_interval_seconds
+            >= self.bridge_idle_timeout_seconds
+        ):
+            raise ValueError(
+                "BRIDGE_HEARTBEAT_INTERVAL_SECONDS must be lower than "
+                "BRIDGE_IDLE_TIMEOUT_SECONDS (heartbeat keeps a healthy bridge "
+                "inside the idle window)"
+            )
+        return self
 
     @field_validator("cors_allowed_origins")
     @classmethod

@@ -648,11 +648,49 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.clock = EpochClock()
     app.state.store = Store(settings.database_url)
     app.state.publication_service = PublicationService(app.state.store)
+    # Phase 22 — BYO-Ollama bridge services. OFF by default: no registry, no
+    # pairing service, no routers and no provider branch — the existing app is
+    # byte-identical with ENABLE_BRIDGE=false (every /api/v1/bridge/* path is
+    # the plain 404 envelope).
+    bridge_registry = None
+    if settings.enable_bridge:
+        from app.services.bridge import BridgePairingService, BridgeRegistry
+
+        bridge_registry = BridgeRegistry(
+            settings=settings, store=app.state.store, clock=app.state.clock
+        )
+        app.state.bridge_registry = bridge_registry
+        app.state.bridge_pairing_service = BridgePairingService(
+            settings=settings, store=app.state.store, clock=app.state.clock
+        )
+        # Bounded bridge connect surface — ADV-252 SPLITS the public connect
+        # budget: FAILED handshake attempts are counted in a dedicated PER-IP
+        # window (only an IP that burns its own window is refused pre-accept),
+        # while SUCCESSFUL pairings/connections consume a SEPARATE global
+        # admission budget — a brute-force flurry can never starve legitimate
+        # reconnects. Plus the per-IP pairing-mint window (same in-memory
+        # single-process mode as the Phase 20/21 rate state).
+        app.state.bridge_failed_handshake_gate = SlidingWindowRateLimiter(
+            clock=app.state.clock,
+            limit=settings.bridge_failed_handshake_limit,
+            window_seconds=settings.bridge_failed_handshake_window_seconds,
+        )
+        app.state.bridge_admission_gate = SlidingWindowRateLimiter(
+            clock=app.state.clock,
+            limit=settings.bridge_connect_admission_limit_per_window,
+            window_seconds=settings.bridge_connect_admission_window_seconds,
+        )
+        app.state.bridge_pairing_ip_limiter = SlidingWindowRateLimiter(
+            clock=app.state.clock,
+            limit=settings.bridge_pairing_limit_per_ip_per_hour,
+            window_seconds=60 * 60,
+        )
     app.state.generation_service = GenerationService(
         settings=settings,
         store=app.state.store,
         clock=app.state.clock,
         publication=app.state.publication_service,
+        bridge_registry=bridge_registry,
     )
     # PD-SEC-02 — bounded public admission policies (single-process in-memory
     # rate state, documented deployment mode §8.1). Keyed on the
@@ -721,6 +759,28 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # ``ServerErrorMiddleware`` and miss exactly those responses.
 
     app.include_router(api_router)
+    # Phase 22 — the BYO-Ollama bridge REST + WebSocket surface exists ONLY
+    # when ENABLE_BRIDGE=true (OFF default). The WebSocket route is registered
+    # on the app (not the /api/v1 router) with its full path so the transport
+    # handshake needs no URL rewriting; a disabled deployment keeps every
+    # /api/v1/bridge/* path on the normal 404 envelope.
+    if settings.enable_bridge:
+        from app.api.v1.bridge import router as bridge_rest_router
+        from app.api.v1.bridge_ws import BridgeMessageSizeGuard
+        from app.api.v1.bridge_ws import router as bridge_ws_router
+
+        # ADV-251 — the transport-level WS frame bound (BRIDGE_MAX_MESSAGE_BYTES)
+        # on the bridge endpoint: oversized frames are rejected with 1009 at the
+        # ASGI transport edge BEFORE any application decode (first/pre-auth
+        # frame included). uvicorn's own default ``ws_max_size`` is 16 MiB; every
+        # repo-controlled uvicorn launch also passes ``--ws-max-size``, and this
+        # app-owned guard enforces the same bound under any server configuration.
+        app.add_middleware(
+            BridgeMessageSizeGuard,
+            max_bytes=settings.bridge_max_message_bytes,
+        )
+        app.include_router(bridge_rest_router)
+        app.include_router(bridge_ws_router)
     _configure_static_serving(app, settings)
     register_exception_handlers(app)
     return app

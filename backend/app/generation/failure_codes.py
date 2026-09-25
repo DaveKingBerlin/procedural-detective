@@ -28,6 +28,19 @@ class GenerationFailureCode(str, Enum):
     ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED = "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED"
     MAX_PROCEDURAL_ASSETS_EXCEEDED = "MAX_PROCEDURAL_ASSETS_EXCEEDED"
     MAX_FAILED_ASSETS_EXCEEDED = "MAX_FAILED_ASSETS_EXCEEDED"
+    # -- Phase 22 — BYO-Ollama bridge typed failures (closed vocabulary) ------
+    # Typed server-side codes only: the public UI maps them safely and they are
+    # never constructed from arbitrary bridge text (the bridge's own reported
+    # failureCode is projected onto this closed set, never echoed raw).
+    BRIDGE_NOT_CONNECTED = "BRIDGE_NOT_CONNECTED"
+    BRIDGE_DISCONNECTED = "BRIDGE_DISCONNECTED"
+    BRIDGE_PAIRING_EXPIRED = "BRIDGE_PAIRING_EXPIRED"
+    BRIDGE_BUSY = "BRIDGE_BUSY"
+    BRIDGE_PROTOCOL_ERROR = "BRIDGE_PROTOCOL_ERROR"
+    LOCAL_OLLAMA_UNAVAILABLE = "LOCAL_OLLAMA_UNAVAILABLE"
+    LOCAL_MODEL_UNAVAILABLE = "LOCAL_MODEL_UNAVAILABLE"
+    LOCAL_PROVIDER_TIMEOUT = "LOCAL_PROVIDER_TIMEOUT"
+    LOCAL_PROVIDER_INVALID_OUTPUT = "LOCAL_PROVIDER_INVALID_OUTPUT"
 
 
 PUBLIC_FAILURE_CODES = frozenset(code.value for code in GenerationFailureCode)
@@ -51,6 +64,26 @@ def infer_failure_code(reason: str | None) -> GenerationFailureCode:
         return GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
     if "timed out" in text or "timeout" in text:
         return GenerationFailureCode.PROVIDER_TIMEOUT
+    # Phase 22 — the bridge typed-failure phrases map to their canonical codes
+    # (defensive: the driver/provider normally raise the typed code directly).
+    if "local ai did not finish" in text or "local provider timed out" in text:
+        return GenerationFailureCode.LOCAL_PROVIDER_TIMEOUT
+    if "bridge not connected" in text:
+        return GenerationFailureCode.BRIDGE_NOT_CONNECTED
+    if "bridge disconnected" in text:
+        return GenerationFailureCode.BRIDGE_DISCONNECTED
+    if "pairing expired" in text or "pairing rejected" in text:
+        return GenerationFailureCode.BRIDGE_PAIRING_EXPIRED
+    if "bridge busy" in text:
+        return GenerationFailureCode.BRIDGE_BUSY
+    if "bridge protocol" in text or "bridge frame" in text:
+        return GenerationFailureCode.BRIDGE_PROTOCOL_ERROR
+    if "ollama is not reachable" in text or "local ollama unavailable" in text:
+        return GenerationFailureCode.LOCAL_OLLAMA_UNAVAILABLE
+    if "local model unavailable" in text or "selected local model" in text:
+        return GenerationFailureCode.LOCAL_MODEL_UNAVAILABLE
+    if "local provider invalid" in text or "bridge returned invalid" in text:
+        return GenerationFailureCode.LOCAL_PROVIDER_INVALID_OUTPUT
     # Phase 19 Fix C: the narrower hierarchical budget causes are detected
     # BEFORE the generic "call budget" fallback so a narrowly-attributed
     # exhaustion never collapses back into PROVIDER_CALL_BUDGET_EXHAUSTED.

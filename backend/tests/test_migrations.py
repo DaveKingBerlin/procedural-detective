@@ -2,11 +2,11 @@
 it, re-running upgrade is idempotent, and the documented CLI path works from
 the repo root (REQUIREMENTS 42/47).
 
-The migration chain head is 0004 as of Phase 7 (0001 baseline + 0002 cases /
-auth / playthroughs + 0003 player_knowledge + 0004 accusations).
-``migration_head()`` is read dynamically everywhere possible; the two explicit
-head literals below assert the exact current head so a regression cannot
-silently shift it.
+The migration chain head is 0005 as of Phase 22 (0001 baseline + 0002 cases /
+auth / playthroughs + 0003 player_knowledge + 0004 accusations + 0005 BYO-
+Ollama bridge). ``migration_head()`` is read dynamically everywhere possible;
+the two explicit head literals below assert the exact current head so a
+regression cannot silently shift it.
 """
 
 from __future__ import annotations
@@ -21,8 +21,9 @@ from app.db.session import migration_head
 from conftest import downgrade_db, upgrade_db, REPO_ROOT
 
 # The exact chain head this phase delivers (0001 baseline -> 0002 Phase 5 ->
-# 0003 Phase 6 player knowledge -> 0004 Phase 7 accusations).
-EXPECTED_HEAD = "0004"
+# 0003 Phase 6 player knowledge -> 0004 Phase 7 accusations -> 0005 Phase 22
+# BYO-Ollama bridge).
+EXPECTED_HEAD = "0005"
 
 
 def _engine(database_url):

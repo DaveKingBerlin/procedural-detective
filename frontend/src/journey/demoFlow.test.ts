@@ -498,6 +498,92 @@ describe("generationFailed — direct mapping (Phase 19 codes)", () => {
   });
 });
 
+describe("generationFailed — Phase 22 BYO-Ollama bridge typed codes (§21)", () => {
+  it("maps the 5 new bridge/local codes to their distinct safe copy, never the raw code", () => {
+    const cases: Array<[string, string]> = [
+      ["BRIDGE_NOT_CONNECTED", DEMO_FAILURE_MESSAGES.bridgeNotConnected],
+      ["BRIDGE_DISCONNECTED", DEMO_FAILURE_MESSAGES.bridgeDisconnected],
+      ["LOCAL_OLLAMA_UNAVAILABLE", DEMO_FAILURE_MESSAGES.localOllamaUnavailable],
+      ["LOCAL_MODEL_UNAVAILABLE", DEMO_FAILURE_MESSAGES.localModelUnavailable],
+      ["LOCAL_PROVIDER_TIMEOUT", DEMO_FAILURE_MESSAGES.localProviderTimeout],
+    ];
+    for (const [failureCode, expected] of cases) {
+      const failure = generationFailed(failureCode);
+      expect(failure.kind).toBe("provider");
+      expect(failure.message).toBe(expected);
+      expect(failure.message).not.toContain(failureCode);
+      expect(failure.message).not.toContain("_");
+    }
+  });
+
+  it("exact copy for each of the 5 codes (§21 wording)", () => {
+    expect(generationFailed("BRIDGE_NOT_CONNECTED").message).toBe(
+      "Connect your local Ollama bridge first.",
+    );
+    expect(generationFailed("LOCAL_OLLAMA_UNAVAILABLE").message).toBe(
+      "Ollama is not reachable on this computer.",
+    );
+    expect(generationFailed("LOCAL_MODEL_UNAVAILABLE").message).toBe(
+      "The selected local model is not available.",
+    );
+    expect(generationFailed("LOCAL_PROVIDER_TIMEOUT").message).toBe(
+      "Local AI did not finish within the allowed time.",
+    );
+    expect(generationFailed("BRIDGE_DISCONNECTED").message).toBe(
+      "Local AI disconnected — Reconnect the local bridge or use Deterministic Demo.",
+    );
+  });
+
+  it("exact strings only — a prefix/substring variant never narrows into the Phase 22 buckets", () => {
+    for (const hostile of [
+      "BRIDGE_NOT_CONNECTED_PLEASE",
+      "X_LOCAL_OLLAMA_UNAVAILABLE",
+      "LOCAL_MODEL_UNAVAILABLE_2",
+      "LOCAL_PROVIDER_TIMEOUT_NOW",
+      "BRIDGE_DISCONNECTED_AGAIN",
+      "NOT_BRIDGE_NOT_CONNECTED",
+    ]) {
+      const failure = generationFailed(hostile);
+      expect(failure.kind).toBe("failed");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+      expect(failure.message).not.toContain(hostile);
+    }
+  });
+
+  it("the remaining Phase 22 codes (busy/expired/protocol/invalid) fall to the generic safe failed message", () => {
+    for (const failureCode of [
+      "BRIDGE_PAIRING_EXPIRED",
+      "BRIDGE_BUSY",
+      "BRIDGE_PROTOCOL_ERROR",
+      "LOCAL_PROVIDER_INVALID_OUTPUT",
+    ]) {
+      const failure = generationFailed(failureCode);
+      expect(failure.kind).toBe("failed");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+      expect(failure.message).not.toContain(failureCode);
+    }
+  });
+
+  it("the Phase 22 codes also map from a run (createCase FAILED with failureCode)", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => ({
+        caseId: "CASE-demo-01",
+        generationId: "GEN-demo-01",
+        generationAttemptId: "ATT-demo-01",
+        creatorAccessToken: CREATOR,
+        status: "FAILED",
+        failureCode: "BRIDGE_NOT_CONNECTED",
+      })),
+    });
+    const result = await runDemo("prompt", { services, wait: NO_WAIT });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.failure.kind).toBe("provider");
+    expect(result.failure.message).toBe("Connect your local Ollama bridge first.");
+    expect(result.failure.message).not.toContain("BRIDGE_NOT_CONNECTED");
+  });
+});
+
 describe("runDemo — quota / admission rejection", () => {
   it("maps a 429 ADMISSION_DENIED on session creation to the quota failure", async () => {
     const services = makeServices({
