@@ -4,8 +4,10 @@ import {
   ApiError,
   apiUrl,
   createAnonymousSession,
+  createBridgePairing,
   createCase,
   createPlaythrough,
+  getBridgeStatus,
   getGenerationCapabilities,
   getGenerationProgress,
   getHealth,
@@ -438,5 +440,95 @@ describe("Phase 8 journey endpoints", () => {
     expect((init as RequestInit).method).toBe("POST");
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer creator");
+  });
+});
+
+describe("Phase 22 bridge endpoints (BYO-Ollama pairing + status)", () => {
+  const ANON = "anon-session-token";
+
+  it("createBridgePairing POSTs /bridge/pairing with the anonymous session bearer", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        {
+          pairingSessionId: "PAIR-0001",
+          pairingCode: "PD-X7K4-92QP",
+          expiresAt: 1e12,
+        },
+        201,
+      ),
+    );
+    const pairing = await createBridgePairing(ANON);
+    expect(pairing.pairingSessionId).toBe("PAIR-0001");
+    expect(pairing.pairingCode).toBe("PD-X7K4-92QP");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(apiUrl("/api/v1/bridge/pairing"));
+    const requestInit = init as RequestInit;
+    expect(requestInit.method).toBe("POST");
+    const headers = requestInit.headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${ANON}`);
+  });
+
+  it("createBridgePairing maps a 429 TOO_MANY_REQUESTS envelope to a structured ApiError", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { error: { code: "TOO_MANY_REQUESTS", message: "Too many pairing codes", details: null } },
+        429,
+      ),
+    );
+    const error = await createBridgePairing(ANON).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(429);
+    expect(error.code).toBe("TOO_MANY_REQUESTS");
+  });
+
+  it("getBridgeStatus GETs /bridge/status with the anonymous session bearer and parses the sanitized block", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        {
+          remoteLocalAi: {
+            available: true,
+            connected: true,
+            model: "hermes3:8b",
+            ready: true,
+          },
+        },
+        200,
+      ),
+    );
+    const status = await getBridgeStatus(ANON);
+    expect(status.remoteLocalAi).toEqual({
+      available: true,
+      connected: true,
+      model: "hermes3:8b",
+      ready: true,
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(apiUrl("/api/v1/bridge/status"));
+    expect((init as RequestInit).method ?? "GET").toBe("GET");
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${ANON}`);
+  });
+
+  it("getBridgeStatus maps a 401 bearer failure to a structured ApiError", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: "UNAUTHORIZED", message: "bearer token invalid", details: null } }, 401),
+    );
+    const error = await getBridgeStatus(ANON).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(401);
+    expect(error.code).toBe("UNAUTHORIZED");
+  });
+
+  it("getBridgeStatus maps a 404 (feature OFF / unmounted router) to a structured ApiError, never a raw throw", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: "NOT_FOUND", message: "Not found", details: null } }, 404),
+    );
+    const error = await getBridgeStatus(ANON).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(404);
+    expect(error.code).toBe("NOT_FOUND");
   });
 });

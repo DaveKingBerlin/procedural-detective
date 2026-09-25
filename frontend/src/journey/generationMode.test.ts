@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { GenerationCapabilitiesResponse } from "../api/types";
 import {
   GENERATION_MODE_STORAGE_KEY,
   LOCAL_AI_SHOWCASE_NOTE,
@@ -11,7 +12,9 @@ import {
   generationModeOptionLabel,
   getGenerationMode,
   isLocalModeAvailable,
+  isRemoteLocalAiOffered,
   parseGenerationCapabilities,
+  remoteLocalAiBlock,
   selectableGenerationModes,
   setGenerationMode,
   validatedJourneyMode,
@@ -219,6 +222,110 @@ describe("parseGenerationCapabilities — trust-boundary allowlist", () => {
     expect(parseGenerationCapabilities({ configuredProvider: 42, modes: [] })).toEqual({ modes: [] });
     expect(parseGenerationCapabilities({ modes: [] })).toEqual({ modes: [] });
     expect(parseGenerationCapabilities(null)).toEqual({ modes: [] });
+  });
+});
+
+describe("Phase 22 — remoteLocalAi (BYO-Ollama bridge) allowlist parsing", () => {
+  it("carries the sanitized remoteLocalAi block when the server advertises it", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [{ id: "demo", available: true }],
+      configuredProvider: "fake",
+      remoteLocalAi: { available: true, connected: false, model: "hermes3:8b", ready: false },
+    });
+    expect(parsed.remoteLocalAi).toEqual({
+      available: true,
+      connected: false,
+      model: "hermes3:8b",
+      ready: false,
+    });
+    expect(isRemoteLocalAiOffered(parsed)).toBe(true);
+    expect(remoteLocalAiBlock(parsed)).toEqual(parsed.remoteLocalAi);
+  });
+
+  it("the block is ABSENT (feature OFF / older server) -> NOT offered, byte-identical Phase 21B payload", () => {
+    const parsed = parseGenerationCapabilities({ modes: [{ id: "demo", available: true }] });
+    expect(parsed).toEqual({ modes: [{ id: "demo", available: true }] });
+    expect("remoteLocalAi" in parsed).toBe(false);
+    expect(isRemoteLocalAiOffered(parsed)).toBe(false);
+    expect(remoteLocalAiBlock(parsed)).toBeNull();
+    // Null capabilities (loading / unreachable) are not offered either.
+    expect(isRemoteLocalAiOffered(null)).toBe(false);
+  });
+
+  it("drops a hostile model (URL / dotted IP / @-host / markup) to null — the connected panel can never render it", () => {
+    for (const hostileModel of [
+      "http://127.0.0.1:11434",
+      "llama3@10.0.0.7",
+      "data:text/html;base64,PHN0",
+      "hermes3:8b</p><script>alert(1)</script>",
+    ]) {
+      const parsed = parseGenerationCapabilities({
+        modes: [],
+        remoteLocalAi: { available: true, connected: true, model: hostileModel, ready: true },
+      });
+      expect(parsed.remoteLocalAi?.model).toBeNull();
+      expect(parsed.remoteLocalAi?.available).toBe(true);
+    }
+  });
+
+  it("hostile booleans never fabricate an offer or a connection claim (strict booleans)", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [],
+      remoteLocalAi: { available: "yes", connected: 1, model: "hermes3:8b", ready: "true" },
+    });
+    expect(parsed.remoteLocalAi).toEqual({
+      available: false,
+      connected: false,
+      model: "hermes3:8b",
+      ready: false,
+    });
+    // available:false -> NOT offered despite the block being present.
+    expect(isRemoteLocalAiOffered(parsed)).toBe(false);
+    expect(remoteLocalAiBlock(parsed)).toBeNull();
+  });
+
+  it("a missing/garbled/blank block is omitted (never crashes, never offered)", () => {
+    for (const raw of [
+      { modes: [], remoteLocalAi: null },
+      { modes: [], remoteLocalAi: undefined },
+      { modes: [], remoteLocalAi: "garbage" },
+      { modes: [], remoteLocalAi: 42 },
+      { modes: [], remoteLocalAi: {} },
+    ]) {
+      const parsed = parseGenerationCapabilities(raw);
+      expect("remoteLocalAi" in parsed).toBe(false);
+      expect(isRemoteLocalAiOffered(parsed)).toBe(false);
+    }
+  });
+
+  it("a non-string model is dropped to null", () => {
+    const parsed = parseGenerationCapabilities({
+      modes: [],
+      remoteLocalAi: { available: true, connected: false, model: 42, ready: false },
+    });
+    expect(parsed.remoteLocalAi?.model).toBeNull();
+  });
+
+  it("hand-constructed capabilities (parser bypassed) stay safe for the panel guards", () => {
+    // remoteLocalAiBlock re-sanitizes defensively: even a hand-built object
+    // (parser bypassed) with a hostile model can never reach the panel.
+    const hostile: GenerationCapabilitiesResponse = {
+      modes: [],
+      remoteLocalAi: {
+        available: true,
+        connected: true,
+        model: "http://127.0.0.1:11434",
+        ready: true,
+      },
+    };
+    const block = remoteLocalAiBlock(hostile);
+    expect(block).not.toBeNull();
+    // The hostile model is DROPPED by the last-line guard (hostile booleans
+    // are re-checked too), so the panel omits the Model line.
+    expect(block?.model).toBeNull();
+    expect(block?.available).toBe(true);
+    expect(block?.connected).toBe(true);
+    expect(isRemoteLocalAiOffered(hostile)).toBe(true);
   });
 });
 

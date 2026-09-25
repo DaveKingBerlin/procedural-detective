@@ -3,6 +3,7 @@ import type {
   GenerationCapabilitiesResponse,
   GenerationModeDTO,
   GenerationModeId,
+  RemoteLocalAiDTO,
 } from "../api/types";
 import { effectiveProviderMode, providerIsReported } from "./providerMode";
 
@@ -201,6 +202,74 @@ export const DEMO_ONLY_CAPABILITIES: GenerationCapabilitiesResponse = Object.fre
 });
 
 /**
+ * Phase 22 — sanitize the trust-boundary `remoteLocalAi` block (BYO-Ollama
+ * bridge) into the typed {@link RemoteLocalAiDTO}, or null when the block is
+ * absent/garbled.
+ *
+ * Hard rules (same spirit as every other field on this boundary):
+ *   - `available` / `connected` / `ready` are STRICT booleans — anything else
+ *     reads false, so a hostile reply can never fabricate an offer or a
+ *     connection claim;
+ *   - `model` passes the module's last-line `safeDisplay` sanitizer: a value
+ *     carrying a URL/data/file/javascript token, an IPv4 dotted literal, an
+ *     `@`-joined host hint or a raw angle bracket is dropped to null (the
+ *     panel then omits the Model line rather than render hostile text).
+ * The block exists ONLY when ENABLE_BRIDGE=true (an OFF server omits the key
+ * entirely → null → the feature is not offered). Never throws.
+ */
+export function parseRemoteLocalAi(raw: unknown): RemoteLocalAiDTO | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const block = raw as {
+    available?: unknown;
+    connected?: unknown;
+    model?: unknown;
+    ready?: unknown;
+  };
+  // An object that names NONE of the four known fields is not a bridge block
+  // at all ({} / a totally foreign shape) — treat it as absent so a malformed
+  // reply can never surface an empty-but-present offer.
+  const hasAnyField =
+    "available" in block || "connected" in block || "model" in block || "ready" in block;
+  if (!hasAnyField) return null;
+  const model = typeof block.model === "string" ? block.model : null;
+  return {
+    available: typeof block.available === "boolean" ? block.available : false,
+    connected: typeof block.connected === "boolean" ? block.connected : false,
+    model: model !== null && model !== "" && !isUnsafeDisplayString(model) ? model : null,
+    ready: typeof block.ready === "boolean" ? block.ready : false,
+  };
+}
+
+/**
+ * Phase 22 — True ONLY when the capability DTO actually OFFERS the BYO-Ollama
+ * bridge: the parsed `remoteLocalAi` block exists AND its `available` is the
+ * strict boolean true. Absence (feature OFF / older server / malformed
+ * payload) → false → the pairing/status panel renders nothing and the
+ * landing//new pages stay byte-identical to Phase 21B.
+ */
+export function isRemoteLocalAiOffered(
+  capabilities: GenerationCapabilitiesResponse | null,
+): boolean {
+  return remoteLocalAiBlock(capabilities) !== null;
+}
+
+/**
+ * The parsed SANITIZED `remoteLocalAi` block when the feature is offered (see
+ * {@link isRemoteLocalAiOffered}), else null.
+ *
+ * The block is re-parsed through {@link parseRemoteLocalAi} here — the same
+ * last-line discipline {@link selectableGenerationModes} uses for labels: even
+ * a HAND-CONSTRUCTED capabilities object (parser bypassed) is sanitized again
+ * (strict booleans, hostile model dropped) before the panel can render it.
+ */
+export function remoteLocalAiBlock(
+  capabilities: GenerationCapabilitiesResponse | null,
+): RemoteLocalAiDTO | null {
+  const block = parseRemoteLocalAi(capabilities?.remoteLocalAi);
+  return block !== null && block.available === true ? block : null;
+}
+
+/**
  * Re-parse the trust-boundary payload into the typed contract. Only the three
  * frozen ids survive; unknown mode objects/fields are dropped; `available` is
  * a strict boolean (anything else reads as false — never favours an option).
@@ -215,6 +284,12 @@ export const DEMO_ONLY_CAPABILITIES: GenerationCapabilitiesResponse = Object.fre
  * MISSING or unknown value is DROPPED so consumers treat it as UNKNOWN (never
  * as "fake", and never driving a deterministic claim). Unknown extra fields
  * are ignored as before.
+ *
+ * Phase 22: the top-level `remoteLocalAi` (BYO-Ollama bridge status block) is
+ * re-sanitized through {@link parseRemoteLocalAi} — strict booleans + model
+ * through `safeDisplay`. A MISSING/unknown block is OMITTED (feature not
+ * offered); a hostile block can neither fabricate an offer nor a connection
+ * claim.
  *
  * Never throws: a malformed reply resolves to an empty allowlist.
  */
@@ -245,6 +320,7 @@ export function parseGenerationCapabilities(raw: unknown): GenerationCapabilitie
     }
     modes.push(dto);
   }
+  const parsed: GenerationCapabilitiesResponse = { modes };
   // Phase 21B (DEF-096): the closed provider enum is re-sanitized here. An
   // absent/unknown/malformed value is OMITTED from the parsed result — every
   // consumer then reads it as UNKNOWN (backward compatible with older servers)
@@ -252,12 +328,15 @@ export function parseGenerationCapabilities(raw: unknown): GenerationCapabilitie
   // story from this field).
   const configuredRaw = (raw as { configuredProvider?: unknown }).configuredProvider;
   if (typeof configuredRaw === "string" && CONFIGURED_PROVIDER_IDS.includes(configuredRaw as ConfiguredProvider)) {
-    return {
-      modes,
-      configuredProvider: configuredRaw as ConfiguredProvider,
-    };
+    parsed.configuredProvider = configuredRaw as ConfiguredProvider;
   }
-  return { modes };
+  // Phase 22 — the BYO-Ollama bridge status block. Omitted when absent so an
+  // ENABLE_BRIDGE=false server keeps a byte-identical response shape.
+  const remoteLocalAi = parseRemoteLocalAi((raw as { remoteLocalAi?: unknown }).remoteLocalAi);
+  if (remoteLocalAi !== null) {
+    parsed.remoteLocalAi = remoteLocalAi;
+  }
+  return parsed;
 }
 
 /**

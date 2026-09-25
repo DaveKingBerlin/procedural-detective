@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
-import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
+import type { GenerationCapabilitiesResponse, GenerationModeId, RemoteLocalAiDTO } from "../api/types";
 import { demoCtaNote } from "../journey/generationMode";
 import { providerQualifierFromCapabilities } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
@@ -647,5 +647,103 @@ describe("/new — DEF-096 / DEF-097 (Phase 21B) truthful surfaces for probe-dow
     expect(markup).not.toContain("Demo mode active");
     expect(markup).not.toContain('data-testid="generation-mode-demo-notice"');
     expect(markup).not.toContain("uses the built-in deterministic generator in this demo build");
+  });
+});
+
+describe("/new — Phase 22 BYO-Ollama pairing/status panel", () => {
+  const renderWithCaps = (capabilities: GenerationCapabilitiesResponse | null): string =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/new"]}>
+        <NewCasePage capabilities={capabilities} />
+      </MemoryRouter>,
+    );
+
+  const OFFERED_DISCONNECTED: GenerationCapabilitiesResponse = {
+    modes: [
+      { id: "demo", available: true },
+      { id: "local", available: false, label: "Local AI", model: "llama3.2:3b" },
+    ],
+    configuredProvider: "fake",
+    remoteLocalAi: { available: true, connected: false, model: null, ready: false },
+  };
+
+  const OFFERED_CONNECTED: GenerationCapabilitiesResponse = {
+    modes: [{ id: "demo", available: true }],
+    configuredProvider: "fake",
+    remoteLocalAi: {
+      available: true,
+      connected: true,
+      model: "hermes3:8b",
+      ready: true,
+    },
+  };
+
+  it("default OFF (no remoteLocalAi block) — NO pairing panel and the Phase 21B generation-mode section stays byte-identical", () => {
+    const markup = renderWithCaps({ modes: [{ id: "demo", available: true }] });
+    expect(markup).not.toContain('data-testid="local-ai-bridge-panel"');
+    expect(markup).not.toContain("Connect local Ollama");
+    expect(markup).not.toContain("Status: Not connected");
+    // The Phase 21B lines are untouched.
+    expect(markup).toContain('data-testid="generation-mode-demo-notice"');
+    expect(markup).toContain("Generation mode: Deterministic demo");
+  });
+
+  it("offered + not connected -> the truthful Local-AI bridge lines + [Connect local Ollama] (still read-only generation-mode), no code yet", () => {
+    const markup = renderWithCaps(OFFERED_DISCONNECTED);
+    expect(markup).toContain('data-testid="local-ai-bridge-panel"');
+    expect(markup).toContain("Local AI (Use Ollama running on this computer)");
+    expect(markup).toContain('data-testid="bridge-status-not-connected"');
+    expect(markup).toContain("Status: Not connected");
+    expect(markup).toContain("Connect local Ollama");
+    expect(markup).not.toContain('data-testid="bridge-pairing-code"');
+    expect(markup).not.toContain("pd-ollama-bridge connect");
+  });
+
+  it("offered + connected (server-authoritative fixture) -> 'Local AI — Connected / Model / Bridge: Ready'", () => {
+    const markup = renderWithCaps(OFFERED_CONNECTED);
+    expect(markup).toContain('data-testid="bridge-connected"');
+    expect(markup).toContain("Local AI — Connected");
+    expect(markup).toContain("Model: hermes3:8b");
+    expect(markup).toContain("Bridge: Ready");
+    expect(markup).not.toContain("Status: Not connected");
+    expect(markup).not.toContain("Connect local Ollama");
+  });
+
+  it("a hostile remoteLocalAi model never reaches the panel markup (parser drops it)", () => {
+    const markup = renderWithCaps({
+      modes: [{ id: "demo", available: true }],
+      configuredProvider: "fake",
+      remoteLocalAi: {
+        available: true,
+        connected: true,
+        model: "http://127.0.0.1:11434 — ip=192.168.1.9",
+        ready: true,
+      },
+    });
+    expect(markup).not.toContain("127.0.0.1");
+    expect(markup).not.toContain("11434");
+    expect(markup).not.toContain("192.168.1.9");
+    // The connected headline still renders truthfully (model line omitted).
+    expect(markup).toContain("Local AI — Connected");
+    expect(markup).not.toContain("Model:");
+  });
+
+  it("a hostile remoteLocalAi block cannot manufacture a connection claim", () => {
+    const hostileOffer: GenerationCapabilitiesResponse = {
+      modes: [{ id: "demo", available: true }],
+      configuredProvider: "fake",
+      remoteLocalAi: {
+        available: "yes",
+        connected: 1,
+        model: "hermes3:8b",
+        ready: "true",
+      } as unknown as RemoteLocalAiDTO,
+    };
+    const markup = renderWithCaps(hostileOffer);
+    // Strict booleans: not offered, so the panel renders nothing at all — the
+    // page cannot show a pairing UI or a connection claim from a hostile offer.
+    expect(markup).not.toContain('data-testid="local-ai-bridge-panel"');
+    expect(markup).not.toContain("Local AI — Connected");
+    expect(markup).not.toContain("Connect local Ollama");
   });
 });

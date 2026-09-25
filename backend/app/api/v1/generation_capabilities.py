@@ -53,9 +53,10 @@ router = APIRouter(tags=["generation-capabilities"])
 _LOCAL_LABEL = "Local AI"
 
 # The CLOSED enum of provider values the DTO may ever advertise. The Settings
-# field is already a Literal of exactly these three, so it cannot be malformed;
-# the allowlist is a defensive fail-closed guard so a hostile injected settings
-# object can never turn ``configuredProvider`` into a non-enum string.
+# field is already a Literal of exactly these three (+ the Phase 22
+# "remote_client" bridge mode), so it cannot be malformed; the allowlist is a
+# defensive fail-closed guard so a hostile injected settings object can never
+# turn ``configuredProvider`` into a non-enum string.
 _PROVIDER_ALLOWLIST: tuple[str, ...] = ("fake", "ollama", "live")
 
 
@@ -63,19 +64,84 @@ def _configured_provider(settings: object) -> str:
     """Backend-authoritative, sanitized provider enum for the DTO.
 
     The value is the EXACT raw operator setting (``Settings.generation_provider``,
-    a ``Literal["fake","ollama","live"]``) — emitted verbatim, never a URL,
-    host/IP, model token or credential. Defensive allowlist (fail closed):
-    any non-enum value (possible only from a hostile injected settings object)
+    a ``Literal["fake","ollama","live","remote_client"]``) — emitted verbatim,
+    never a URL, host/IP, model token or credential. Defensive allowlist (fail
+    closed): a value outside the Phase 21B closed set {fake, ollama, live}
     resolves to ``"fake"`` — the one provider that is always server-enforced
-    and needs no network, and exactly the runtime fallback branch the provider
-    factory uses for any unknown value
-    (``GenerationService._build_default_provider_factory`` else-branch), so the
-    field always reports what the backend will actually run.
+    and needs no network.
+
+    Phase 22: ``remote_client`` (the BYO-Ollama bridge) is a NEW separate
+    concept and is NOT a ``configuredProvider`` value (Phase 21B contract). It
+    projects onto the closed set as ``"fake"`` here (the documented fail-closed
+    default), and its TRUTHFUL signal lives in the top-level ``remoteLocalAi``
+    block instead. ``demo.available`` never becomes true for it (see
+    ``_demo_available``), so a bridge deployment is never mislabelled as the
+    deterministic demo.
     """
     value = getattr(settings, "generation_provider", None)
     if value in _PROVIDER_ALLOWLIST:
         return value
     return "fake"
+
+
+def _demo_available(configured_provider: str, settings: object) -> bool:
+    """Truthful Phase 21B rule: the deterministic demo pipeline is server-
+    enforced ONLY on the fake profile. A remote_client (bridge) backend does
+    NOT run the fake pipeline (its closed-set projection is ``"fake"`` for the
+    untouchable Phase 21B enum), so demo.available stays false there; any
+    OTHER value (including a hostile injected string) keeps the historical
+    fail-closed rule ``configuredProvider == "fake"``."""
+    if getattr(settings, "generation_provider", None) == "remote_client":
+        return False
+    return configured_provider == "fake"
+
+
+def _current_session_scope(request: Request) -> str | None:
+    """Best-effort anonymous-session detection for the PUBLIC capability
+    endpoint: a VALID ``anonymousSessionToken`` bearer scopes the truthful
+    ``remoteLocalAi.connected`` value to its own session. An absent/garbled/
+    expired bearer simply leaves ``connected=false`` for the anonymous caller —
+    the endpoint stays public and never hard-fails on a header it did not
+    require."""
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        return None
+    try:
+        from app.auth.tokens import parse_bearer, verifier
+
+        token = parse_bearer(authorization)
+        row = request.app.state.store.get_session_by_verifier(verifier(token))
+        if row is None:
+            return None
+        if request.app.state.clock.now() >= row.quota_window_end:
+            return None
+        return row.session_id
+    except Exception:  # noqa: BLE001 - public endpoint never hard-fails
+        return None
+
+
+def _remote_local_ai(request: Request, settings: object) -> dict | None:
+    """Truthful top-level ``remoteLocalAi`` block (Phase 22), or None when the
+    bridge feature is disabled (the DTO then omits the key entirely).
+
+    NEVER includes the bridge token, secret, IP or Ollama URL — only booleans
+    and the sanitized model label, scoped to the requester's session."""
+    if not bool(getattr(settings, "enable_bridge", False)):
+        return None
+    scope = _current_session_scope(request)
+    registry = getattr(request.app.state, "bridge_registry", None)
+    state = {"connected": False, "model": None, "ready": False}
+    if scope is not None and registry is not None:
+        try:
+            state = registry.status_for_scope(scope)
+        except Exception:  # noqa: BLE001 - sanitized degrade
+            state = {"connected": False, "model": None, "ready": False}
+    return {
+        "available": True,
+        "connected": bool(state.get("connected", False)),
+        "model": state.get("model"),
+        "ready": bool(state.get("ready", False)),
+    }
 
 
 def _live_configured(settings: object) -> bool:
@@ -142,7 +208,7 @@ def generation_capabilities(request: Request) -> dict:
     settings = request.app.state.settings
     configured_provider = _configured_provider(settings)
     modes: list[dict] = [
-        {"id": "demo", "available": configured_provider == "fake"}
+        {"id": "demo", "available": _demo_available(configured_provider, settings)}
     ]
 
     # Local AI: only the SELECTED provider is probed.
@@ -165,4 +231,11 @@ def generation_capabilities(request: Request) -> dict:
                 "available": getattr(settings, "generation_provider", None) == "live",
             }
         )
-    return {"modes": modes, "configuredProvider": configured_provider}
+    body: dict = {"modes": modes, "configuredProvider": configured_provider}
+    remote_local_ai = _remote_local_ai(request, settings)
+    if remote_local_ai is not None:
+        # Phase 22 — the BYO-Ollama bridge is a NEW top-level concept (never a
+        # configuredProvider value). The key is OMITTED entirely when the
+        # feature is disabled so the existing byte-identical DTO stays.
+        body["remoteLocalAi"] = remote_local_ai
+    return body

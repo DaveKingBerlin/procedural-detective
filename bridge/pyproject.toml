@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pd-ollama-bridge"
+version = "0.1.0"
+description = "Phase 22 BYO-Ollama local bridge client for Procedural Detective"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=13",
+    "httpx>=0.24",
+]
+
+[project.scripts]
+pd-ollama-bridge = "pd_ollama_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pd_ollama_bridge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"

@@ -32,6 +32,12 @@ _SAFE_FIELDS = frozenset(
         "remainingGlobalCalls", "remainingCoreCalls", "remainingAssetCalls",
         "proceduralAssetCount", "failedAssetCount", "environmentId",
         "fallbackSource", "assetId", "matchedAlias", "provenance", "resolved",
+        # Phase 22 — sanitized BYO-Ollama bridge lifecycle fields. Opaque ids /
+        # safe labels / bounded numbers only: NEVER the pairing code, the
+        # bridge session token, a prompt, model output, CaseTruth, the local
+        # Ollama URL or client IP.
+        "bridgeSessionId", "pairingSessionId", "jobId", "schemaId",
+        "timeoutMs", "latencyMs", "expiresInSeconds", "resultStatus",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

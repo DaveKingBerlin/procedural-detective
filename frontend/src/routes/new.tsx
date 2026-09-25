@@ -14,6 +14,7 @@ import {
 } from "../journey/examplePrompts";
 import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, demoCtaLabel, demoCtaNote } from "../journey/generationMode";
 import { GenerationModeDisplay } from "../journey/generationModeSelector";
+import LocalAiBridgePanel from "../journey/LocalAiBridgePanel";
 import {
   providerPathNoteFromCapabilities,
   providerQualifierFromCapabilities,
@@ -266,6 +267,18 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
             prompts or diagnostics are ever rendered — only frozen public
             labels — and no click changes the provider. */}
         <GenerationModeDisplay capabilities={capabilities} />
+
+        {/* Phase 22 — BYO-Ollama pairing/status panel (PER-CREATOR /new ONLY).
+            Gated on the capability DTO advertising remoteLocalAi.available
+            (ENABLE_BRIDGE=true); when the block is absent (§36 default OFF)
+            this renders NOTHING and the generation-mode section stays
+            byte-identical to Phase 21B. The panel only ever talks to the app
+            server with an anonymous session it creates itself — the browser
+            never touches a local Ollama and never opens a bridge WebSocket
+            (the bridge CLI owns that WS). Player routes (/scene, /accuse,
+            /reveal) never render this component and never call the bridge
+            endpoints — the backend enforces the same session scoping. */}
+        <LocalAiBridgePanel capabilities={capabilities} />
 
         {/* Phase 16.2 §20 — honest unavailability (Phase 21 F-03: storage is
             legacy-only now — no user action writes `pd_generation_mode`, but
