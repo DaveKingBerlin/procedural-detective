@@ -379,3 +379,54 @@ describe("PD-SEC-01 — no undiscovered evidence title/description reaches the n
     expect(model.groups.flatMap((group) => group.entries).filter((e) => e.evidenceId === "record_witness_hall_01")).toEqual([]);
   });
 });
+
+describe("Phase 19J §30 — the notebook records the ACTIVITY_LOG item neutrally (no row copies, no auto answer summary)", () => {
+  /** A discovered/read ACTIVITY_LOG record carrying 15–20 generated rows. The
+   *  canonical 21:18 row IS present in content (index 7) — the leak guard must
+   *  keep it out of the notebook. */
+  function makeActivityLogRecord(count: number): EvidenceReadResultDTO {
+    const entries: Array<{ time: string; text: string }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const minute = 21 * 60 + 4 + index * 2; // 21:04 .. 21:32 / 21:42
+      const hh = String(Math.floor(minute / 60)).padStart(2, "0");
+      const mm = String(minute % 60).padStart(2, "0");
+      entries.push({ time: `2026-09-11T${hh}:${mm}:00+02:00`, text: `Scheduled task line ${index + 1}` });
+    }
+    expect(entries[7].time).toContain("21:18"); // canonical row is really there
+    return {
+      evidenceId: "email_thomas_01",
+      kind: "email",
+      title: "Laptop activity log",
+      description: null,
+      openedAt: "2026-09-11T22:20:00+02:00",
+      readByPlayer: true,
+      content: { renderType: "ACTIVITY_LOG", entries },
+    } as EvidenceReadResultDTO;
+  }
+
+  for (const count of [15, 20]) {
+    it(`a ${count}-row ACTIVITY_LOG contributes ONE neutral line — never the ${count} rows, the canonical time, or an automatic summary`, () => {
+      const model = modelFor(["email_thomas_01"], ["email_thomas_01"], [makeActivityLogRecord(count)]);
+      const json = JSON.stringify(model);
+
+      // The evidence item appears as ONE neutral line (the app/published title).
+      expect(json.match(/Laptop activity log/g) ?? []).toHaveLength(1);
+      const digital = groupOf(model, "digital-physical").entries;
+      const item = digital.find((entry) => entry.evidenceId === "email_thomas_01");
+      expect(item?.label).toBe("Laptop activity log");
+      expect(item?.detail).toBeNull();
+
+      // NONE of the generated rows reach the notebook (no content.entries
+      // consumer exists — the §30 "record the item, not all rows" rule).
+      expect(json).not.toContain("Scheduled task line");
+      expect(groupOf(model, "timeline").entries).toEqual([]);
+
+      // No automatic answer summary (e.g. "The crime happened at 21:18.") and
+      // no canonical-clock leakage from the log rows (21:18 IS in content).
+      expect(json).not.toMatch(/crime happened|murder occurred|auto-?summary/i);
+      expect(json).not.toContain("21:18"); // canonical time absent
+      expect(json).not.toContain("21:04");
+      expect(json).not.toContain("21:42");
+    });
+  }
+});

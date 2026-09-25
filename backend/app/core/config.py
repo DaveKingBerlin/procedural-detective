@@ -419,6 +419,37 @@ class Settings(BaseSettings):
             "(512..32768)."
         ),
     )
+    # -- Phase 19J — deterministic activity-log temporal window --------------
+    # The generated computer activity log spans ``[canonical - BEFORE,
+    # canonical + AFTER]`` minutes around the app-owned canonical evidence
+    # time (Phase19J §15). App-level deterministic: the validator clamps the
+    # total span to WINDOW_HARD_MAX_TOTAL_MINUTES (120) regardless of the
+    # configured values, so a misconfiguration can never widen the window.
+    activity_log_window_before_minutes: int = Field(
+        default=60,
+        ge=0,
+        le=120,
+        description=(
+            "ACTIVITY_LOG_WINDOW_BEFORE_MINUTES (0..120; default 60). "
+            "A configured 0 is honored as \"no span in that direction\" "
+            "(\"-\" side of the generated log starts AT the canonical time) "
+            "— never silently replaced by the default (ADV-257)."
+        ),
+    )
+    activity_log_window_after_minutes: int = Field(
+        default=60,
+        ge=0,
+        le=120,
+        description=(
+            "ACTIVITY_LOG_WINDOW_AFTER_MINUTES (0..120; default 60). "
+            "A configured 0 is honored as \"no span in that direction\" "
+            "(\"+\" side of the generated log stops AT the canonical time) "
+            "— never silently replaced by the default (ADV-257). A 0/0 "
+            "window leaves the deterministic validator no room for the "
+            "15..20 strictly-unique rows, so every log fails the window "
+            "check (fail-closed, never a silent wider window)."
+        ),
+    )
     # -- Phase 22 — Bring Your Own Ollama / remote local-provider bridge ------
     # Feature flag. OFF by DEFAULT so the existing app is byte-identical:
     # ENABLE_BRIDGE=false -> every /api/v1/bridge/* route is 404, the provider

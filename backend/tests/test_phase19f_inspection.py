@@ -81,7 +81,7 @@ from phase6_helpers import (  # noqa: E402
     interact,
     playthrough,
 )
-from test_ollama_driver import _case_people, _evidence, _j, _run  # noqa: E402
+from test_ollama_driver import _case_people, _evidence, _j, _run, _alog_posts  # noqa: E402
 from test_phase19e_semantic_pipeline import _weapon_prompt, _named_spec  # noqa: E402
 from test_phase7_helpers import assert_no_pre_reveal_material  # noqa: E402
 
@@ -694,11 +694,18 @@ def test_solver_isolation_decorative_objects_do_not_change_the_case():
         posts = [
             _j(_case_people(weapon="kitchen_knife")),
             _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+            *_alog_posts('2026-09-11T23:42:00+02:00'),
             _j(world),
         ]
         for name in decor_names:
             posts.append(_named_spec(name))
-        record, _transport = _run(posts, prompt=_weapon_prompt("kitchen knife"))
+        # 7 core calls (case/evidence/4 activity logs/world) + one ASSET_SPEC
+        # per distinct decorative object — a 20-decor world needs a matching
+        # global ceiling (the core + asset budgets are unchanged).
+        record, _transport = _run(
+            posts, prompt=_weapon_prompt("kitchen knife"),
+            max_llm_calls_per_generation=40,
+        )
         assert record.state is GenerationState.PUBLISHED
         return record
 

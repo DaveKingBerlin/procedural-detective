@@ -39,6 +39,16 @@ class GenerationStage(Enum):
     # Phase 16_2 Ollama-stage-driver internal AssetSpec stages.
     ASSET_SPEC = "asset_spec"
     ASSET_SPEC_REPAIR = "asset_spec_repair"
+    # Phase 19J Ollama-stage-driver internal ACTIVITY_LOG stages. Like
+    # ASSET_SPEC / ASSET_SPEC_REPAIR they are driver-internal request names:
+    # they key a structured activity-log round-trip through the SAME
+    # ``GenerateRequest`` / ``ProviderResult`` boundary and NEVER appear in the
+    # controller's ``STAGE_ORDER`` (the deterministic parser never consumes
+    # them — the driver validates their output with the Phase 19J validator).
+    # ``ACTIVITY_LOG_REPAIR`` carries ONLY machine-readable validation
+    # findings + the locked canonical time (Phase19J §20/§7).
+    ACTIVITY_LOG = "activity_log"
+    ACTIVITY_LOG_REPAIR = "activity_log_repair"
 
 
 @dataclass(frozen=True)

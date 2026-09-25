@@ -200,7 +200,7 @@ def test_malicious_duplicate_response_discarded_and_generation_succeeds(stack):
     response = _generate(stack, token)
     assert response.status_code == 201, response.json()
     assert response.json()["status"] == "PUBLISHED"
-    assert len(bridge.jobs) == 4
+    assert len(bridge.jobs) == 8  # 4 core + 4 Phase 19J activity logs
     bridge.close()
 
 
@@ -307,7 +307,7 @@ def test_malicious_late_response_after_cancel_discarded_no_corruption(timeout_st
     bridge2.connect_reconnect(secret)
     result = _generate(timeout_stack, token, timeout=60)
     assert result.json()["status"] == "PUBLISHED"
-    assert len(bridge2.jobs) == 4
+    assert len(bridge2.jobs) == 8  # 4 core + 4 Phase 19J activity logs
     bridge2.close()
 
 

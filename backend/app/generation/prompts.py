@@ -51,6 +51,15 @@ from app.assets.specs import (
     MIN_PART_SCALE,
     PRIMITIVE_ALLOWLIST,
 )
+from app.domain.activity_log import (
+    ACTIVITY_LOG_ACTIVITY_TYPES,
+    MAX_ACTIVITY_TEXT_CHARS,
+    MAX_ACTIVITY_LOG_ENTRIES,
+    MIN_ACTIVITY_LOG_ENTRIES,
+    WINDOW_DEFAULT_AFTER_MINUTES,
+    WINDOW_DEFAULT_BEFORE_MINUTES,
+    WINDOW_HARD_MAX_TOTAL_MINUTES,
+)
 from app.domain.evidence import PROPOSITION_TYPES
 from app.world.environment import ENVIRONMENT_IDS
 
@@ -172,6 +181,31 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
             "category": f"one of {list(CATEGORY_ALLOWLIST)}",
             "subtype": "string or null",
             **__dimensions_contract(),
+        }
+    elif stage == "activity_log":
+        # Phase 19J — closed structured activity-log schema. The closed enum
+        # marker derives the transport JSON Schema ``enum`` for Ollama
+        # structured output; the strict Phase 19J validator stays the sole
+        # acceptance authority. The provider NEVER emits HTML/tables.
+        contract = {
+            "entries": [
+                {
+                    "timestamp": "ISO-8601 timestamp WITH timezone offset "
+                        "(e.g. 2026-09-11T21:18:00+02:00 or 2026-09-11T20:18:00Z)",
+                    "activityType": (
+                        "enum "
+                        + ",".join(sorted(ACTIVITY_LOG_ACTIVITY_TYPES))
+                        + " (use EXACTLY one of those EXACT tokens, never "
+                        "an invented/lowercase token)"
+                    ),
+                    "activity": (
+                        f"plain short text, 1..{MAX_ACTIVITY_TEXT_CHARS} "
+                        "characters, no HTML, no URLs, no file paths, no "
+                        "control characters, no person/weapon/motive/location "
+                        "names, no crime wording"
+                    ),
+                }
+            ]
         }
     elif stage == "evidence":
         contract = {
@@ -373,6 +407,8 @@ def schema_contract(stage: str) -> str:
 #   world_requirements -> WORLD_GRAPH  -> world_requirements_v1 -> world_requirements
 #   asset_spec      -> ASSET_SPEC      -> asset_spec_v1         -> asset_spec
 #   asset_spec_repair -> ASSET_SPEC_REPAIR -> asset_spec_repair_v1 -> asset_spec
+#   activity_log    -> ACTIVITY_LOG    -> activity_log_v1       -> activity_log
+#   activity_log_repair -> ACTIVITY_LOG_REPAIR -> activity_log_repair_v1 -> activity_log
 #   repair          -> REPAIR          -> repair_v1             -> full_draft
 STAGE_TO_PROMPT_VERSION: Mapping[str, str] = {
     "case_truth": "case_people_v1",
@@ -380,6 +416,8 @@ STAGE_TO_PROMPT_VERSION: Mapping[str, str] = {
     "world_graph": "world_requirements_v1",
     "asset_spec": "asset_spec_v1",
     "asset_spec_repair": "asset_spec_repair_v1",
+    "activity_log": "activity_log_v1",
+    "activity_log_repair": "activity_log_repair_v1",
     "repair": "repair_v1",
 }
 STAGE_TO_CONTRACT: Mapping[str, str] = {
@@ -388,6 +426,8 @@ STAGE_TO_CONTRACT: Mapping[str, str] = {
     "world_graph": "world_requirements",
     "asset_spec": "asset_spec",
     "asset_spec_repair": "asset_spec",
+    "activity_log": "activity_log",
+    "activity_log_repair": "activity_log",
     "repair": "full_draft",
 }
 # The authoritative schema-contract vocabulary (a closed set; the stale-version
@@ -398,6 +438,7 @@ CONTRACT_KEYS: frozenset[str] = frozenset(
         "evidence",
         "world_requirements",
         "asset_spec",
+        "activity_log",
         "full_draft",
     }
 )
@@ -1009,6 +1050,55 @@ REPAIR_PROMPT_v1 = (
 )
 
 
+# --- Phase 19J activity-log templates (server owns the canonical fact) ------
+
+ACTIVITY_LOG_PROMPT_v1 = (
+    "You are generating a realistic computer activity log for a detective "
+    "game — GENERATION_PROVIDER=ollama (prompt template version "
+    "activity_log_v1).\n"
+    "The server OWNS the canonical evidence fact. The time below is LOCKED: "
+    "return it VERBATIM in exactly one entry; never change it, never add a "
+    "second occurrence, never call it the crime/murder/attack time.\n\n"
+    "Canonical evidence time: __CANONICAL_TIME__\n\n"
+    "Requirements:\n"
+    f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
+    "chronological entries (strictly increasing unique timestamps).\n"
+    f"- Cover approximately the window around the canonical time: from "
+    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes relative to it "
+    f"(the whole log spans at most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
+    "- Include the locked canonical evidence time EXACTLY ONCE, in an "
+    "ordinary-looking row (e.g. \"Local user activity detected\", \"Foreground "
+    "application activity recorded\"); NEVER label it as crime, murder, "
+    "attack, death, weapon, evidence, clue, culprit or victim activity.\n"
+    "- All other entries must be plausible harmless computer/system actions "
+    "(system resume/idle, session unlock/lock, login/logout, file/document "
+    "activity, browser/mail/cloud/background sync, USB, network, backup, "
+    "application open/close).\n"
+    "- Do NOT mention: murder, crime, death, killer, murderer, victim, "
+    "weapon, motive, witness, culprit, attack, or any conclusion.\n"
+    "- Do NOT introduce named people, named weapons, motives, or locations.\n"
+    "Return ONLY a single JSON document matching this EXACT schema:\n"
+    + schema_contract("activity_log")
+    + "\n\nNo HTML, no markdown tables, no prose outside the JSON document."
+)
+
+
+ACTIVITY_LOG_REPAIR_PROMPT_v1 = (
+    "You are REPAIRING a computer activity log for a detective game — "
+    "GENERATION_PROVIDER=ollama (prompt template version activity_log_repair_v1).\n"
+    "The server OWNS the canonical evidence fact. The time below is LOCKED: "
+    "return it VERBATIM in exactly one entry; never change it, never call it "
+    "the crime/murder/attack time.\n\n"
+    "Canonical evidence time: __CANONICAL_TIME__\n\n"
+    "Your PREVIOUS activity log failed validation. Fix EXACTLY the "
+    "machine-readable findings below (deterministic app rules):\n"
+    "__FINDINGS__\n\n"
+    "Return a corrected log satisfying the SAME schema and constraints as "
+    "before (only the structured JSON document; no explanations).\n"
+    + schema_contract("activity_log")
+)
+
+
 # ---------------------------------------------------------------------------
 # internal prompt-building helpers (fill every placeholder; never leave a hole)
 # ---------------------------------------------------------------------------
@@ -1126,7 +1216,45 @@ def build_repair_prompt(previous_draft: str, issues: tuple[str, ...]) -> str:
     )
 
 
+def build_activity_log_prompt(
+    canonical_time: str,
+    *,
+    before_minutes: int = WINDOW_DEFAULT_BEFORE_MINUTES,
+    after_minutes: int = WINDOW_DEFAULT_AFTER_MINUTES,
+) -> str:
+    """The Phase 19J activity-log prompt (locked canonical time + window).
+
+    ``canonical_time`` is the app-owned evidence time injected as the locked
+    constraint; the provider only ever receives this one temporal fact plus the
+    neutral generation rules — no CaseTruth, no person/weapon/motive names.
+    """
+    return _fill(
+        template=ACTIVITY_LOG_PROMPT_v1,
+        CANONICAL_TIME=canonical_time,
+        WINDOW_BEFORE=str(max(0, int(before_minutes or 0))),
+        WINDOW_AFTER=str(max(0, int(after_minutes or 0))),
+    )
+
+
+def build_activity_log_repair_prompt(
+    canonical_time: str, findings: tuple[str, ...]
+) -> str:
+    """The Phase 19J repair prompt: machine-readable findings + locked time.
+
+    The findings are the ONLY feedback (never the rejected log, never
+    CaseTruth beyond the locked temporal constraint), so the repair can never
+    be steered by content or hidden truth (Phase19J §20).
+    """
+    return _fill(
+        template=ACTIVITY_LOG_REPAIR_PROMPT_v1,
+        CANONICAL_TIME=canonical_time,
+        FINDINGS="\n".join(f"- {finding}" for finding in findings) or "- SCHEMA_INVALID",
+    )
+
+
 __all__ = [
+    "ACTIVITY_LOG_PROMPT_v1",
+    "ACTIVITY_LOG_REPAIR_PROMPT_v1",
     "ASSET_SPEC_PROMPT_v1",
     "ASSET_SPEC_REPAIR_PROMPT_v1",
     "CASE_PEOPLE_PROMPT_v1",
@@ -1136,6 +1264,8 @@ __all__ = [
     "STAGE_TO_CONTRACT",
     "STAGE_TO_PROMPT_VERSION",
     "WORLD_REQUIREMENTS_PROMPT_v1",
+    "build_activity_log_prompt",
+    "build_activity_log_repair_prompt",
     "build_asset_spec_prompt",
     "build_asset_spec_repair_prompt",
     "build_case_people_prompt",

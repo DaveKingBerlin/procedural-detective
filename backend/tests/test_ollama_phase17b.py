@@ -374,11 +374,12 @@ def test_asset_spec_first_pass_reaches_targets():
 def test_phase17b_targets_reachable_through_full_driver():
     """The full OllamaStageDriver pipeline (mocked transport) publishes with the
     coherent asset — the geometry provider path is green end-to-end."""
-    from test_ollama_driver import _case_people, _evidence, _j as _jd, _run, _world
+    from test_ollama_driver import _case_people, _evidence, _j as _jd, _run, _world, _alog_posts
 
     posts = [
         _jd(_case_people()),
         _jd(_evidence()),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _jd(_world()),
         _j(_hermes_asset_spec_good()),
     ]
@@ -574,6 +575,8 @@ def test_stage_mapping_versions_are_current_no_stale_strings():
         "world_requirements_v1",
         "asset_spec_v1",
         "asset_spec_repair_v1",
+        "activity_log_v1",
+        "activity_log_repair_v1",
         "repair_v1",
     }
     assert current == expected
@@ -582,6 +585,7 @@ def test_stage_mapping_versions_are_current_no_stale_strings():
         "evidence",
         "world_requirements",
         "asset_spec",
+        "activity_log",
         "full_draft",
     }
     assert prompts.STAGE_TO_CONTRACT["repair"] == "full_draft"
@@ -592,6 +596,10 @@ def test_stage_mapping_versions_are_current_no_stale_strings():
     assert "world_requirements_v1" in prompts.build_world_requirements_prompt("x", None)
     assert "asset_spec_v1" in prompts.build_asset_spec_prompt("x", "decor")
     assert "asset_spec_repair_v1" in prompts.build_asset_spec_repair_prompt("x", "{}", ("i",))
+    assert "activity_log_v1" in prompts.build_activity_log_prompt("2026-09-11T21:18:00+02:00")
+    assert "activity_log_repair_v1" in prompts.build_activity_log_repair_prompt(
+        "2026-09-11T21:18:00+02:00", ("CANONICAL_TIME_MISSING",)
+    )
     assert "repair_v1" in prompts.build_repair_prompt("{}", ("i",))
 
     # NO stale version tokens anywhere in the module source (lowercase scan —

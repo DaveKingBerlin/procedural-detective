@@ -821,3 +821,310 @@ describe("Phase 19H — jsdom layout regression (live DOM: distinct rows, normal
     }
   });
 });
+
+describe("Phase 19J — 15/20-row activity logs: distinct rows, compact times, scroll region (§31/§32/§54)", () => {
+  /**
+   * Strictly chronological full-ISO production-shape entries (20:31 →
+   * 21:28 across 15/20 rows): unique timestamps, distinct ignored-safe texts.
+   * `isoAt(i)` and `clockAt(i)` mirror the SAME arithmetic so the expected
+   * <time> markup can be asserted without string drift.
+   */
+  function startMinuteOf(index: number): number {
+    return 20 * 60 + 31 + index * 3;
+  }
+  function isoAt(index: number): string {
+    const minute = startMinuteOf(index);
+    const hh = String(Math.floor(minute / 60)).padStart(2, "0");
+    const mm = String(minute % 60).padStart(2, "0");
+    return `2026-09-11T${hh}:${mm}:00+02:00`;
+  }
+  function clockAt(index: number): string {
+    const minute = startMinuteOf(index);
+    const hh = String(Math.floor(minute / 60)).padStart(2, "0");
+    const mm = String(minute % 60).padStart(2, "0");
+    return `${hh}:${mm}`;
+  }
+  function activityEntries(count: number): Array<{ time: string; text: string }> {
+    const entries: Array<{ time: string; text: string }> = [];
+    for (let index = 0; index < count; index += 1) {
+      entries.push({
+        time: isoAt(index),
+        text: `Scheduled activity ${String(index + 1).padStart(2, "0")}`,
+      });
+    }
+    return entries;
+  }
+
+  const SHIPPED_CSS = readFileSync(join(process.cwd(), "src", "index.css"), "utf8");
+
+  /** Extract the shipped CSS rule block for a selector (real newlines kept). */
+  function shippedRule(selectorPattern: string): string {
+    const match = new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`).exec(SHIPPED_CSS);
+    if (!match) throw new Error(`missing shipped rule matching ${selectorPattern}`);
+    return match[1];
+  }
+
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    container.remove();
+  });
+
+  function mountActivityLog(entries: unknown[]): void {
+    const record = recordWith({
+      renderType: "ACTIVITY_LOG",
+      title: "Activity logged at the scene",
+      entries,
+    });
+    act(() => {
+      root = createRoot(container);
+      root.render(<EvidencePanel record={record} onClose={() => {}} />);
+    });
+  }
+
+  it("renders the SHIPPED activity-log scroll-region CSS contract (max-height cap + vertical auto scroll, no forced height/min-width)", () => {
+    const block = shippedRule(`\\.evidence-activity-scroll`);
+    expect(block).toMatch(/max-height\s*:\s*24rem/);
+    expect(block).toMatch(/overflow-y\s*:\s*auto/);
+    expect(block).toMatch(/overflow-x\s*:\s*hidden/);
+    // The cap is a CEILING, not a forced box: no height/min-width rule that
+    // could force a scrollbar when the table fits or force horizontal pages.
+    expect(block).not.toMatch(/(?<!-)height\s*:/);
+    expect(block).not.toMatch(/min-width/);
+  });
+
+  for (const count of [15, 20]) {
+    it(`${count} entries render ${count} DISTINCT sibling rows: visible HH:mm, canonical dateTime, normal in-flow table (no overlap cause)`, () => {
+      mountActivityLog(activityEntries(count));
+      const rows = Array.from(container.querySelectorAll("tbody tr"));
+      expect(rows).toHaveLength(count);
+      const times = Array.from(container.querySelectorAll("time"));
+      expect(times).toHaveLength(count);
+      expect(container.querySelectorAll("td.evidence-activity-time")).toHaveLength(count);
+      expect(container.querySelectorAll("td.evidence-activity-text")).toHaveLength(count);
+      for (const row of rows) {
+        const cs = getComputedStyle(row);
+        expect(cs.display).toBe("table-row"); // normal in-flow block
+        expect(cs.position).toBe(""); // no author rule positions the row
+        expect(row.querySelectorAll("td.evidence-activity-time")).toHaveLength(1);
+        expect(row.querySelectorAll("td.evidence-activity-text")).toHaveLength(1);
+        const time = row.querySelector("time")!;
+        expect(time.textContent).toMatch(/^\d{2}:\d{2}$/); // compact visible time
+        expect(time.getAttribute("dateTime")).toMatch(/^2026-09-11T\d{2}:\d{2}:\d{2}\+02:00$/);
+      }
+      // Every canonical datetime is present once, in chronological order.
+      const datetimes = times.map((t) => t.getAttribute("dateTime") ?? "");
+      expect([...datetimes].sort()).toEqual(datetimes);
+      // All rows sit DIRECTLY in <tbody> (no positioned wrapper between them).
+      expect(container.querySelector("tbody")!.childElementCount).toBe(count);
+      const table = container.querySelector("table.evidence-activity-log")!;
+      expect(getComputedStyle(table).display).toBe("table");
+      expect(getComputedStyle(table).position).toBe("");
+    });
+  }
+
+  it("STATIC markup — both counts keep the compact contract: N <tr> rows, N <time>, visible HH:mm for every entry, canonical ISO only in dateTime", () => {
+    for (const count of [15, 20]) {
+      const entries = activityEntries(count);
+      const record = recordWith({ renderType: "ACTIVITY_LOG", title: "Activity logged at the scene", entries });
+      const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+      expect(html.match(/<tr>/g) ?? []).toHaveLength(count + 1); // + thead row
+      expect(html.match(/<time /g) ?? []).toHaveLength(count);
+      expect(html.match(/>\d{2}:\d{2}<\/time>/g) ?? []).toHaveLength(count);
+      // The canonical full ISO appears EXACTLY once per entry and only as the
+      // dateTime attribute (never as visible text) — the 19H overlap cause.
+      expect(html.match(/\+02:00/g) ?? []).toHaveLength(count);
+      for (let index = 0; index < count; index += 1) {
+        expect(html).toContain(`<time dateTime="${isoAt(index)}">${clockAt(index)}</time>`);
+      }
+      expect(html).not.toMatch(/>2026-09-11T\d{2}:\d{2}:\d{2}\+02:00</);
+    }
+  });
+
+  it("reload/identical-render determinism — the same 15- and 20-row DTO renders byte-identical markup (§18/§54)", () => {
+    for (const entries of [activityEntries(15), activityEntries(20)]) {
+      const record = recordWith({ renderType: "ACTIVITY_LOG", title: "Activity logged at the scene", entries });
+      const first = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+      const second = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+      expect(second).toBe(first);
+    }
+  });
+
+  it("the scroll region is a labelled keyboard-focusable landmark with a fixed heading and logical reading order (§32/§34)", () => {
+    const record = recordWith({ renderType: "ACTIVITY_LOG", title: "Activity logged at the scene", entries: activityEntries(20) });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    // The region wrapper is deterministic markup: class + role + tabindex +
+    // aria-label, with NO inline style/positioning or forced dimensions.
+    expect(html).toContain(
+      '<div class="evidence-activity-scroll" role="region" tabindex="0" aria-label="Activity log entries">',
+    );
+    expect(html).not.toContain('style="');
+    // Reading order: fixed heading -> scroll region -> table -> Close button.
+    const headingPos = html.indexOf(">Activity log</h4>");
+    const regionPos = html.indexOf('class="evidence-activity-scroll"');
+    const tablePos = html.indexOf('<table class="evidence-table evidence-activity-log">');
+    const firstTimePos = html.indexOf("<time ");
+    const closePos = html.indexOf('data-testid="evidence-close"');
+    expect(headingPos).toBeGreaterThan(-1);
+    expect(regionPos).toBeGreaterThan(headingPos);
+    expect(tablePos).toBeGreaterThan(regionPos);
+    expect(firstTimePos).toBeGreaterThan(tablePos);
+    expect(closePos).toBeGreaterThan(firstTimePos);
+    // The semantic table surface is intact (NOT replaced by canvas-only text).
+    expect(html).toContain("<thead>");
+    expect(html).toContain("</thead><tbody><tr>");
+    expect(html).toContain('<th scope="col">Time</th>');
+    expect(html).toContain('<th scope="col">Activity</th>');
+  });
+
+  it("a SHORT table uses the SAME deterministic wrapper but no scrollbar is forced — max-height is a ceiling, not a fixed box (§32)", () => {
+    // 4 rows already fit the natural panel — the wrapper stays the single code
+    // path (no conditional markup), but nothing forces the region taller than
+    // its content: the shipped cap only engages when rows outgrow 24rem.
+    mountActivityLog(activityEntries(4));
+    const wrapper = container.querySelector("div.evidence-activity-scroll")!;
+    expect(wrapper).not.toBeNull();
+    expect(wrapper.getAttribute("role")).toBe("region");
+    expect(wrapper.getAttribute("tabindex")).toBe("0");
+    const region = shippedRule(`\\.evidence-activity-scroll`);
+    expect(region).toMatch(/max-height\s*:\s*24rem/);
+    expect(region).toMatch(/overflow-y\s*:\s*auto/);
+    expect(region).not.toMatch(/(?<!-)height\s*:/);
+    expect(Array.from(container.querySelectorAll("tbody tr"))).toHaveLength(4);
+  });
+
+  it("TIMELINE gets the SAME bounded scroll region (both renderers — no Laptop special-case, §32/§33)", () => {
+    const record = recordWith({
+      renderType: "TIMELINE",
+      events: [
+        { time: "2026-09-11T21:38:07+02:00", description: "A visitor enters the apartment" },
+        { time: "2026-09-11T22:03:41+02:00", description: "The visitor leaves in a hurry" },
+      ],
+    });
+    const html = renderToStaticMarkup(<EvidencePanel record={record} onClose={() => {}} />);
+    expect(html).toContain(
+      '<div class="evidence-activity-scroll" role="region" tabindex="0" aria-label="Timeline entries">',
+    );
+    expect(html).toContain('<table class="evidence-table evidence-timeline">');
+    expect(html).toContain('<time dateTime="2026-09-11T21:38:07+02:00">21:38</time>');
+    // Reading order: fixed heading -> region -> table.
+    expect(html.indexOf("evidence-activity-scroll")).toBeGreaterThan(html.indexOf(">Timeline</h4>"));
+    expect(html.indexOf('class="evidence-table evidence-timeline">')).toBeGreaterThan(
+      html.indexOf("evidence-activity-scroll"),
+    );
+  });
+
+  it("hostile labels & over-long text stay INERT and BOUNDED (§49/§31): escaped, clipped time cell, wrapping activity cell, 15 rows intact", () => {
+    const longRaw = "23:41:50 heavy-probe-line-2026-09-11t23:41:50+02:00-extra";
+    const entries = activityEntries(15);
+    entries[3] = {
+      time: isoAt(3),
+      text: "<img src=x onerror=alert(1)> <script>window.evil=1</script> — ひらがな — 😀",
+    };
+    // A malformed long value is kept VERBATIM (never fabricated) so it must be
+    // clipped inside its 5.5rem time cell; the 5000-char activity must wrap.
+    entries[7] = { time: longRaw, text: "X".repeat(5000) };
+    mountActivityLog(entries);
+
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(15); // nothing dropped
+    const html = container.innerHTML;
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;script&gt;window.evil=1&lt;/script&gt;");
+    expect(html).toContain("&lt;img");
+    expect(html).toContain("ひらがな");
+    expect(html).toContain("😀");
+
+    const style = document.createElement("style");
+    style.textContent = SHIPPED_CSS;
+    document.head.appendChild(style);
+    try {
+      // Time cells: the last-resort clip bounds ink to the fixed 5.5rem column
+      // (an over-long raw fallback can NEVER bleed into the Activity column).
+      const timeCells = Array.from(container.querySelectorAll("td.evidence-activity-time")) as HTMLElement[];
+      expect(timeCells).toHaveLength(15);
+      for (const cell of timeCells) {
+        const cs = getComputedStyle(cell);
+        expect(cs.overflow).toBe("hidden");
+        expect(cs.textOverflow).toBe("ellipsis");
+        expect(cs.whiteSpace).toBe("nowrap");
+        expect(cs.width).toBe("5.5rem");
+        expect(cs.position).toBe("");
+      }
+      // Activity cells: any unbroken long text wraps inside the cell — no cell
+      // bleed and no horizontal page scroll can ever form.
+      const textCells = Array.from(container.querySelectorAll("td.evidence-activity-text")) as HTMLElement[];
+      expect(textCells).toHaveLength(15);
+      for (const cell of textCells) {
+        expect(getComputedStyle(cell).overflowWrap).toBe("anywhere");
+      }
+      // The hostile row still shows its compact clock; the malformed long value
+      // stays VERBATIM inside its clipped cell.
+      const times = Array.from(container.querySelectorAll("time"));
+      const byClock = new Map(times.map((t) => [t.textContent, t]));
+      expect(byClock.get(clockAt(3))?.getAttribute("dateTime")).toBe(isoAt(3));
+      expect(byClock.get(longRaw)).toBeDefined();
+    } finally {
+      style.remove();
+    }
+  });
+});
+
+describe("Phase 19J §33 — width-independent responsive contracts (1280/600/360)", () => {
+  // jsdom ships NO layout engine, so "at 1280/600/360" is pinned as the
+  // SHIPPED stylesheet contract that makes the phase guarantees hold at EVERY
+  // panel width (same approach as the ADV-245 regression test; real-pixel
+  // geometry stays the QA/Playwright layer's domain). Every assertion reads
+  // src/index.css directly, so the contract can never drift from production.
+  const css = readFileSync(join(process.cwd(), "src", "index.css"), "utf8");
+
+  function rule(selectorPattern: string): string {
+    const match = new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`).exec(css);
+    if (!match) throw new Error(`missing shipped rule matching ${selectorPattern}`);
+    return match[1];
+  }
+
+  it("the panel box is viewport-bounded with its own vertical scroll — usable at 360px, never horizontally oversized", () => {
+    const panel = rule(`\\.evidence-panel`);
+    expect(panel).toMatch(/width\s*:\s*min\(24rem,\s*calc\(100%\s*-\s*2rem\)\)/);
+    expect(panel).toMatch(/max-height\s*:\s*calc\(100%\s*-\s*2rem\)/);
+    expect(panel).toMatch(/overflow\s*:\s*auto/);
+  });
+
+  it("fixed table layout + full width + stable 5.5rem time column at every width: time readable, no table bleed, no horizontal page scroll", () => {
+    const table = rule(`\\.evidence-activity-log,
+\\.evidence-timeline`);
+    expect(table).toMatch(/table-layout\s*:\s*fixed/);
+    expect(table).toMatch(/width\s*:\s*100%/);
+    const header = rule(`\\.evidence-activity-log th:first-child,
+\\.evidence-timeline th:first-child`);
+    expect(header).toMatch(/width\s*:\s*5\.5rem/);
+    const cell = rule(`\\.evidence-activity-time`);
+    expect(cell).toMatch(/width\s*:\s*5\.5rem/);
+    // no min-width anywhere in the table/scroll-region rules -> the table can
+    // never force the page wider than the viewport.
+    expect(table).not.toMatch(/min-width/);
+    expect(cell).not.toMatch(/min-width/);
+  });
+
+  it("activity text wraps at any width; long values stay inside their cells (wrap, not bleed)", () => {
+    const textCell = rule(`\\.evidence-activity-text`);
+    expect(textCell).toMatch(/overflow-wrap\s*:\s*anywhere/);
+    expect(textCell).toMatch(/vertical-align\s*:\s*top/);
+  });
+
+  it("the panel can scroll vertically: the long-log scroll region caps at 24rem with overflow-y auto (15–20 rows scroll inside)", () => {
+    const region = rule(`\\.evidence-activity-scroll`);
+    expect(region).toMatch(/max-height\s*:\s*24rem/);
+    expect(region).toMatch(/overflow-y\s*:\s*auto/);
+  });
+});

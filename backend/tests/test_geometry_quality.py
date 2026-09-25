@@ -24,7 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fixtures.asset_specs import GOLDEN_SPEC_CONTENT, GOLDEN_SPEC_NAMES
-from test_ollama_driver import _case_people, _evidence, _j, _run, _world
+from test_ollama_driver import _case_people, _evidence, _j, _run, _world, _alog_posts
 
 import app.assets.compiler as compiler_mod
 
@@ -162,8 +162,15 @@ def _issue_codes(raw):
 
 
 def _postscript(*specs):
-    """Driver post list: case/evidence/world + the given spec responses."""
-    return [_j(_case_people()), _j(_evidence()), _j(_world()), *[_j(s) for s in specs]]
+    """Driver post list: case/evidence + the four Phase 19J activity logs +
+    world + the given spec responses."""
+    return [
+        _j(_case_people()),
+        _j(_evidence()),
+        *_alog_posts("2026-09-11T23:42:00+02:00"),
+        _j(_world()),
+        *[_j(s) for s in specs],
+    ]
 
 
 class _ScriptedProvider:
@@ -621,7 +628,7 @@ def test_valid_repaired_spec_accepted_through_driver():
     published."""
     record, transport = _run([*_postscript(_coherent(dims=(2.5, 0.5, 0.1)), _coherent())])
     assert record.state.value == "PUBLISHED"
-    assert transport.call_count == 5
+    assert transport.call_count == 9  # 4 staged + 4 activity logs + 1 spec
 
 
 def test_second_invalid_repair_still_rejected():
@@ -704,8 +711,8 @@ def test_showcase_A_unit_confusion_driver_repair():
     bad = _coherent(dims=(10, 5, 0.15))
     record, transport = _run([*_postscript(bad, _coherent())])
     assert record.state.value == "PUBLISHED"
-    assert transport.call_count == 5
-    repair_prompt = transport.prompt_of_call(4)
+    assert transport.call_count == 9  # 4 staged + 4 activity logs + 1 spec
+    repair_prompt = transport.prompt_of_call(8)  # 0 case,1 evidence,2..5 activity logs,6 world,7 ASSET_SPEC,8 ASSET_SPEC_REPAIR
     assert "25 means 25 meters" in repair_prompt
     assert "Geometry-quality instructions" in repair_prompt
     proc = next(
@@ -726,8 +733,8 @@ def test_showcase_B_part_outside_driver_repair():
     bad = _part_with(bad, 1, transform={"position": {"x": -4.0, "y": 0.0, "z": 0.05}})
     record, transport = _run([*_postscript(bad, _coherent())])
     assert record.state.value == "PUBLISHED"
-    assert transport.call_count == 5
-    repair_prompt = transport.prompt_of_call(4)
+    assert transport.call_count == 9  # 4 staged + 4 activity logs + 1 spec
+    repair_prompt = transport.prompt_of_call(8)  # 0 case,1 evidence,2..5 activity logs,6 world,7 ASSET_SPEC,8 ASSET_SPEC_REPAIR
     assert "PART_OUTSIDE_DECLARED_BOUNDS" in repair_prompt
     assert "Geometry-quality instructions" in repair_prompt
 
@@ -740,8 +747,8 @@ def test_showcase_C_invalid_identifiers_driver_repair():
     bad = _part_with(bad, 1, role="cross guard")
     record, transport = _run([*_postscript(bad, _coherent())])
     assert record.state.value == "PUBLISHED"
-    assert transport.call_count == 5
-    repair_prompt = transport.prompt_of_call(4)
+    assert transport.call_count == 9  # 4 staged + 4 activity logs + 1 spec
+    repair_prompt = transport.prompt_of_call(8)  # 0 case,1 evidence,2..5 activity logs,6 world,7 ASSET_SPEC,8 ASSET_SPEC_REPAIR
     assert "INVALID_IDENTIFIER" in repair_prompt
     assert "a-z0-9_" in repair_prompt
 
@@ -754,8 +761,8 @@ def test_showcase_D_degenerate_origin_driver_repair():
         p["transform"]["position"] = {"x": 0.0, "y": 0.0, "z": 0.0}
     record, transport = _run([*_postscript(bad, _coherent())])
     assert record.state.value == "PUBLISHED"
-    assert transport.call_count == 5
-    repair_prompt = transport.prompt_of_call(4)
+    assert transport.call_count == 9  # 4 staged + 4 activity logs + 1 spec
+    repair_prompt = transport.prompt_of_call(8)  # 0 case,1 evidence,2..5 activity logs,6 world,7 ASSET_SPEC,8 ASSET_SPEC_REPAIR
     assert "DEGENERATE_PART_LAYOUT" in repair_prompt
     assert "recognizable" in repair_prompt.lower()
 

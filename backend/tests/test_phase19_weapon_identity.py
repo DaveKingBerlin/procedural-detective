@@ -47,6 +47,7 @@ from test_ollama_driver import (  # noqa: E402
     _evidence,
     _j,
     _run,
+    _alog_posts,
 )
 
 # The locked semantic weapon + render asset the Medium showcase pins.
@@ -83,6 +84,7 @@ def _medium_posts(weapon_obj=SEMANTIC_WEAPON_ID):
     return [
         _j(_case_people(weapon=weapon_obj)),
         _j(_evidence(weapon_obj=weapon_obj, murderer="paul_becker")),
+        *_alog_posts("2026-09-11T23:42:00+02:00"),
         _j(_medium_world()),
     ]
 
@@ -103,8 +105,8 @@ def _load_objects(record):
 def test_driver_medium_semantic_weapon_identity_preserved():
     record, transport = _run(_medium_posts(), prompt=MEDIUM_PROMPT)
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 3  # case + evidence + world (alias, no proc)
-    assert record.budget.calls == 3
+    assert transport.call_count == 7  # case + evidence + 4 activity logs + world
+    assert record.budget.calls == 7
     # the environment canonicalized from the user/LLM hint.
     assert record.draft.scene.environment_id == "hotel_suite"
 
@@ -304,6 +306,7 @@ def test_empty_world_publishes_via_locked_weapon_injection():
     posts = [
         _j(_case_people(weapon=SEMANTIC_WEAPON_ID)),
         _j(_evidence(weapon_obj=SEMANTIC_WEAPON_ID, murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(empty_world),
     ]
     record, _transport = _run(posts, prompt=MEDIUM_PROMPT)
@@ -346,6 +349,7 @@ def test_fail_closed_when_locked_weapon_cannot_be_represented():
     posts = [
         _j(_case_people(weapon="fork")),
         _j(_evidence(weapon_obj="fork", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(world),
         "<not-json>",
         "<not-json>",

@@ -46,6 +46,7 @@ from test_ollama_driver import (  # noqa: E402
     _j,
     _run,
     _world,
+    _alog_posts,
 )
 
 
@@ -209,14 +210,15 @@ def test_deterministic_local_repairs_cost_zero_calls():
 def test_driver_environment_formatting_costs_zero_extra_calls():
     """A format-only environmentHint failure never spends a provider call
     (the full driver is exercised in test_phase19_environment; this proves the
-    budget counters stay at the canonical 3-call path)."""
+    budget counters stay at the 7-call path: case/evidence + 4 Phase 19J
+    activity logs + world — environment canonicalization adds zero calls)."""
     from test_phase19_environment import _hotel_suite_prompt, _staged
 
     record, transport = _run(_staged(True), prompt=_hotel_suite_prompt())
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 3
-    assert record.budget.calls == 3
-    assert record.budget.core_calls == 3
+    assert transport.call_count == 7
+    assert record.budget.calls == 7
+    assert record.budget.core_calls == 7
     assert record.budget.asset_calls == 0
 
 
@@ -267,27 +269,19 @@ def test_driver_core_budget_exhaustion_narrows_code():
         OLLAMA_MODEL,
         _admission,
         _controller,
+        _alog_posts,
     )
 
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
-        "<not-json>",
+        *_alog_posts("2026-09-11T23:42:00+02:00"),  # pass-1 activity logs
+        "<not-json>",  # pass-1 world (parse fails -> structural issue -> repair)
+        "<not-json>",  # pass-1 world retry (still fails)
+        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),  # pass-2 evidence
+        *_alog_posts("2026-09-11T23:42:00+02:00"),  # pass-2 activity logs
+        # pass-2 world never runs: the CORE budget (12) is exhausted by the
+        # fourth pass-2 activity-log call (case is cached across passes).
     ]
 
     class _Transport:
@@ -333,6 +327,7 @@ def test_driver_core_budget_exhaustion_narrows_code():
     assert attempt.failure_code == "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED"
     assert attempt.budget.core_calls >= 12
     assert attempt.budget.calls <= 60
+    assert attempt.budget.calls == 12
 
 
 # --------------------------------------------------------------------------- #
@@ -352,13 +347,16 @@ def test_catalog_only_case_is_low_call():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world(unknown_name="kitchen knife")),
     ]
     record, transport = _run(posts, prompt=_KNIFE_PROMPT)
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 3
-    assert record.budget.calls == 3
-    assert record.budget.core_calls == 3
+    # case + evidence + 4 Phase 19J activity logs + world (kitchen knife is
+    # catalog-resolved: no ASSET_SPEC call).
+    assert transport.call_count == 7
+    assert record.budget.calls == 7
+    assert record.budget.core_calls == 7
     assert record.budget.asset_calls == 0
     assert record.budget.procedural_asset_count == 0
 
@@ -379,6 +377,7 @@ def test_no_infinite_asset_retry_loop_and_failed_asset_bounded():
     posts = [
         _j(_case_people(weapon="bronze_ceremonial_ice_pick")),
         _j(_evidence(weapon_obj="bronze_ceremonial_ice_pick", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world()),
         _always_bad_spec(),  # ASSET_SPEC
     ]
@@ -388,8 +387,8 @@ def test_no_infinite_asset_retry_loop_and_failed_asset_bounded():
     assert record.state is GenerationState.FAILED
     assert record.published is None
     # exactly 1 initial + bounded repairs; never a loop beyond the budget.
-    assert transport.call_count == 3 + 1 + MAX_SPEC_REPAIR_PASSES
-    assert record.budget.calls == 3 + 1 + MAX_SPEC_REPAIR_PASSES
+    assert transport.call_count == 7 + 1 + MAX_SPEC_REPAIR_PASSES
+    assert record.budget.calls == 7 + 1 + MAX_SPEC_REPAIR_PASSES
 
 
 def test_essential_evidence_asset_failure_stays_fail_closed():
@@ -398,6 +397,7 @@ def test_essential_evidence_asset_failure_stays_fail_closed():
     posts = [
         _j(_case_people(weapon="bronze_ceremonial_ice_pick")),
         _j(_evidence(weapon_obj="bronze_ceremonial_ice_pick", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world()),
         "<not-json>",  # ASSET_SPEC (cannot even parse)
         "<not-json>",  # ASSET_SPEC_REPAIR
@@ -415,6 +415,7 @@ def test_decorative_asset_failure_falls_back_safely():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         json.dumps({
             "environmentHint": "office",
             "locationTokens": ["office"],
@@ -566,6 +567,7 @@ def test_ollamaprovider_compatible_with_budgeted_controller():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world(unknown_name="kitchen knife")),
     ]
     transport = _Transport(posts)
@@ -603,8 +605,9 @@ def test_ollamaprovider_compatible_with_budgeted_controller():
     )
     record = controller.attempt(handle.attempt_id)
     assert record.state is GenerationState.PUBLISHED
-    assert record.budget.calls == 3
-    assert record.budget.core_calls == 3
+    # 7 core calls: case + evidence + 4 Phase 19J activity logs + world.
+    assert record.budget.calls == 7
+    assert record.budget.core_calls == 7
     assert record.budget.asset_calls == 0
 
 

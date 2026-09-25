@@ -71,7 +71,7 @@ from app.world.composer import (  # noqa: E402
     compose_world,
 )
 from app.world.extract import extract_world_requirements  # noqa: E402
-from test_ollama_driver import _case_people, _evidence, _j, _run  # noqa: E402
+from test_ollama_driver import _case_people, _evidence, _j, _run, _alog_posts  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -224,12 +224,15 @@ def test_weapon_generalization_matrix(weapon, world_names, include_spec, render_
     posts = [
         _j(_case_people(weapon=weapon_id)),
         _j(_evidence(weapon_obj=weapon_id, murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world_with(*world_names, excluded=not world_names)),
     ]
-    expected_calls = 3
+    # case + evidence + 4 Phase 19J activity logs + world (+ procedural
+    # spec when the weapon is unknown -> ASSET_SPEC).
+    expected_calls = 7
     if include_spec:
         posts.append(spec)
-        expected_calls = 4
+        expected_calls = 8
     record, transport = _run(posts, prompt=_weapon_prompt(weapon))
     _assert_weapon_contract(record, weapon_id, render_prefix)
     # provider-call impact: budgets UNCHANGED — only the staged calls were
@@ -255,6 +258,7 @@ def test_variant_weapon_materializes_own_semantic_object_next_to_base_object():
         [
             _j(_case_people(weapon="antique_brass_letter_opener")),
             _j(_evidence(weapon_obj="antique_brass_letter_opener", murderer="paul_becker")),
+            *_alog_posts('2026-09-11T23:42:00+02:00'),
             _j(_world_with("antique brass letter opener")),
         ],
         prompt=_weapon_prompt("antique brass letter opener"),
@@ -284,6 +288,7 @@ def test_weapon_already_requested_by_world_is_upgraded_not_duplicated():
     posts = [
         _j(_case_people(weapon="fork")),
         _j(_evidence(weapon_obj="fork", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j({"environmentHint": "office", "objects": [{"name": "fork", "criticality": "decorative"}], "relations": [], "unsafeUnsupported": []}),
         FORk_SPEC,
     ]
@@ -400,6 +405,7 @@ def test_decorative_objects_not_solver_required_in_driver_world():
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(world),
         GENERIC_SPEC,  # umbrella
         GENERIC_SPEC,  # toolbox
@@ -548,6 +554,7 @@ def test_unsupported_weapon_with_no_representable_geometry_fails_closed():
     posts = [
         _j(_case_people(weapon="fork")),
         _j(_evidence(weapon_obj="fork", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(world),
         "<not-json>",  # ASSET_SPEC
         "<not-json>",  # ASSET_SPEC_REPAIR 1
@@ -658,6 +665,7 @@ def test_provider_call_impact_stays_within_budget_for_rich_worlds():
     posts = [
         _j(_case_people(weapon="fork")),
         _j(_evidence(weapon_obj="fork", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(world),
         FORk_SPEC,      # fork          (asset call 1)
         mug_spec,       # coffee mug    (asset call 2)
@@ -668,9 +676,10 @@ def test_provider_call_impact_stays_within_budget_for_rich_worlds():
     assert record.state is GenerationState.PUBLISHED
     assert record.solver_proof.weapon.winner == "fork"
     budget = record.budget
-    # exactly the staged calls: 3 core (case/evidence/world) + 4 ASSET_SPEC.
-    assert budget.calls == 7
-    assert budget.core_calls == 3
+    # exactly the staged calls: 7 core (case/evidence/4 activity logs/world)
+    # + 4 ASSET_SPEC (procedural assets are their own bucket).
+    assert budget.calls == 11
+    assert budget.core_calls == 7
     assert budget.core_calls <= (budget.max_core_calls or budget.core_calls)
     assert budget.calls < 128  # MAX_LLM_CALLS_PER_GENERATION ceiling untouched
     from app.generation import pipeline
@@ -741,6 +750,7 @@ def test_solver_derives_weapon_uniquely_via_existing_surfaces():
         [
             _j(_case_people(weapon="fork")),
             _j(_evidence(weapon_obj="fork", murderer="paul_becker")),
+            *_alog_posts('2026-09-11T23:42:00+02:00'),
             _j(_world_with(excluded=True)),
             FORk_SPEC,
         ],

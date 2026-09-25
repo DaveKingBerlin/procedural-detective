@@ -159,6 +159,10 @@ _PRESENTATION_KEYS = frozenset(
         # "cctv"/"cctv_observation"/"view_record" kind
         "events",
         "cameraId",
+        # Phase 19J — clean version marker of an ACCEPTED generated activity
+        # log persisted into ``events`` (server-owned metadata; never emitted
+        # in the read DTO, which keeps the fixed cctv allowlist).
+        "activityLogVersion",
         # "testimonial"/"witness_statement"/"statement" kind
         "speakerName",
         "statement",

@@ -64,7 +64,7 @@ from phase6_helpers import (  # noqa: E402
     interact,
     playthrough,
 )
-from test_ollama_driver import _run, _staged  # noqa: E402
+from test_ollama_driver import _run, _staged, _alog_posts  # noqa: E402
 from test_phase7_helpers import (  # noqa: E402
     accuse_then_reveal,
     assert_no_pre_reveal_material,
@@ -438,7 +438,7 @@ def test_6_when_derivability_medium_driver_hotel_knife():
     """MEDIUM (driver hotel_suite kitchen-knife / 21:18): the canonical
     time-bearing algebra (d_ev_when_last_seen/body/obs) is discoverable,
     derives 21:18 and appears in the reveal timeline."""
-    from test_ollama_driver import _case_people, _evidence, _j, _world
+    from test_ollama_driver import _case_people, _evidence, _j, _world, _alog_posts
 
     cp = _case_people(weapon="kitchen_knife")
     cp["crime"]["crimeTime"] = {
@@ -448,6 +448,7 @@ def test_6_when_derivability_medium_driver_hotel_knife():
     posts = [
         _j(cp),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T21:18:00+02:00'),
         _j(_world("kitchen knife")),
     ]
     prompt = (

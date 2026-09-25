@@ -61,7 +61,7 @@ from phase6_helpers import (  # noqa: E402
     playthrough,
 )
 from test_phase7_helpers import assert_no_pre_reveal_material  # noqa: E402
-from test_ollama_driver import _case_people, _evidence, _j, _run, _staged, _world  # noqa: E402
+from test_ollama_driver import _case_people, _evidence, _j, _run, _staged, _world, _alog_posts  # noqa: E402
 from test_generation_roundtrip import _draft_from_stages  # noqa: E402
 
 
@@ -175,6 +175,7 @@ def _medium_hotel_payload():
     posts = [
         _j(cp),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        *_alog_posts('2026-09-11T21:18:00+02:00'),
         _j(_world("kitchen knife")),
     ]
     prompt = (
@@ -283,6 +284,7 @@ def test_adv222_every_driver_kit_carries_a_reachable_when_fact():
         posts = [
             _j(cp),
             _j(_evidence(weapon_obj=weapon_obj, murderer="paul_becker")),
+            *_alog_posts('2026-09-11T21:18:00+02:00'),
             _j(world_req),
         ]
         record, _transport = _run(posts, prompt=prompt)

@@ -107,6 +107,13 @@ def _remaining_ms(attempt: Any) -> int | None:
 # Â§13: "bounded â‰¤2 per driver").
 MAX_SPEC_REPAIR_PASSES = 2
 
+# Phase 19J Â§20 â€” bounded activity-log repair passes INSIDE one activity-log
+# round-trip (like ASSET_SPEC_REPAIR: each pass is a REAL bounded provider
+# call; the global/core provider-call budgets stay authoritative). The repair
+# prompt carries ONLY machine-readable validation findings + the locked
+# canonical time.
+MAX_ACTIVITY_LOG_REPAIR_PASSES = 2
+
 # The four (non-AssetSpec) stage surfaces the driver walks (in order).
 _DRIVER_STAGES = (
     GenerationStage.CASE_TRUTH,
@@ -920,6 +927,80 @@ def _canonical_distant_location(
         if seconds is not None and seconds >= 180:
             return loc
     return non_scene_locations[0] if non_scene_locations else None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 19J â€” activity-log persistence helpers (server-owned presentation only)
+# --------------------------------------------------------------------------- #
+
+
+def _first_time_bearing_observed_at(item: Any) -> str | None:
+    """The FIRST parseable ``observed_at`` of an evidence fact (or None).
+
+    The canonical time the server locks into the activity-log prompt comes from
+    the fact's OWN canonical proposition (the solver input is never touched).
+    """
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    for prop in getattr(item, "propositions", ()) or ():
+        raw = getattr(prop, "observed_at", None)
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            parse_iso8601_to_epoch(raw)
+        except (TypeError, ValueError):
+            continue
+        return raw
+    return None
+
+
+def _log_order_flags(entries: Any) -> tuple[bool, bool]:
+    """Deterministic ordering/dedupe flags of one parsed log (repair feedback)."""
+    non_chronological = False
+    duplicate_timestamp = False
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    previous: int | None = None
+    seen: set[int] = set()
+    for entry in entries:
+        try:
+            tick = parse_iso8601_to_epoch(getattr(entry, "timestamp", ""))
+        except (TypeError, ValueError):
+            continue
+        if previous is not None and tick <= previous:
+            non_chronological = True
+        if tick in seen:
+            duplicate_timestamp = True
+        seen.add(tick)
+        previous = tick
+    return non_chronological, duplicate_timestamp
+
+
+def _with_activity_log_events(
+    item: Any, entries: tuple[Any, ...], version_marker: str
+) -> Any:
+    """Rebuild ONE evidence fact with the accepted log persisted into its
+    public presentation (``events`` + ``activityLogVersion``).
+
+    Propositions (the solver input) and every other public field are
+    byte-identical; only the player-facing presentation gains the log rows
+    (Phase19J Â§19/Â§27/Â§28/Â§52).
+    """
+    from app.generation.schemas import EvidenceSpec
+
+    signature: dict[str, Any] = {
+        "id": item.id,
+        "kind": item.kind,
+        "propositions": item.propositions,
+        "source_ref": item.source_ref,
+        "reliability": item.reliability,
+        "discoverable": item.discoverable,
+    }
+    presentation = dict(getattr(item, "presentation", {}) or {})
+    presentation["events"] = [entry.to_event() for entry in entries]
+    presentation["activityLogVersion"] = version_marker
+    signature["presentation"] = presentation
+    return EvidenceSpec(**signature)
 
 
 def _evidence_set_summary(evidence_spec: Any) -> dict[str, Any]:
@@ -2078,6 +2159,28 @@ class OllamaStageDriver:
             evidence_spec = completed_spec
         self.last_evidence_summary = _evidence_set_summary(evidence_spec)
 
+        # --- 2c. Phase 19J â€” ACTIVITY_LOG generation (driver-internal stage)
+        # Triggered ONLY when a published evidence fact requires an
+        # ACTIVITY_LOG representation (kind -> renderType == ACTIVITY_LOG) AND
+        # carries a time-bearing observed_at; everything else costs ZERO extra
+        # provider calls (Phase19J Â§4). Each triggered fact performs ONE
+        # bounded CORE-bucket provider call (+ at most
+        # MAX_ACTIVITY_LOG_REPAIR_PASSES bounded repair calls on validation
+        # failure). Generated logs are validated HERE and persisted into the
+        # fact's public ``presentation.events`` BEFORE world composition /
+        # publication, so gameplay/interaction/reload call ZERO providers and
+        # the published case contains the final accepted log (Phase19J
+        # Â§3/Â§18/Â§19).
+        if evidence_spec is not None:
+            evidence_spec = self._activity_log_stage(
+                provider,
+                attempt,
+                crime,
+                public,
+                evidence_spec,
+                budget_consumer,
+            )
+
         # --- 3. WORLD_REQUIREMENTS --------------------------------------------
         weapon_evidence_id = _weapon_evidence_id(attempt, evidence_spec)
         world_prompt = prompts.build_world_requirements_prompt(
@@ -2239,6 +2342,361 @@ class OllamaStageDriver:
 
         return _consume
 
+    # -- Phase 19J â€” ACTIVITY_LOG generation stage ----------------------------
+
+    def _activity_log_stage(
+        self,
+        provider: Any,
+        attempt: Any,
+        crime: Any,
+        public: Any,
+        evidence_spec: Any,
+        budget_consumer: Callable[[str | None], bool],
+    ) -> Any:
+        """Phase19J Â§4 trigger + generation walk over the composed evidence.
+
+        ONLY evidence facts whose kind maps to ``renderType == ACTIVITY_LOG``
+        AND that carry a time-bearing ``observed_at`` get a generated log (one
+        bounded CORE-bucket provider call each). Facts without an
+        activity-log requirement cost ZERO extra provider calls. The validated
+        log is persisted into the fact's public ``presentation.events``
+        (``{time, action}`` events shape without ``personId``) plus the
+        ``ACTIVITY_LOG_v1`` version marker.
+
+        Solver isolation (Phase19J Â§27/Â§28): ONLY the public presentation is
+        enriched â€” canonical propositions (the solver input) are untouched, so
+        the solver signature is byte-identical with and without the rich log.
+        """
+        from app.domain.activity_log import (
+            ACTIVITY_LOG_VERSION_MARKER,
+            WINDOW_DEFAULT_AFTER_MINUTES,
+            WINDOW_DEFAULT_BEFORE_MINUTES,
+        )
+        from app.domain.render import EvidenceRenderType, render_type_for_kind
+        from app.generation.schemas import EvidenceSetSpec
+
+        if evidence_spec is None:
+            return None
+        # ADV-257 â€” an operator-configured 0-sided window is HONORED (never
+        # silently coerced to the default): ``0 = no span in that direction``.
+        # Only an ABSENT setting falls back to the default. The hard total-span
+        # clamp (120 min) stays in the pure validator (activity_log_window_bounds).
+        before_raw = getattr(self._settings, "activity_log_window_before_minutes", None)
+        after_raw = getattr(self._settings, "activity_log_window_after_minutes", None)
+        before = (
+            WINDOW_DEFAULT_BEFORE_MINUTES
+            if before_raw is None
+            else max(0, int(before_raw))
+        )
+        after = (
+            WINDOW_DEFAULT_AFTER_MINUTES
+            if after_raw is None
+            else max(0, int(after_raw))
+        )
+        persons, weapons, motives, location_ids, location_names = (
+            self._activity_log_forbidden_tokens(attempt, crime, public)
+        )
+        enriched: list[Any] = []
+        for item in getattr(evidence_spec, "evidence", ()) or ():
+            kind = str(getattr(item, "kind", "") or "")
+            if (
+                str(render_type_for_kind(kind))
+                != EvidenceRenderType.ACTIVITY_LOG.value
+            ):
+                enriched.append(item)
+                continue
+            canonical = _first_time_bearing_observed_at(item)
+            if canonical is None:
+                # no time-bearing evidence -> no log requirement -> no call
+                enriched.append(item)
+                continue
+            entries = self._generate_activity_log(
+                provider,
+                attempt,
+                str(getattr(item, "id", "") or ""),
+                canonical,
+                person_names=persons,
+                weapon_names=weapons,
+                motive_names=motives,
+                location_ids=location_ids,
+                location_names=location_names,
+                before_minutes=before,
+                after_minutes=after,
+                budget_consumer=budget_consumer,
+            )
+            enriched.append(_with_activity_log_events(item, entries, ACTIVITY_LOG_VERSION_MARKER))
+        return EvidenceSetSpec(evidence=tuple(enriched))
+
+    def _activity_log_forbidden_tokens(
+        self, attempt: Any, crime: Any, public: Any
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """The FIRST-VERSION canonical name set for entity-leak rejection.
+
+        Returns ``(person_names, weapon_names, motive_names, location_ids,
+        location_names)`` â€” the case's OWN canonical names/ids (public persons
+        + ids, motive labels + ids, location names + ids, the locked weapon
+        display name + the crime weapon id, the crime motive/location ids).
+        The activity-log validator rejects any occurrence in log text by
+        default (Phase19J Â§23/Â§24/Â§25/Â§26).
+        """
+        from app.domain.activity_log import entity_leak_tokens  # noqa: F401
+
+        persons: set[str] = set()
+        weapons: set[str] = set()
+        motives: set[str] = set()
+        location_ids: set[str] = set()
+        location_names: set[str] = set()
+        if public is not None:
+            for person in getattr(public, "persons", ()) or ():
+                name = getattr(person, "name", None)
+                if isinstance(name, str) and name:
+                    persons.add(name)
+                pid = getattr(person, "person_id", None)
+                if isinstance(pid, str) and pid:
+                    persons.add(pid)
+            for motive in getattr(public, "motives", ()) or ():
+                label = getattr(motive, "label", None)
+                if isinstance(label, str) and label:
+                    motives.add(label)
+                mid = getattr(motive, "motive_id", None)
+                if isinstance(mid, str) and mid:
+                    motives.add(mid)
+            for loc in getattr(public, "locations", ()) or ():
+                name = getattr(loc, "name", None)
+                if isinstance(name, str) and name:
+                    location_names.add(name)
+                lid = getattr(loc, "location_id", None)
+                if isinstance(lid, str) and lid:
+                    location_ids.add(lid)
+            scene = getattr(public, "scene", None)
+            if scene is not None:
+                sname = getattr(scene, "name", None)
+                if isinstance(sname, str) and sname:
+                    location_names.add(sname)
+                slid = getattr(scene, "location_id", None)
+                if isinstance(slid, str) and slid:
+                    location_ids.add(slid)
+        locked = getattr(attempt, "locked", None)
+        weapon_display = getattr(locked, "weapon", None) if locked is not None else None
+        if isinstance(weapon_display, str) and weapon_display:
+            weapons.add(weapon_display)
+        if crime is not None:
+            wid = getattr(crime, "weapon_id", None)
+            if isinstance(wid, str) and wid:
+                weapons.add(wid)
+            mid = getattr(crime, "motive_id", None)
+            if isinstance(mid, str) and mid:
+                motives.add(mid)
+            lid = getattr(crime, "location_id", None)
+            if isinstance(lid, str) and lid:
+                location_ids.add(lid)
+        return (
+            tuple(sorted(persons)),
+            tuple(sorted(weapons)),
+            tuple(sorted(motives)),
+            tuple(sorted(location_ids)),
+            tuple(sorted(location_names)),
+        )
+
+    def _generate_activity_log(
+        self,
+        provider: Any,
+        attempt: Any,
+        evidence_id: str,
+        canonical: str,
+        *,
+        person_names: tuple[str, ...],
+        weapon_names: tuple[str, ...],
+        motive_names: tuple[str, ...],
+        location_ids: tuple[str, ...],
+        location_names: tuple[str, ...],
+        before_minutes: int,
+        after_minutes: int,
+        budget_consumer: Callable[[str | None], bool],
+    ) -> tuple[Any, ...]:
+        """ONE bounded activity-log round-trip (initial + repair passes).
+
+        Provider-level failures (timeout / transport / budget) propagate as
+        ``StageDriverProviderFailure`` â€” the attempt fails with the provider's
+        typed code (the UI shows the provider-unavailable mapping ONLY then).
+        A VALIDATION failure after the bounded repair budget surfaces the
+        specific typed validator code (the UI maps it to the Phase19J Â§39 safe
+        copy: "A piece of scene evidence could not be generated safely.
+        Try again or adjust the prompt.").
+
+        Safe observability (Phase19J Â§40): only sanitized counts/codes are
+        emitted â€” NEVER CaseTruth, raw provider responses, full log text,
+        prompts or hidden evidence.
+        """
+        from app.domain.activity_log import (
+            ActivityLogValidatorCode,
+            parse_activity_log,
+            primary_validator_code,
+            repair_findings,
+            validate_activity_log,
+        )
+        from app.generation.failure_codes import GenerationFailureCode
+        from app.generation import prompts
+
+        generation_attempt_id = getattr(attempt, "attempt_id", None)
+        case_id = getattr(attempt, "case_id", None)
+        evidence_id_safe = _sanitize_object_id_for_message(evidence_id) or "<unknown>"
+        attempt_clock = time.perf_counter()
+
+        def _elapsed() -> int:
+            return int((time.perf_counter() - attempt_clock) * 1000)
+
+        emit_event(
+            "activity_log.generation.started",
+            caseId=case_id,
+            generationAttemptId=generation_attempt_id,
+            evidenceIdSafe=evidence_id_safe,
+            providerCallCount=getattr(attempt.budget, "calls", None),
+        )
+        prompt = prompts.build_activity_log_prompt(
+            canonical,
+            before_minutes=before_minutes,
+            after_minutes=after_minutes,
+        )
+        # ADV-256 â€” the activity-log stages never receive the FULL locked
+        # identity sheet. The provider appends every non-None locked field to
+        # the prompt under "Locked user constraints (must be respected
+        # exactly):", so passing ``attempt.locked`` would hand the model that
+        # is generating neutral noise the murderer/motive/weapon/victim/
+        # witness answers. These stages receive a TIME-ONLY projection: the
+        # canonical evidence time and nothing else (Phase19J Â§10/Â§20/Â§41).
+        from app.generation.constraints import LockedConstraints
+
+        locked_projection = LockedConstraints(crime_time=canonical)
+        stage = GenerationStage.ACTIVITY_LOG
+        codes: tuple[Any, ...] = ()
+        entries: list[Any] = []
+        non_chronological = False
+        duplicate_timestamp = False
+        parse_error = False
+        repair_attempts = 0
+
+        for pass_index in range(MAX_ACTIVITY_LOG_REPAIR_PASSES + 1):
+            _call_started = time.perf_counter()
+            content = self._call(
+                provider,
+                attempt,
+                stage,
+                prompt,
+                budget_consumer,
+                locked=locked_projection,
+            )
+            if content is None:
+                # _call returns None only when content was empty after a
+                # successful provider result -> treat as schema-invalid.
+                codes = (ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,)
+                entries = []
+            else:
+                try:
+                    entries = parse_activity_log(content)
+                    codes = validate_activity_log(
+                        entries,
+                        canonical_time=canonical,
+                        person_names=person_names,
+                        weapon_names=weapon_names,
+                        motive_names=motive_names,
+                        location_ids=location_ids,
+                        location_names=location_names,
+                        before_minutes=before_minutes,
+                        after_minutes=after_minutes,
+                    )
+                    non_chronological, duplicate_timestamp = _log_order_flags(
+                        entries
+                    )
+                except (TypeError, ValueError):
+                    # structural parse failure -> schema-invalid category
+                    codes = (ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,)
+                    entries = []
+                    parse_error = True
+            entry_count = len(entries) if entries else 0
+            emit_event(
+                "activity_log.generation.complete",
+                caseId=case_id,
+                generationAttemptId=generation_attempt_id,
+                evidenceIdSafe=evidence_id_safe,
+                entryCount=entry_count,
+                providerCallCount=getattr(attempt.budget, "calls", None),
+                elapsedMs=int((time.perf_counter() - _call_started) * 1000),
+                success=not codes,
+            )
+            if not codes:
+                if repair_attempts:
+                    emit_event(
+                        "activity_log.repair.complete",
+                        caseId=case_id,
+                        generationAttemptId=generation_attempt_id,
+                        evidenceIdSafe=evidence_id_safe,
+                        entryCount=entry_count,
+                        providerCallCount=getattr(attempt.budget, "calls", None),
+                        elapsedMs=_elapsed(),
+                        success=True,
+                    )
+                return tuple(entries)
+
+            validator = primary_validator_code(codes)
+            emit_event(
+                "activity_log.validation_failed",
+                caseId=case_id,
+                generationAttemptId=generation_attempt_id,
+                evidenceIdSafe=evidence_id_safe,
+                entryCount=entry_count,
+                validatorCode=validator.value if validator is not None else None,
+                providerCallCount=getattr(attempt.budget, "calls", None),
+                elapsedMs=_elapsed(),
+            )
+            if pass_index >= MAX_ACTIVITY_LOG_REPAIR_PASSES:
+                break
+            findings = repair_findings(
+                codes,
+                entry_count=entry_count,
+                non_chronological=non_chronological,
+                duplicate_timestamp=duplicate_timestamp,
+            )
+            emit_event(
+                "activity_log.repair.started",
+                caseId=case_id,
+                generationAttemptId=generation_attempt_id,
+                evidenceIdSafe=evidence_id_safe,
+                entryCount=entry_count,
+                validatorCode=validator.value if validator is not None else None,
+                providerCallCount=getattr(attempt.budget, "calls", None),
+                elapsedMs=_elapsed(),
+            )
+            repair_attempts += 1
+            prompt = prompts.build_activity_log_repair_prompt(canonical, findings)
+            stage = GenerationStage.ACTIVITY_LOG_REPAIR
+            # fall through to the next bounded pass (no other state needed)
+
+        validator = primary_validator_code(codes) or (
+            ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID
+        )
+        emit_event(
+            "activity_log.repair.complete",
+            caseId=case_id,
+            generationAttemptId=generation_attempt_id,
+            evidenceIdSafe=evidence_id_safe,
+            entryCount=len(entries) if entries else 0,
+            validatorCode=validator.value,
+            providerCallCount=getattr(attempt.budget, "calls", None),
+            elapsedMs=_elapsed(),
+            success=False,
+        )
+        # A provider RESPONDED but the log could not be validated within the
+        # bounded repair budget: this is NOT a provider failure. The typed
+        # validator code fails the attempt; the public UI maps it to the
+        # Phase19J Â§39 safe copy (never "AI unavailable" for a validation
+        # failure after a successful provider response).
+        raise StageDriverProviderFailure(
+            "activity log could not be generated safely within the bounded "
+            "repair budget",
+            code=GenerationFailureCode(validator.value),
+        )
+
     def _configured_provider_timeout(self) -> float:
         """The operator-configured PER-CALL timeout source.
 
@@ -2321,7 +2779,18 @@ class OllamaStageDriver:
         stage: GenerationStage,
         prompt: str,
         budget: Callable[[str | None], bool],
+        *,
+        locked: Any | None = None,
     ) -> str | None:
+        """ONE bounded budgeted stage call; returns content or raises typed.
+
+        ``locked`` overrides the request's locked-constraints projection.
+        ``None`` means the attempt's FULL locked constraints travel with the
+        request (the general stages need the identity sheet). The ACTIVITY_LOG
+        stages pass a TIME-ONLY projection (ADV-256) so the provider's
+        "Locked user constraints" block carries the canonical evidence time and
+        NO murderer/motive/weapon/victim/witness material.
+        """
         effective_timeout = self._effective_timeout(attempt)
         configured_timeout_ms = int(self._configured_provider_timeout() * 1000)
         if effective_timeout <= 0:
@@ -2342,7 +2811,7 @@ class OllamaStageDriver:
             attempt_id=attempt.attempt_id,
             stage=stage,
             prompt_context=prompt,
-            locked=attempt.locked,
+            locked=attempt.locked if locked is None else locked,
             diagnostics=(),
             seed=attempt.seed,
             timeout_seconds=effective_timeout,
@@ -3097,6 +3566,7 @@ def _base_object_spec(object_id: str) -> ObjectSpec | None:
 
 
 __all__ = [
+    "MAX_ACTIVITY_LOG_REPAIR_PASSES",
     "MAX_SPEC_REPAIR_PASSES",
     "OllamaAssetSpecProvider",
     "OllamaStageDriver",
