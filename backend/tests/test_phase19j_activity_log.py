@@ -416,6 +416,126 @@ def test_short_ambiguous_location_word_not_overblocked():
 
 
 # --------------------------------------------------------------------------- #
+# 8b — ADV-254: person-name variants are rejected (bounded normalization)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "The user Paul Becker opened a file",   # exact full name (v1 phrase)
+        "session for paul_becker started",      # id token
+        "P4UL B3CK3R logged in",                # leet full name (uppercase)
+        "p4ul b3ck3r logged in",                # leet full name (lowercase)
+        "Päul Becker logged in",                # diacritic variant of Paul
+        "user becker authenticated",            # surname only
+        "user paul authenticated",              # bare first name
+        "Paul-Beckers workstation",             # hyphenated possessive
+        "Anna Weiss opened the lab door",       # title-less victim full name
+        "Doktor Weiss accessing records",       # German title + surname
+        "lisa koenig entered the laboratory",   # ASCII transliteration (König)
+        "Lisa K. disconnected",                 # first name + initial
+        "M. Fischer synced the mail",           # initial + surname
+        "Marco Fischer checked in",             # mis-spelled first + surname
+        "s0ph1e h0ffmann logged in",            # leet first+last (Sophie)
+    ),
+)
+def test_person_name_variants_rejected(text):
+    """ADV-254: surname-only, bare-first-name, ASCII-folded, title-less,
+    leet and initial-based variants of canonical persons are rejected."""
+    entries = _valid_entries()
+    entries[8] = _entry(CANONICAL, activity=text)
+    codes = validate_activity_log(
+        _as_log(entries),
+        canonical_time=CANONICAL,
+        person_names=(
+            "Dr. Anna Weiss", "Paul Becker", "Marcus Fischer",
+            "Sophie Hoffmann", "Lisa König",
+        ),
+    )
+    assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK in codes, text
+
+
+def test_person_name_generic_words_accepted():
+    """ADV-254: plausible generic words that do NOT coincide with a canonical
+    name never trip the tightened filter."""
+    for text in (
+        "the operator ran a scan",
+        "a colleague logged off",
+        "user initiated a backup",
+    ):
+        entries = _valid_entries()
+        entries[8] = _entry(CANONICAL, activity=text)
+        codes = validate_activity_log(
+            _as_log(entries),
+            canonical_time=CANONICAL,
+            person_names=(
+                "Dr. Anna Weiss", "Paul Becker", "Marcus Fischer",
+                "Sophie Hoffmann", "Lisa König",
+            ),
+        )
+        assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK not in codes, text
+
+
+# --------------------------------------------------------------------------- #
+# 8c — ADV-255: weapon/motive paraphrases are rejected (§24/§25)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Stolen research data opened",          # §25 example 1
+        "stolen research data was accessed",
+        "the research archive was stolen",
+        "Blackmail file accessed",              # §25 example 2
+        "blackmail document opened",
+        "Insurance payout document edited",     # §25 example 3
+        "payout processed",
+        "embezzlement",
+        "her affair",
+        "weapon present",
+        "the knife",
+        "a ceremonial pick was seized",         # weapon word-token paraphrase
+        "a sharp bronze instrument was wiped",  # weapon word-token paraphrase
+    ),
+)
+def test_weapon_motive_paraphrase_rejected(text):
+    """ADV-255: the §25 example phrases, motive-significant content words,
+    the static forbidden vocabulary and the weapon word-token paraphrases are
+    all rejected."""
+    entries = _valid_entries()
+    entries[8] = _entry(CANONICAL, activity=text)
+    codes = validate_activity_log(
+        _as_log(entries),
+        canonical_time=CANONICAL,
+        weapon_names=("bronze ceremonial ice pick",),
+        motive_names=("wanted to steal the research data",),
+    )
+    assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK in codes, text
+
+
+def test_weapon_motive_generic_rows_not_overblocked():
+    """ADV-255: neutral computer-log rows stay valid even when they share a
+    generic word with the motive label ("research"/"document"/"data")."""
+    for text in (
+        "opened a document",
+        "Research document accessed",
+        "Data synchronization completed",
+        "Cloud sync finished",
+    ):
+        entries = _valid_entries()
+        entries[8] = _entry(CANONICAL, activity=text)
+        codes = validate_activity_log(
+            _as_log(entries),
+            canonical_time=CANONICAL,
+            weapon_names=("bronze ceremonial ice pick",),
+            motive_names=("wanted to steal the research data",),
+        )
+        assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK not in codes, text
+
+
+# --------------------------------------------------------------------------- #
 # 9 — unsafe text (HTML/URL/path/control) + text bounds
 # --------------------------------------------------------------------------- #
 
@@ -588,6 +708,142 @@ def test_driver_activity_log_prompt_carries_locked_canonical_time():
     assert "2026-09-11T23:41:50+02:00" in alog_prompt  # 23:42:00 - 10s
 
 
+def test_activity_log_prompts_carry_only_locked_time_not_the_identity_sheet():
+    """ADV-256 regression: BOTH the ACTIVITY_LOG and ACTIVITY_LOG_REPAIR
+    prompts — the FULL text the provider receives, including the provider's
+    own "Locked user constraints (must be respected exactly):" serialization —
+    carry the canonical evidence time and NONE of the murderer/victim/motive/
+    weapon/witness names or ids. The repair prompt is captured by forcing one
+    validation failure so the initial + repair stages both appear in the
+    transport request log."""
+    from test_ollama_driver import MockOllamaTransport, _world  # noqa: F401
+
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    when_obs_canonical = epoch_to_iso(
+        parse_iso8601(crime_canonical)[0] - 10, parse_iso8601(crime_canonical)[1]
+    )
+    bad = _alog(when_obs_canonical)
+    bad["entries"][8]["timestamp"] = "2026-09-11T23:40:00+02:00"  # canonical removed
+    good = _alog(when_obs_canonical)
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        json.dumps(bad),        # ACTIVITY_LOG (invalid -> repair)
+        json.dumps(good),       # ACTIVITY_LOG_REPAIR (valid)
+        *_alog_posts(crime_canonical)[1:],
+        _j(_world()),
+    ]
+    from test_ollama_driver import ICEPICK_SPEC
+
+    posts.append(ICEPICK_SPEC)
+    record, transport = _run(posts)
+    assert record.state is GenerationState.PUBLISHED
+    prompts = [transport.prompt_of_call(i) for i in range(transport.call_count)]
+    alog_prompt = next(p for p in prompts if "activity_log_v1" in p)
+    repair_prompt = next(p for p in prompts if "activity_log_repair_v1" in p)
+    leaks = (
+        "Paul Becker", "paul_becker", "Paul", "Becker",
+        "Anna Weiss", "anna_weiss", "Weiss",
+        "stolen research data", "stolen_research_data", "stolen",
+        "bronze ceremonial ice pick", "bronze_ceremonial_ice_pick",
+        "Lisa König", "lisa_koenig", "König",
+        "Marcus Fischer", "marcus_fischer", "Sophie Hoffmann",
+        "sophie_hoffmann",
+    )
+    for prompt in (alog_prompt, repair_prompt):
+        for needle in leaks:
+            assert needle not in prompt, (needle, prompt[:400])
+        # the canonical evidence time IS the locked temporal constraint
+        assert when_obs_canonical in prompt
+        assert "Locked user constraints (must be respected exactly):" in prompt
+        # the locked block serializes ONLY the time — never the answer sheet
+        assert "- crime_time: " in prompt
+        for field in ("victim", "murderer", "motive", "weapon", "witness"):
+            assert f"- {field}: " not in prompt, (field, prompt[-400:])
+
+
+def _run_window(posts, *, before, after):
+    """A full driver run with the operator-configured activity-log window."""
+    from app.core.config import Settings
+    from app.generation.clock import ManualClock
+    from app.generation.ids import IdSource
+    from app.generation.ollama_provider import OllamaProvider
+    from app.services.ollama_driver import OllamaStageDriver
+    from test_ollama_driver import (
+        OLLAMA_BASE,
+        OLLAMA_MODEL,
+        PROMPT,
+        MockOllamaTransport,
+        _admission,
+        _controller,
+    )
+
+    clock = ManualClock()
+    ids = IdSource()
+    admission = _admission(clock, ids)
+    session = admission.create_anonymous_quota_session()
+    transport = MockOllamaTransport(posts=posts)
+
+    def factory():
+        return OllamaProvider(
+            base_url=OLLAMA_BASE,
+            model=OLLAMA_MODEL,
+            timeout_seconds=5,
+            transport=transport,
+        )
+
+    driver = OllamaStageDriver(
+        settings=Settings(
+            activity_log_window_before_minutes=before,
+            activity_log_window_after_minutes=after,
+        ),
+        provider_factory=factory,
+    )
+    controller = _controller(driver, transport, admission, clock, ids)
+    handle = controller.start_generation(
+        PROMPT, anonymous_quota_session_id=session.session_id
+    )
+    return controller.attempt(handle.attempt_id), transport
+
+
+def _alog_forward_entries(canonical, count=15):
+    """A VALID log under a 0-before window: rows run [canonical, canonical+60min)."""
+    tick, offset = parse_iso8601(canonical)
+    rows = [_entry(epoch_to_iso(tick + i * 150, offset)) for i in range(count)]
+    rows[0] = _entry(canonical)
+    return {"entries": rows}
+
+
+def test_activity_log_window_zero_is_honored_not_coerced():
+    """ADV-257 regression: an operator-configured 0-sided window is HONORED by
+    the driver (never silently replaced by the default 60). With BEFORE=0 /
+    AFTER=60 the generated-logs window is [canonical, canonical+60min] and the
+    first activity-log prompt renders \"-0 minutes ... +60 minutes\"."""
+    from test_ollama_driver import ICEPICK_SPEC, _evidence, _world
+
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    tick, offset = parse_iso8601(crime_canonical)
+
+    def iso(delta_seconds):
+        return epoch_to_iso(tick + delta_seconds, offset)
+
+    posts = [_j(_case_people()), _j(_evidence())]
+    # four time-bearing cctv facts, each with a log inside [canonical, +60min]
+    for anchor in (iso(-10), iso(-120), iso(-120), iso(-20)):
+        posts.append(_j(_alog_forward_entries(anchor)))
+    posts.append(_j(_world()))
+    posts.append(ICEPICK_SPEC)
+    record, transport = _run_window(posts, before=0, after=60)
+    assert record.state is GenerationState.PUBLISHED
+    first_alog = next(
+        transport.prompt_of_call(i) for i in range(transport.call_count)
+        if "activity_log_v1" in transport.prompt_of_call(i)
+    )
+    assert "-0 minutes" in first_alog       # BEFORE=0 honored, not -> 60
+    assert "-60 minutes" not in first_alog  # the old (0 or 60) coercion is gone
+    assert "+60 minutes" in first_alog      # AFTER=60 stays as configured
+
+
 def test_driver_repair_is_bounded_and_uses_machine_readable_findings():
     from test_ollama_driver import MockOllamaTransport, _world
 
@@ -727,6 +983,57 @@ def test_fake_provider_golden_log_renders_realistic_rows(phase5_app):
     assert times == sorted(times)
     # determinism: repeated reads are byte-identical
     assert render_payload_of(fact) == render_payload_of(fact)
+
+
+def test_fake_provider_fixture_logs_pass_tightened_validator():
+    """ADV-254/255 regression guard: every builtin FakeProvider ACTIVITY_LOG
+    fixture (``dev_mode_case.json``, 20 rows x3) still validates unchanged
+    under the case's OWN persons/motives/weapons/locations after the tightened
+    filter. A generic row (\"Research document accessed\") never trips; a row
+    accidentally containing forbidden content would fail here."""
+    _BACKEND = Path(__file__).resolve().parents[1]
+    fixture = json.loads(
+        (_BACKEND / "app" / "services" / "dev_mode_case.json").read_text(encoding="utf-8")
+    )
+    truth = json.loads(fixture["case_truth"][0])
+    public = json.loads(fixture["public_world"][0])
+    persons = [p["name"] for p in public["persons"]]
+    persons += [p["personId"] for p in public["persons"]]
+    motives = [m["label"] for m in public["motives"]]
+    motives += [m["motiveId"] for m in public["motives"]]
+    weapons = [truth["crime"]["weaponId"]]
+    loc_ids = [loc["locationId"] for loc in public["locations"]]
+    loc_ids += [truth["crime"]["locationId"]]
+    loc_names = [loc["name"] for loc in public["locations"]]
+    loc_names += [public["scene"]["name"]]
+    evidence = json.loads(fixture["evidence"][0])["evidence"]
+    log_items = [
+        item
+        for item in evidence
+        if (item.get("presentation") or {}).get("activityLogVersion")
+    ]
+    assert len(log_items) == 3
+    for item in log_items:
+        canonical = item["propositions"][0]["observedAt"]
+        rows = [
+            {
+                "timestamp": event["time"],
+                "activityType": "LOCAL_ACTIVITY",
+                "activity": event["action"],
+            }
+            for event in item["presentation"]["events"]
+        ]
+        entries = parse_activity_log(json.dumps({"entries": rows}))
+        codes = validate_activity_log(
+            entries,
+            canonical_time=canonical,
+            person_names=persons,
+            weapon_names=weapons,
+            motive_names=motives,
+            location_ids=loc_ids,
+            location_names=loc_names,
+        )
+        assert codes == (), (item["id"], codes)
 
 
 # --------------------------------------------------------------------------- #

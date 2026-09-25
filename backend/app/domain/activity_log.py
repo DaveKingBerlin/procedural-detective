@@ -25,8 +25,10 @@ Rules implemented here (Phase19J §8/§11/§15/§16/§17/§21/§22/§23/§24/§2
   and free of control characters / HTML-markup / URLs / path-like text;
 - no duplicate entries (same timestamp + text);
 - no direct truth-leak language (answer-like tokens);
-- no entity/weapon/motive/location leakage (app-owned name set, FIRST-version
-  strict-by-default stance documented below).
+- no entity/weapon/motive/location leakage (app-owned name set, strict-by-
+  default; ADV-254/ADV-255: person-name matching folds case/ASCII/titles and
+  compares first/last/full tokens + leet variants, weapon/motive paraphrases
+  are rejected via word-token and de-genericized content-word needles).
 
 Purity: this module is pure — zero provider calls, zero network, never reads
 CaseTruth or solver material, and never touches raw prompts. Every function is
@@ -263,6 +265,196 @@ def truth_leak_tokens(value: str) -> tuple[str, ...]:
     return tuple(hits)
 
 
+# --------------------------------------------------------------------------- #
+# ADV-254/ADV-255 — deterministic bounded normalization for the entity/weapon/
+# motive leak filter. The FIRST-VERSION filter matched only the exact canonical
+# token, so surname/bare-first-name/ASCII-folded/leet person variants and
+# weapon/motive paraphrases passed. The layer below folds BOTH the canonical
+# name set and the log text identically (case + ASCII + NFKC + title/punctuation
+# stripping) and compares word tokens — bounded, deterministic, no stemmer.
+# --------------------------------------------------------------------------- #
+
+_HONORIFIC_TOKENS: frozenset[str] = frozenset(
+    {
+        "dr", "mr", "mrs", "ms", "mx", "prof", "sir", "madam", "mister",
+        "miss", "doktor", "frau", "herr", "her", "his",
+    }
+)
+
+_ASCII_TRANSLIT = str.maketrans(
+    {
+        "ä": "a", "å": "a", "æ": "ae", "ç": "c", "é": "e", "è": "e",
+        "ê": "e", "ë": "e", "í": "i", "ì": "i", "î": "i", "ï": "i",
+        "ñ": "n", "ó": "o", "ò": "o", "ô": "o", "ö": "o", "ø": "o",
+        "ú": "u", "ù": "u", "û": "u", "ü": "u", "ý": "y", "ÿ": "y",
+        "ß": "ss",
+    }
+)
+
+# Deterministic leet substitutions (ADV-254: "P4UL B3CK3R" == "Paul Becker").
+_LEET_SUBSTITUTIONS = str.maketrans(
+    {"a": "4", "e": "3", "i": "1", "o": "0", "s": "5", "t": "7"}
+)
+
+_NAME_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _leet_key(token: str) -> str:
+    """Deterministic leet-canonical key (a->4, e->3, i->1, o->0, s->5, t->7)."""
+    return token.translate(_LEET_SUBSTITUTIONS)
+
+
+def _fold_ascii(value: str) -> str:
+    """Deterministic bounded ASCII fold: NFKC -> casefold -> transliteration.
+
+    ``"Lisa König"`` -> ``"lisa konig"``; ``"P4UL B3CK3R"`` -> ``"p4ul b3ck3r"``.
+    """
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.casefold()
+    text = text.translate(_ASCII_TRANSLIT)
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+
+
+def _fold_name_tokens(value: str) -> tuple[str, ...]:
+    """Deterministic folded, honorific-stripped, punctuation-split tokens.
+
+    ``"Dr. Anna Weiss"`` -> ``("anna", "weiss")``; ``"paul_becker"`` ->
+    ``("paul", "becker")``; ``"Paul-Beckers"`` -> ``("paul", "beckers")``.
+    """
+    folded = _fold_ascii(value)
+    parts = [part for part in _NAME_SEPARATOR_RE.split(folded) if part]
+    return tuple(part for part in parts if part not in _HONORIFIC_TOKENS)
+
+
+def _person_leak_keys(names: Iterable[str]) -> frozenset[str]:
+    """Person-name leak needles: first/last/full word tokens + leet variants.
+
+    Bounded: every canonical person name/id contributes at most 2*T keys where
+    T is its (small) folded token count.
+    """
+    keys: set[str] = set()
+    for raw in names:
+        for token in _fold_name_tokens(raw):
+            if len(token) >= 2:
+                keys.add(token)
+                keys.add(_leet_key(token))
+    return frozenset(keys)
+
+
+def _weapon_leak_keys(names: Iterable[str]) -> frozenset[str]:
+    """Weapon-name word tokens (the near-paraphrase needle set).
+
+    "bronze ceremonial ice pick" -> {bronze, ceremonial, ice, pick} — a row
+    naming ANY of the weapon's distinctive words ("a ceremonial pick was
+    seized", "a sharp bronze instrument was wiped") is rejected.
+    """
+    keys: set[str] = set()
+    for raw in names:
+        for token in _fold_name_tokens(raw):
+            if len(token) >= 3:
+                keys.add(token)
+    return frozenset(keys)
+
+
+_MOTIVE_FUNCTION_WORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "and", "as", "at", "be", "been", "being", "but", "by",
+        "did", "do", "does", "for", "from", "had", "has", "have", "he",
+        "her", "his", "i", "in", "into", "is", "it", "its", "of", "on",
+        "or", "out", "over", "she", "than", "that", "the", "their", "them",
+        "there", "they", "this", "to", "up", "was", "we", "were", "will",
+        "with", "wanted", "would", "you", "your",
+    }
+)
+
+# Neutral computer-log vocabulary: generic words that legitimately appear in
+# ordinary activity-log rows and must NEVER trip the motive filter ("Research
+# document accessed", "opened a document", "data synced"). Bounded and
+# documented; keeps the motive content-word needle set distinctive.
+_NEUTRAL_COMPUTER_WORDS: frozenset[str] = frozenset(
+    {
+        "access", "accessed", "activity", "application", "applications",
+        "autosave", "autosaved", "backup", "background", "browser", "client",
+        "cloud", "completed", "copied", "data", "detected", "document",
+        "documents", "editor", "entered", "explorer", "file", "files",
+        "folder", "folders", "foreground", "keyboard", "local", "login",
+        "logged", "mail", "network", "office", "opened", "opening",
+        "recorded", "research", "resumed", "saved", "scan", "schedule",
+        "server", "service", "session", "sessions", "sleep", "started",
+        "sync", "synced", "synchronization", "synchronized", "system",
+        "task", "tasks", "update", "updated", "user", "users", "view",
+        "viewed", "window", "workspace", "written",
+    }
+)
+
+
+def _motive_leak_keys(names: Iterable[str]) -> frozenset[str]:
+    """The motive's SIGNIFICANT content words (bounded, de-genericized).
+
+    Each motive label is tokenized; function words and the neutral
+    computer-log vocabulary are dropped so generic rows never trip. The
+    remaining distinctive words are the forbidden motive needles (word
+    boundaries). "Wanted to steal the research data" -> {"steal"};
+    "Cover up the €240,000 embezzlement" -> {"cover", "embezzlement"}.
+    """
+    keys: set[str] = set()
+    for raw in names:
+        for token in _fold_name_tokens(raw):
+            if len(token) < 4:
+                continue
+            if (
+                token in _MOTIVE_FUNCTION_WORDS
+                or token in _NEUTRAL_COMPUTER_WORDS
+            ):
+                continue
+            keys.add(token)
+    return frozenset(keys)
+
+
+# ADV-255 (c) — the small deterministic forbidden-content vocabulary beyond the
+# direct truth-leak set. These are the §25 example phrases' diagnostic words
+# plus the weapon-family terms; matched with a PREFIX rule so plural/-ed/-ing/
+# -ment forms ("payouts", "embezzlement", "weapons") are caught without a
+# stemmer. Bounded and deterministic; never a semantic model.
+_FORBIDDEN_CONTENT_WORDS: tuple[str, ...] = (
+    "stolen", "blackmail", "payout", "affair", "embezzle",
+    "knife", "blade", "weapon", "gun", "shaft",
+)
+
+
+def _forbidden_content_hits(tokens: Iterable[str]) -> tuple[str, ...]:
+    """Deterministic prefix hits of ``_FORBIDDEN_CONTENT_WORDS``."""
+    hits: list[str] = []
+    for token in tokens:
+        for word in _FORBIDDEN_CONTENT_WORDS:
+            if token.startswith(word):
+                hits.append(word)
+                break
+    return tuple(dict.fromkeys(hits))
+
+
+def _exact_phrase_hits(
+    tokens: Iterable[str], scan: str
+) -> tuple[str, ...]:
+    """Exact folded phrase/word hits (v1 semantics: substring for multi-word
+    values, word-boundary for single tokens)."""
+    found: list[str] = []
+    for raw in tokens:
+        token = str(raw or "").strip()
+        if not token or len(token) < 3:
+            continue
+        needle = _scan_text(token)
+        if not needle:
+            continue
+        if " " in needle:
+            if needle in scan:
+                found.append(token)
+        elif re.search(rf"\b{re.escape(needle)}\b", scan):
+            found.append(token)
+    return tuple(found)
+
+
 def entity_leak_tokens(
     value: str,
     *,
@@ -274,50 +466,75 @@ def entity_leak_tokens(
 ) -> tuple[str, ...]:
     """Entity/weapon/motive/location leakage findings for ONE activity string.
 
-    FIRST-VERSION strict-by-default stance (Phase19J §23/§24/§25/§26): the
-    case's own canonical names are forbidden in log text by default.
+    Strict-by-default stance (Phase19J §23/§24/§25/§26): the case's own
+    canonical names are forbidden in log text by default.
 
-    - person names / weapon names / motive labels: rejected on ANY casefolded
-      substring occurrence (word-boundary matched for single-word values,
-      substring matched for multi-word phrases) — a log row can never name a
-      person, the canonical weapon, or state a motive.
-    - location **id** tokens (app-owned slugs): always rejected.
+    - **person names / ids** (ADV-254): the canonical name set (first/last/full
+      word tokens) is folded (case+ASCII+NFKC, titles/punctuation stripped) and
+      leet-canonicalized on BOTH sides, so bare first names, surname-only,
+      ASCII-transliterated, title-less and leet spellings are rejected with
+      word-boundary token equality. Generic words ("user", "operator",
+      "colleague") are untouched unless they coincide with a canonical name.
+    - **weapon names / ids** (ADV-255): the whole name is rejected on ANY
+      occurrence (v1) AND any distinctive word-token of the weapon name rejects
+      ("ceremonial pick", "sharp bronze instrument").
+    - **motive labels / ids** (ADV-255): the whole label is rejected on ANY
+      occurrence (v1) AND the label's significant content words (after dropping
+      function words + the neutral computer-log vocabulary) are forbidden.
+    - **static forbidden-content vocabulary** (ADV-255): "stolen"/"blackmail"/
+      "payout"/"affair"/"embezzle" and the weapon family ("knife"/"blade"/
+      "weapon"/"gun"/"shaft") are rejected by word-boundary PREFIX match — the
+      §25 example phrases can never pass.
+    - location **id** tokens (app-owned slugs): always rejected on the exact
+      folded slug.
     - location **display names**: rejected when distinctive — a multi-word
-      name (contains whitespace) or a single word of at least
-      ``_DISTINCTIVE_SINGLE_WORD_NAME_LEN`` characters. Short ambiguous
-      single-word names (e.g. ``office``) are NOT name-rejected to avoid
-      over-blocking harmless prose ("Office applications updated"); their id
-      token is still rejected, and the full-draft content-safety scan remains
-      the backstop.
+      name or a single word of at least ``_DISTINCTIVE_SINGLE_WORD_NAME_LEN``
+      characters. Short ambiguous single-word names (e.g. ``office``) are NOT
+      name-rejected to avoid over-blocking harmless prose ("Office
+      applications updated"); their id token is still rejected.
 
     Returns the matched source labels (empty when no leak).
     """
+    if not isinstance(value, str) or not value.strip():
+        return ()
 
-    def _hits(tokens: Iterable[str], *, distinctive_words: bool = False) -> list[str]:
-        found: list[str] = []
-        for raw in tokens:
-            token = str(raw or "").strip()
-            if not token or len(token) < 3:
-                continue
-            if distinctive_words and not _distinctive_name(token):
-                continue
-            needle = _scan_text(token)
-            if not needle:
-                continue
-            haystack = _scan_text(value)
-            if " " in needle:
-                if needle in haystack:
-                    found.append(token)
-            elif re.search(rf"\b{re.escape(needle)}\b", haystack):
-                found.append(token)
-        return found
+    scan = _scan_text(value)
+    tokens = _fold_name_tokens(value)
+    text_token_set = frozenset(tokens)
+    text_keys = text_token_set | frozenset(_leet_key(t) for t in tokens)
 
     hits: list[str] = []
-    hits.extend(_hits(person_names))
-    hits.extend(_hits(weapon_names))
-    hits.extend(_hits(motive_names))
-    hits.extend(_hits(location_ids))
-    hits.extend(_hits(location_names, distinctive_words=True))
+    hits.extend(_exact_phrase_hits(person_names, scan))
+    hits.extend(_exact_phrase_hits(weapon_names, scan))
+    hits.extend(_exact_phrase_hits(motive_names, scan))
+    hits.extend(_exact_phrase_hits(location_ids, scan))
+
+    # person-name first/last/full + leet token set (ADV-254)
+    if _person_leak_keys(person_names) & text_keys:
+        hits.append("<person-name-token>")
+    # weapon word-token near-paraphrase (ADV-255 a)
+    for token in sorted(_weapon_leak_keys(weapon_names) & text_token_set):
+        hits.append(f"weapon-token:{token}")
+    # motive significant content words (ADV-255 b)
+    for token in sorted(_motive_leak_keys(motive_names) & text_token_set):
+        hits.append(f"motive-token:{token}")
+    # static forbidden-content words (ADV-255 c)
+    hits.extend(_forbidden_content_hits(text_token_set))
+
+    # location display names: distinctive names only (v1 semantics)
+    for raw in location_names:
+        token = str(raw or "").strip()
+        if not token or len(token) < 3 or not _distinctive_name(token):
+            continue
+        needle = _scan_text(token)
+        if not needle:
+            continue
+        if " " in needle:
+            if needle in scan:
+                hits.append(raw)
+        elif re.search(rf"\b{re.escape(needle)}\b", scan):
+            hits.append(raw)
+
     return tuple(sorted(set(hits)))
 
 
@@ -444,16 +661,6 @@ def activity_log_window_bounds(
     return (canonical_tick - before * 60, canonical_tick + after * 60)
 
 
-def _normalize_forbidden_tokens(names: Iterable[str]) -> frozenset[str]:
-    out: set[str] = set()
-    for raw in names:
-        value = str(raw or "").strip()
-        if not value or len(value) < 3:
-            continue
-        out.add(_scan_text(value) or value.casefold())
-    return frozenset(out)
-
-
 def validate_activity_log(
     entries: list[ActivityLogEntry],
     *,
@@ -493,12 +700,6 @@ def validate_activity_log(
     seen_pair: set[tuple[int, str]] = set()
     previous_tick: int | None = None
 
-    person_tokens = _normalize_forbidden_tokens(person_names)
-    weapon_tokens = _normalize_forbidden_tokens(weapon_names)
-    motive_tokens = _normalize_forbidden_tokens(motive_names)
-    location_id_tokens = _normalize_forbidden_tokens(location_ids)
-    location_name_tokens = _normalize_forbidden_tokens(location_names)
-
     for entry in entries:
         try:
             tick = parse_iso8601_to_epoch(entry.timestamp)
@@ -533,11 +734,11 @@ def validate_activity_log(
             codes.add(ActivityLogValidatorCode.ACTIVITY_LOG_DIRECT_TRUTH_LEAK)
         if entity_leak_tokens(
             entry.activity,
-            person_names=person_tokens,
-            weapon_names=weapon_tokens,
-            motive_names=motive_tokens,
-            location_ids=location_id_tokens,
-            location_names=location_name_tokens,
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
         ):
             codes.add(ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK)
 

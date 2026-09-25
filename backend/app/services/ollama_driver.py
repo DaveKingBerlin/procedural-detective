@@ -2377,13 +2377,21 @@ class OllamaStageDriver:
 
         if evidence_spec is None:
             return None
-        before = int(
-            getattr(self._settings, "activity_log_window_before_minutes", None)
-            or WINDOW_DEFAULT_BEFORE_MINUTES
+        # ADV-257 â€” an operator-configured 0-sided window is HONORED (never
+        # silently coerced to the default): ``0 = no span in that direction``.
+        # Only an ABSENT setting falls back to the default. The hard total-span
+        # clamp (120 min) stays in the pure validator (activity_log_window_bounds).
+        before_raw = getattr(self._settings, "activity_log_window_before_minutes", None)
+        after_raw = getattr(self._settings, "activity_log_window_after_minutes", None)
+        before = (
+            WINDOW_DEFAULT_BEFORE_MINUTES
+            if before_raw is None
+            else max(0, int(before_raw))
         )
-        after = int(
-            getattr(self._settings, "activity_log_window_after_minutes", None)
-            or WINDOW_DEFAULT_AFTER_MINUTES
+        after = (
+            WINDOW_DEFAULT_AFTER_MINUTES
+            if after_raw is None
+            else max(0, int(after_raw))
         )
         persons, weapons, motives, location_ids, location_names = (
             self._activity_log_forbidden_tokens(attempt, crime, public)
@@ -2550,6 +2558,16 @@ class OllamaStageDriver:
             before_minutes=before_minutes,
             after_minutes=after_minutes,
         )
+        # ADV-256 â€” the activity-log stages never receive the FULL locked
+        # identity sheet. The provider appends every non-None locked field to
+        # the prompt under "Locked user constraints (must be respected
+        # exactly):", so passing ``attempt.locked`` would hand the model that
+        # is generating neutral noise the murderer/motive/weapon/victim/
+        # witness answers. These stages receive a TIME-ONLY projection: the
+        # canonical evidence time and nothing else (Phase19J Â§10/Â§20/Â§41).
+        from app.generation.constraints import LockedConstraints
+
+        locked_projection = LockedConstraints(crime_time=canonical)
         stage = GenerationStage.ACTIVITY_LOG
         codes: tuple[Any, ...] = ()
         entries: list[Any] = []
@@ -2560,7 +2578,14 @@ class OllamaStageDriver:
 
         for pass_index in range(MAX_ACTIVITY_LOG_REPAIR_PASSES + 1):
             _call_started = time.perf_counter()
-            content = self._call(provider, attempt, stage, prompt, budget_consumer)
+            content = self._call(
+                provider,
+                attempt,
+                stage,
+                prompt,
+                budget_consumer,
+                locked=locked_projection,
+            )
             if content is None:
                 # _call returns None only when content was empty after a
                 # successful provider result -> treat as schema-invalid.
@@ -2754,7 +2779,18 @@ class OllamaStageDriver:
         stage: GenerationStage,
         prompt: str,
         budget: Callable[[str | None], bool],
+        *,
+        locked: Any | None = None,
     ) -> str | None:
+        """ONE bounded budgeted stage call; returns content or raises typed.
+
+        ``locked`` overrides the request's locked-constraints projection.
+        ``None`` means the attempt's FULL locked constraints travel with the
+        request (the general stages need the identity sheet). The ACTIVITY_LOG
+        stages pass a TIME-ONLY projection (ADV-256) so the provider's
+        "Locked user constraints" block carries the canonical evidence time and
+        NO murderer/motive/weapon/victim/witness material.
+        """
         effective_timeout = self._effective_timeout(attempt)
         configured_timeout_ms = int(self._configured_provider_timeout() * 1000)
         if effective_timeout <= 0:
@@ -2775,7 +2811,7 @@ class OllamaStageDriver:
             attempt_id=attempt.attempt_id,
             stage=stage,
             prompt_context=prompt,
-            locked=attempt.locked,
+            locked=attempt.locked if locked is None else locked,
             diagnostics=(),
             seed=attempt.seed,
             timeout_seconds=effective_timeout,
