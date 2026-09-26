@@ -21,6 +21,8 @@ POSIX/cmd:
     python -m tools.ollama_smoke --enable --roundtrip        # + CASE/PEOPLE & ASSET_SPEC round-trip
     python -m tools.ollama_smoke --enable --geometry-repair  # + Phase 17 geometry repair round-trip
     python -m tools.ollama_smoke --enable --debug --stage asset_spec
+    python -m tools.ollama_smoke --enable --stage activity_log          # Phase19J-RI: 1 real log call
+    python -m tools.ollama_smoke --enable --activity-log-roundtrip     # + initial + bounded repair passes
     python -m tools.ollama_smoke --enable --full-chain       # REAL full Prompt-to-World chain
     python -m tools.ollama_smoke --showcase-steps            # print the manual Local-AI showcase E2E steps
 
@@ -120,6 +122,7 @@ _SMOKE_STAGES = (
     "world_requirements",
     "asset_spec",
     "asset_spec_repair",
+    "activity_log",
     "repair",
 )
 
@@ -214,6 +217,24 @@ def _parse_issues_for(stage: str, content: str) -> tuple[bool, list[str]]:
     if stage == "repair":
         issues = list(stage_parser.collect_full_draft_issues(content))
         return (not issues), issues
+    if stage == "activity_log":
+        from app.domain.activity_log import (
+            parse_activity_log,
+            validate_activity_log,
+        )
+
+        try:
+            entries = parse_activity_log(content)
+        except (TypeError, ValueError):
+            return False, ["activity_log: parse failed (shape diagnostics are "
+                           "reported by the driver's activity_log.parse_failed "
+                           "event)"]
+        codes = validate_activity_log(
+            entries, canonical_time=_ACTIVITY_LOG_CANONICAL
+        )
+        if not codes:
+            return True, []
+        return False, [f"activity_log: {code.value}" for code in codes]
     if stage == "case_truth":
         issues = _case_truth_issues(content)
         return (not issues), issues
@@ -491,6 +512,11 @@ def _stage_builders() -> dict[str, tuple[str, str, str]]:
             "bronze ceremonial ice pick",
             "asset_spec_repair_v1",
         ),
+        "activity_log": (
+            "build_activity_log_prompt",
+            "2026-09-11T23:42:00+02:00",
+            "activity_log_v1",
+        ),
         "repair": (
             "build_repair_prompt",
             "",
@@ -513,6 +539,8 @@ def _build_stage_prompt(
         return prompts.build_world_requirements_prompt(arg, None)
     if stage == "asset_spec":
         return prompts.build_asset_spec_prompt(arg, "decor")
+    if stage == "activity_log":
+        return prompts.build_activity_log_prompt(arg)
     if stage == "asset_spec_repair":
         # Deterministic sanitized repair request: the observed-broken candidate
         # plus the app-owned issue text it produces.
@@ -620,6 +648,191 @@ def _single_stage_report(settings, provider, stage: str) -> dict[str, object]:
 
 
 # --------------------------------------------------------------------------- #
+# Phase19J-RI — REAL ACTIVITY_LOG acceptance smoke (single stage + bounded
+# repair round-trip). Reports ONLY sanitized counts/codes: parsedOk,
+# entryCount, validatorCodes and the truthful ``provider.last_format`` (what
+# was ACTUALLY sent in /api/chat format — never a hardcoded driver flag).
+# Never the log text, prompts, CaseTruth or the base URL.
+# --------------------------------------------------------------------------- #
+
+_ACTIVITY_LOG_CANONICAL = "2026-09-11T23:42:00+02:00"
+
+
+def _activity_log_window(settings) -> tuple[int, int]:
+    return (
+        max(0, int(getattr(settings, "activity_log_window_before_minutes", 60) or 60)),
+        max(0, int(getattr(settings, "activity_log_window_after_minutes", 60) or 60)),
+    )
+
+
+def _activity_log_validation(
+    content: str,
+    canonical: str,
+    *,
+    before_minutes: int | None = None,
+    after_minutes: int | None = None,
+) -> dict[str, object]:
+    """Sanitized parse+validate outcome of ONE activity-log response.
+
+    Phase19J-RI (ADV-E): the validator is threaded the settings-derived
+    ``before/after`` window (the SAME ``_activity_log_window(settings)`` the
+    prompt builder uses) so a non-default operator window configuration can
+    never drift from the prompt. ``None`` defaults to the library default
+    (60/60) exactly as before.
+    """
+    from app.domain import activity_log as al
+
+    entry: dict[str, object] = {
+        "parsedOk": False,
+        "entryCount": 0,
+        "validatorCodes": [],
+    }
+    try:
+        entries = al.parse_activity_log(content)
+    except (TypeError, ValueError):
+        entry["parseFailureClass"] = "parse_failed"
+        return entry
+    entry["parsedOk"] = True
+    entry["entryCount"] = len(entries)
+    codes = al.validate_activity_log(
+        entries,
+        canonical_time=canonical,
+        before_minutes=before_minutes,
+        after_minutes=after_minutes,
+    )
+    entry["validatorCodes"] = [code.value for code in codes]
+    return entry
+
+
+def _activity_log_call(
+    provider, stage, prompt, attempt_id="ollama-smoke-activity-log"
+) -> tuple[dict[str, object], Any]:
+    """ONE real provider call + sanitized common diagnostics."""
+    from app.generation.provider import GenerateRequest
+
+    entry: dict[str, object] = {}
+    started = time.perf_counter()
+    result = provider.generate(
+        GenerateRequest(attempt_id=attempt_id, stage=stage, prompt_context=prompt)
+    )
+    entry["elapsedSeconds"] = round(time.perf_counter() - started, 4)
+    # Truthful transport flag + the format ACTUALLY sent (never hardcoded).
+    entry["lastFormat"] = getattr(provider, "last_format", None)
+    entry["transportStructuredOutput"] = bool(
+        getattr(provider, "structured_output_sent", False)
+    )
+    entry["providerResult"] = result.content is not None
+    if result.timed_out:
+        entry["errorSanitized"] = "timed out"
+    elif result.error is not None:
+        entry["errorSanitized"] = str(result.error)[:200]
+    if result.content is not None:
+        entry["responseBytes"] = len(result.content.encode("utf-8", errors="replace"))
+    return entry, result
+
+
+def _activity_log_single_stage(settings, provider) -> dict[str, object]:
+    """ONE real ACTIVITY_LOG call + sanitized parse/validate diagnostics."""
+    from app.generation import prompts
+    from app.generation.provider import GenerationStage
+
+    before, after = _activity_log_window(settings)
+    canonical = _ACTIVITY_LOG_CANONICAL
+    prompt = prompts.build_activity_log_prompt(
+        canonical, before_minutes=before, after_minutes=after
+    )
+    entry: dict[str, object] = {
+        "stage": GenerationStage.ACTIVITY_LOG.value,
+        "stageAlias": "activity_log",
+        "stageTemplate": "activity_log_v1",
+        "promptChars": len(prompt),
+    }
+    # Phase19J-RI (ADV-G, hermetic only — never a network call): the transport
+    # JSON Schema sent to the targeted Ollama in ``format`` carries the hard
+    # 15..20 entry-count bounds, so a schema-grammar provider (lastFormat ==
+    # "schema") physically cannot emit a one-row repair wrapper. Reported as a
+    # static field (offline; the live ``lastFormat`` above is what was ACTUALLY
+    # sent — never hardcoded).
+    from app.generation import prompts as _prompts
+
+    _al_schema = _prompts.schema_contract_as_json_schema("activity_log")
+    entry["transportEntryBounds"] = [
+        _al_schema["properties"]["entries"]["minItems"],
+        _al_schema["properties"]["entries"]["maxItems"],
+    ]
+    result_entry, result = _activity_log_call(
+        provider, GenerationStage.ACTIVITY_LOG, prompt
+    )
+    entry.update(result_entry)
+    if result.content is not None:
+        entry.update(
+            _activity_log_validation(
+                result.content, canonical, before_minutes=before, after_minutes=after
+            )
+        )
+        entry["pass"] = bool(entry.get("parsedOk")) and not entry.get("validatorCodes")
+    else:
+        entry.update({"parsedOk": False, "entryCount": 0, "validatorCodes": [], "pass": False})
+    return entry
+
+
+def _activity_log_repair_roundtrip(settings, provider) -> dict[str, object]:
+    """Initial + bounded ACTIVITY_LOG_REPAIR round-trip (real provider calls).
+
+    PASS = a pass whose log parses AND validates with no codes. Reports the
+    sanitized result of EVERY pass (parsedOk, entryCount, validatorCodes,
+    lastFormat, responseBytes) — never the log text, prompts or truth.
+    """
+    from app.generation import prompts
+    from app.generation.provider import GenerationStage
+    from app.services.ollama_driver import MAX_ACTIVITY_LOG_REPAIR_PASSES
+
+    before, after = _activity_log_window(settings)
+    canonical = _ACTIVITY_LOG_CANONICAL
+    passes: list[dict[str, object]] = []
+    prompt = prompts.build_activity_log_prompt(
+        canonical, before_minutes=before, after_minutes=after
+    )
+    stage = GenerationStage.ACTIVITY_LOG
+    for pass_index in range(MAX_ACTIVITY_LOG_REPAIR_PASSES + 1):
+        entry: dict[str, object] = {"pass": pass_index, "stage": stage.value}
+        result_entry, result = _activity_log_call(provider, stage, prompt)
+        entry.update(result_entry)
+        if result.content is None:
+            entry.update(
+                {"parsedOk": False, "entryCount": 0, "validatorCodes": [], "pass": False}
+            )
+            passes.append(entry)
+            break
+        entry.update(
+            _activity_log_validation(
+                result.content, canonical, before_minutes=before, after_minutes=after
+            )
+        )
+        entry["pass"] = bool(entry.get("parsedOk")) and not entry.get("validatorCodes")
+        passes.append(entry)
+        if entry["pass"] or pass_index >= MAX_ACTIVITY_LOG_REPAIR_PASSES:
+            break
+        from app.domain import activity_log as al
+
+        entry_count = int(entry.get("entryCount") or 0)
+        findings = al.repair_findings(entry.get("validatorCodes") or (), entry_count=entry_count)
+        if not findings:
+            findings = ("SCHEMA_INVALID",)
+        prompt = prompts.build_activity_log_repair_prompt(
+            canonical, findings, before_minutes=before, after_minutes=after
+        )
+        stage = GenerationStage.ACTIVITY_LOG_REPAIR
+    return {
+        "canonicalTime": canonical,
+        "windowBeforeMinutes": before,
+        "windowAfterMinutes": after,
+        "maxRepairPasses": MAX_ACTIVITY_LOG_REPAIR_PASSES,
+        "passes": passes,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # AssetSpec geometry round-trip through the REAL driver (Phase 17 diagnostics)
 # --------------------------------------------------------------------------- #
 
@@ -710,7 +923,12 @@ def _sanitized_report(
     """One real per-stage generation through the real adapter + strict parser +
     (for asset_spec) the full Phase 17 geometry round-trip."""
     report = _base_report(settings, probe_available, structured_supported)
-    report["generation"] = _single_stage_report(settings, provider, stage)
+    if stage == "activity_log":
+        # Phase19J-RI: the activity-log stage has its OWN sanitized report
+        # (parsedOk + entryCount + validatorCodes + the truthful last_format).
+        report["generation"] = _activity_log_single_stage(settings, provider)
+    else:
+        report["generation"] = _single_stage_report(settings, provider, stage)
     if stage == "asset_spec":
         report["geometryRoundtrip"] = _geometry_repair_roundtrip(settings, provider)
     return report
@@ -765,10 +983,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "run the smoke for ONE stage only (case_truth | evidence | "
-            "world_requirements | asset_spec | asset_spec_repair | repair). "
-            "Default: case_truth. asset_spec additionally reports the full "
-            "Phase 17 geometry round-trip (first-pass issues, each repair "
-            "attempt, final proc.* id)."
+            "world_requirements | asset_spec | asset_spec_repair | "
+            "activity_log | repair). Default: case_truth. asset_spec "
+            "additionally reports the full Phase 17 geometry round-trip "
+            "(first-pass issues, each repair attempt, final proc.* id); "
+            "activity_log reports sanitized parsedOk/entryCount/"
+            "validatorCodes/lastFormat."
         ),
     )
     parser.add_argument(
@@ -789,6 +1009,11 @@ def main(argv: list[str] | None = None) -> int:
         "--geometry-repair",
         action="store_true",
         help="also run one Phase 17 geometry-repair round-trip (sanitized metrics: issueCountBeforeRepair, repairAttempts, per-pass issues, finalPartCount, finalBoundingBox, declaredDimensions, silhouettePassed, generatedOnFirstPass/repaired, finalProcId).",
+    )
+    parser.add_argument(
+        "--activity-log-roundtrip",
+        action="store_true",
+        help="also run one ACTIVITY_LOG + bounded ACTIVITY_LOG_REPAIR round-trip through the REAL adapter (sanitized per-pass parsedOk / entryCount / validatorCodes / lastFormat / responseBytes).",
     )
     parser.add_argument(
         "--full-chain",
@@ -857,6 +1082,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if args.roundtrip:
                 report["roundtrip"] = _roundtrip_report(settings, provider)
+            if args.activity_log_roundtrip:
+                report["activityLogRoundtrip"] = _activity_log_repair_roundtrip(
+                    settings, provider
+                )
             if args.geometry_repair and "roundtrip" not in report:
                 report["geometryRepair"] = _geometry_repair_roundtrip(
                     settings, provider

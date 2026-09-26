@@ -976,6 +976,183 @@ def _log_order_flags(entries: Any) -> tuple[bool, bool]:
     return non_chronological, duplicate_timestamp
 
 
+def _bounded_item_count_candidate(count: int) -> int | str:
+    """A bounded item-count candidate: the int up to the parse bound, else a
+    token (``>=65``) above it — never an unbounded length on the wire."""
+    from app.domain.activity_log import _MAX_PARSED_ENTRIES
+
+    if int(count) > _MAX_PARSED_ENTRIES:
+        return f">={_MAX_PARSED_ENTRIES + 1}"
+    return int(count)
+
+
+# Phase19J-RI (ADV-B) — the per-key cap for the allowlisted ``topLevelKeys``
+# shape field. Keeps EVERY emitted key a bounded shape token (never a raw
+# length/content-unbounded provider key name on the wire).
+_MAX_SHAPE_KEY_CHARS = 40
+
+
+def _bounded_shape_key(value: Any) -> str:
+    """A bounded, control-free SHAPE token for one raw top-level key.
+
+    Caps the length at ``_MAX_SHAPE_KEY_CHARS`` (40) and strips every
+    control / non-printable / Unicode-format character, so a 5000-char or
+    prose-bearing provider key name can never leak content into the
+    allowlisted ``topLevelKeys`` telemetry field. A sanitized key that
+    differs from the raw key is fine (it is a shape token, not content).
+    Deterministic and bounded in both length and value set.
+    """
+    if value is None:
+        return "<none>"
+    raw = "".join(
+        ch
+        for ch in str(value)[: _MAX_SHAPE_KEY_CHARS]
+        if ch.isprintable()
+    ).strip()
+    if not raw:
+        return "<unsafe-or-empty>"
+    return raw
+
+
+def _activity_log_diagnostic_shape(content: str | None) -> dict[str, Any]:
+    """SAFE structural SHAPE of one unparseable activity-log response.
+
+    Phase19J-RI diagnostic harness (shape ONLY, never content): returns the
+    top-level JSON type, bounded top-level key names, the expected top-level
+    keys, a bounded item-count candidate and a STABLE parse-failure class
+    token (``empty`` / ``non_json`` / ``root_not_object`` /
+    ``unknown_top_level_keys`` / ``entries_not_array`` /
+    ``entries_exceed_parse_bound`` / ``entry_not_object`` /
+    ``entry_unknown_keys`` / ``entry_timestamp_invalid`` /
+    ``entry_activity_type_invalid`` / ``entry_activity_invalid`` /
+    ``schema_invalid_unclassified``).
+
+    The raw provider text, timestamps and activity strings NEVER appear, so
+    the event can be emitted without leaking generated content, prompts or
+    CaseTruth (Phase19J §40 / Phase19J-RI). ADV-B: every ``topLevelKeys``
+    member is a bounded (<= 40 chars), control-stripped shape token — raw,
+    length/content-unbounded provider key names never reach the event.
+    """
+    from app.assets.depthguard import bounded_json_loads
+    from app.domain.activity_log import (
+        ACTIVITY_LOG_ACTIVITY_TYPES,
+        _MAX_PARSED_ENTRIES,
+    )
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    base: dict[str, Any] = {
+        "topLevelType": None,
+        "topLevelKeys": [],
+        "expectedTopLevelKeys": ["entries"],
+        "itemCountCandidate": None,
+    }
+
+    def shape(**extra: Any) -> dict[str, Any]:
+        out = dict(base)
+        out.update(extra)
+        return out
+
+    if not isinstance(content, str) or not content.strip():
+        return shape(topLevelType="non-json", parseFailureClass="empty")
+    try:
+        data = bounded_json_loads(content)
+    except (TypeError, ValueError):
+        return shape(topLevelType="non-json", parseFailureClass="non_json")
+    if isinstance(data, list):
+        return shape(
+            topLevelType="array",
+            itemCountCandidate=_bounded_item_count_candidate(len(data)),
+            parseFailureClass="root_not_object",
+        )
+    if not isinstance(data, dict):
+        return shape(topLevelType="scalar", parseFailureClass="root_not_object")
+    top_keys = sorted(_bounded_shape_key(key) for key in data)[:8]
+    if set(data) != {"entries"}:
+        return shape(
+            topLevelType="object",
+            topLevelKeys=top_keys,
+            parseFailureClass="unknown_top_level_keys",
+        )
+    raw_entries = data.get("entries")
+    if not isinstance(raw_entries, list):
+        return shape(
+            topLevelType="object",
+            topLevelKeys=top_keys,
+            parseFailureClass="entries_not_array",
+        )
+    count = len(raw_entries)
+    if count > _MAX_PARSED_ENTRIES:
+        return shape(
+            topLevelType="object",
+            topLevelKeys=top_keys,
+            itemCountCandidate=_bounded_item_count_candidate(count),
+            parseFailureClass="entries_exceed_parse_bound",
+        )
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_not_object",
+            )
+        extra_keys = set(item) - {"timestamp", "activityType", "activity"}
+        if extra_keys:
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_unknown_keys",
+            )
+        timestamp = item.get("timestamp")
+        activity_type = item.get("activityType")
+        activity = item.get("activity")
+        if not isinstance(timestamp, str) or not timestamp:
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_timestamp_invalid",
+            )
+        try:
+            parse_iso8601_to_epoch(timestamp)
+        except (TypeError, ValueError):
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_timestamp_invalid",
+            )
+        if (
+            not isinstance(activity_type, str)
+            or not activity_type
+            or activity_type not in ACTIVITY_LOG_ACTIVITY_TYPES
+        ):
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_activity_type_invalid",
+            )
+        if not isinstance(activity, str):
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_activity_invalid",
+            )
+    # Every structural check above passed (each item is well-formed under the
+    # closed schema and the count is within the parse bound) — the parse still
+    # failed only through a deeper defensive rejection. Stable token, never
+    # content.
+    return shape(
+        topLevelType="object",
+        topLevelKeys=top_keys,
+        itemCountCandidate=count,
+        parseFailureClass="schema_invalid_unclassified",
+    )
+
+
 def _with_activity_log_events(
     item: Any, entries: tuple[Any, ...], version_marker: str
 ) -> Any:
@@ -2369,8 +2546,10 @@ class OllamaStageDriver:
         """
         from app.domain.activity_log import (
             ACTIVITY_LOG_VERSION_MARKER,
+            MIN_ACTIVITY_LOG_ENTRIES,
             WINDOW_DEFAULT_AFTER_MINUTES,
             WINDOW_DEFAULT_BEFORE_MINUTES,
+            activity_log_window_satisfiable,
         )
         from app.domain.render import EvidenceRenderType, render_type_for_kind
         from app.generation.schemas import EvidenceSetSpec
@@ -2393,6 +2572,26 @@ class OllamaStageDriver:
             if after_raw is None
             else max(0, int(after_raw))
         )
+        # Phase19J-RI (ADV-C) fail-fast OPERATOR GUARD: an unsatisfiable window
+        # (total clamped span below ``MIN - 1`` seconds — e.g. a 0/0 setting)
+        # can never hold the 15 distinct strictly-increasing rows the strict
+        # validator demands, so every prompt built for it would contradict
+        # itself. Raise a clear sanitized operator-config error BEFORE any
+        # provider call (the cached-CASE path above already paid ZERO provider
+        # calls for the activity-log stage itself). The pure domain guard
+        # mirrors the validator's OWN clamping math; the validator is NOT
+        # weakened — the guard only converts a silent long tail into a loud
+        # operator mistake.
+        if not activity_log_window_satisfiable(before, after):
+            from app.services.generation import ProviderConfigError
+
+            raise ProviderConfigError(
+                "activity-log window config error: before="
+                f"{before} after={after} cannot geometrically hold "
+                f"{MIN_ACTIVITY_LOG_ENTRIES} distinct strictly-increasing "
+                "timestamps (configure at least 1 minute of total span; the "
+                "default before=60 after=60 is fine)"
+            )
         persons, weapons, motives, location_ids, location_names = (
             self._activity_log_forbidden_tokens(attempt, crime, public)
         )
@@ -2557,6 +2756,16 @@ class OllamaStageDriver:
             canonical,
             before_minutes=before_minutes,
             after_minutes=after_minutes,
+            # Phase19J-RI (ADV-D): the canonical forbidden-name sets are
+            # accepted ONLY for the deterministic scaffold collision check
+            # (reserved fallback pool); they are NEVER rendered into the
+            # prompt text (ADV-256 holds — the model still sees only the
+            # canonical time + window + neutral rules).
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
         )
         # ADV-256 â€” the activity-log stages never receive the FULL locked
         # identity sheet. The provider appends every non-None locked field to
@@ -2577,6 +2786,14 @@ class OllamaStageDriver:
         repair_attempts = 0
 
         for pass_index in range(MAX_ACTIVITY_LOG_REPAIR_PASSES + 1):
+            # Phase19J-RI accounting note: this driver-local repair loop is
+            # bounded by ``MAX_ACTIVITY_LOG_REPAIR_PASSES`` and its OWN
+            # counter — it deliberately never touches
+            # ``budget.consume_repair_pass()``. Every call in the loop is a
+            # normal CORE-bucket provider call through ``_call``, so
+            # ``provider.call.start`` reports ``repairCount=0`` for
+            # stage=activity_log_repair BY DESIGN (separate-stage accounting;
+            # budgets and ceilings are unchanged).
             _call_started = time.perf_counter()
             content = self._call(
                 provider,
@@ -2613,6 +2830,25 @@ class OllamaStageDriver:
                     codes = (ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,)
                     entries = []
                     parse_error = True
+                    # Phase19J-RI — SAFE diagnostic harness (SHAPE only, never
+                    # content): capture WHY the parse failed (top-level type /
+                    # bounded keys / bounded item-count candidate / stable
+                    # class token) so the real Hermes failure class can be
+                    # diagnosed without ever logging the generated text,
+                    # prompts or CaseTruth (Phase19J §40).
+                    shape = _activity_log_diagnostic_shape(content)
+                    emit_event(
+                        "activity_log.parse_failed",
+                        caseId=case_id,
+                        generationAttemptId=generation_attempt_id,
+                        evidenceIdSafe=evidence_id_safe,
+                        providerCallCount=getattr(attempt.budget, "calls", None),
+                        topLevelType=shape.get("topLevelType"),
+                        topLevelKeys=shape.get("topLevelKeys"),
+                        expectedTopLevelKeys=shape.get("expectedTopLevelKeys"),
+                        itemCountCandidate=shape.get("itemCountCandidate"),
+                        parseFailureClass=shape.get("parseFailureClass"),
+                    )
             entry_count = len(entries) if entries else 0
             emit_event(
                 "activity_log.generation.complete",
@@ -2668,7 +2904,17 @@ class OllamaStageDriver:
                 elapsedMs=_elapsed(),
             )
             repair_attempts += 1
-            prompt = prompts.build_activity_log_repair_prompt(canonical, findings)
+            prompt = prompts.build_activity_log_repair_prompt(
+                canonical,
+                findings,
+                before_minutes=before_minutes,
+                after_minutes=after_minutes,
+                person_names=person_names,
+                weapon_names=weapon_names,
+                motive_names=motive_names,
+                location_ids=location_ids,
+                location_names=location_names,
+            )
             stage = GenerationStage.ACTIVITY_LOG_REPAIR
             # fall through to the next bounded pass (no other state needed)
 

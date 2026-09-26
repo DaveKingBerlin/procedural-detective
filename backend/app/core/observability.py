@@ -43,6 +43,14 @@ _SAFE_FIELDS = frozenset(
         # text, prompts or hidden evidence. ``evidenceIdSafe`` is the
         # evidence id scrubbed through ``_sanitize_object_id_for_message``.
         "evidenceIdSafe", "entryCount", "validatorCode",
+        # Phase19J-RI — sanitized structural SHAPE of a failed activity-log
+        # parse (``activity_log.parse_failed``). Shape tokens ONLY: the
+        # top-level JSON type, bounded top-level key names, the expected
+        # top-level keys, a bounded item-count candidate and a STABLE
+        # parse-failure class token. Never generated log text, timestamps,
+        # activity strings, prompts or CaseTruth.
+        "topLevelType", "topLevelKeys", "expectedTopLevelKeys",
+        "itemCountCandidate", "parseFailureClass",
         # Phase 23 — safe witness-interview lifecycle fields (§38). The closed
         # question type, the bounded per-interview discovery count and the
         # public witness id are player-safe metadata: NEVER the statement

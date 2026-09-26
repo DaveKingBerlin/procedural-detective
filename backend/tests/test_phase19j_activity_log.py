@@ -59,6 +59,7 @@ from app.services.publication import (  # noqa: E402
 )
 
 from test_ollama_driver import (  # noqa: E402
+    PROMPT,
     _alog,
     _alog_posts,
     _case_people,
@@ -66,6 +67,7 @@ from test_ollama_driver import (  # noqa: E402
     _j,
     _run,
     _staged,
+    _world,
 )
 from phase6_helpers import case_for  # noqa: E402
 
@@ -719,7 +721,9 @@ def test_repair_findings_are_machine_readable_tokens_only():
         entry_count=12,
     )
     assert findings == ("SCHEMA_INVALID", "CANONICAL_TIME_MISSING")
-    # entry-count findings only appear when the code itself is present
+    # entry-count findings only appear when the code itself is present; since
+    # Phase19J-RI they carry the DETERMINISTIC numeric target (never content),
+    # so the repair prompt can restate the hard 15..20 bound.
     with_count = repair_findings(
         (
             ActivityLogValidatorCode.ACTIVITY_LOG_ENTRY_COUNT_INVALID,
@@ -728,7 +732,11 @@ def test_repair_findings_are_machine_readable_tokens_only():
         ),
         entry_count=12,
     )
-    assert with_count == ("SCHEMA_INVALID", "ENTRY_COUNT_TOO_LOW", "CANONICAL_TIME_MISSING")
+    assert with_count == (
+        "SCHEMA_INVALID",
+        "ENTRY_COUNT_TOO_LOW (need 15..20, have 12)",
+        "CANONICAL_TIME_MISSING",
+    )
 
 
 def test_repair_findings_count_direction_and_order_problems():
@@ -736,7 +744,11 @@ def test_repair_findings_count_direction_and_order_problems():
         (ActivityLogValidatorCode.ACTIVITY_LOG_ENTRY_COUNT_INVALID,),
         entry_count=25,
     )
-    assert "ENTRY_COUNT_TOO_HIGH" in findings
+    # Phase19J-RI: the token now carries the deterministic numeric target
+    # (ENTRY_COUNT_TOO_HIGH (need 15..20, have 25)); the old bare code is
+    # still a substring (additive change).
+    assert any("ENTRY_COUNT_TOO_HIGH" in f for f in findings)
+    assert "need 15..20, have 25" in findings[0]
     findings2 = repair_findings(
         (
             ActivityLogValidatorCode.ACTIVITY_LOG_TIME_ORDER_INVALID,
@@ -1309,6 +1321,1307 @@ def test_activity_log_events_carry_only_safe_fields(caplog):
         assert "Local user activity detected" not in blob
         assert "Canonical evidence time" not in blob
         assert "murderer" not in blob
+
+
+# --------------------------------------------------------------------------- #
+# 17 — Phase19J-RI regression suite (defect: real hermes3:8b observation —
+# initial 11986-byte SCHEMA_INVALID + repair 153/186-byte one-row
+# ENTRY_COUNT_INVALID failures). Each numbered item maps to the
+# Phase19J-RI.md §REGRESSION TESTS list 1..15.
+# --------------------------------------------------------------------------- #
+
+
+def _alog_log_events(caplog):
+    """(event name, fields) pairs for every activity_log.* event."""
+    return [
+        (str(getattr(e, "pd_event", "")), dict(getattr(e, "pd_fields", {}) or {}))
+        for e in caplog.records
+        if str(getattr(e, "pd_event", "")).startswith("activity_log.")
+    ]
+
+
+# 1 — initial stage returning 17 valid entries parses as 17 (driver-level).
+def test_ri01_initial_stage_17_valid_entries_parses_as_17(caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        record, _transport = _run(_staged())
+    assert record.state is GenerationState.PUBLISHED
+    complete_ok = [
+        fields["entryCount"]
+        for name, fields in _alog_log_events(caplog)
+        if name == "activity_log.generation.complete" and fields.get("success")
+    ]
+    assert complete_ok
+    assert all(count == 17 for count in complete_ok)
+
+
+# 2 — repair stage returning 17 valid entries parses as 17 (+ PUBLISHED).
+def test_ri02_repair_stage_17_valid_entries_parses_as_17(caplog):
+    import logging
+
+    from test_ollama_driver import ICEPICK_SPEC, _world
+
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    when_obs = epoch_to_iso(
+        parse_iso8601(crime_canonical)[0] - 10, parse_iso8601(crime_canonical)[1]
+    )
+    bad = _alog(when_obs)
+    bad["entries"][8]["timestamp"] = "2026-09-11T23:40:00+02:00"  # canonical removed
+    good = _alog(when_obs)
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        json.dumps(bad),   # ACTIVITY_LOG (invalid -> repair)
+        json.dumps(good),  # ACTIVITY_LOG_REPAIR (valid, 17 entries)
+        *_alog_posts(crime_canonical)[1:],
+        _j(_world()),
+    ]
+    posts.append(ICEPICK_SPEC)
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        record, _transport = _run(posts)
+    assert record.state is GenerationState.PUBLISHED
+    repaired_ok = [
+        fields["entryCount"]
+        for name, fields in _alog_log_events(caplog)
+        if name == "activity_log.repair.complete" and fields.get("success")
+    ]
+    assert repaired_ok
+    assert all(count == 17 for count in repaired_ok)
+
+
+# 3 — initial and repair stages use the SAME output DTO/schema (plus the
+# Phase19J-RI transport count bounds).
+def test_ri03_initial_and_repair_stages_share_the_same_schema():
+    from app.generation import prompts
+
+    assert prompts.json_schema_for_generation_stage("activity_log") == \
+        prompts.json_schema_for_generation_stage("activity_log_repair")
+    assert prompts.STAGE_TO_CONTRACT["activity_log"] == \
+        prompts.STAGE_TO_CONTRACT["activity_log_repair"] == "activity_log"
+    assert prompts.schema_contract(
+        prompts.STAGE_TO_CONTRACT["activity_log"]
+    ) == prompts.schema_contract(prompts.STAGE_TO_CONTRACT["activity_log_repair"])
+    schema = prompts.schema_contract_as_json_schema("activity_log")
+    entries = schema["properties"]["entries"]
+    assert entries["minItems"] == MIN_ACTIVITY_LOG_ENTRIES == 15
+    assert entries["maxItems"] == MAX_ACTIVITY_LOG_ENTRIES == 20
+
+
+# 4 — wrong top-level key fails typed (domain parse raises; driver terminal
+# ACTIVITY_LOG_SCHEMA_INVALID).
+def test_ri04_wrong_top_level_key_fails_typed():
+    when_obs = CANONICAL
+    doc = {"events": _valid_entries(when_obs)}
+    with pytest.raises(ValueError):
+        parse_activity_log(json.dumps(doc))
+
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    when_obs = epoch_to_iso(
+        parse_iso8601(crime_canonical)[0] - 10, parse_iso8601(crime_canonical)[1]
+    )
+    events_doc = json.dumps({"events": _alog(when_obs)["entries"]})
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        events_doc,  # ACTIVITY_LOG (wrong top-level key -> SCHEMA_INVALID)
+        events_doc,  # repair 1
+        events_doc,  # repair 2 (terminal)
+    ]
+    record, transport = _run(posts)
+    assert record.state is GenerationState.FAILED
+    assert record.failure_code == "ACTIVITY_LOG_SCHEMA_INVALID"
+    assert transport.call_count == 5
+
+
+# 5 — a single ActivityLogEntry can never be accepted as a repaired document.
+def test_ri05_single_entry_document_is_never_accepted():
+    bare = _entry(CANONICAL)
+    with pytest.raises(ValueError):
+        parse_activity_log(json.dumps(bare))  # no wrapper -> schema-invalid
+    one = parse_activity_log(json.dumps({"entries": [bare]}))
+    codes = validate_activity_log(one, canonical_time=CANONICAL)
+    assert ActivityLogValidatorCode.ACTIVITY_LOG_ENTRY_COUNT_INVALID in codes
+
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    when_obs = epoch_to_iso(
+        parse_iso8601(crime_canonical)[0] - 10, parse_iso8601(crime_canonical)[1]
+    )
+    one_row = json.dumps({"entries": [_entry(when_obs)]})
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        one_row,  # ACTIVITY_LOG (1 entry)
+        one_row,  # repair 1 (1 entry)
+        one_row,  # repair 2 (terminal)
+    ]
+    record, transport = _run(posts)
+    assert record.state is GenerationState.FAILED
+    assert record.failure_code == "ACTIVITY_LOG_ENTRY_COUNT_INVALID"
+    assert transport.call_count == 5
+
+
+# 7 — a realistic Hermes-shaped ~10KB response survives adapter projection.
+def test_ri07_ten_kb_hermes_shaped_response_survives_adapter_projection():
+    from test_ollama_driver import ICEPICK_SPEC, _world
+
+    tick, offset = parse_iso8601(CANONICAL)
+    rows = []
+    for i in range(17):
+        rows.append(
+            _entry(
+                epoch_to_iso(tick + (i - 8) * 180, offset),
+                activity="Document autosaved" + "x" * (
+                    MAX_ACTIVITY_TEXT_CHARS - len("Document autosaved")
+                ),
+            )
+        )
+    rows[8] = _entry(CANONICAL)  # canonical exactly once, ordinary row
+    doc = json.dumps({"entries": rows}, ensure_ascii=False, indent=2)
+    # Hermes-style verbose JSON: arbitrary JSON whitespace padding brings the
+    # raw response to ~10KB while the parsed content stays a VALID 17-row log.
+    raw = doc + " " * max(0, 10_000 - len(doc))
+    assert len(raw.encode("utf-8")) >= 10_000
+    entries = parse_activity_log(raw)
+    assert len(entries) == 17
+    assert validate_activity_log(entries, canonical_time=CANONICAL) == ()
+
+    # through the MockOllamaTransport driver run (first log call = the 10KB doc)
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    when_obs = epoch_to_iso(
+        parse_iso8601(crime_canonical)[0] - 10, parse_iso8601(crime_canonical)[1]
+    )
+    big = json.dumps({"entries": _alog(when_obs)["entries"]}, indent=2)
+    big_padded = big + " " * max(0, 10_000 - len(big))
+    assert len(big_padded.encode("utf-8")) >= 10_000
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        big_padded,
+        *_alog_posts(crime_canonical)[1:],
+        _j(_world()),
+    ]
+    posts.append(ICEPICK_SPEC)
+    record, _transport = _run(posts)
+    assert record.state is GenerationState.PUBLISHED
+    payload = json.loads(
+        serialize_published_payload(
+            record.published, seed=1, prompt="ri07", model="mock", title="RI07"
+        )
+    )
+    obs = next(f for f in payload["draft"]["evidence"] if f["id"] == "d_ev_when_obs")
+    assert len(obs["presentation"]["events"]) == 17
+
+
+# 8 — canonical time appears exactly once through the DRIVER repair path.
+def test_ri08_canonical_time_appears_exactly_once_through_repair_path():
+    from test_ollama_driver import ICEPICK_SPEC, _world
+
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    when_obs = epoch_to_iso(
+        parse_iso8601(crime_canonical)[0] - 10, parse_iso8601(crime_canonical)[1]
+    )
+    bad = _alog(when_obs)
+    bad["entries"][8]["timestamp"] = "2026-09-11T23:40:00+02:00"  # canonical removed
+    good = _alog(when_obs)
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        json.dumps(bad),   # ACTIVITY_LOG (invalid -> repair)
+        json.dumps(good),  # ACTIVITY_LOG_REPAIR (canonical once)
+        *_alog_posts(crime_canonical)[1:],
+        _j(_world()),
+    ]
+    posts.append(ICEPICK_SPEC)
+    record, _transport = _run(posts)
+    assert record.state is GenerationState.PUBLISHED
+    payload = json.loads(
+        serialize_published_payload(
+            record.published, seed=1, prompt="ri08", model="mock", title="RI08"
+        )
+    )
+    obs = next(f for f in payload["draft"]["evidence"] if f["id"] == "d_ev_when_obs")
+    events = obs["presentation"]["events"]
+    assert len([e for e in events if e["time"] == when_obs]) == 1
+
+
+# 10 — bounded repair count unchanged: exactly MAX_ACTIVITY_LOG_REPAIR_PASSES+1
+# calls then a terminal typed failure (keep 2).
+def test_ri10_bounded_repair_count_unchanged_terminal_after_three_calls():
+    from app.services.ollama_driver import MAX_ACTIVITY_LOG_REPAIR_PASSES
+
+    assert MAX_ACTIVITY_LOG_REPAIR_PASSES == 2
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    when_obs = epoch_to_iso(
+        parse_iso8601(crime_canonical)[0] - 10, parse_iso8601(crime_canonical)[1]
+    )
+    bad = _alog(when_obs)
+    bad["entries"][8]["timestamp"] = "2026-09-11T23:40:00+02:00"
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        json.dumps(bad),  # ACTIVITY_LOG
+        json.dumps(bad),  # repair 1
+        json.dumps(bad),  # repair 2
+    ]
+    record, transport = _run(posts)
+    assert record.state is GenerationState.FAILED
+    assert record.failure_code == "ACTIVITY_LOG_CANONICAL_TIME_MISSING"
+    log_calls = sum(
+        1
+        for i in range(transport.call_count)
+        if "activity_log" in transport.prompt_of_call(i)[:80]
+    )
+    assert log_calls == MAX_ACTIVITY_LOG_REPAIR_PASSES + 1 == 3
+    assert transport.call_count == 5
+    assert record.budget.calls == 5
+
+
+# 11 — solver signature unchanged (the rich log never touches solver input).
+def test_ri11_solver_signature_unchanged_by_fix():
+    record_rich, _t = _run(_staged())
+    assert record_rich.state is GenerationState.PUBLISHED
+    payload_rich = json.loads(
+        serialize_published_payload(
+            record_rich.published, seed=1, prompt="ri11", model="mock", title="RI11"
+        )
+    )
+    payload_plain = json.loads(json.dumps(payload_rich))
+    for fact in payload_plain["draft"]["evidence"]:
+        presentation = fact.get("presentation")
+        if isinstance(presentation, dict):
+            presentation.pop("events", None)
+            presentation.pop("activityLogVersion", None)
+    assert _solver_signature(payload_rich) == _solver_signature(payload_plain)
+
+
+# 12 — FakeProvider unchanged (deterministic golden path).
+def test_ri12_fake_provider_deterministic_path_unchanged(phase5_app):
+    from app.domain.render import render_payload_of
+    from test_phase19c_interaction import _published_payload
+    from test_phase19g_evidence_render import GOLDEN_CCTV
+
+    case_id, creator = case_for(phase5_app)
+    payload = _published_payload(phase5_app, case_id, 1)
+    fact = next(f for f in payload["draft"]["evidence"] if f["id"] == GOLDEN_CCTV)
+    canonical = fact["propositions"][0]["observed_at"]
+    content = project_read_content(payload, GOLDEN_CCTV)
+    assert content["renderType"] == "ACTIVITY_LOG"
+    entries = content["entries"]
+    assert len(entries) == 20
+    assert len([e for e in entries if e["time"] == canonical]) == 1
+    assert render_payload_of(fact) == render_payload_of(fact)
+
+
+# 13 — RemoteClientProvider contract unchanged (schema ids + transport schema
+# equality for both activity-log stages).
+def test_ri13_remote_client_contract_unchanged_with_schema_equality():
+    from app.generation import prompts
+    from app.generation.bridge_protocol import (
+        AUTHORITATIVE_SCHEMA_IDS,
+        schema_id_for_stage,
+    )
+    from app.generation.provider import GenerationStage
+
+    assert schema_id_for_stage(GenerationStage.ACTIVITY_LOG.value) == "ACTIVITY_LOG_v1"
+    assert schema_id_for_stage(
+        GenerationStage.ACTIVITY_LOG_REPAIR.value
+    ) == "ACTIVITY_LOG_REPAIR_v1"
+    assert "ACTIVITY_LOG_v1" in AUTHORITATIVE_SCHEMA_IDS
+    assert "ACTIVITY_LOG_REPAIR_v1" in AUTHORITATIVE_SCHEMA_IDS
+    assert prompts.json_schema_for_generation_stage("activity_log") == \
+        prompts.json_schema_for_generation_stage("activity_log_repair")
+
+
+# 14 — gameplay still performs zero provider calls.
+def test_ri14_gameplay_reads_make_zero_provider_calls():
+    record, transport = _run(_staged())
+    assert record.state is GenerationState.PUBLISHED
+    calls_after_generation = transport.call_count
+    payload = json.loads(
+        serialize_published_payload(
+            record.published, seed=1, prompt="ri14", model="mock", title="RI14"
+        )
+    )
+    # projection + DTO serialization + byte-deterministic JSON round trips
+    for fact in payload["draft"]["evidence"]:
+        project_read_content(payload, fact["id"])
+    json.loads(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+    json.loads(serialize_published_payload(
+        record.published, seed=1, prompt="ri14", model="mock", title="RI14"
+    ))
+    assert transport.call_count == calls_after_generation
+
+
+# 15 — REQUIREMENTS.md byte-identical (repo guard; never hashed generated or
+# adapter files).
+def test_ri15_requirements_md_byte_identical():
+    import hashlib
+
+    path = Path(__file__).resolve().parents[2] / "REQUIREMENTS.md"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest == (
+        "b2e568c029b02de79a74c43bb0e2ecd4d44a7fbec65d7de191a890a6dec9970d"
+    )
+
+
+# 16 — DEF-104: the INITIAL prompt carries the concrete window endpoints and
+# the canonical-anchor worked example (no identity-sheet material — ADV-256).
+def test_ri16_initial_prompt_carries_concrete_window_and_canonical_anchor():
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    blob = prompts.build_activity_log_prompt(canonical)
+    assert "activity_log_v1" in blob
+    # concrete deterministic window endpoints (60/60 defaults -> 22:42 ..
+    # next-day 00:42, both rendered with the canonical instant's own +02:00)
+    assert (
+        "Every entry timestamp MUST lie inside the deterministic window "
+        "[2026-09-11T22:42:00+02:00 .. 2026-09-12T00:42:00+02:00]"
+    ) in blob
+    # the relative explanation is KEPT next to the exact bounds
+    assert "-60 minutes" in blob and "+60 minutes" in blob
+    assert "(the whole log spans at most 120 minutes)" in blob
+    # canonical-anchor worked example with the EXACT locked value: the model
+    # never has to invent a canonical-row shape.
+    assert (
+        '"timestamp": "2026-09-11T23:42:00+02:00", "activityType": '
+        '"LOCAL_ACTIVITY", "activity": "Local user activity detected"'
+    ) in blob
+    # the locked value occurs as the plain canonical line AND inside the anchor
+    # row AND once inside the COMPLETE worked-example scaffold AND once inside
+    # the app-owned TIMESTAMP GRID (DEF-104 follow-up #3) — exactly 4
+    # occurrences, never a phantom second canonical outside those signals.
+    assert blob.count("2026-09-11T23:42:00+02:00") == 4
+    # count sentence present (the Phase19J-RI hard floor/ceiling)
+    assert "Exactly 15 to 20 chronological entries" in blob
+    # ADV-256 invariant: initial prompt = canonical time + window + neutral
+    # rules ONLY; no identity sheet, no truth seeds, no other locked facts.
+    for junk in (
+        "Paul Becker", "Anna Weiss", "König", "bronze ceremonial ice pick",
+        "stolen research data", "solverProof", "caseTruth", "crimeTime",
+        "murdererId", "weaponId", "motiveId", "locationId", "konsortium",
+    ):
+        assert junk not in blob, junk
+
+
+# 17 — DEF-104 DRIFT GUARD: the concrete window endpoints the prompt builder
+# renders EXACTLY equal the ISO endpoints derived from
+# ``activity_log_window_bounds`` (the strict validator's authoritative math)
+# for BOTH prompts — including the clamped-window cases where before+after
+# exceeds the 120-minute hard cap (the relative sentence then shows the
+# CLAMPED minutes, so the prompt can never advertise a wider window than the
+# validator accepts).
+def test_ri17_prompt_window_endpoints_match_validator_window_math():
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    tick, offset = parse_iso8601(canonical)
+    for before, after in ((60, 60), (90, 90), (5, 130), (0, 120), (120, 0), (30, 0)):
+        lo, hi = activity_log_window_bounds(
+            tick, before_minutes=before, after_minutes=after
+        )
+        start_iso, end_iso = epoch_to_iso(lo, offset), epoch_to_iso(hi, offset)
+        initial = prompts.build_activity_log_prompt(
+            canonical, before_minutes=before, after_minutes=after
+        )
+        repair = prompts.build_activity_log_repair_prompt(
+            canonical, ("TIMESTAMP_OUTSIDE_WINDOW",),
+            before_minutes=before, after_minutes=after,
+        )
+        expected = (
+            "Every entry timestamp MUST lie inside the deterministic window ["
+            + start_iso + " .. " + end_iso + "]"
+        )
+        assert expected in initial, (before, after)
+        assert expected in repair, (before, after)
+        # the relative sentence carries the CLAMPED minutes — prompt and
+        # validator agree on the ACTUAL window in every configuration.
+        clamped_before = (tick - lo) // 60
+        clamped_after = (hi - tick) // 60
+        assert f"-{clamped_before} minutes" in initial, (before, after)
+        assert f"+{clamped_after} minutes" in initial, (before, after)
+        assert f"-{clamped_before} minutes" in repair, (before, after)
+        assert f"+{clamped_after} minutes" in repair, (before, after)
+
+
+# 18a — DEF-104 DRIVER-LEVEL regression: a first-pass activity-log response
+# with rows OUTSIDE the window AND the canonical missing triggers a repair
+# whose ACTUAL provider prompt text embeds the concrete deterministic window
+# endpoints (for THAT fact's locked canonical instant) and the
+# canonical-anchor worked example with the exact locked value.
+def test_ri18_driver_repair_prompt_embeds_concrete_window_and_canonical_anchor():
+    from test_ollama_driver import ICEPICK_SPEC, _world
+
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    tick, offset = parse_iso8601(crime_canonical)
+    when_obs = epoch_to_iso(tick - 10, offset)  # d_ev_when_obs locked instant
+    bad = _alog(when_obs)
+    for i, entry in enumerate(bad["entries"]):
+        row_tick = parse_iso8601(entry["timestamp"])[0]
+        # every row lands 2 hours after the canonical -> ALL outside the
+        # deterministic ±60-minute window AND the canonical is missing.
+        bad["entries"][i]["timestamp"] = epoch_to_iso(row_tick + 7200, offset)
+    good = _alog(when_obs)
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        json.dumps(bad),   # ACTIVITY_LOG (d_ev_when_obs) — invalid -> repair
+        json.dumps(good),  # ACTIVITY_LOG_REPAIR — valid
+        *_alog_posts(crime_canonical)[1:],
+        _j(_world()),
+    ]
+    posts.append(ICEPICK_SPEC)
+    record, transport = _run(posts)
+    assert record.state is GenerationState.PUBLISHED
+    repair_prompt = transport.prompt_of_call(3)
+    assert "activity_log_repair_v1" in repair_prompt
+    # the repair prompt locks the SERVER-OWNED canonical of THIS fact
+    assert "Canonical evidence time: " + when_obs + "\n" in repair_prompt
+    # concrete window endpoints for when_obs with the 60/60 defaults
+    lo, hi = activity_log_window_bounds(
+        parse_iso8601(when_obs)[0], before_minutes=60, after_minutes=60
+    )
+    assert (
+        "Every entry timestamp MUST lie inside the deterministic window ["
+        + epoch_to_iso(lo, offset) + " .. " + epoch_to_iso(hi, offset) + "]"
+    ) in repair_prompt
+    # canonical-anchor worked example with the exact locked value
+    assert (
+        '"timestamp": "' + when_obs + '", "activityType": "LOCAL_ACTIVITY", '
+        '"activity": "Local user activity detected"'
+    ) in repair_prompt
+    # BOTH machine-readable findings tokens reached the model plus the
+    # findings->fix mapping sentence (DEF-104 requirement 4).
+    assert "CANONICAL_TIME_MISSING" in repair_prompt
+    assert "TIMESTAMP_OUTSIDE_WINDOW" in repair_prompt
+    assert "Findings-to-fix mapping (deterministic)" in repair_prompt
+    # ADV-256: the repair prompt still carries NO identity-sheet material.
+    for junk in (
+        "Paul Becker", "Anna Weiss", "bronze ceremonial ice pick",
+        "solverProof", "caseTruth", "crimeTime",
+    ):
+        assert junk not in repair_prompt, junk
+
+
+# --------------------------------------------------------------------------- #
+# 19..22 — DEF-104 follow-up #2: BOTH prompts embed a COMPLETE
+#      self-consistent worked-example scaffold plus the explicit
+#      simultaneous-constraint rule ("satisfy ALL of these at once").
+# --------------------------------------------------------------------------- #
+
+
+def _extract_worked_example(prompt_text: str) -> str:
+    """The embedded COMPLETE worked-example JSON document — the ONLY compact
+    single-line ``{"entries":[...]}`` document in a built prompt (the schema
+    skeleton that follows is pretty-printed, never single-line)."""
+    import re as _re
+
+    match = _re.search(r'\{"entries":\[[^\n]*\}', prompt_text)
+    assert match, "built prompt carries no complete worked-example JSON document"
+    return match.group(0)
+
+
+def test_ri19_initial_prompt_embeds_self_consistent_worked_example():
+    """DEF-104 follow-up #2 self-consistency guard: the INITIAL built prompt
+    embeds a COMPLETE 15-row worked example whose parsed rows validate with
+    the REAL validator — ``parse_activity_log`` -> 15 entries and
+    ``validate_activity_log`` -> () under the configured 60/60 window (the
+    scaffold itself proves the simultaneous rules can all hold at once)."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    blob = prompts.build_activity_log_prompt(canonical)
+    assert "Complete worked example" in blob
+    example = _extract_worked_example(blob)
+    entries = parse_activity_log(example)
+    assert len(entries) == MIN_ACTIVITY_LOG_ENTRIES == 15
+    codes = validate_activity_log(entries, canonical_time=canonical)
+    assert codes == (), codes
+    # the scaffold is a SHAPE, not the answer
+    assert "shows the required shape/format only" in blob
+    assert "replace the row content with your own plausible harmless rows" in blob
+    # example rows use ONLY closed-enum tokens and app-owned neutral texts
+    assert all(e.activity_type in ACTIVITY_LOG_ACTIVITY_TYPES for e in entries)
+    assert all(
+        e.activity in prompts.ACTIVITY_LOG_NEUTRAL_TEXT_POOL for e in entries
+    ), [e.activity for e in entries]
+    # ADV-256: the scaffold never carries identity-sheet material
+    for junk in ("Becker", "Weiss", "König", "ice pick", "stolen", "research data"):
+        assert junk not in example, junk
+
+
+def test_ri20_repair_prompt_embeds_self_consistent_worked_example():
+    """DEF-104 follow-up #2 self-consistency guard for the REPAIR prompt: the
+    COMPLETE worked example embedded in the built repair prompt validates
+    under the REAL validator BOTH with the default 60/60 window AND with a
+    clamped asymmetric window (15/130 -> the app clamps to 12 before / 108
+    after) — the scaffold stays valid even when the configured window is not
+    the centered default."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    findings = ("CANONICAL_TIME_MISSING", "TIMESTAMP_OUTSIDE_WINDOW")
+    blob = prompts.build_activity_log_repair_prompt(
+        canonical, findings, before_minutes=60, after_minutes=60
+    )
+    assert "Complete worked example" in blob
+    entries = parse_activity_log(_extract_worked_example(blob))
+    assert len(entries) == MIN_ACTIVITY_LOG_ENTRIES == 15
+    assert validate_activity_log(entries, canonical_time=canonical) == ()
+
+    clamped = prompts.build_activity_log_repair_prompt(
+        canonical, findings, before_minutes=15, after_minutes=130
+    )
+    entries = parse_activity_log(_extract_worked_example(clamped))
+    assert len(entries) == MIN_ACTIVITY_LOG_ENTRIES == 15
+    codes = validate_activity_log(
+        entries, canonical_time=canonical, before_minutes=15, after_minutes=130
+    )
+    assert codes == (), codes
+
+
+def test_ri21_prompts_carry_simultaneous_rules_and_scaffold_qualification():
+    """DEF-104 follow-up #2: BOTH templates carry the explicit simultaneous
+    rule (count + chronology + window + canonical-once + closed enum +
+    neutral texts ALL at once, never trading one rule for another) and the
+    shape-scaffold qualification; the REPAIR stage additionally carries the
+    findings-recheck line."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    initial = prompts.build_activity_log_prompt(canonical)
+    repair = prompts.build_activity_log_repair_prompt(
+        canonical, ("TIMESTAMP_OUTSIDE_WINDOW",)
+    )
+    for blob in (initial, repair):
+        assert "satisfy ALL of these at once" in blob
+        assert "(a) 15 to 20 entries" in blob
+        assert "(b) every timestamp strictly increasing and inside" in blob
+        assert "(c) the locked canonical time appears verbatim exactly once" in blob
+        assert "(d) every activityType is one of the closed tokens" in blob
+        assert "(e) every activity is harmless neutral text" in blob
+        assert "Fixing one rule must NEVER break another" in blob
+        assert "shows the required shape/format only" in blob
+        assert "replace the row content with your own plausible harmless rows" in blob
+    assert (
+        "When fixing the findings, re-verify ALL the simultaneous rules above"
+        in repair
+    )
+    assert "never trade one rule for another" in repair
+
+
+def test_ri22_worked_example_timestamps_follow_validator_window_math():
+    """DEF-104 follow-up #2 DRIFT GUARD: the worked-example timestamps are
+    computed from the SAME ``activity_log_window_bounds`` math the validator
+    uses — for a sweep of configurations (centered, clamped asymmetric,
+    0-sided) the embedded example has 15 strictly-increasing +3-minute rows
+    that ALL lie inside ``activity_log_window_bounds(...)`` with the
+    canonical time exactly once. The scaffold can never advertise a window
+    the validator rejects."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T21:18:00+02:00"
+    tick, _offset = parse_iso8601(canonical)
+    for before, after in (
+        (60, 60), (90, 90), (5, 130), (0, 120), (120, 0), (15, 130),
+    ):
+        blob = prompts.build_activity_log_prompt(
+            canonical, before_minutes=before, after_minutes=after
+        )
+        entries = parse_activity_log(_extract_worked_example(blob))
+        assert len(entries) == MIN_ACTIVITY_LOG_ENTRIES == 15, (before, after)
+        lo, hi = activity_log_window_bounds(
+            tick, before_minutes=before, after_minutes=after
+        )
+        ticks = [parse_iso8601(e.timestamp)[0] for e in entries]
+        # strictly increasing AND unique (no repeated instant)
+        assert ticks == sorted(ticks) == sorted(set(ticks)), (before, after)
+        assert all(lo <= t <= hi for t in ticks), (before, after)
+        assert len([e for e in entries if e.timestamp == canonical]) == 1
+        # +3-minute steps between adjacent scaffold rows
+        for left, right in zip(ticks, ticks[1:]):
+            assert right - left == 180, (before, after, left, right)
+
+
+# --------------------------------------------------------------------------- #
+# 23..26 — DEF-104 follow-up #3: THE TIMESTAMP GRID (app-owned, deterministic).
+# The grid makes the canonical-once property a pure VERBATIM COPY task: the
+# locked instant IS one grid member (middle slot), and the model's only job is
+# to copy the given timestamps and write the surrounding neutral text.
+# --------------------------------------------------------------------------- #
+
+
+def test_ri23_grid_for_default_window_is_middle_and_inside():
+    """The app-owned grid for a canonical + 60/60 window contains EXACTLY
+    ``ACTIVITY_LOG_GRID_COUNT`` (18) distinct ISO timestamps, strictly
+    increasing, ALL strictly inside the ``activity_log_window_bounds``
+    endpoints, with the canonical ISO EXACTLY once at the MIDDLE slot (index
+    count // 2). The worked-example scaffold rows ARE the grid's first 15
+    timestamps (requirement 3: the two signals agree byte-for-byte)."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    grid = prompts.activity_log_timestamp_grid(canonical)
+    assert len(grid) == prompts.ACTIVITY_LOG_GRID_COUNT == 18
+    assert len(set(grid)) == len(grid)  # distinct
+    ticks = [parse_iso8601(t)[0] for t in grid]
+    assert ticks == sorted(ticks) == sorted(set(ticks))  # strictly increasing
+    tick, _offset = parse_iso8601(canonical)
+    lo, hi = activity_log_window_bounds(tick, before_minutes=60, after_minutes=60)
+    # strictly inside the ACTUAL validated window (and for the centered
+    # default every member is strictly interior: lo < t < hi)
+    assert all(lo < t < hi for t in ticks), ticks
+    # canonical EXACTLY once, at the MIDDLE grid slot, VERBATIM
+    assert grid.count(canonical) == 1
+    assert grid[len(grid) // 2] == canonical
+    # requirement 3: the scaffold's 15 rows ARE the first 15 grid timestamps
+    blob = prompts.build_activity_log_prompt(canonical)
+    scaffold_ts = [e.timestamp for e in parse_activity_log(_extract_worked_example(blob))]
+    assert scaffold_ts == list(grid[: MIN_ACTIVITY_LOG_ENTRIES])
+    assert scaffold_ts.count(canonical) == 1
+
+
+def test_ri24_both_prompts_embed_the_exact_grid_block():
+    """BOTH the built initial AND repair prompt texts contain the machine-
+    readable TIMESTAMP GRID block with the EXACT grid timestamps (computed
+    deterministically by ``activity_log_timestamp_grid``) and the verbatim-
+    copy instruction, including the repair's "copy the GIVEN timestamp grid
+    verbatim" restatement."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    grid = prompts.activity_log_timestamp_grid(canonical)
+    grid_line = "  TIMESTAMP_GRID: " + ", ".join(grid)
+    initial = prompts.build_activity_log_prompt(canonical)
+    repair = prompts.build_activity_log_repair_prompt(
+        canonical, ("CANONICAL_TIME_MISSING", "TIMESTAMP_OUTSIDE_WINDOW")
+    )
+    for blob in (initial, repair):
+        assert grid_line in blob, blob[:600]
+        assert "The EXACT timestamps for the entries are GIVEN below (server-owned; deterministic)" in blob
+        assert "TIMESTAMP_GRID: " in blob
+        assert (
+            "Copy EACH timestamp VERBATIM into exactly one row's 'timestamp' field, "
+            "in the exact order shown" in blob
+        )
+        assert (
+            "the row whose timestamp equals the locked canonical time MUST be the "
+            "ordinary neutral row" in blob
+        )
+        assert (
+            "Never invent, reformat, reorder, or omit any given timestamp. "
+            "Never add a timestamp outside the grid." in blob
+        )
+    # the repair stage additionally restates the grid-based canonical fix
+    assert (
+        "When repairing, copy the GIVEN timestamp grid verbatim — the canonical "
+        "missing finding is resolved by including the grid's canonical row unchanged."
+    ) in repair
+
+
+def test_ri25_grid_copy_self_consistency_acceptance():
+    """The acceptance-shaped hermetic proof: a synthetic provider response
+    whose rows copy the GIVEN grid VERBATIM (canonical once, at the grid's
+    middle slot, closed-enum neutral types/texts) parses and validates with
+    ZERO codes under the REAL strict validator — a model that merely copies
+    the grid passes."""
+    from app.generation import prompts
+    from app.domain.activity_log import ActivityLogEntry
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    grid = prompts.activity_log_timestamp_grid(canonical)
+    tokens = tuple(sorted(ACTIVITY_LOG_ACTIVITY_TYPES))
+    pool = prompts.ACTIVITY_LOG_NEUTRAL_TEXT_POOL
+    entries = [
+        ActivityLogEntry(
+            timestamp=ts,
+            activity_type=tokens[i % len(tokens)],
+            activity=pool[i % len(pool)],
+        )
+        for i, ts in enumerate(grid)
+    ]
+    # canonical row carries the ordinary neutral text (copy the grid order)
+    canon_index = grid.index(canonical)
+    entries[canon_index] = ActivityLogEntry(
+        timestamp=canonical, activity_type="LOCAL_ACTIVITY",
+        activity="Local user activity detected",
+    )
+    assert len(entries) == prompts.ACTIVITY_LOG_GRID_COUNT == 18
+    codes = validate_activity_log(entries, canonical_time=canonical)
+    assert codes == (), codes
+    # and the full JSON round-trip (what the strict parser sees) also passes
+    doc = json.dumps(
+        {"entries": [{"timestamp": e.timestamp, "activityType": e.activity_type,
+                      "activity": e.activity} for e in entries]}
+    )
+    assert validate_activity_log(parse_activity_log(doc), canonical_time=canonical) == ()
+
+
+def test_ri26_grid_clamped_window_sweep_and_prompt_length_guard():
+    """DEF-104 follow-up #3 DRIFT GUARD: for a sweep of configurations the
+    grid timestamps stay inside the ACTUAL validated window, the count stays
+    in [15..20] whenever the window is geometrically satisfiable (Phase19J-RI
+    ADV-C: 30/0 and 0/30 now yield 15 rows at a finer cadence instead of the
+    old sub-MIN fallback), the canonical appears exactly once, and both built
+    prompts stay comfortably below the ~7000-char budget (inside
+    OLLAMA_NUM_CTX=4096 tokens). Only the truly unsatisfiable 0/0 window
+    falls back deterministically (count < MIN is expected and documented;
+    the operator guard fails fast before any prompt is ever built for it)."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    tick, _offset = parse_iso8601(canonical)
+    for before, after in (
+        (60, 60), (90, 90), (5, 130), (0, 120), (120, 0), (15, 130),
+        (30, 0), (0, 0),
+    ):
+        lo, hi = activity_log_window_bounds(
+            tick, before_minutes=before, after_minutes=after
+        )
+        grid = prompts.activity_log_timestamp_grid(
+            canonical, before_minutes=before, after_minutes=after
+        )
+        gticks = [parse_iso8601(t)[0] for t in grid]
+        assert gticks == sorted(gticks) == sorted(set(gticks)), (before, after)
+        # the ACTUAL validated window (inclusive, exactly like the validator)
+        assert all(lo <= t <= hi for t in gticks), (before, after)
+        assert grid.count(canonical) == 1, (before, after)
+        # count stays in [15..20] whenever the window can geometrically hold
+        # MIN distinct strictly-increasing rows (Phase19J-RI ADV-C: the
+        # ADAPTIVE grid now yields 15 with finer cadences for 30/0 and 0/30,
+        # which the pre-fix +3-minute grid could never satisfy)
+        from app.domain.activity_log import activity_log_window_satisfiable
+
+        if activity_log_window_satisfiable(before, after):
+            assert MIN_ACTIVITY_LOG_ENTRIES <= len(grid) <= MAX_ACTIVITY_LOG_ENTRIES, (
+                before, after, len(grid)
+            )
+        else:
+            # fail-closed degenerate (0/0): deterministic documented fallback,
+            # still at least the canonical alone
+            assert len(grid) >= 1, (before, after)
+    # prompt-length budget: both built prompts <= ~7000 chars for the default
+    # window (measured comfortably inside OLLAMA_NUM_CTX=4096 tokens)
+    initial = prompts.build_activity_log_prompt(canonical)
+    repair = prompts.build_activity_log_repair_prompt(canonical, ("CANONICAL_TIME_MISSING",))
+    assert len(initial) <= 7000, len(initial)
+    assert len(repair) <= 7000, len(repair)
+
+
+# --------------------------------------------------------------------------- #
+# 18 — Phase19J-RI SAFE diagnostic harness (activity_log.parse_failed shape)
+# --------------------------------------------------------------------------- #
+
+
+def _shape_of(content):
+    from app.services.ollama_driver import _activity_log_diagnostic_shape
+
+    return _activity_log_diagnostic_shape(content)
+
+
+def test_parse_failed_shape_unknown_top_level_keys():
+    shape = _shape_of(json.dumps({"events": _valid_entries(CANONICAL)}))
+    assert shape["topLevelType"] == "object"
+    assert shape["topLevelKeys"] == ["events"]
+    assert shape["expectedTopLevelKeys"] == ["entries"]
+    assert shape["itemCountCandidate"] is None
+    assert shape["parseFailureClass"] == "unknown_top_level_keys"
+
+
+def test_parse_failed_shape_non_json_and_empty():
+    assert _shape_of("")["parseFailureClass"] == "empty"
+    assert _shape_of("<not-json>")["parseFailureClass"] == "non_json"
+    assert _shape_of(None)["parseFailureClass"] == "empty"
+
+
+def test_parse_failed_shape_entries_bound_and_bad_item():
+    over = {"entries": _valid_entries(CANONICAL, count=17) * 4}  # 68 rows
+    shape = _shape_of(json.dumps(over))
+    assert shape["parseFailureClass"] == "entries_exceed_parse_bound"
+    assert shape["itemCountCandidate"] == ">=65"
+    bad_ts = {"entries": [dict(_entry(CANONICAL), timestamp="not-a-time")]}
+    assert _shape_of(json.dumps(bad_ts))["parseFailureClass"] == "entry_timestamp_invalid"
+
+
+def test_parse_failed_event_carries_only_shape_fields(caplog):
+    """A genuine driver parse failure emits activity_log.parse_failed with ONLY
+    the sanitized shape fields (never raw content/prompts/truth)."""
+    import logging
+
+    when_obs = CANONICAL
+    events_doc = json.dumps({"events": _valid_entries(when_obs)})
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        events_doc,  # ACTIVITY_LOG (wrong top-level key -> parse fails)
+        events_doc,  # repair 1
+        events_doc,  # repair 2 (terminal)
+    ]
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        record, _transport = _run(posts)
+    assert record.state is GenerationState.FAILED
+    parse_failed = [
+        dict(getattr(e, "pd_fields", {}) or {})
+        for e in caplog.records
+        if str(getattr(e, "pd_event", "")) == "activity_log.parse_failed"
+    ]
+    assert parse_failed
+    for fields in parse_failed:
+        assert fields.get("topLevelType") == "object"
+        assert fields.get("topLevelKeys") == ["events"]
+        assert fields.get("expectedTopLevelKeys") == ["entries"]
+        assert fields.get("parseFailureClass") == "unknown_top_level_keys"
+        assert fields.get("providerCallCount") is not None
+        blob = json.dumps(fields, default=str)
+        # shape tokens ONLY: never the raw generated text / any content values
+        for junk in ("Local user activity detected", "Canonical evidence time",
+                     "murderer", "stolen", "2026-09-11T"):
+            assert junk not in blob, junk
+
+
+# --------------------------------------------------------------------------- #
+# 19 — ADMIN-ACCEPTED ADVERSARIAL DISPOSITIONS (Phase19J-RI):
+#      ADV-A schema picture / ADV-B shape-token bounds / ADV-C adaptive grid +
+#      fail-fast operator guard / ADV-D neutral fallback pool / ADV-E smoke
+#      window threading. No validator, budget, retry, REQUIREMENTS or ADV-256
+#      change is made — these are prompt/reporting/guard-only fixes.
+# --------------------------------------------------------------------------- #
+
+
+def test_adv_a_prompt_contract_renders_array_not_directive_object():
+    """ADV-A: the PROMPT-EMBEDDED ``schema_contract("activity_log")`` renders
+    ``entries`` as an unambiguous JSON ARRAY (one example entry object) —
+    never the TRANSPORT directive object (``$note`` / ``minItems`` /
+    ``maxItems`` / ``entrySchema``). A literal-copying model sees exactly the
+    shaped the transport schema and the worked example use."""
+    from app.generation import prompts
+
+    rendered = prompts.schema_contract("activity_log")
+    parsed = json.loads(rendered)
+    assert isinstance(parsed["entries"], list), parsed["entries"]
+    assert len(parsed["entries"]) == 1
+    entry = parsed["entries"][0]
+    assert set(entry) == {"timestamp", "activityType", "activity"}
+    assert "ISO-8601 timestamp WITH timezone offset" in entry["timestamp"]
+    assert "enum " in entry["activityType"]
+    assert "plain short text, 1..120 characters" in entry["activity"]
+    # the directive keys NEVER appear in the prompt-facing text
+    for directive_key in ("$note", "minItems", "maxItems", "entrySchema"):
+        assert directive_key not in rendered, directive_key
+    # BOTH built activity-log prompts embed the array picture + the one-line
+    # array clarification
+    canonical = "2026-09-11T23:42:00+02:00"
+    initial = prompts.build_activity_log_prompt(canonical)
+    repair = prompts.build_activity_log_repair_prompt(canonical, ("SCHEMA_INVALID",))
+    for blob in (initial, repair):
+        assert '"entries": [' in blob
+        assert "entrySchema" not in blob
+        assert "minItems" not in blob
+        assert (
+            f"Note: 'entries' is a JSON ARRAY of 15..20 objects"
+        ) in blob
+    # the TRANSPORT JSON Schema is UNCHANGED: minItems/maxItems + enum
+    schema = prompts.schema_contract_as_json_schema("activity_log")
+    entries = schema["properties"]["entries"]
+    assert entries["minItems"] == MIN_ACTIVITY_LOG_ENTRIES == 15
+    assert entries["maxItems"] == MAX_ACTIVITY_LOG_ENTRIES == 20
+    assert set(entries["items"]["properties"]["activityType"]["enum"]) == \
+        ACTIVITY_LOG_ACTIVITY_TYPES
+    assert schema == prompts.schema_contract_as_json_schema("activity_log")
+    assert prompts.json_schema_for_generation_stage("activity_log_repair") == schema
+    # the schema-drift guard (rendered contract keys == JSON-Schema properties)
+    # still holds with the array picture
+    assert set(json.loads(rendered)) == set(schema["properties"]) == {"entries"}
+
+
+def test_adv_b_top_level_shape_keys_bounded_and_content_sanitized():
+    """ADV-B: ``topLevelKeys`` shape tokens are length-capped at 40 chars and
+    stripped of every control / non-printable character, so a raw
+    length/content-unbounded provider key name can never leak into the
+    allowlisted telemetry field; the count stays bounded at 8."""
+    from app.services.ollama_driver import _MAX_SHAPE_KEY_CHARS, _bounded_shape_key
+
+    assert _MAX_SHAPE_KEY_CHARS == 40
+
+    # (a) oversized + prose-bearing + control-char raw key -> bounded token
+    prose = "K" * 5000 + "\x1b[31m" + "Local user activity detected at " \
+            "2026-09-11T23:42:00+02:00 secret mistress weapon murder\x07"
+    token = _bounded_shape_key(prose)
+    assert len(token) <= 40
+    assert all(ch.isprintable() for ch in token)
+    assert "Local user activity detected" not in token
+    assert "secret mistress" not in token
+    assert "\x1b" not in token and "\x07" not in token
+
+    # (b) through the diagnostic shape harness
+    shape = _shape_of(
+        json.dumps(
+            {
+                prose: 1,
+                "entries_ok": 2,
+                "x" * 300: 3,
+                "plain": 4,
+            }
+        )
+    )
+    assert shape["parseFailureClass"] == "unknown_top_level_keys"
+    for key in shape["topLevelKeys"]:
+        assert len(key) <= 40
+        assert all(ch.isprintable() for ch in key)
+    blob = json.dumps(shape)
+    assert "Local user activity detected" not in blob
+    assert "secret mistress" not in blob
+    assert "K" * 300 not in blob
+
+    # (c) count bound of 8 keys
+    many = {f"key_{i:03d}": i for i in range(30)}
+    many["entries"] = _valid_entries(CANONICAL, count=17)
+    # use a wrong second key so the shape takes the unknown-keys path after
+    # sorting (sorted -> "entries" NOT first, bounded to 8)
+    shape_many = _shape_of(json.dumps(many))
+    assert shape_many["parseFailureClass"] == "unknown_top_level_keys"
+    assert len(shape_many["topLevelKeys"]) <= 8
+
+
+def test_adv_c_adaptive_grid_every_reachable_window_self_validating():
+    """ADV-C (a): for EVERY reachable window config whose total clamped span
+    can geometrically hold MIN distinct strictly-increasing ticks the grid
+    count stays in [MIN..MAX] (or >= MIN) and the built prompt's worked-example
+    scaffold SELF-VALIDATES (parse + validate == ()) under the REAL validator —
+    including the sub-42-minute 30/0, 0/30 and 1/0 one-sided windows that the
+    pre-fix +3-minute grid could never satisfy."""
+    from app.domain.activity_log import activity_log_window_satisfiable
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    cases = (
+        (60, 60), (90, 90), (5, 130), (0, 120), (120, 0), (15, 130),
+        (30, 0), (0, 30), (1, 0), (0, 1), (1, 1),
+    )
+    for before, after in cases:
+        assert activity_log_window_satisfiable(before, after), (before, after)
+        grid = prompts.activity_log_timestamp_grid(
+            canonical, before_minutes=before, after_minutes=after
+        )
+        assert len(grid) >= MIN_ACTIVITY_LOG_ENTRIES, (before, after, len(grid))
+        assert MIN_ACTIVITY_LOG_ENTRIES <= len(grid) <= MAX_ACTIVITY_LOG_ENTRIES, (
+            before, after, len(grid)
+        )
+        blob = prompts.build_activity_log_prompt(
+            canonical, before_minutes=before, after_minutes=after
+        )
+        entries = parse_activity_log(_extract_worked_example(blob))
+        assert len(entries) == MIN_ACTIVITY_LOG_ENTRIES, (before, after)
+        codes = validate_activity_log(
+            entries, canonical_time=canonical,
+            before_minutes=before, after_minutes=after,
+        )
+        assert codes == (), (before, after, codes)
+    # the WORKED-EXAMPLE scaffold is the grid's first 15 timestamps in every
+    # reachable configuration (byte-for-byte agreement)
+    for before, after in cases:
+        grid = prompts.activity_log_timestamp_grid(
+            canonical, before_minutes=before, after_minutes=after
+        )
+        blob = prompts.build_activity_log_prompt(
+            canonical, before_minutes=before, after_minutes=after
+        )
+        scaffold_ts = [
+            e.timestamp for e in parse_activity_log(_extract_worked_example(blob))
+        ]
+        assert scaffold_ts == list(grid[:MIN_ACTIVITY_LOG_ENTRIES]), (before, after)
+        assert scaffold_ts.count(canonical) == 1
+
+
+def test_adv_c_default_and_clamped_paths_are_byte_identical_to_pre_fix():
+    """ADV-C IMPORTANT: the default 60/60 operator config and every clamped-120
+    case behave EXACTLY as before the adaptive fix — the +3-minute cadence
+    still wins, grid counts and canonical slots are the documented pre-fix
+    shapes (60/60 and the symmetric/asymmetric clamped windows -> 18 rows with
+    the canonical near the middle; the one-sided 120/0 -> the documented 15
+    rows with the canonical as the LAST slot) — so the QA-closed real Hermes
+    path never regresses."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    # (before, after) -> (clamped before, clamped after, pre-fix grid count)
+    expected = {
+        (60, 60): (60, 60, 18),
+        (90, 90): (60, 60, 18),
+        (5, 130): (4, 116, 18),
+        (0, 120): (0, 120, 18),
+        (120, 0): (120, 0, 15),
+        (15, 130): (12, 108, 18),
+    }
+    for (before, after), (_cb, _ca, count) in expected.items():
+        grid = prompts.activity_log_timestamp_grid(
+            canonical, before_minutes=before, after_minutes=after
+        )
+        assert len(grid) == count, (before, after, len(grid))
+        gticks = [parse_iso8601(t)[0] for t in grid]
+        steps = {right - left for left, right in zip(gticks, gticks[1:])}
+        assert steps == {3 * 60}, (before, after, steps)
+        assert grid.count(canonical) == 1
+        assert grid.index(canonical) < MIN_ACTIVITY_LOG_ENTRIES
+    # the centered default keeps the canonical at the MIDDLE slot
+    grid_default = prompts.activity_log_timestamp_grid(canonical)
+    assert grid_default.index(canonical) == len(grid_default) // 2 == 9
+    # 120/0 keeps the canonical as the LAST scaffold slot (canonical index 14)
+    grid_120_0 = prompts.activity_log_timestamp_grid(
+        canonical, before_minutes=120, after_minutes=0
+    )
+    assert grid_120_0.index(canonical) == len(grid_120_0) - 1 == 14
+    # the 60/60 worked-example scaffold rows stay +3-minute apart
+    blob = prompts.build_activity_log_prompt(canonical)
+    ticks = [parse_iso8601(e.timestamp)[0] for e in parse_activity_log(_extract_worked_example(blob))]
+    assert all(right - left == 180 for left, right in zip(ticks, ticks[1:]))
+
+
+def test_adv_c_unsatisfiable_window_guard_raises_before_provider_calls():
+    """ADV-C (b) FAIL-FAST OPERATOR GUARD: a window whose total clamped span
+    cannot geometrically hold MIN distinct strictly-increasing ticks — the
+    reachable 0/0 setting — is rejected at THREE levels, and a driver run over
+    an unsatisfiable (duck-typed) settings object fails BEFORE any
+    activity-log provider call."""
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+    from app.domain.activity_log import activity_log_window_satisfiable
+
+    # 1. the pure domain guard
+    assert activity_log_window_satisfiable(0, 0) is False
+    assert activity_log_window_satisfiable(60, 60) is True
+    assert activity_log_window_satisfiable(30, 0) is True
+    assert activity_log_window_satisfiable(0, 30) is True
+    # 2. Settings construction fail-fast (the primary "service construction")
+    with pytest.raises(ValidationError):
+        Settings(activity_log_window_before_minutes=0, activity_log_window_after_minutes=0)
+    # the ADV-257 zero-honored window (0/60) is satisfiable and stays allowed
+    Settings(activity_log_window_before_minutes=0, activity_log_window_after_minutes=60)
+    # 3. driver-level guard for a duck-typed settings object: zero
+    # activity-log calls (only the pre-activity-log CASE + EVIDENCE calls)
+    from app.generation.clock import ManualClock
+    from app.generation.ids import IdSource
+    from app.generation.ollama_provider import OllamaProvider
+    from app.services.ollama_driver import OllamaStageDriver
+    from test_ollama_driver import (
+        OLLAMA_BASE,
+        OLLAMA_MODEL,
+        MockOllamaTransport,
+        _admission,
+        _controller,
+    )
+
+    class _DuckSettings:
+        activity_log_window_before_minutes = 0
+        activity_log_window_after_minutes = 0
+
+    clock = ManualClock()
+    ids = IdSource()
+    admission = _admission(clock, ids)
+    session = admission.create_anonymous_quota_session()
+    transport = MockOllamaTransport(
+        posts=[_j(_case_people()), _j(_evidence()), _j(_world())]
+    )
+
+    def factory():
+        return OllamaProvider(
+            base_url=OLLAMA_BASE, model=OLLAMA_MODEL, timeout_seconds=5,
+            transport=transport,
+        )
+
+    driver = OllamaStageDriver(settings=_DuckSettings(), provider_factory=factory)
+    controller = _controller(driver, transport, admission, clock, ids)
+    handle = controller.start_generation(
+        PROMPT, anonymous_quota_session_id=session.session_id
+    )
+    record = controller.attempt(handle.attempt_id)
+    assert record.state is GenerationState.FAILED
+    # case + evidence only — ZERO activity-log provider calls ever reached
+    assert transport.call_count == 2
+    assert not any(
+        "activity_log" in transport.prompt_of_call(i)[:80]
+        for i in range(transport.call_count)
+    )
+
+
+def test_adv_d_hostile_collision_names_do_not_break_the_scaffold():
+    """ADV-D (prompt-side mitigation, NO validator weakening): a case whose
+    canonical person/location names collide with ordinary computer-log
+    vocabulary ("Mail"/"User"/"Local"/"Workspace"/"ServerWorkspace") no longer
+    makes the built worked-example scaffold fail ENTITY_LEAK — the colliding
+    scaffold rows are deterministically substituted from the reserved fallback
+    pool, while the scaffold still self-validates with zero codes. The real
+    fixture name sets also pass, and no canonical identity material is ever
+    rendered into the prompt text (ADV-256)."""
+    from app.generation import prompts
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    hostile_persons = ("Mail", "User", "Local", "Workspace", "ServerWorkspace")
+    hostile_locations = ("ServerWorkspace",)
+
+    blob = prompts.build_activity_log_prompt(
+        canonical, person_names=hostile_persons, location_names=hostile_locations
+    )
+    entries = parse_activity_log(_extract_worked_example(blob))
+    assert len(entries) == MIN_ACTIVITY_LOG_ENTRIES
+    codes = validate_activity_log(
+        entries,
+        canonical_time=canonical,
+        person_names=hostile_persons,
+        location_names=hostile_locations,
+    )
+    assert codes == (), codes
+    # the canonical-anchor trap text ("Local ... User ...") was substituted
+    assert all(e.activity != "Local user activity detected" for e in entries)
+    # a fallback phrase IS used (the collision was real)
+    assert any(
+        e.activity in prompts.ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL for e in entries
+    )
+    # default runs still use ONLY the primary neutral pool (no substitution)
+    default_blob = prompts.build_activity_log_prompt(canonical)
+    default_entries = parse_activity_log(_extract_worked_example(default_blob))
+    assert all(
+        e.activity in prompts.ACTIVITY_LOG_NEUTRAL_TEXT_POOL for e in default_entries
+    )
+    # the REAL fixture sets still pass (substitution is adaptive, not tuned)
+    real_persons = ("Paul Becker", "Anna Weiss", "Lisa König", "Marcus Fischer",
+                    "Sophie Hoffmann")
+    real_weapons = ("bronze ceremonial ice pick", "bronze_ceremonial_ice_pick")
+    real_motives = ("stolen research data",)
+    real_loc_ids = ("main_office", "server_room")
+    real_loc_names = ("Main Office", "Server Room")
+    real_blob = prompts.build_activity_log_prompt(
+        canonical,
+        person_names=real_persons,
+        weapon_names=real_weapons,
+        motive_names=real_motives,
+        location_ids=real_loc_ids,
+        location_names=real_loc_names,
+    )
+    real_entries = parse_activity_log(_extract_worked_example(real_blob))
+    real_codes = validate_activity_log(
+        real_entries,
+        canonical_time=canonical,
+        person_names=real_persons,
+        weapon_names=real_weapons,
+        motive_names=real_motives,
+        location_ids=real_loc_ids,
+        location_names=real_loc_names,
+    )
+    assert real_codes == (), real_codes
+    # ADV-256: DISTINCTIVE identity material is never rendered into the text
+    for needle in (
+        "ServerWorkspace", "Paul Becker", "Anna Weiss", "König",
+        "bronze ceremonial ice pick", "stolen research data",
+        "Main Office", "Server Room",
+    ):
+        assert needle not in blob, needle
+        assert needle not in real_blob, needle
+
+
+def test_adv_e_smoke_validation_uses_settings_derived_window():
+    """ADV-E: the smoke tool's activity-log validation threads the
+    settings-derived before/after window (the SAME ``_activity_log_window``
+    the prompt builder uses), so a non-default operator window can never drift
+    from the prompt."""
+    from app.core.config import Settings
+    import tools.ollama_smoke as smoke
+
+    from app.domain.time_interval import epoch_to_iso, parse_iso8601
+
+    # (a) unit-level: a 15-row log valid ONLY under before=30/after=90 (its
+    #     last row sits at canonical+80 minutes) validates under 30/90 and is
+    #     rejected by the default 60/60 bounds.
+    canonical = "2026-09-11T23:42:00+02:00"
+    tick, offset = parse_iso8601(canonical)
+    row_offsets = (-30, -22, -14, -6, 0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80)
+
+    def row(t: int, i: int) -> dict:
+        timestamp = canonical if t == 0 else epoch_to_iso(tick + t * 60, offset)
+        return {
+            "timestamp": timestamp,
+            "activityType": "LOCAL_ACTIVITY",
+            "activity": f"Neutral activity text {i}",
+        }
+
+    rows = [row(t, i) for i, t in enumerate(row_offsets)]
+    assert len(rows) == 15
+    assert len([r for r in rows if r["timestamp"] == canonical]) == 1
+    payload = json.dumps({"entries": rows})
+
+    r_valid = smoke._activity_log_validation(
+        payload, canonical, before_minutes=30, after_minutes=90
+    )
+    r_default = smoke._activity_log_validation(payload, canonical)
+    assert r_valid["validatorCodes"] == [], r_valid["validatorCodes"]
+    assert "ACTIVITY_LOG_TIME_WINDOW_INVALID" in r_default["validatorCodes"]
+
+    # (b) the settings-derived window source used by the prompt builder
+    _settings = Settings(generation_provider="ollama")
+    assert smoke._activity_log_window(_settings) == (60, 60)
+
+
+def test_adv_e_smoke_mocked_run_with_non_default_window(monkeypatch, capsys):
+    """ADV-E driver-level mocked smoke run: configuring a non-default window
+    (before=30, after=90) makes the smoke report PASS a response whose 80-min
+    row is only valid inside that window — and, with the default 60/60, the
+    SAME response would be rejected (the validator is actually using the
+    settings-derived bounds, never a hardcoded 60/60)."""
+    import tools.ollama_smoke as smoke
+    from app.generation import ollama_provider as ollama_mod
+    from app.generation.provider import ProviderResult as PR
+    from app.domain.time_interval import epoch_to_iso, parse_iso8601
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    tick, offset = parse_iso8601(canonical)
+    row_offsets = (-30, -22, -14, -6, 0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80)
+
+    def row(t: int, i: int) -> dict:
+        timestamp = canonical if t == 0 else epoch_to_iso(tick + t * 60, offset)
+        return {
+            "timestamp": timestamp,
+            "activityType": "LOCAL_ACTIVITY",
+            "activity": f"Neutral activity text {i}",
+        }
+
+    rows = [row(t, i) for i, t in enumerate(row_offsets)]
+    assert len(rows) == 15
+    assert len([r for r in rows if r["timestamp"] == canonical]) == 1
+    payload = _j({"entries": rows})
+
+    class FakeProvider:
+        last_format = "schema"
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate(self, request) -> PR:
+            return PR(content=payload)
+
+        @property
+        def structured_output_sent(self):
+            return self.last_format == "schema"
+
+    monkeypatch.setattr(ollama_mod, "ollama_available", lambda _s: (True, ""))
+    monkeypatch.setattr(ollama_mod, "ollama_structured_output_supported", lambda _s: True)
+    monkeypatch.setattr(ollama_mod, "OllamaProvider", FakeProvider)
+    # settings-derived 30/90 window (the SAME source the prompt builder uses)
+    monkeypatch.setattr(smoke, "_activity_log_window", lambda _s: (30, 90))
+
+    rc = smoke.main(["--enable", "--stage", "activity_log"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    report = json.loads(captured.out)
+    gen = report["generation"]
+    assert gen["parsedOk"] is True
+    assert gen["entryCount"] == 15
+    assert gen["validatorCodes"] == []
+    assert gen["pass"] is True
+    report_blob = captured.out
+    for token in ("127.0.0.1", "11434", "OLLAMA_BASE_URL", "prompt_context"):
+        assert token not in report_blob, token
 
 
 __all__ = []  # pytest module: no accidental public names
