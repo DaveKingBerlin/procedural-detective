@@ -212,6 +212,11 @@ class InvestigationService:
             # never marked). Projected by the reveal module so the candidate
             # contract lives in ONE place.
             "candidates": reveal_projection.candidate_block_of(payload),
+            # Phase 23: player-safe witness list of the pinned CaseVersion
+            # (public witness ids + display names + closed presence; NEVER
+            # statements / question availability). Always present — an empty
+            # list when the case publishes no witness person. Sorted by id.
+            "witnesses": pub.project_witnesses(payload),
         }
 
     # ------------------------------------------------------------------ #
@@ -458,6 +463,16 @@ class InvestigationService:
         opened_epoch = snapshot.opened_at.get(seen_id)
         if opened_epoch is None:
             opened_epoch = snapshot.updated_at
+        content = pub.project_read_content(payload, seen_id)
+        # Phase 23 — reload re-derivation: an interview-sourced witness
+        # statement record carries its deterministic questionType + witnessId
+        # tags so the notebook can re-build the "Witness statements" group
+        # from READ records after a reload (the interview response overrides
+        # questionType with the type actually asked; the tags are derived
+        # ONLY from the pinned payload — zero provider calls).
+        tags = pub.witness_statement_content_tags(payload, seen_id)
+        if tags:
+            content = {**content, **tags}
         return {
             "evidenceId": seen_id,
             "kind": str(fact.get("kind")),
@@ -465,7 +480,7 @@ class InvestigationService:
             "description": presentation.get("description"),
             "openedAt": _iso_utc(opened_epoch),
             "readByPlayer": True,
-            "content": pub.project_read_content(payload, seen_id),
+            "content": content,
         }
 
 

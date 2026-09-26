@@ -421,6 +421,231 @@ a {
   outline-offset: 1px;
 }
 
+/* ======================================================================
+ * Phase 23 — witness interviews.
+ *
+ * Two surfaces:
+ *  1. the scene "Witnesses" section — the safe interview/contact control for
+ *     REMOTE_STATEMENT witnesses AND the accessibility fallback for ON_SCENE
+ *     witness persons (real labelled buttons, keyboard reachable);
+ *  2. the interview panel — a modal dialog rendering the six closed question
+ *     buttons (real <button>s, human labels) and the deterministic
+ *     player-safe statement (summary + observations, timestamps as compact
+ *     <time>). Both are plain text only: every untrusted string wraps inside
+ *     its box (overflow-wrap) and NO min-width exists anywhere, so 1280/600/
+ *     360px layouts never overlap buttons and never overflow horizontally.
+ * ==================================================================== */
+
+/* ----------------------- Witnesses section --------------------------- */
+
+.witnesses-section {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.9rem 1.1rem;
+  margin: 0.6rem 0;
+}
+
+.witnesses-section h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+}
+
+.witnesses-list {
+  list-style: none;
+  padding-left: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.witnesses-list li {
+  display: inline-block;
+}
+
+.witness-contact-button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.35rem 0.65rem;
+  cursor: pointer;
+}
+
+.witness-contact-button:hover,
+.witness-contact-button:focus-visible,
+.witness-question-button:focus-visible,
+.witness-close:focus-visible,
+.witness-ask-another:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ----------------------- Interview panel ----------------------------- */
+
+.witness-panel {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  /* Below the evidence panel (z-index 40) so a discovery record opens on top. */
+  z-index: 39;
+  /* Viewport-bounded + vertically scrollable at EVERY width (360px included):
+     no fixed column width, no fixed height — a panel can never force
+     horizontal overflow, and long statements scroll inside the panel. */
+  width: min(24rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  padding: 1rem 1.25rem;
+}
+
+.witness-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.witness-panel-identity {
+  min-width: 0;
+}
+
+.witness-panel-name {
+  margin: 0;
+  font-size: 1.1rem;
+  overflow-wrap: anywhere;
+}
+
+.witness-panel-role {
+  margin: 0.1rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.witness-close,
+.witness-ask-another {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.35rem 0.85rem;
+  cursor: pointer;
+}
+
+.witness-close {
+  white-space: nowrap;
+}
+
+.witness-error {
+  color: var(--err);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.witness-questions-hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0 0 0.6rem;
+}
+
+/* One closed question per row, always: flex-column means the buttons can
+   NEVER overlap at any width (1280 / 600 / 360px). */
+.witness-question-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.witness-question-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.witness-question-button {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.witness-question-button--asked {
+  border-color: var(--ok);
+}
+
+.witness-question-button:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.witness-question-asked {
+  color: var(--ok);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.witness-answer-question {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+/* Statement text wraps inside the panel (Phase23 §36) — an unbroken hostile
+   string can never bleed the panel wider than the viewport. */
+.witness-statement-summary {
+  margin: 0.4rem 0 0.6rem;
+  overflow-wrap: anywhere;
+}
+
+.witness-observations {
+  list-style: none;
+  padding-left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin: 0 0 0.8rem;
+}
+
+.witness-observation {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  overflow-wrap: anywhere;
+}
+
+.witness-observation-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.witness-observation-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.object-witness-marker {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .discovery-toast {
   position: fixed;
   bottom: 1.25rem;

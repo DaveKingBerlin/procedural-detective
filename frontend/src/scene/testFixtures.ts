@@ -6,6 +6,9 @@ import type {
   GeneratedPartDTO,
   InvestigationBootstrapResponse,
   RevealResponse,
+  WitnessInterviewResponse,
+  WitnessListEntryDTO,
+  WitnessQuestionType,
   WorldObjectDTO,
 } from "../api/types";
 
@@ -1021,5 +1024,206 @@ export function makeObjectRecord(overrides: Partial<EvidenceReadResultDTO> = {})
     readByPlayer: true,
     content: { subtype: "trophy", locationId: "miller_consulting_office" },
     ...overrides,
+  };
+}
+
+/* ======================================================================
+ * Phase 23 — WITNESS INTERVIEW fixtures.
+ *
+ * Two deterministically canned witnesses mirror the backend contract:
+ *   - Emily Reed — the CANONICAL/golden witness (backend golden fixture
+ *     person id "emily_reed"); ON_SCENE (a pickable person world object). Her
+ *     ID IS the semantic person id, so 3D child meshes resolve to it.
+ *   - Lisa König — the DRIVER witness ("lisa_koenig", the ollama driver's
+ *     canonical witness); REMOTE_STATEMENT (reachable through the Witnesses
+ *     section only, never rendered physically — no forcing a witness to
+ *     stand next to the victim).
+ * The canned statements are deterministic, player-safe, evidence-grounded
+ * text (NO case truth, NO hidden solver material) and follow the Phase 23
+ * statement model exactly: {summary, observations:[{time?, text}]}.
+ * ==================================================================== */
+
+/** Golden canonical witness — Emily Reed (ON_SCENE). */
+export const EMILY_WITNESS_ID = "witness_emily_reed";
+export const EMILY_WITNESS_NAME = "Emily Reed";
+
+/** Driver witness — Lisa König (REMOTE_STATEMENT, Unicode name). */
+export const LISA_WITNESS_ID = "witness_lisa_koenig";
+export const LISA_WITNESS_NAME = "Lisa König";
+
+/** The interview-discovery evidence id for Emily's TIME question. */
+export const EMILY_TIME_EVIDENCE_ID = "record_witness_statement_emily_time_01";
+
+/** Witness interview question types (the closed enum). */
+export const WITNESS_QUESTION_TYPES: readonly WitnessQuestionType[] = [
+  "OBSERVATION",
+  "TIME",
+  "SOUND",
+  "PERSON",
+  "OBJECT",
+  "LOCATION",
+];
+
+/** One player-safe witness list entry (ids + names + presence ONLY). */
+export function makeWitnessListEntry(
+  overrides: Partial<WitnessListEntryDTO> = {},
+): WitnessListEntryDTO {
+  return {
+    witnessId: EMILY_WITNESS_ID,
+    displayName: EMILY_WITNESS_NAME,
+    presence: "ON_SCENE",
+    sceneObjectId: EMILY_WITNESS_ID,
+    ...overrides,
+  };
+}
+
+/** The ON_SCENE witness PERSON world object (semantic id == witness id). */
+export function makeEmilyReedWorldObject(overrides: Partial<WorldObjectDTO> = {}): WorldObjectDTO {
+  return makeWorldObject({
+    objectId: EMILY_WITNESS_ID,
+    assetId: "PROP_BODY_PLACEHOLDER_01",
+    assetType: "character",
+    subtype: "witness",
+    locationId: "miller_apartment_kitchen",
+    anchor: "hall_wall_01",
+    interaction: "",
+    evidenceId: null,
+    ...overrides,
+  });
+}
+
+/**
+ * Golden Phase 23 bootstrap: the standard golden scene + the two witnesses
+ * (Emily ON_SCENE with her pickable person object; Lisa REMOTE_STATEMENT).
+ * The `witnesses` list is the ONLY witness source — no hidden statement
+ * content exists anywhere on the payload.
+ */
+export function makeWitnessBootstrap(
+  overrides: Partial<InvestigationBootstrapResponse> = {},
+): InvestigationBootstrapResponse {
+  const base = makeBootstrap();
+  base.scene.worldObjects = [...base.scene.worldObjects, makeEmilyReedWorldObject()];
+  return makeBootstrap({
+    ...base,
+    witnesses: [
+      makeWitnessListEntry(),
+      makeWitnessListEntry({
+        witnessId: LISA_WITNESS_ID,
+        displayName: LISA_WITNESS_NAME,
+        presence: "REMOTE_STATEMENT",
+        sceneObjectId: null,
+      }),
+    ],
+    ...overrides,
+  });
+}
+
+/** Emily's TIME answer: grounded, time-bearing, supporting WHEN (§21). */
+export function makeEmilyTimeStatement(): WitnessInterviewResponse["statement"] {
+  return {
+    summary: "Emily recalls hearing a heavy impact at approximately 23:42.",
+    observations: [
+      { time: "23:40", text: "Emily entered the corridor." },
+      { time: "23:42", text: "She heard a heavy impact from inside the laboratory." },
+    ],
+  };
+}
+
+/** The interview-discovery record for Emily's TIME question (an ordinary
+ *  player-safe witness_statement record, exactly as the existing machinery
+ *  publishes — kind-allowlisted content + Phase 19G render payload). */
+export function makeEmilyTimeDiscoveryRecord(
+  overrides: Partial<EvidenceReadResultDTO> = {},
+): EvidenceReadResultDTO {
+  return {
+    evidenceId: EMILY_TIME_EVIDENCE_ID,
+    kind: "witness_statement",
+    title: "Emily Reed — when she was there",
+    description: "A statement collected from the witness Emily Reed.",
+    openedAt: "2026-09-11T23:20:00+02:00",
+    readByPlayer: true,
+    content: {
+      renderType: "GENERIC_TEXT",
+      summary: "Emily recalls hearing a heavy impact at approximately 23:42.",
+      speakerName: EMILY_WITNESS_NAME,
+      statement: "Emily recalls hearing a heavy impact at approximately 23:42.",
+      witnessId: EMILY_WITNESS_ID,
+      questionType: "TIME",
+      observations: [
+        { time: "23:40", text: "Emily entered the corridor." },
+        { time: "23:42", text: "She heard a heavy impact from inside the laboratory." },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+/** Emily's SOUND answer: honestly NEUTRAL — no evidence, no discovery (§10). */
+export function makeEmilyNeutralStatement(): WitnessInterviewResponse["statement"] {
+  return {
+    summary: "No. Nothing stood out to me.",
+    observations: [],
+  };
+}
+
+/**
+ * Deterministic canned interview response. `discovery` defaults to the TIME
+ * discovery (newlyDiscovered true); pass discovery:null for neutral answers.
+ */
+export function makeWitnessInterviewResponse(
+  questionType: WitnessQuestionType,
+  overrides: Partial<WitnessInterviewResponse> = {},
+): WitnessInterviewResponse {
+  const statement =
+    questionType === "TIME" ? makeEmilyTimeStatement() : makeEmilyNeutralStatement();
+  const discovery =
+    questionType === "TIME"
+      ? { newlyDiscovered: true, record: makeEmilyTimeDiscoveryRecord() }
+      : null;
+  return {
+    witnessId: EMILY_WITNESS_ID,
+    displayName: EMILY_WITNESS_NAME,
+    questionType,
+    statement,
+    discovery,
+    ...overrides,
+  };
+}
+
+/** A canned Lisa König (driver) grounded PERSON answer — no discovery. */
+export function makeLisaPersonResponse(): WitnessInterviewResponse {
+  return {
+    witnessId: LISA_WITNESS_ID,
+    displayName: LISA_WITNESS_NAME,
+    questionType: "PERSON",
+    statement: {
+      summary:
+        "Lisa says she saw a tall figure hurrying out of the corridor shortly after the noise.",
+      observations: [
+        { time: "23:43", text: "A tall figure left the corridor at speed." },
+      ],
+    },
+    discovery: null,
+  };
+}
+
+/** A HOSTILE interview response — every untrusted field looks executable.
+ *  The frontend must render every value inert (escaped) and BOUNDED. */
+export function makeHostileWitnessInterviewResponse(): WitnessInterviewResponse {
+  const hostile = "<script>alert(1)</script>";
+  return {
+    witnessId: `${hostile} -- ひらがな -- 😀`,
+    displayName: `${hostile} — Lisa</span><img src=x onerror=alert(2)>`,
+    questionType: "TIME",
+    statement: {
+      summary:
+        `${hostile} <img src=x onerror=alert(2)> — "Heard a heavy impact at 23:42." — ` +
+        "X".repeat(4000),
+      observations: [
+        { time: hostile, text: `${hostile} <b>bold</b> ひらがな 😀` + "Y".repeat(1200) },
+        { text: "A second observation without a time." },
+      ],
+    },
+    discovery: null,
   };
 }

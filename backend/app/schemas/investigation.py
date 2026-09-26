@@ -178,6 +178,30 @@ class CandidateWeaponDTO(BaseModel):
     name: str
 
 
+# The CLOSED wire-level witness presence tokens (mirrors the frozen domain
+# enum in app/domain/witness.py; re-declared here so schemas stay free of a
+# domain import — the same boundary contract as QUESTION_TYPE_VALUES).
+WITNESS_PRESENCE_VALUES = Literal["ON_SCENE", "REMOTE_STATEMENT"]
+
+
+class WitnessListEntryDTO(BaseModel):
+    """One player-safe witness list entry of the investigation bootstrap
+    (Phase23 §15/§16/§17 — implemented for Phase 23).
+
+    Carries ONLY the witness identity + the closed presence enum and the
+    optional linkage to the ON_SCENE person world object — NEVER statements,
+    NEVER hidden person data, NEVER question-availability semantics (the
+    availability of an interview question is a no-leak constant: all six are
+    always offered at interview time). `sceneObjectId` is the world-object id
+    of the witness's published person placement when ON_SCENE, else null.
+    """
+
+    witnessId: str
+    displayName: str
+    presence: WITNESS_PRESENCE_VALUES
+    sceneObjectId: str | None = None
+
+
 class AccusationCandidatesDTO(BaseModel):
     """Player-safe accusation candidate universes of the pinned CaseVersion
     (Phase7 J/K, REQUIREMENTS 31.1 / 41.2 addition).
@@ -207,6 +231,16 @@ class InvestigationBootstrapResponse(BaseModel):
         description=(
             "Phase 7 addition: player-safe accusation candidate universes of "
             "the pinned CaseVersion (alphabetical, never winner-marked)."
+        ),
+    )
+    witnesses: list[WitnessListEntryDTO] = Field(
+        default_factory=list,
+        description=(
+            "Phase 23 addition: the player-safe witness list of the pinned "
+            "CaseVersion (public witness ids + display names + the closed "
+            "presence enum; NEVER statement or question-availability content). "
+            "Always present — an empty list for a case without a published "
+            "witness person (absent only on pre-23 servers)."
         ),
     )
 

@@ -1,7 +1,15 @@
-import type { EvidenceReadResultDTO } from "../api/types";
+import type { EvidenceReadResultDTO, WitnessQuestionType } from "../api/types";
 import type { SceneWorldObject } from "../scene/buildInvestigationScene";
 import { evidenceLabelFor } from "../scene/objectLabel";
 import { formatCrimeTime } from "../reveal/revealFormat";
+import {
+  boundedText,
+  isWitnessQuestionType,
+  MAX_WITNESS_DISPLAY_NAME,
+  MAX_WITNESS_SUMMARY_LENGTH,
+  witnessQuestionLabel,
+  type AskedWitnessStatement,
+} from "../witness/witnessModel";
 
 /**
  * Detective Notebook model (Phase 18C) — pure, deterministic derivation of
@@ -30,10 +38,17 @@ import { formatCrimeTime } from "../reveal/revealFormat";
  * (record groups catch up once the session lazy-hydrates the read ids).
  */
 
-export type NotebookGroupId = "people" | "objects" | "motive" | "timeline" | "digital-physical";
+export type NotebookGroupId =
+  | "people"
+  | "witness-statements"
+  | "objects"
+  | "motive"
+  | "timeline"
+  | "digital-physical";
 
 export const NOTEBOOK_GROUP_ORDER: readonly NotebookGroupId[] = [
   "people",
+  "witness-statements",
   "objects",
   "motive",
   "timeline",
@@ -72,6 +87,13 @@ export interface NotebookSource {
   worldObjects: readonly SceneWorldObject[];
   /** Cached read records (session cache — empty right after a reload). */
   records: ReadonlyArray<EvidenceReadResultDTO>;
+  /**
+   * Phase 23 — ASKED witness interview statements (the session's in-memory
+   * store; empty right after a reload). Interview statements that DISCOVERED
+   * evidence also re-derive from the READ records below, so the group
+   * converges without any client-side persistence.
+   */
+  witnessStatements?: readonly AskedWitnessStatement[];
 }
 
 /** Evidence kinds whose READ content yields witness/suspect facts. */
@@ -294,10 +316,158 @@ function digitalPhysicalEntries(records: EvidenceReadResultDTO[], discoveredSet:
   return entries;
 }
 
+/* ======================================================================
+ * Phase 23 — "Witness statements" notebook group.
+ *
+ * Shows ONLY statements that were legitimately asked/discovered. Two sources
+ * merge deterministically under one stable per-(witness, question) id, so no
+ * line can ever duplicate:
+ *   1. the session's in-memory ASKED store (any asked question, grounded or
+ *      neutral — never a hidden future answer);
+ *   2. READ records that carry an interview-sourced statement (kind in the
+ *      People set AND a content.questionType in the closed enum, gated on
+ *      the server-authoritative discovered set). This is what re-populates
+ *      the group after a reload — the server persists discoveries and the
+ *      session re-fetches the read records (no client-side statement store).
+ * A record-derived entry wins over an asked entry for the SAME id (it also
+ * carries the authoritative read marker + evidence linkage).
+ * ==================================================================== */
+
+/** Record kinds that may carry an interview-sourced question payload. */
+const WITNESS_STATEMENT_KINDS: ReadonlySet<string> = new Set([
+  "witness_statement",
+  "statement",
+  "testimonial",
+  "suspect_statement",
+]);
+
+/** One interview-sourced record view (safe coercion, never throws). */
+interface InterviewRecordView {
+  witnessId: string;
+  displayName: string;
+  questionType: unknown;
+  summary: string;
+  evidenceId: string;
+  read: boolean;
+}
+
+/** Best-effort witness id from a record: content.witnessId when the backend
+ *  publishes it, else the evidence id (stable, deterministic). */
+function witnessIdOfRecord(record: EvidenceReadResultDTO): string {
+  const content = isRecord(record.content) ? record.content : {};
+  const witnessId = asText(content.witnessId).trim();
+  return witnessId !== "" ? witnessId : record.evidenceId;
+}
+
+/** Extract the interview source from a READ record, or null when the record
+ *  is NOT interview-sourced (no closed questionType in a People kind). */
+function interviewRecordView(
+  record: EvidenceReadResultDTO,
+  discoveredSet: Set<string>,
+  readSet: Set<string>,
+): InterviewRecordView | null {
+  if (!discoveredSet.has(record.evidenceId)) return null;
+  if (!WITNESS_STATEMENT_KINDS.has(record.kind)) return null;
+  const content = isRecord(record.content) ? record.content : {};
+  if (!isWitnessQuestionType(content.questionType)) return null;
+  const speaker = asText(content.speakerName).trim();
+  const displayName = speaker !== "" ? speaker : safeTitle(record);
+  const summary = asText(content.statement).trim();
+  const fromSummary = asText(content.summary).trim();
+  return {
+    witnessId: witnessIdOfRecord(record),
+    displayName,
+    questionType: content.questionType,
+    summary: summary !== "" ? summary : fromSummary,
+    evidenceId: record.evidenceId,
+    read: readSet.has(record.evidenceId),
+  };
+}
+
+/** One rendered line detail of the group ("<question> — <summary>"). */
+function witnessStatementDetail(questionType: unknown, summary: string): string {
+  return `${witnessQuestionLabel(questionType)} — ${boundedText(summary, MAX_WITNESS_SUMMARY_LENGTH)}`;
+}
+
+/** Deterministic attribute-safe notebook id for one (witness, question) line.
+ *  Never carries the record-separator key (\u0000) into a data-testid. */
+function witnessStatementEntryId(witnessId: string, questionType: WitnessQuestionType): string {
+  return `witness-statements-${witnessId}-${questionType}`;
+}
+
+/** Merge the two Phase 23 sources into ONE deduped entry list. */
+function witnessStatementsEntries(
+  records: EvidenceReadResultDTO[],
+  discoveredSet: Set<string>,
+  readEvidenceIds: readonly string[],
+  asked: readonly AskedWitnessStatement[],
+): NotebookEntry[] {
+  const readSet = new Set(readEvidenceIds);
+  const byId = new Map<string, NotebookEntry>();
+
+  // The asked store is the canonical (witness, question) identity. When a
+  // READ record later lands for the SAME interview (the discovery record), it
+  // is correlated by its evidenceId — even if the backend does not echo the
+  // witness id inside the record content — so both sources always converge on
+  // ONE id and a re-ask/discovery can never duplicate the line.
+  const askedByEvidenceId = new Map<string, AskedWitnessStatement>();
+  for (const askedStatement of asked) {
+    if (askedStatement.evidenceId !== null) {
+      askedByEvidenceId.set(askedStatement.evidenceId, askedStatement);
+    }
+  }
+
+  // Source 1 — in-memory ASKED statements (this session; empty after reload).
+  for (const askedStatement of asked) {
+    const id = witnessStatementEntryId(askedStatement.witnessId, askedStatement.questionType);
+    byId.set(id, {
+      id,
+      label: boundedText(askedStatement.displayName, MAX_WITNESS_DISPLAY_NAME),
+      detail: witnessStatementDetail(
+        askedStatement.questionType,
+        askedStatement.statement.summary,
+      ),
+      evidenceId: askedStatement.evidenceId,
+      read: askedStatement.evidenceId !== null && readSet.has(askedStatement.evidenceId),
+    });
+  }
+
+  // Source 2 — READ interview-sourced records (survives reload: the server
+  // persists the discovery and the session re-fetches the record). A
+  // record-derived entry OVERWRITES the asked entry for the same line (it
+  // also carries the authoritative read marker + evidence linkage).
+  for (const record of records) {
+    if (!discoveredSet.has(record.evidenceId)) continue;
+    const view = interviewRecordView(record, discoveredSet, readSet);
+    if (view === null) continue;
+    if (!isWitnessQuestionType(view.questionType)) continue;
+    // Correlate with the asked store when this record IS a discovery record
+    // of a previously-asked question (record-derived data wins the fields,
+    // the asked store supplies the canonical witness identity).
+    const matchingAsked = view.evidenceId !== null ? askedByEvidenceId.get(view.evidenceId) : undefined;
+    const witnessId = matchingAsked !== undefined ? matchingAsked.witnessId : view.witnessId;
+    const questionType = matchingAsked !== undefined ? matchingAsked.questionType : view.questionType;
+    const id = witnessStatementEntryId(witnessId, questionType);
+    byId.set(id, {
+      id,
+      label: boundedText(view.displayName, MAX_WITNESS_DISPLAY_NAME),
+      detail: witnessStatementDetail(questionType, view.summary),
+      evidenceId: view.evidenceId,
+      read: view.read,
+    });
+  }
+
+  return sortEntries([...byId.values()]);
+}
+
 const GROUP_META: Record<NotebookGroupId, { title: string; emptyMessage: string }> = {
   people: {
     title: "People",
     emptyMessage: "No people facts noted yet — read witness statements to fill this in.",
+  },
+  "witness-statements": {
+    title: "Witness statements",
+    emptyMessage: "No witness statements collected yet — interview a witness to ask your questions.",
   },
   objects: {
     title: "Objects",
@@ -324,6 +494,7 @@ const GROUP_META: Record<NotebookGroupId, { title: string; emptyMessage: string 
 export function buildNotebookModel(source: NotebookSource): NotebookModel {
   const discoveredSet = new Set(source.discoveredEvidenceIds);
   const sortedRecords = [...source.records].sort((a, b) => a.evidenceId.localeCompare(b.evidenceId));
+  const askedWitnessStatements = source.witnessStatements ?? [];
 
   const groups: NotebookGroup[] = [
     {
@@ -331,6 +502,12 @@ export function buildNotebookModel(source: NotebookSource): NotebookModel {
       title: GROUP_META.people.title,
       emptyMessage: GROUP_META.people.emptyMessage,
       entries: sortEntries(dedupeById(peopleEntries(sortedRecords, discoveredSet, source.readEvidenceIds))),
+    },
+    {
+      id: "witness-statements",
+      title: GROUP_META["witness-statements"].title,
+      emptyMessage: GROUP_META["witness-statements"].emptyMessage,
+      entries: witnessStatementsEntries(sortedRecords, discoveredSet, source.readEvidenceIds, askedWitnessStatements),
     },
     {
       id: "objects",

@@ -9,6 +9,7 @@ from app.api.v1.health import router as health_router
 from app.api.v1.investigation import router as investigation_router
 from app.api.v1.playthroughs import router as playthroughs_router
 from app.api.v1.sessions import router as sessions_router
+from app.api.v1.witnesses import router as witnesses_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health_router)
@@ -17,4 +18,5 @@ api_router.include_router(cases_router)
 api_router.include_router(generations_router)
 api_router.include_router(playthroughs_router)
 api_router.include_router(investigation_router)
+api_router.include_router(witnesses_router)
 api_router.include_router(generation_capabilities_router)

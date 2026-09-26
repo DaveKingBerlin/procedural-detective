@@ -11,6 +11,8 @@ import type {
   PlayerKnowledgeDTO,
   SuspectCandidateDTO,
   WeaponCandidateDTO,
+  WitnessListEntryDTO,
+  WitnessPresence,
   WorldObjectDTO,
 } from "../api/types";
 
@@ -280,6 +282,70 @@ export const validateWeaponCandidate: Validator<WeaponCandidateDTO> = {
   },
 };
 
+/* ======================================================================
+ * Phase 23 — player-safe witness list validation.
+ *
+ * Every entry carries ONLY the witness identity + presence (+ the optional
+ * scene-object linkage). Strict rules mirror the Phase 23 contract:
+ *  - witnessId / displayName are bounded non-empty strings;
+ *  - presence is the CLOSED enum {"ON_SCENE","REMOTE_STATEMENT"} — any other
+ *    value is malformed (never silently coerced);
+ *  - sceneObjectId (optional) is a bounded string or null;
+ *  - unknown fields are DROPPED (a hostile "statement"/"questionType" key on
+ *    a list entry can never reach the typed DTO).
+ * ==================================================================== */
+
+/** Closed witness presence values the parser accepts (Phase23 §17). */
+export const WITNESS_PRESENCE_VALUES: readonly string[] = ["ON_SCENE", "REMOTE_STATEMENT"];
+
+/** Max witness display-name length (Phase23 §32 bounded text mirror). */
+export const MAX_WITNESS_DISPLAY_NAME_LENGTH = 120;
+/** Max witness/scene-object id length (defensive bound). */
+export const MAX_WITNESS_ID_LENGTH = 120;
+
+/** A non-empty string capped at `max` characters (malformed otherwise). */
+function requireBoundedString(owner: Record<string, unknown>, field: string, where: string, max: number): string {
+  const value = requireString(owner, field, where);
+  if (value.length > max) {
+    throw new ValidationError(`${where}.${field} exceeds ${max} characters.`);
+  }
+  return value;
+}
+
+/** An optional bounded string (absent/null -> null; present non-string -> malformed). */
+function requireOptionalBoundedString(
+  owner: Record<string, unknown>,
+  field: string,
+  where: string,
+  max: number,
+): string | null {
+  const value = owner[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || value === "" || value.length > max) {
+    throw new ValidationError(`${where}.${field} must be a bounded non-empty string or null/absent.`);
+  }
+  return value;
+}
+
+/** Validator for ONE player-safe witness list entry. */
+export const validateWitnessListEntry: Validator<WitnessListEntryDTO> = {
+  validate(raw: unknown): WitnessListEntryDTO {
+    if (!isRecord(raw)) {
+      throw new ValidationError("witnesses entry must be an object.");
+    }
+    const presence = raw.presence;
+    if (typeof presence !== "string" || !WITNESS_PRESENCE_VALUES.includes(presence)) {
+      throw new ValidationError('witnesses.presence must be one of "ON_SCENE" or "REMOTE_STATEMENT".');
+    }
+    return {
+      witnessId: requireBoundedString(raw, "witnessId", "witnesses", MAX_WITNESS_ID_LENGTH),
+      displayName: requireBoundedString(raw, "displayName", "witnesses", MAX_WITNESS_DISPLAY_NAME_LENGTH),
+      presence: presence as WitnessPresence,
+      sceneObjectId: requireOptionalBoundedString(raw, "sceneObjectId", "witnesses", MAX_WITNESS_ID_LENGTH),
+    };
+  },
+};
+
 /**
  * Validates the player-safe `candidates` block of the bootstrap.
  *
@@ -331,6 +397,18 @@ export const parseInvestigationBootstrap: Validator<InvestigationBootstrapRespon
     const playerKnowledge = validatePlayerKnowledge.validate(raw.playerKnowledge);
     const scene = validateWorldGraph.validate(raw.scene);
     const candidates = validateAccusationCandidates.validate(raw.candidates);
+    // Phase 23 — the OPTIONAL player-safe witness list. Absent on pre-23
+    // servers (normalized to [] — the witness UI simply does not render).
+    // A PRESENT but malformed list is still rejected, never silently coerced.
+    let witnesses: WitnessListEntryDTO[] | null;
+    if (raw.witnesses === undefined || raw.witnesses === null) {
+      witnesses = null;
+    } else {
+      if (!Array.isArray(raw.witnesses)) {
+        throw new ValidationError("bootstrap.witnesses must be an array.");
+      }
+      witnesses = raw.witnesses.map((entry) => validateWitnessListEntry.validate(entry));
+    }
     return {
       playthroughId,
       caseId,
@@ -339,6 +417,7 @@ export const parseInvestigationBootstrap: Validator<InvestigationBootstrapRespon
       playerKnowledge,
       scene,
       candidates,
+      witnesses,
     };
   },
 };

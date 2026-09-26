@@ -762,12 +762,29 @@ def test_bootstrap_and_inspection_add_no_evidence_metadata_or_leak_surface(phase
         for list_key in ("suspect_ids", "motive_ids", "weapon_ids")
         for i in (universes.get(list_key) or ())
     }
+    # Phase 23: the bootstrap ``witnesses`` block legitimately echoes the
+    # PUBLIC witness person identity (id + display name) — the same class as
+    # the candidate-universe ids: player-safe world material, never
+    # undiscovered evidence content. Only role=="witness" persons are
+    # exempted; the forbidden-set semantics are unchanged for everyone else.
+    public_ids |= {
+        str(person.get("person_id"))
+        for person in payload["draft"].get("persons") or ()
+        if str(person.get("role")) == "witness" and person.get("person_id") is not None
+    }
+    public_names = {
+        str(person.get("name"))
+        for person in payload["draft"].get("persons") or ()
+        if str(person.get("role")) == "witness"
+        and isinstance(person.get("name"), str)
+        and person.get("name")
+    }
     forbidden_strings = []
     for fact in payload["draft"]["evidence"]:
         presentation = fact.get("presentation") or {}
         for value in presentation.values():
             if isinstance(value, str) and value:
-                if value in public_ids:
+                if value in public_ids or value in public_names:
                     continue
                 forbidden_strings.append(value)
 
