@@ -1254,3 +1254,228 @@ def test_interview_discovery_record_carries_asked_question_type(phase5_app):
     assert body2["discovery"]["record"]["content"]["questionType"] == "OBSERVATION"
     assert body2["discovery"]["record"]["content"]["witnessId"] == EMILY
     assert body2["discovery"]["newlyDiscovered"] is False  # idempotent repeat
+
+
+# --------------------------------------------------------------------------- #
+# 13 — adversarial-review closures (ADV-262 / ADV-263 / ADV-264)
+# --------------------------------------------------------------------------- #
+
+
+def test_crafted_witness_kind_evidence_without_presentation_title_never_500s(
+    phase5_app,
+):
+    """ADV-262 — a crafted witness-kind evidence fact whose allowlisted
+    presentation is missing `title` (empty presentation included) no longer
+    500s the interview discovery or the read-record boundary: the read DTO
+    title degrades to the deterministic neutral fallback and every response
+    stays 200 with a player-safe summary (no truth leak)."""
+    case_id, creator = case_for(phase5_app)
+    payload = _golden_payload(phase5_app, case_id)
+    del creator
+    draft = payload["draft"]
+    # Empty presentation, TIME-grounded via the proposition observed_at anchor.
+    draft["evidence"].append(
+        {
+            "id": "no_title_statement_01",
+            "kind": "witness_statement",
+            "discoverable": True,
+            "reliability": "high",
+            "propositions": [
+                {
+                    "type": "WITNESS_CLAIMS",
+                    "person_id": EMILY,
+                    "location_id": None,
+                    "object_id": None,
+                    "motive_id": None,
+                    "observed_at": "2026-03-14T22:15:00+00:00",
+                    "uncertainty_seconds": 0,
+                    "structured": {},
+                }
+            ],
+            "presentation": {},  # ADV-262: NO title (and no description either)
+        }
+    )
+    # Description-bearing presentation, STILL no title (the ADV-262 repro).
+    draft["evidence"].append(
+        {
+            "id": "no_title_statement_02",
+            "kind": "witness_statement",
+            "discoverable": True,
+            "reliability": "high",
+            "propositions": [
+                {
+                    "type": "WITNESS_CLAIMS",
+                    "person_id": EMILY,
+                    "location_id": None,
+                    "object_id": None,
+                    "motive_id": None,
+                    "observed_at": None,
+                    "uncertainty_seconds": 0,
+                    "structured": {},
+                }
+            ],
+            "presentation": {
+                "description": "I saw the visitor leave the apartment shortly before the evening.",
+                "speakerName": "Emily Reed",
+                "statement": "The visitor left the apartment.",
+            },
+        }
+    )
+    pt_id = f"PT-WITNESS-NOTITLE-{uuid.uuid4().hex[:10]}"
+    pt_token = _insert_crafted_payload(
+        phase5_app,
+        payload,
+        case_id=f"CASE-P23-NOTITLE-{uuid.uuid4().hex[:10]}",
+        version=1,
+        pt_id=pt_id,
+    )
+    # 1. Interview discovery (TIME): the empty-presentation fact grounds TIME
+    # through its observed_at anchor -> the discovery record DTO must degrade
+    # the missing title to a safe fallback instead of a 500.
+    res = interview(phase5_app, pt_id, pt_token, EMILY, "TIME")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["discovery"]["newlyDiscovered"] is True
+    record = body["discovery"]["record"]
+    # Sorted evidence ids: no_title_statement_01 < witness_statement_emily_01,
+    # so the empty-presentation fact is the primary discovered record.
+    assert record["evidenceId"] == "no_title_statement_01"
+    assert record["title"] == "Witness statement"  # deterministic fallback
+    assert "renderType" in record["content"]
+    assert_no_hidden_leaks(body)
+    # 2. Interview discovery (OBSERVATION): the description-bearing fact
+    # (no title) grounds OBSERVATION -> primary record is no_title_statement_02.
+    res = interview(phase5_app, pt_id, pt_token, EMILY, "OBSERVATION")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["statement"]["summary"]
+    assert body["discovery"]["newlyDiscovered"] is True
+    record = body["discovery"]["record"]
+    assert record["evidenceId"] == "no_title_statement_02"
+    assert record["title"] == "Witness statement"
+    assert_no_hidden_leaks(body)
+    # 3. The pre-existing read-record boundary answers the same crafted fact
+    # with a safe title (200), never the pre-fix sanitized 500.
+    with client(phase5_app) as c:
+        res = c.get(
+            f"/api/v1/playthroughs/{pt_id}/records/no_title_statement_01",
+            headers=auth(pt_token),
+        )
+        assert res.status_code == 200, res.text
+        read = res.json()
+    assert read["title"] == "Witness statement"
+    assert "renderType" in read["content"]
+    assert_no_hidden_leaks(read)
+
+
+def test_witness_display_name_strips_control_characters(phase5_app):
+    """ADV-263 — a crafted witness person whose public name embeds C0
+    controls (NUL, tab), a Unicode line separator and a C1 control projects a
+    CLEANED displayName on all three DTO paths (bootstrap, witness view,
+    interview); valid names stay byte-identical."""
+    case_id, creator = case_for(phase5_app)
+    payload = _golden_payload(phase5_app, case_id)
+    del creator
+    draft = payload["draft"]
+    # Bounded crafted person: \x00 (NUL), \u2028 (line separator), \u0009 (tab),
+    # \u0085 (C1 NEL) — every one must be stripped from the public displayName.
+    draft["persons"].append(
+        {
+            "person_id": "witness_ctrl",
+            "name": "Ann\x00a\u2028Miller\u0009\u0085Esq",
+            "role": "witness",
+            "affordances": ["VISIBLE_CHARACTER"],
+            "presented_data": {},
+        }
+    )
+    pt_id = f"PT-WITNESS-CTRL-{uuid.uuid4().hex[:10]}"
+    pt_token = _insert_crafted_payload(
+        phase5_app,
+        payload,
+        case_id=f"CASE-P23-CTRL-{uuid.uuid4().hex[:10]}",
+        version=1,
+        pt_id=pt_id,
+    )
+    # 1. bootstrap witness list entry displayName is cleaned.
+    with client(phase5_app) as c:
+        res = c.get(f"/api/v1/playthroughs/{pt_id}/investigation", headers=auth(pt_token))
+        assert res.status_code == 200
+        body = res.json()
+    entry = next(w for w in body["witnesses"] if w["witnessId"] == "witness_ctrl")
+    assert entry["displayName"] == "AnnaMillerEsq"
+    # Valid names unchanged.
+    emily = next(w for w in body["witnesses"] if w["witnessId"] == EMILY)
+    assert emily["displayName"] == "Emily Reed"
+    # 2. witness view displayName is cleaned.
+    res = witness_view(phase5_app, pt_id, pt_token, "witness_ctrl")
+    assert res.status_code == 200
+    assert res.json()["displayName"] == "AnnaMillerEsq"
+    res = witness_view(phase5_app, pt_id, pt_token, EMILY)
+    assert res.status_code == 200
+    assert res.json()["displayName"] == "Emily Reed"
+    # 3. interview response displayName is cleaned (neutral answer for a
+    # witness with no attributed evidence — still 200 and clean identity).
+    res = interview(phase5_app, pt_id, pt_token, "witness_ctrl", "OBSERVATION")
+    assert res.status_code == 200, res.text
+    assert res.json()["displayName"] == "AnnaMillerEsq"
+    # None of the hostile control characters survive anywhere in the DTOs.
+    blob = json.dumps(
+        [
+            w for w in body["witnesses"] if w["witnessId"] == "witness_ctrl"
+        ]
+        + [witness_view(phase5_app, pt_id, pt_token, "witness_ctrl").json()]
+        + [interview(phase5_app, pt_id, pt_token, "witness_ctrl", "TIME").json()]
+    )
+    for hostile in ("\x00", "\u2028", "\u0009", "\u0085"):
+        assert hostile not in blob, f"{hostile!r} survived the displayName projection"
+
+
+def test_bootstrap_witnesses_dedupe_duplicate_person_ids(phase5_app):
+    """ADV-264 — a crafted published payload whose public persons carry the
+    SAME witness id twice projects a SINGLE bootstrap `witnesses` entry
+    (first-wins, deterministic) so the frontend never keys a collision."""
+    case_id, creator = case_for(phase5_app)
+    payload = _golden_payload(phase5_app, case_id)
+    del creator
+    draft = payload["draft"]
+    draft["persons"].append(
+        {
+            "person_id": "dupe_w",
+            "name": "First Duplicate Witness",
+            "role": "witness",
+            "affordances": ["VISIBLE_CHARACTER"],
+            "presented_data": {},
+        }
+    )
+    draft["persons"].append(
+        {
+            "person_id": "dupe_w",
+            "name": "Second Duplicate Witness",
+            "role": "witness",
+            "affordances": ["VISIBLE_CHARACTER"],
+            "presented_data": {},
+        }
+    )
+    pt_id = f"PT-WITNESS-DUPE-{uuid.uuid4().hex[:10]}"
+    pt_token = _insert_crafted_payload(
+        phase5_app,
+        payload,
+        case_id=f"CASE-P23-DUPE-{uuid.uuid4().hex[:10]}",
+        version=1,
+        pt_id=pt_id,
+    )
+    with client(phase5_app) as c:
+        res = c.get(f"/api/v1/playthroughs/{pt_id}/investigation", headers=auth(pt_token))
+        assert res.status_code == 200
+        body = res.json()
+    ids = [w["witnessId"] for w in body["witnesses"]]
+    # Each witnessId appears EXACTLY once (bijection witnessId -> entry).
+    assert len(ids) == len(set(ids))
+    dupe_entries = [w for w in body["witnesses"] if w["witnessId"] == "dupe_w"]
+    assert len(dupe_entries) == 1
+    # First published occurrence wins (deterministic, payload order).
+    assert dupe_entries[0]["displayName"] == "First Duplicate Witness"
+    # Emily still present exactly once with her valid name.
+    emily = [w for w in body["witnesses"] if w["witnessId"] == EMILY]
+    assert len(emily) == 1
+    assert emily[0]["displayName"] == "Emily Reed"

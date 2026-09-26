@@ -137,10 +137,9 @@ class WitnessService:
         self._require_playing(playthrough)
         witness = self._witness_or_404(payload, witness_id)
         presence, at_scene = witness_domain.witness_presence(payload, witness_id)
-        name = witness.get("name") or str(witness.get("person_id") or witness_id)
         return {
             "witnessId": str(witness.get("person_id")),
-            "displayName": name[: witness_domain.MAX_NAME_CHARS],
+            "displayName": witness_domain.witness_display_name(witness, witness_id),
             "presence": presence.value,
             "atScene": at_scene,
             "questions": [
@@ -199,9 +198,7 @@ class WitnessService:
 
         return {
             "witnessId": str(witness.get("person_id")),
-            "displayName": str(witness.get("name") or witness.get("person_id"))[
-                : witness_domain.MAX_NAME_CHARS
-            ],
+            "displayName": witness_domain.witness_display_name(witness, witness_id),
             "questionType": question.value,
             "statement": {
                 "summary": statement.summary,
@@ -312,7 +309,7 @@ class WitnessService:
         return {
             "evidenceId": evidence_id,
             "kind": str(fact.get("kind")),
-            "title": presentation.get("title"),
+            "title": pub.read_dto_title(fact),
             "description": presentation.get("description"),
             "openedAt": _iso_utc(opened_epoch),
             "readByPlayer": True,

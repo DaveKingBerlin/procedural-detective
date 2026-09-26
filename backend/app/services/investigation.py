@@ -476,7 +476,7 @@ class InvestigationService:
         return {
             "evidenceId": seen_id,
             "kind": str(fact.get("kind")),
-            "title": presentation.get("title"),
+            "title": pub.read_dto_title(fact),
             "description": presentation.get("description"),
             "openedAt": _iso_utc(opened_epoch),
             "readByPlayer": True,

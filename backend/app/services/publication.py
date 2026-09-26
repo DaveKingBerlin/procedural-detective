@@ -607,6 +607,35 @@ def presentation_of(fact: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return _presentation_of(fact)
 
 
+# Neutral non-empty title fallbacks for a read-record DTO whose crafted
+# evidence presentation carries no ``title`` (ADV-262). The strict generation
+# parser requires a non-empty ``presentation.title`` for EVERY evidence item,
+# so a missing title can only come from a crafted/forged ``published_versions``
+# row. Degrade deterministically instead of answering a sanitized 500.
+_READ_DTO_TITLE_FALLBACK = "Evidence"
+_READ_DTO_WITNESS_KIND_TITLE_FALLBACK = "Witness statement"
+
+
+def read_dto_title(fact: Mapping[str, Any] | None) -> str:
+    """The player-safe ``title`` of a read-record DTO.
+
+    The presentation's own ``title`` verbatim when present, else a
+    deterministic neutral non-empty label: ``"Witness statement"`` for
+    witness-kind evidence, ``"Evidence"`` for everything else. Never
+    ``None``/``""`` — ``EvidenceReadResultDTO.title`` is a required string and
+    a crafted presentation without a title must never 500 the record-read or
+    the interview discovery boundary (ADV-262).
+    """
+    title = _presentation_of(fact).get("title")
+    if isinstance(title, str) and title:
+        return title
+    from app.domain.witness import WITNESS_KINDS
+
+    if fact is not None and str(fact.get("kind") or "") in WITNESS_KINDS:
+        return _READ_DTO_WITNESS_KIND_TITLE_FALLBACK
+    return _READ_DTO_TITLE_FALLBACK
+
+
 def placements_for_evidence(
     payload: Mapping[str, Any], evidence_id: str
 ) -> tuple[dict[str, Any], ...]:
@@ -1003,28 +1032,37 @@ def project_witnesses(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     ``app.domain.witness.witness_presence`` (ON_SCENE iff the published world
     graph contains a semantic person placement for the witness);
     ``sceneObjectId`` is that placement's object_id when ON_SCENE else null.
-    ``displayName`` is the public person name (human-readable), bounded.
-    Sorted by witnessId for determinism.
+    ``displayName`` is the public person name (human-readable), bounded and
+    control-character-stripped (ADV-263 — the same C0/C1/format removal every
+    witness DTO emitter applies). Duplicate person ids project ONE entry
+    (first-wins, deterministic — ADV-264, the list stays a bijection
+    witnessId -> entry the frontend keys by). Sorted by witnessId for
+    determinism.
     """
     from app.domain import witness as witness_domain
 
     draft = _draft_of(payload)
     out: list[dict[str, Any]] = []
+    seen_witness_ids: set[str] = set()
     for person in draft.get("persons") or ():
         if not isinstance(person, Mapping):
             continue
         if str(person.get("role")) != "witness":
             continue
         witness_id = str(person.get("person_id") or "")
-        if not witness_id:
+        if not witness_id or witness_id in seen_witness_ids:
+            # ADV-264: a crafted duplicate person id NEVER projects twice —
+            # the first published occurrence wins and later duplicates are
+            # skipped, so the witness list stays a bijection id -> entry.
             continue
+        seen_witness_ids.add(witness_id)
         presence, _at_scene = witness_domain.witness_presence(payload, witness_id)
         out.append(
             {
                 "witnessId": witness_id,
-                "displayName": str(person.get("name") or witness_id)[
-                    : witness_domain.MAX_NAME_CHARS
-                ],
+                "displayName": witness_domain.witness_display_name(
+                    person, witness_id
+                ),
                 "presence": presence.value,
                 "sceneObjectId": witness_domain.witness_scene_object_id(
                     payload, witness_id
@@ -1092,6 +1130,7 @@ __all__ = [
     "project_witnesses",
     "project_world_objects",
     "public_case_dict_from_payload",
+    "read_dto_title",
     "scene_spec_of",
     "serialize_published_payload",
     "visible_placement_for_object",

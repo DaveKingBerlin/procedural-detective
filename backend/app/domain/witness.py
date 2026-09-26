@@ -149,6 +149,17 @@ _CLOCK_TOKEN_RE = re.compile(r"\b([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)\b")
 # Control characters stripped from every witness-facing string.
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+# Control/format characters stripped from the public witness DISPLAY NAME
+# (ADV-263): the full C0 block (NUL, tab, LF, CR), DEL, the C1 controls and
+# the Unicode line/paragraph separators (U+2028/U+2029) plus the shared
+# project format-glyph class (zero-width space/joiners, LRM/RLM, bidi
+# controls, BOM) — the same control+format class the activity-log and
+# asset-glyph safe-string paths remove. A hostile NUL/control name therefore
+# reaches the DOM as clean text, never as an invisible control byte.
+_DISPLAY_NAME_CONTROL_RE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\ufeff]"
+)
+
 # Epoch used ONLY as a sort-key for bare clock tokens (no date known), so
 # they sort after the dated ISO anchors: ISO (full timestamps) first, bare
 # clock tokens after — deterministic and chronologically natural.
@@ -204,6 +215,21 @@ def _clean_text(value: Any, max_chars: int) -> str:
         return ""
     cleaned = _CONTROL_RE.sub("", value)
     return cleaned[:max_chars]
+
+
+def witness_display_name(witness: Mapping[str, Any], witness_id: str) -> str:
+    """The player-safe bounded display name of a witness DTO entry.
+
+    The public person ``name`` (falling back to ``person_id`` then
+    ``witness_id``), with control/format characters stripped
+    (``_DISPLAY_NAME_CONTROL_RE``) and truncated to ``MAX_NAME_CHARS``.
+    The underlying public name VALUE is never mutated — only the projected
+    DTO string is cleaned. Every one of the three witness DTO emitters
+    (bootstrap ``witnesses[].displayName``, witness-view and interview
+    responses) uses this same projection (ADV-263).
+    """
+    raw = str(witness.get("name") or witness.get("person_id") or witness_id)
+    return _DISPLAY_NAME_CONTROL_RE.sub("", raw)[:MAX_NAME_CHARS]
 
 
 def _parse_time_token(raw: Any) -> str | None:
@@ -771,6 +797,7 @@ __all__ = [
     "WitnessStatement",
     "project_witness_statement",
     "witness_attributed_to",
+    "witness_display_name",
     "witness_person_of",
     "witness_presence",
     "witness_question_types_of",
