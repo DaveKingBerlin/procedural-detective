@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { getInvestigation, interactObject, readRecord } from "../api/client";
+import { getInvestigation, interactObject, interviewWitness, readRecord } from "../api/client";
 import { clearPlaythroughCredentials, getPlaythroughId, getPlaythroughToken } from "../api/playthroughToken";
-import type { EvidenceReadResultDTO } from "../api/types";
+import type { EvidenceReadResultDTO, WitnessListEntryDTO, WitnessQuestionType } from "../api/types";
 import { getCatalogError } from "../catalog/assetCatalog";
 import { getKit, hasKit, isKitCatalogHealthy } from "../environments/kitCatalog";
 import { handleEvidencePanelKey } from "../evidence/evidenceContent";
@@ -19,6 +19,7 @@ import {
   type InteractionFeedback,
   type InvestigationErrorKind,
   type SessionToast,
+  type WitnessAskOutcome,
 } from "../scene/investigationFlow";
 import {
   discoveredCaptionsForWorld,
@@ -33,6 +34,8 @@ import type { InvestigationSceneHandle } from "../scene/renderInvestigation";
 import { loadHypothesis, saveHypothesis, type HypothesisPins } from "../notebook/hypothesisStore";
 import { buildNotebookModel } from "../notebook/notebookModel";
 import NotebookPanel from "../notebook/NotebookPanel";
+import WitnessPanel from "../witness/WitnessPanel";
+import { boundedText, handleWitnessPanelKey, MAX_WITNESS_DISPLAY_NAME } from "../witness/witnessModel";
 
 type PageStatus =
   | { status: "loading" }
@@ -94,6 +97,13 @@ export default function ScenePage() {
   const [notebookOpen, setNotebookOpen] = useState(true);
   const [notebookRev, setNotebookRev] = useState(0);
   const [pins, setPins] = useState<HypothesisPins>(() => loadHypothesis(getPlaythroughId() ?? ""));
+  /**
+   * Phase 23 — the witness whose interview panel is open (null = closed).
+   * The panel is opened from the 3D ON_SCENE person pick, from the "Objects
+   * in this room" witness button, or from the Witnesses section (the
+   * REMOTE_STATEMENT / accessibility path).
+   */
+  const [witnessPanel, setWitnessPanel] = useState<WitnessListEntryDTO | null>(null);
 
   const retry = () => {
     setRunId((n) => n + 1);
@@ -111,6 +121,7 @@ export default function ScenePage() {
     setHasInteracted(false);
     setSelectedObjectId(null);
     setCaptionPos({});
+    setWitnessPanel(null);
     setStatus({ status: "no-token" });
   };
 
@@ -165,6 +176,83 @@ export default function ScenePage() {
     sceneHandleRef.current?.setObjectSelected(null);
   };
 
+  /** Open the interview panel for a witness (3D pick / list button / section). */
+  const openWitnessPanel = (witness: WitnessListEntryDTO) => {
+    setInteractionError(null);
+    setWitnessPanel(witness);
+  };
+
+  /** Close the interview panel (focus returns to the activating control). */
+  const closeWitnessPanel = () => {
+    setWitnessPanel(null);
+  };
+
+  /**
+   * Phase 23 — route ONE scene-object activation. An ON_SCENE witness person
+   * object opens the interview panel (the semantic witness id), every other
+   * published object keeps the Phase 19F universal inspect flow.
+   */
+  const handleSceneObject = (objectId: string) => {
+    const session = sessionRef.current;
+    if (!session) return;
+    const witness = session.sceneWitnessByObjectId(objectId);
+    if (witness !== null) {
+      openWitnessPanel(witness);
+      return;
+    }
+    void session.interact(objectId).then((feedback) => applyFeedback(feedback));
+  };
+
+  /**
+   * Phase 23 — the interview ask chain: session.askWitness (idempotent;
+   * cached re-ask -> no POST) -> statement back to the panel + knowledge /
+   * discovery side effects here. A newly discovered record opens the existing
+   * evidence panel and the whole discovery machinery flows into the notebook.
+   */
+  const handleWitnessAsk = async (
+    witnessId: string,
+    questionType: WitnessQuestionType,
+  ): Promise<WitnessAskOutcome> => {
+    const session = sessionRef.current;
+    if (!session) {
+      return { ok: false, error: { message: "The investigation has not loaded yet." }, cached: false };
+    }
+    const outcome = await session.askWitness(witnessId, questionType);
+    if (outcome.ok) {
+      if (!outcome.cached) setHasInteracted(true);
+      if (outcome.record !== null) {
+        // Reuse the existing record/panel mechanics: the discovery record
+        // opens the evidence panel (no object context — the witness is the
+        // source, and REMOTE witnesses have no scene object to highlight).
+        setRecordPanel(outcome.record);
+        setPanelContext(null);
+        setSelectedObjectId(null);
+        setInteractionError(null);
+        if (outcome.discovery !== null && outcome.discovery.newlyDiscovered) {
+          setToast({
+            id: `toast-witness-${Date.now()}`,
+            text: `Discovered: ${outcome.record.title}`,
+            evidenceId: outcome.record.evidenceId,
+          });
+        }
+      } else {
+        setInteractionError(null);
+      }
+      // The interview may have grown the server-derived knowledge (discovered/
+      // read ids) — re-sync the scene model by reference stability (cheap
+      // no-op when nothing changed, EXACTLY like applyFeedback).
+      const model = session.sceneModel ?? null;
+      if (model !== null) {
+        setStatus((prev) =>
+          prev.status === "ready" && model !== prev.model ? { ...prev, model } : prev,
+        );
+      }
+    } else {
+      setInteractionError(outcome.error.message);
+    }
+    return outcome;
+  };
+
   useEffect(() => {
     const token = getPlaythroughToken();
     const playthroughId = getPlaythroughId();
@@ -194,6 +282,7 @@ export default function ScenePage() {
     setSceneStatus("idle");
     setSelectedObjectId(null);
     setCaptionPos({});
+    setWitnessPanel(null);
     sceneHandleRef.current = null;
     // Phase 18C: the notebook reloads THIS playthrough's player pins (the
     // localStorage namespace is per-playthrough, so a different playthrough
@@ -203,20 +292,42 @@ export default function ScenePage() {
 
     // PD-SEC-01: interactObject is the ONLY discovery entry (the direct
     // evidence discover route is removed server-side).
-    const services = { getInvestigation, interactObject, readRecord };
+    // Phase 23: interviewWitness powers the witness interview flow (optional
+    // in the session — pre-23 backends simply render no witness UI).
+    const services = { getInvestigation, interactObject, readRecord, interviewWitness };
     const session = new InvestigationSession(
       services,
       token,
       (sceneCanvas, model) => {
         const result = createInvestigationScene(sceneCanvas, model, {
           onPick: (objectId) => {
+            // Phase 23: an ON_SCENE witness person pick opens the interview
+            // panel; every other pick keeps the universal inspect flow. The
+            // original cancellation guard stays: after unmount no feedback
+            // state is ever applied from a pick-triggered interaction.
+            const witness = session.sceneWitnessByObjectId(objectId);
+            if (witness !== null) {
+              openWitnessPanel(witness);
+              return;
+            }
             void session.interact(objectId).then((feedback) => {
               if (!cancelled) applyFeedback(feedback);
             });
           },
           onHoverStart: (objectId, origin) => {
             const next = tooltipForHover(model, objectId);
-            setTooltip(next ? { ...next, x: origin?.x ?? 0, y: origin?.y ?? 0 } : null);
+            if (next === null) {
+              setTooltip(null);
+              return;
+            }
+            // Phase 23: an ON_SCENE witness person surfaces its display name
+            // in the hover tooltip (never the registry "Victim"-class label).
+            const witness = session.sceneWitnessByObjectId(objectId);
+            setTooltip(
+              witness !== null
+                ? { ...next, label: boundedText(witness.displayName, MAX_WITNESS_DISPLAY_NAME), x: origin?.x ?? 0, y: origin?.y ?? 0 }
+                : { ...next, x: origin?.x ?? 0, y: origin?.y ?? 0 },
+            );
           },
           onHoverEnd: () => setTooltip(null),
         });
@@ -285,6 +396,20 @@ export default function ScenePage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [recordPanel]);
 
+  // Phase 23 — Escape closes the witness interview panel (focus returns to
+  // the activating control via the panel's unmount cleanup).
+  useEffect(() => {
+    if (witnessPanel === null) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (handleWitnessPanelKey(event.key) === "close") {
+        event.preventDefault();
+        closeWitnessPanel();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [witnessPanel]);
+
   // Discovery toast auto-dismisses after a few seconds.
   useEffect(() => {
     if (toast === null) return;
@@ -293,9 +418,7 @@ export default function ScenePage() {
   }, [toast]);
 
   const handleObjectAction = (objectId: string) => {
-    const session = sessionRef.current;
-    if (!session) return;
-    void session.interact(objectId).then((feedback) => applyFeedback(feedback));
+    handleSceneObject(objectId);
   };
 
   const dismissToast = () => {
@@ -308,6 +431,17 @@ export default function ScenePage() {
   // (never persisted — EVIDENCE_DISCOVERED stays the server-authoritative
   // `discovered` flag). Both states render as separate, honest list markers.
   const inspectedIds = new Set(sessionRef.current?.inspectedObjectIdsSnapshot() ?? []);
+  // Phase 23: the player-safe witness list + the ON_SCENE person linkage
+  // (world object id -> witness). REMOTE_STATEMENT witnesses have no linkage.
+  const witnesses = sessionRef.current?.witnessesSnapshot() ?? [];
+  const sceneWitnessByObject = new Map<string, WitnessListEntryDTO>();
+  for (const witness of witnesses) {
+    if (witness.presence !== "ON_SCENE") continue;
+    const sceneObjectId = witness.sceneObjectId ?? witness.witnessId;
+    if (sceneObjectId !== null && sceneObjectId !== "") {
+      sceneWitnessByObject.set(sceneObjectId, witness);
+    }
+  }
   const summary = status.status === "ready" ? summaryFromSession(sessionRef.current, status.model) : null;
   const interacted =
     hasInteracted || (knowledge != null && knowledge.discoveredEvidenceIds.length > 0);
@@ -326,6 +460,10 @@ export default function ScenePage() {
           readEvidenceIds: session.readEvidenceIdsSnapshot(),
           worldObjects: status.model.worldObjects,
           records: session.recordCacheSnapshot(),
+          // Phase 23: ASKED witness interview statements (the session's
+          // in-memory store — statements that discovered evidence ALSO
+          // re-derive from the READ records after a reload).
+          witnessStatements: session.askedWitnessStatementsSnapshot(),
         })
       : null;
 
@@ -568,6 +706,35 @@ export default function ScenePage() {
             />
           )}
 
+          {/* Phase 23 — Witnesses section. The ONLY interview/contact control
+              for REMOTE_STATEMENT witnesses and the accessibility fallback for
+              ON_SCENE witness persons: real labelled buttons, keyboard
+              reachable, opening the same interview panel as the 3D pick. Each
+              list entry carries the server-published closed presence. */}
+          {witnesses.length > 0 && (
+            <div className="witnesses-section" data-testid="witnesses">
+              <h3>Witnesses</h3>
+              <ul className="witnesses-list">
+                {witnesses.map((entry) => {
+                  const safeName = boundedText(entry.displayName, MAX_WITNESS_DISPLAY_NAME);
+                  return (
+                    <li key={entry.witnessId} data-presence={entry.presence}>
+                      <button
+                        type="button"
+                        className="witness-contact-button"
+                        data-testid={`witness-${entry.witnessId}`}
+                        aria-label={`Interview ${safeName}`}
+                        onClick={() => openWitnessPanel(entry)}
+                      >
+                        {safeName}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
           <div className="scene-objects" data-testid="scene-objects">
             <h3>Objects in this room</h3>
             <p className="scene-objects-fallback-note">
@@ -575,7 +742,12 @@ export default function ScenePage() {
               objects: click them directly.
             </p>
             <ul>
-              {status.model.worldObjects.map((obj) => (
+              {status.model.worldObjects.map((obj) => {
+                const objectWitness = sceneWitnessByObject.get(obj.objectId) ?? null;
+                const label = objectWitness !== null
+                  ? boundedText(objectWitness.displayName, MAX_WITNESS_DISPLAY_NAME)
+                  : evidenceLabelFor(obj);
+                return (
                 <li key={obj.objectId}>
                   {/* Phase 19F: EVERY published semantic world object renders
                       an interactive button — decorative/structural objects
@@ -585,7 +757,8 @@ export default function ScenePage() {
                       object in the room, and every button still shows the
                       SEMANTIC human label (registry label / humanized proc
                       canonicalName — never a raw objectId/assetId/proc.*
-                      token). */}
+                      token). Phase 23: an ON_SCENE witness person button shows
+                      the witness display name and opens the interview panel. */}
                   <button
                     type="button"
                     data-testid={`object-${obj.objectId}`}
@@ -597,14 +770,23 @@ export default function ScenePage() {
                     aria-pressed={obj.objectId === selectedObjectId}
                     onClick={() => handleObjectAction(obj.objectId)}
                   >
-                    {evidenceLabelFor(obj)}
+                    {label}
                   </button>
                   <span
                     className="object-label visually-hidden"
                     data-testid={`object-label-${obj.objectId}`}
                   >
-                    {evidenceLabelFor(obj)}
+                    {label}
                   </span>
+                  {objectWitness !== null && (
+                    <span
+                      className="object-witness-marker"
+                      data-testid={`object-witness-${obj.objectId}`}
+                    >
+                      {" "}
+                      · Witness — interview
+                    </span>
+                  )}
                   {/* Phase 19F state model: INSPECTED (cosmetic, in-memory) and
                       EVIDENCE_DISCOVERED (server-authoritative `discovered`)
                       are distinct and rendered as separate markers. The
@@ -642,7 +824,8 @@ export default function ScenePage() {
                     </span>
                   )}
                 </li>
-              ))}
+                );
+              })}
             </ul>
           </div>
 
@@ -698,6 +881,19 @@ export default function ScenePage() {
           onClose={closeRecordPanel}
           objectLabel={panelContext?.label ?? null}
           preview={panelContext}
+        />
+      )}
+
+      {/* Phase 23 — the witness interview panel. Idempotent re-ask: the
+          session serves answered questions from its in-memory store (no
+          POST, no duplicate); discovered evidence already opened above. */}
+      {witnessPanel !== null && sessionRef.current !== null && (
+        <WitnessPanel
+          witness={witnessPanel}
+          askedQuestions={sessionRef.current.askedWitnessQuestionTypes(witnessPanel.witnessId)}
+          statementCache={sessionRef.current.witnessStatementCache(witnessPanel.witnessId)}
+          onAsk={(questionType) => handleWitnessAsk(witnessPanel.witnessId, questionType)}
+          onClose={closeWitnessPanel}
         />
       )}
 

@@ -7,11 +7,21 @@ import type {
   InvestigationBootstrapResponse,
   PlaythroughLifecycleState,
   PlayerKnowledgeDTO,
+  WitnessInterviewResponse,
+  WitnessListEntryDTO,
+  WitnessQuestionType,
+  WitnessStatementDTO,
 } from "../api/types";
 import { buildInvestigationScene, applyKnowledgeToSceneModel, bindEvidenceToSceneModel, type InvestigationSceneModel } from "./buildInvestigationScene";
 import { semanticLabelOrNull } from "./objectLabel";
 import type { CreateInvestigationSceneResult, InvestigationSceneHandle } from "./renderInvestigation";
-import { ValidationError } from "./validation";
+import { ValidationError, parseInvestigationBootstrap } from "./validation";
+import {
+  parseWitnessInterviewResponse,
+  WITNESS_QUESTION_ORDER,
+  witnessQuestionKey,
+  type AskedWitnessStatement,
+} from "../witness/witnessModel";
 
 /**
  * Server-authoritative investigation session (Phase 6 I/N).
@@ -52,6 +62,18 @@ export interface InvestigationServices {
   getInvestigation(playthroughId: string, token: string): Promise<InvestigationBootstrapResponse>;
   interactObject(playthroughId: string, objectId: string, interaction: string, token: string): Promise<InteractionResultDTO>;
   readRecord(playthroughId: string, recordId: string, token: string): Promise<EvidenceReadResultDTO>;
+  /**
+   * Phase 23 — witness interview. OPTIONAL: present only on backends that
+   * publish the Phase 23 interview feature (a bootstrap `witnesses` list).
+   * Absent services degrade the session to the pre-23 behavior (no witness
+   * UI at all) — existing callers/tests are untouched.
+   */
+  interviewWitness?(
+    playthroughId: string,
+    witnessId: string,
+    questionType: WitnessQuestionType,
+    token: string,
+  ): Promise<WitnessInterviewResponse>;
 }
 
 /** Injectable Babylon scene creation (the route wires the real glue + canvas). */
@@ -73,6 +95,27 @@ export interface InteractionFeedback {
   record: EvidenceReadResultDTO | null;
   error: { message: string } | null;
 }
+
+/**
+ * Phase 23 — the result of asking ONE closed interview question.
+ * `ok:true` always carries the deterministic player-safe statement; when the
+ * question legitimately discovered evidence, `record`/`discovery.record`
+ * carry the (now player-known) evidence record the UI should open. `cached`
+ * is true ONLY when the answer was served from the in-memory asked-store
+ * (a re-ask — no POST, no duplicate, no re-opened panel).
+ */
+export type WitnessAskOutcome =
+  | {
+      ok: true;
+      witnessId: string;
+      displayName: string;
+      questionType: WitnessQuestionType;
+      statement: WitnessStatementDTO;
+      discovery: { newlyDiscovered: boolean; record: EvidenceReadResultDTO | null } | null;
+      record: EvidenceReadResultDTO | null;
+      cached: boolean;
+    }
+  | { ok: false; error: { message: string }; cached: false };
 
 /** True for 401/403 responses — the playthrough credential is the problem. */
 export function isAuthorisationFailure(error: unknown): boolean {
@@ -98,6 +141,19 @@ export class InvestigationSession {
    * not discovered; knife -> inspected + discovered.
    */
   private readonly inspectedIds = new Set<string>();
+  /**
+   * Phase 23 — the player-safe witness list from the bootstrap (ids + names +
+   * presence ONLY; no statement content). Empty on pre-23 servers.
+   */
+  private witnessesValue: WitnessListEntryDTO[] = [];
+  /**
+   * Phase 23 — in-memory ASKED witness statements, keyed by
+   * witnessQuestionKey(witnessId, questionType). This is cosmetic session
+   * state (idempotent re-ask, panel + notebook dedupe). Statements that
+   * discovered evidence ALSO flow into `records`/`knowledge`, so they survive
+   * a reload via the server while the store itself is never persisted.
+   */
+  private readonly askedStatements = new Map<string, AskedWitnessStatement>();
 
   constructor(
     private readonly services: InvestigationServices,
@@ -231,9 +287,35 @@ export class InvestigationSession {
       return this.mapBootstrapError(error);
     }
 
+    // Phase 23: validate the WHOLE bootstrap once, so the player-safe witness
+    // list (an optional field on this exact DTO) is parsed through the same
+    // strict gate as the scene. The typed result feeds the scene builder
+    // (which re-validates internally — a cheap, idempotent pure parse).
+    let parsedBootstrap: InvestigationBootstrapResponse;
+    try {
+      parsedBootstrap = parseInvestigationBootstrap.validate(bootstrap);
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        return {
+          ok: false,
+          kind: "malformed",
+          message: "The case scene data is malformed and cannot be displayed safely.",
+          tokenInvalid: false,
+          retryable: false,
+        };
+      }
+      return {
+        ok: false,
+        kind: "gameplay",
+        message: "The case scene data could not be prepared.",
+        tokenInvalid: false,
+        retryable: false,
+      };
+    }
+
     let model: InvestigationSceneModel;
     try {
-      model = buildInvestigationScene(bootstrap);
+      model = buildInvestigationScene(parsedBootstrap);
     } catch (error) {
       if (error instanceof ValidationError) {
         return {
@@ -268,12 +350,14 @@ export class InvestigationSession {
     }
 
     this.knowledge = {
-      discoveredEvidenceIds: [...bootstrap.playerKnowledge.discoveredEvidenceIds],
-      readEvidenceIds: [...bootstrap.playerKnowledge.readEvidenceIds],
-      visitedLocationIds: [...bootstrap.playerKnowledge.visitedLocationIds],
+      discoveredEvidenceIds: [...parsedBootstrap.playerKnowledge.discoveredEvidenceIds],
+      readEvidenceIds: [...parsedBootstrap.playerKnowledge.readEvidenceIds],
+      visitedLocationIds: [...parsedBootstrap.playerKnowledge.visitedLocationIds],
     };
-    this.lifecycleStateValue = bootstrap.state;
-    this.candidatesValue = bootstrap.candidates;
+    this.lifecycleStateValue = parsedBootstrap.state;
+    this.candidatesValue = parsedBootstrap.candidates;
+    // Phase 23: the player-safe witness list ([] on pre-23 servers).
+    this.witnessesValue = parsedBootstrap.witnesses ?? [];
     this.model = model;
     // DEF-072 invariant: the scene-model flags ALWAYS mirror the knowledge
     // snapshot — the bootstrap DTO flags define the same sets at start.
@@ -366,6 +450,155 @@ export class InvestigationSession {
   /** Clear the current discovery toast (manual dismissal). */
   dismissToast(): void {
     this.toast = null;
+  }
+
+  /* ======================================================================
+   * Phase 23 — witness interviews.
+   *
+   * The ONLY browser request is POST .../witnesses/{id}/interview with a
+   * closed question type. Ids come exclusively from the player-safe bootstrap
+   * list. Statements are stored in-memory (idempotent re-ask; no duplicate
+   * button state / notebook line, no re-POST); statements that DISCOVERED
+   * evidence ALSO flow into the existing records cache + knowledge snapshot,
+   * so the notebook re-derives them after a reload from the server-persisted
+   * discovery (never from a client-side statement store).
+   * ==================================================================== */
+
+  /** Snapshot of the player-safe witness list (empty on pre-23 servers). */
+  witnessesSnapshot(): WitnessListEntryDTO[] {
+    return [...this.witnessesValue];
+  }
+
+  /** The witness whose ON_SCENE person object is `objectId`, or null. */
+  sceneWitnessByObjectId(objectId: string): WitnessListEntryDTO | null {
+    return (
+      this.witnessesValue.find(
+        (witness) =>
+          witness.presence === "ON_SCENE" &&
+          (witness.sceneObjectId === objectId ||
+            // Backend tolerance: when the list carries no explicit linkage, the
+            // semantic person objectId IS the witness id itself.
+            (witness.sceneObjectId == null && witness.witnessId === objectId)),
+      ) ?? null
+    );
+  }
+
+  /** The asked question types for one witness, in the closed panel order. */
+  askedWitnessQuestionTypes(witnessId: string): WitnessQuestionType[] {
+    const types: WitnessQuestionType[] = [];
+    for (const asked of this.askedStatements.values()) {
+      if (asked.witnessId === witnessId) types.push(asked.questionType);
+    }
+    return types.sort(
+      (a, b) => WITNESS_QUESTION_ORDER.indexOf(a) - WITNESS_QUESTION_ORDER.indexOf(b),
+    );
+  }
+
+  /** Cached statements of one witness (questionType -> statement). */
+  witnessStatementCache(witnessId: string): ReadonlyMap<WitnessQuestionType, WitnessStatementDTO> {
+    const cache = new Map<WitnessQuestionType, WitnessStatementDTO>();
+    for (const asked of this.askedStatements.values()) {
+      if (asked.witnessId === witnessId) cache.set(asked.questionType, asked.statement);
+    }
+    return cache;
+  }
+
+  /** All asked statements (the notebook "Witness statements" source). */
+  askedWitnessStatementsSnapshot(): AskedWitnessStatement[] {
+    return [...this.askedStatements.values()];
+  }
+
+  /** True when this (witness, question) was already answered this session. */
+  hasAskedWitnessQuestion(witnessId: string, questionType: WitnessQuestionType): boolean {
+    return this.askedStatements.has(witnessQuestionKey(witnessId, questionType));
+  }
+
+  /**
+   * Ask ONE closed interview question. Idempotent: a re-ask returns the
+   * cached statement WITHOUT a POST (no duplicate button state, no duplicate
+   * notebook line) and never re-opens an evidence panel. A discovery flows
+   * into the existing discovery/read machinery (record cached, knowledge
+   * snapshot + scene-model flags updated). All failures map to short
+   * player-safe messages — never raw internals.
+   */
+  async askWitness(witnessId: string, questionType: WitnessQuestionType): Promise<WitnessAskOutcome> {
+    if (this.model === null || this.knowledge === null) {
+      return { ok: false, error: { message: "The investigation has not loaded yet." }, cached: false };
+    }
+    const witness = this.witnessesValue.find((entry) => entry.witnessId === witnessId);
+    if (!witness) {
+      return { ok: false, error: { message: "That witness is not part of this playthrough." }, cached: false };
+    }
+    const key = witnessQuestionKey(witnessId, questionType);
+    const asked = this.askedStatements.get(key);
+    if (asked) {
+      return {
+        ok: true,
+        witnessId,
+        displayName: asked.displayName,
+        questionType,
+        statement: asked.statement,
+        discovery: null,
+        record: null,
+        cached: true,
+      };
+    }
+    const interview = this.services.interviewWitness;
+    if (!interview) {
+      return { ok: false, error: { message: "Witness interviews are not available for this case." }, cached: false };
+    }
+
+    let result: WitnessInterviewResponse;
+    try {
+      result = await interview(this.playthroughId, witnessId, questionType, this.token);
+    } catch (error) {
+      return { ok: false, error: { message: this.safeWitnessError(error) }, cached: false };
+    }
+    const parsed = parseWitnessInterviewResponse(result);
+    const displayName = parsed.displayName !== "" ? parsed.displayName : witness.displayName;
+
+    let record: EvidenceReadResultDTO | null = null;
+    if (parsed.discovery !== null && parsed.discovery.record !== null) {
+      const discovered = parsed.discovery.record;
+      // Interview discovery reuses the existing machinery: the record is
+      // cached (notebook/People + client-side panel state) and the
+      // server-confirmed ids flow into the knowledge snapshot + scene-model
+      // flags (discovered AND read — the interview response carries the whole
+      // player-safe record, so the player has effectively read it).
+      this.records.set(discovered.evidenceId, discovered);
+      if (this.knowledge) {
+        this.knowledge = {
+          ...this.knowledge,
+          discoveredEvidenceIds: sortedUnique([...this.knowledge.discoveredEvidenceIds, discovered.evidenceId]),
+          readEvidenceIds: sortedUnique([...this.knowledge.readEvidenceIds, discovered.evidenceId]),
+        };
+      }
+      this.syncSceneModelKnowledge();
+      record = discovered;
+    }
+
+    const askedEntry: AskedWitnessStatement = {
+      witnessId,
+      displayName,
+      questionType,
+      statement: parsed.statement,
+      evidenceId: record !== null ? record.evidenceId : null,
+    };
+    this.askedStatements.set(key, askedEntry);
+
+    return {
+      ok: true,
+      witnessId,
+      displayName,
+      questionType,
+      statement: parsed.statement,
+      discovery:
+        parsed.discovery !== null
+          ? { newlyDiscovered: parsed.discovery.newlyDiscovered, record }
+          : null,
+      record,
+      cached: false,
+    };
   }
 
   /** Release the live 3D scene, if one was created (idempotent, never throws). */
@@ -481,6 +714,30 @@ export class InvestigationSession {
       return "Your playthrough access is no longer valid. Reset the token from the Home page.";
     }
     return "That interaction did not work. Please try again.";
+  }
+
+  /** Phase 23 — map an interview failure to a short player-safe message. The
+   *  server's typed failures (WITNESS_NOT_FOUND / QUESTION_NOT_AVAILABLE /
+   *  QUESTION_ALREADY_ANSWERED / PLAYTHROUGH_NOT_ACTIVE / UNAUTHORIZED) never
+   *  surface as raw text; 401/403 still carry the reset hint. */
+  private safeWitnessError(error: unknown): string {
+    if (isAuthorisationFailure(error)) {
+      return "Your playthrough access is no longer valid. Reset the token from the Home page.";
+    }
+    if (error instanceof ApiError) {
+      if (error.code === "QUESTION_ALREADY_ANSWERED") {
+        return "You have already asked that question — the answer stays the same.";
+      }
+      if (
+        error.status === 409 ||
+        error.code === "WITNESS_NOT_FOUND" ||
+        error.code === "QUESTION_NOT_AVAILABLE" ||
+        error.code === "PLAYTHROUGH_NOT_ACTIVE"
+      ) {
+        return "That question is not available right now.";
+      }
+    }
+    return "That question could not be answered. Please try again.";
   }
 }
 

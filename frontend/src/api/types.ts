@@ -144,6 +144,14 @@ export interface InvestigationSceneLocationDTO {
  * winner). `state` reflects the frozen playthrough lifecycle — the scene is
  * still playable while ACCUSED/REVEALED, so only CREATED/unknown values are
  * rejected.
+ *
+ * Phase 23 (witness interviews): the bootstrap OPTIONALLY gains a player-safe
+ * `witnesses` list. It is ABSENT from servers that do not publish the Phase
+ * 23 interview feature (the client then renders NO witness UI — graceful
+ * degradation, never a crash). The list carries ONLY witness ids, display
+ * names, the closed presence enum and the optional scene-object linkage —
+ * NO statement or question-availability content (interview answers are only
+ * fetched through POST .../witnesses/{id}/interview AFTER the player asks).
  */
 export interface InvestigationBootstrapResponse {
   playthroughId: string;
@@ -158,6 +166,11 @@ export interface InvestigationBootstrapResponse {
     worldObjects: WorldObjectDTO[];
   };
   candidates: AccusationCandidatesDTO;
+  /**
+   * Phase 23 — player-safe witness list (ids + display names ONLY). Absent on
+   * pre-23 servers; never contains statements or hidden question availability.
+   */
+  witnesses?: WitnessListEntryDTO[] | null;
 }
 
 /* ======================================================================
@@ -346,6 +359,88 @@ export interface InteractionResultDTO {
    * discovery flow (evidenceId/discovery stay authoritative).
    */
   inspection?: ObjectInspectionDTO | null;
+}
+
+/* ======================================================================
+ * Phase 23 — witness interview contract (implemented in parallel by the
+ * backend agent).
+ *
+ * REST surface the browser needs (the ONLY witness requests the client
+ * ever makes):
+ *   POST {base}/api/v1/playthroughs/{playthrough_id}/witnesses/{witnessId}
+ *        /interview
+ *        body {"questionType": "OBSERVATION|TIME|PERSON|OBJECT|LOCATION|SOUND"}
+ *        -> 200 WitnessInterviewResponse (deterministic player-safe statement)
+ *   GET {base}/api/v1/witnesses/{witnessId} (public witness view: id,
+ *        displayName, presence, available question types). The client does
+ *        NOT call this at runtime — the bootstrap witness list already
+ *        carries the id/displayName/presence the panel needs and v1 makes
+ *        ALL SIX question types available for every witness.
+ *
+ * Safety model:
+ *   - witness ids reach the browser ONLY through the player-safe bootstrap
+ *     `witnesses` list (a hidden person is never enumerated);
+ *   - no statement content exists on the client before a question is asked;
+ *   - the closed question enum is the only thing the client ever POSTs.
+ * ==================================================================== */
+
+/** The closed Phase 23 interview question universe (Phase23 §4). */
+export type WitnessQuestionType = "OBSERVATION" | "TIME" | "PERSON" | "OBJECT" | "LOCATION" | "SOUND";
+
+/** Closed witness presence modes (Phase23 §17) — a witness is either
+ *  represented in the 3D scene or reachable only through the UI. */
+export type WitnessPresence = "ON_SCENE" | "REMOTE_STATEMENT";
+
+/**
+ * One player-safe witness list entry of the investigation bootstrap
+ * (Phase23 §15/§16). It carries ONLY the witness identity + presence and the
+ * optional linkage to the ON_SCENE person world object — NEVER statements,
+ * NEVER otherwise-hidden person data, NEVER question-availability semantics.
+ */
+export interface WitnessListEntryDTO {
+  /** The semantic witness/person id (player-safe published id). */
+  witnessId: string;
+  /** Player-safe display name ("Lisa King-Queen"). Untrusted text — render as text. */
+  displayName: string;
+  presence: WitnessPresence;
+  /**
+   * ON_SCENE only: the world-object id of the pickable person representation
+   * in the 3D scene (Phase 19F semantic picking resolves child meshes to this
+   * id). Absent/null for REMOTE_STATEMENT witnesses (and tolerated when the
+   * backend publishes the person under an objectId equal to `witnessId`).
+   */
+  sceneObjectId?: string | null;
+}
+
+/** One structured witness observation (Phase23 §5). `time` is optional;
+ *  when present it is concrete player-safe clock text ("23:42" or ISO). */
+export interface WitnessObservationDTO {
+  time?: string | null;
+  text: string;
+}
+
+/** The player-safe deterministic witness statement (Phase23 §5). */
+export interface WitnessStatementDTO {
+  summary: string;
+  observations: WitnessObservationDTO[];
+}
+
+/** The discovery half of an interview response — reuses the EXISTING
+ *  discovery machinery (idempotent; the record is an ordinary player-safe
+ *  evidence record that flows into discoveredEvidenceIds/readEvidenceIds). */
+export interface WitnessInterviewDiscoveryDTO {
+  newlyDiscovered: boolean;
+  record: EvidenceReadResultDTO;
+}
+
+/** 200 body of POST .../witnesses/{witnessId}/interview. Every text field is
+ *  UNTRUSTED generated text — the client renders it as text only. */
+export interface WitnessInterviewResponse {
+  witnessId: string;
+  displayName: string;
+  questionType: WitnessQuestionType;
+  statement: WitnessStatementDTO;
+  discovery: WitnessInterviewDiscoveryDTO | null;
 }
 
 /* ======================================================================

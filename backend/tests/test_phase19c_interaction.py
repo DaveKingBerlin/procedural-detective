@@ -273,13 +273,30 @@ def test_4_undiscovered_evidence_absent_from_bootstrap_and_interact(phase5_app):
         for list_key in ("suspect_ids", "motive_ids", "weapon_ids")
         for i in (universes.get(list_key) or ())
     }
+    # Phase 23: the bootstrap ``witnesses`` block legitimately echoes the
+    # PUBLIC witness person identity (id + display name) — the same class as
+    # the candidate-universe ids: player-safe world material, never
+    # undiscovered evidence content. Only role=="witness" persons are
+    # exempted; the forbidden-set semantics are unchanged for everyone else.
+    public_ids |= {
+        str(person.get("person_id"))
+        for person in payload["draft"].get("persons") or ()
+        if str(person.get("role")) == "witness" and person.get("person_id") is not None
+    }
+    public_names = {
+        str(person.get("name"))
+        for person in payload["draft"].get("persons") or ()
+        if str(person.get("role")) == "witness"
+        and isinstance(person.get("name"), str)
+        and person.get("name")
+    }
     forbidden_strings = []
     for fact in payload["draft"]["evidence"]:
         presentation = fact.get("presentation") or {}
         for value in presentation.values():
             if isinstance(value, str) and value:
-                if value in public_ids:
-                    continue  # public candidate-universe id, not content
+                if value in public_ids or value in public_names:
+                    continue  # public witness identity / candidate id
                 forbidden_strings.append(value)
 
     # bootstrap (player-facing investigation flight): NEVER any evidence

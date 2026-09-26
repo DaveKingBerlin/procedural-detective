@@ -12,7 +12,8 @@ import NotebookPanel from "./NotebookPanel";
  * The scene route only ever mounts this component; these tests render the
  * panel exactly like the route would (a server-derived model + bootstrap
  * candidates) and prove:
- *   - the five groups + hypothesis pickers render with stable test ids;
+ *   - the six groups (incl. Phase 23 "Witness statements") + hypothesis
+ *     pickers render with stable test ids;
  *   - the pre-reveal markup contains NO hidden truth / winner / hidden
  *     candidate / `proc.*` / provider material (reqs 3,4,5,13);
  *   - the post-reveal proof board is ABSENT pre-reveal (req 8);
@@ -88,11 +89,11 @@ const DISCOVERED = ["email_thomas_01", "forensic_knife_match_01", "record_witnes
 const READ = ["email_thomas_01", "record_witness_hall_01", "record_financial_04", "record_cctv_02"];
 
 describe("Phase 18C notebook panel — structure", () => {
-  it("renders the drawer, all five groups and the hypothesis block with stable test ids", () => {
+  it("renders the drawer, all six groups and the hypothesis block with stable test ids", () => {
     const html = markupFor(DISCOVERED, READ);
     expect(html).toContain('data-testid="notebook-panel"');
     expect(html).toContain('data-testid="notebook-heading"');
-    for (const group of ["people", "objects", "motive", "timeline", "digital-physical"]) {
+    for (const group of ["people", "witness-statements", "objects", "motive", "timeline", "digital-physical"]) {
       expect(html).toContain(`data-testid="notebook-group-${group}"`);
     }
     expect(html).toContain('data-testid="hypothesis-block"');
@@ -114,7 +115,7 @@ describe("Phase 18C notebook panel — structure", () => {
 
   it("shows empty-group copy (never fabricated facts) when nothing is read/discovered", () => {
     const html = markupFor([], []);
-    for (const group of ["people", "objects", "motive", "timeline", "digital-physical"]) {
+    for (const group of ["people", "witness-statements", "objects", "motive", "timeline", "digital-physical"]) {
       expect(html).toContain(`data-testid="notebook-group-${group}-empty"`);
     }
   });

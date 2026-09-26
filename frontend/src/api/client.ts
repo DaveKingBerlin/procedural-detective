@@ -15,6 +15,8 @@ import type {
   InvestigationBootstrapResponse,
   ReadinessResponse,
   RevealResponse,
+  WitnessInterviewResponse,
+  WitnessQuestionType,
 } from "./types";
 
 /**
@@ -275,6 +277,29 @@ export function readRecord(playthroughId: string, recordId: string, token: strin
   return authedRequest<EvidenceReadResultDTO>(
     `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/records/${encodeURIComponent(recordId)}`,
     token,
+  );
+}
+
+/**
+ * POST {base}/api/v1/playthroughs/{playthrough_id}/witnesses/{witnessId}/interview
+ * body {"questionType": "<closed enum>"} -> WitnessInterviewResponse.
+ *
+ * Phase 23 — the ONLY witness request the browser makes. The question type is
+ * a closed enum value; the response is a deterministic player-safe statement
+ * (and, when legitimately discovered, an evidence record that flows into the
+ * normal discovery/notebook machinery — idempotent). Witness ids are only
+ * ever taken from the player-safe bootstrap witness list.
+ */
+export function interviewWitness(
+  playthroughId: string,
+  witnessId: string,
+  questionType: WitnessQuestionType,
+  token: string,
+): Promise<WitnessInterviewResponse> {
+  return authedRequest<WitnessInterviewResponse>(
+    `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/witnesses/${encodeURIComponent(witnessId)}/interview`,
+    token,
+    { method: "POST", body: { questionType } },
   );
 }
 

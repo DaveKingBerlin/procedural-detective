@@ -43,6 +43,11 @@ _SAFE_FIELDS = frozenset(
         # text, prompts or hidden evidence. ``evidenceIdSafe`` is the
         # evidence id scrubbed through ``_sanitize_object_id_for_message``.
         "evidenceIdSafe", "entryCount", "validatorCode",
+        # Phase 23 — safe witness-interview lifecycle fields (§38). The closed
+        # question type, the bounded per-interview discovery count and the
+        # public witness id are player-safe metadata: NEVER the statement
+        # text, observations, CaseTruth, hidden evidence or provider output.
+        "questionType", "newDiscoveryCount", "witnessId",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

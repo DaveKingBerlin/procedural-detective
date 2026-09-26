@@ -111,7 +111,7 @@ const DISCOVERED = ["email_thomas_01", "forensic_knife_match_01", "record_financ
 const READ = ["email_thomas_01", "record_witness_hall_01", "record_financial_04", "record_cctv_02"];
 
 describe("Phase 18C notebook — group structure", () => {
-  it("emits exactly the five groups in the fixed order", () => {
+  it("emits exactly the six groups in the fixed order", () => {
     const model = modelFor(DISCOVERED, READ, [
       makeEmailRecord(),
       makeWitnessRecord(),
@@ -120,6 +120,7 @@ describe("Phase 18C notebook — group structure", () => {
     ]);
     expect(model.groups.map((group) => group.id)).toEqual([
       "people",
+      "witness-statements",
       "objects",
       "motive",
       "timeline",
@@ -297,6 +298,7 @@ describe("Phase 18C notebook — reload determinism (req 7)", () => {
     const fresh = modelFor(DISCOVERED, READ, []);
     expect(fresh.groups.map((group) => group.id)).toEqual([
       "people",
+      "witness-statements",
       "objects",
       "motive",
       "timeline",

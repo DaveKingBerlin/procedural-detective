@@ -53,6 +53,11 @@ BOOTSTRAP_KEYS = {
     # Phase 7 J/K frozen addition: the player-safe accusation candidate
     # universes of the pinned CaseVersion (alphabetical, never marked).
     "candidates",
+    # Phase 23 frozen addition: the player-safe witness list (public witness
+    # ids + display names + closed presence; NEVER statements). Always
+    # present — an empty list for a case without a witness person — so the
+    # frontend witness contract is stable.
+    "witnesses",
 }
 WORLD_OBJECT_KEYS = {
     "objectId",
@@ -121,13 +126,30 @@ def test_13_bootstrap_contains_no_undiscovered_evidence_content(phase5_app):
         for list_key in ("suspect_ids", "motive_ids", "weapon_ids")
         for i in (universes.get(list_key) or ())
     }
+    # Phase 23: the bootstrap ``witnesses`` block legitimately echoes the
+    # PUBLIC witness person identity (person_id + display name) — the same
+    # class as the candidate-universe ids: player-safe world material, NOT
+    # undiscovered evidence content (Phase23 §16 witness visibility). Only
+    # role=="witness" persons are exempted; no other evidence field widens.
+    public_ids |= {
+        str(person.get("person_id"))
+        for person in payload["draft"].get("persons") or ()
+        if str(person.get("role")) == "witness" and person.get("person_id") is not None
+    }
+    public_names = {
+        str(person.get("name"))
+        for person in payload["draft"].get("persons") or ()
+        if str(person.get("role")) == "witness"
+        and isinstance(person.get("name"), str)
+        and person.get("name")
+    }
     forbidden_strings = []
     for fact in payload["draft"]["evidence"]:
         presentation = fact.get("presentation") or {}
         for value in presentation.values():
             if isinstance(value, str) and value:
-                if value in public_ids:
-                    continue  # public candidate-universe id, not content
+                if value in public_ids or value in public_names:
+                    continue  # public witness identity / candidate id
                 forbidden_strings.append(value)
     body_text = res.text
     for needle in forbidden_strings:

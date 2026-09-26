@@ -607,6 +607,35 @@ def presentation_of(fact: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return _presentation_of(fact)
 
 
+# Neutral non-empty title fallbacks for a read-record DTO whose crafted
+# evidence presentation carries no ``title`` (ADV-262). The strict generation
+# parser requires a non-empty ``presentation.title`` for EVERY evidence item,
+# so a missing title can only come from a crafted/forged ``published_versions``
+# row. Degrade deterministically instead of answering a sanitized 500.
+_READ_DTO_TITLE_FALLBACK = "Evidence"
+_READ_DTO_WITNESS_KIND_TITLE_FALLBACK = "Witness statement"
+
+
+def read_dto_title(fact: Mapping[str, Any] | None) -> str:
+    """The player-safe ``title`` of a read-record DTO.
+
+    The presentation's own ``title`` verbatim when present, else a
+    deterministic neutral non-empty label: ``"Witness statement"`` for
+    witness-kind evidence, ``"Evidence"`` for everything else. Never
+    ``None``/``""`` — ``EvidenceReadResultDTO.title`` is a required string and
+    a crafted presentation without a title must never 500 the record-read or
+    the interview discovery boundary (ADV-262).
+    """
+    title = _presentation_of(fact).get("title")
+    if isinstance(title, str) and title:
+        return title
+    from app.domain.witness import WITNESS_KINDS
+
+    if fact is not None and str(fact.get("kind") or "") in WITNESS_KINDS:
+        return _READ_DTO_WITNESS_KIND_TITLE_FALLBACK
+    return _READ_DTO_TITLE_FALLBACK
+
+
 def placements_for_evidence(
     payload: Mapping[str, Any], evidence_id: str
 ) -> tuple[dict[str, Any], ...]:
@@ -874,6 +903,14 @@ def project_discovery(
 # Phase 19G adds the MESSAGE/DOCUMENT allowlisted readable fields for the
 # document/digital record kinds (sender/time/subject/body — Phase19G §8); the
 # same strict keys-only rule applies (absent fields are omitted).
+# Phase 23 adds ``questionType`` / ``witnessId`` to the witness-STATEMENT-kind
+# allowlists ONLY (the interview-source kinds the notebook classifies, Phase23
+# §25): a published statement record may tag the question it answers and the
+# witness it is attributed to. Every OTHER kind's allowlist is untouched. The
+# interview read path additionally OVERRIDES ``questionType`` with the type
+# the player actually asked (``WitnessService._read_dto``) and the reload
+# record-read path derives both fields deterministically from the pinned
+# payload (``witness_statement_content_tags``) — never weaker, additive only.
 _READ_CONTENT_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "object": ("subtype", "locationId"),
     "email": ("fromPersonId", "toPersonIds", "subject", "body", "timestamp"),
@@ -883,9 +920,10 @@ _READ_CONTENT_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "cctv": ("events", "cameraId"),
     "cctv_observation": ("events", "cameraId"),
     "view_record": ("events", "cameraId"),
-    "testimonial": ("speakerName", "statement"),
-    "witness_statement": ("speakerName", "statement"),
-    "statement": ("speakerName", "statement"),
+    "testimonial": ("speakerName", "statement", "questionType", "witnessId"),
+    "witness_statement": ("speakerName", "statement", "questionType", "witnessId"),
+    "statement": ("speakerName", "statement", "questionType", "witnessId"),
+    "suspect_statement": ("speakerName", "statement", "questionType", "witnessId"),
 }
 
 _READ_ROW_ALLOWLIST: tuple[str, ...] = ("date", "from", "to", "amount", "currency", "description")
@@ -981,6 +1019,95 @@ def player_knowledge_snapshot(snapshot: Any) -> dict[str, list[str]]:
     }
 
 
+def project_witnesses(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Phase 23 — the player-safe witness list of the investigation bootstrap.
+
+    Projects ONLY the published persons with ``role == "witness"`` from the
+    pinned payload (doors are closed: a hidden person can never appear, and no
+    witness exists outside the pinned case). Each entry carries ONLY the
+    public identity + the closed presence enum and the optional ON_SCENE
+    object linkage — NEVER statements, never question-availability material.
+
+    ``presence`` uses the SAME deterministic rule as
+    ``app.domain.witness.witness_presence`` (ON_SCENE iff the published world
+    graph contains a semantic person placement for the witness);
+    ``sceneObjectId`` is that placement's object_id when ON_SCENE else null.
+    ``displayName`` is the public person name (human-readable), bounded and
+    control-character-stripped (ADV-263 — the same C0/C1/format removal every
+    witness DTO emitter applies). Duplicate person ids project ONE entry
+    (first-wins, deterministic — ADV-264, the list stays a bijection
+    witnessId -> entry the frontend keys by). Sorted by witnessId for
+    determinism.
+    """
+    from app.domain import witness as witness_domain
+
+    draft = _draft_of(payload)
+    out: list[dict[str, Any]] = []
+    seen_witness_ids: set[str] = set()
+    for person in draft.get("persons") or ():
+        if not isinstance(person, Mapping):
+            continue
+        if str(person.get("role")) != "witness":
+            continue
+        witness_id = str(person.get("person_id") or "")
+        if not witness_id or witness_id in seen_witness_ids:
+            # ADV-264: a crafted duplicate person id NEVER projects twice —
+            # the first published occurrence wins and later duplicates are
+            # skipped, so the witness list stays a bijection id -> entry.
+            continue
+        seen_witness_ids.add(witness_id)
+        presence, _at_scene = witness_domain.witness_presence(payload, witness_id)
+        out.append(
+            {
+                "witnessId": witness_id,
+                "displayName": witness_domain.witness_display_name(
+                    person, witness_id
+                ),
+                "presence": presence.value,
+                "sceneObjectId": witness_domain.witness_scene_object_id(
+                    payload, witness_id
+                ),
+            }
+        )
+    return sorted(out, key=lambda item: item["witnessId"])
+
+
+def witness_statement_content_tags(
+    payload: Mapping[str, Any], evidence_id: str
+) -> dict[str, Any] | None:
+    """Deterministic Phase 23 interview-source tags of one published record,
+    or None when the record is NOT an interview-sourced witness statement.
+
+    Returns ``{"witnessId", "questionType"}`` for a record that:
+      - is witness-kind evidence ATTRIBUTED to a role=='witness' person
+        (``app.domain.witness.witness_attributed_to`` — the SAME attribution
+        rule as the interview grounding), AND
+      - grounds the deterministic witness projection for at least one CLOSED
+        question (``witness_question_types_of``).
+
+    ``questionType`` is the FIRST grounded closed question in the frozen
+    ``ALL_QUESTIONS`` order — the deterministic value a RE-READ record carries
+    after a reload (the interview path overrides it with the type actually
+    asked — ``WitnessService._read_dto``). Never reads hidden sections; zero
+    provider calls.
+    """
+    fact = _evidence_by_id(payload).get(evidence_id)
+    if fact is None:
+        return None
+    from app.domain import witness as witness_domain
+
+    witness_id = witness_domain.witness_attributed_to(payload, fact)
+    if witness_id is None:
+        return None
+    question_types = witness_domain.witness_question_types_of(payload, fact)
+    if not question_types:
+        return None
+    return {
+        "witnessId": str(witness_id),
+        "questionType": question_types[0].value,
+    }
+
+
 SAFE_ASSET_TYPE_LABEL = "prop"
 
 
@@ -1000,9 +1127,12 @@ __all__ = [
     "presentation_of",
     "project_discovery",
     "project_read_content",
+    "project_witnesses",
     "project_world_objects",
     "public_case_dict_from_payload",
+    "read_dto_title",
     "scene_spec_of",
     "serialize_published_payload",
     "visible_placement_for_object",
+    "witness_statement_content_tags",
 ]
