@@ -752,6 +752,39 @@ def activity_log_window_bounds(
     return (canonical_tick - before * 60, canonical_tick + after * 60)
 
 
+def activity_log_window_satisfiable(
+    before_minutes: int = WINDOW_DEFAULT_BEFORE_MINUTES,
+    after_minutes: int = WINDOW_DEFAULT_AFTER_MINUTES,
+) -> bool:
+    """Whether the configured window can GEOMETRICALLY hold MIN distinct rows.
+
+    Phase19J-RI (ADV-C): a self-contradictory activity-log prompt is one whose
+    window cannot even geometrically fit ``MIN_ACTIVITY_LOG_ENTRIES`` distinct
+    strictly-increasing integer-second timestamps inside the SAME
+    ``activity_log_window_bounds`` clamp the strict validator applies — the
+    prompt then demands "Exactly 15 to 20 entries" while no 15-row log can
+    ever pass the validator's window rule. A 1-second grid is the DENSEST
+    bounded cadence the prompt grid can use, so the geometric threshold is
+    ``clamped_total_span_seconds >= MIN_ACTIVITY_LOG_ENTRIES - 1`` (14
+    seconds). Integer-minute settings make every reachable config except a
+    0/0 window satisfiable (1/0 and 0/1 already provide 60 >= 14 seconds).
+
+    Pure, deterministic, zero provider calls; mirrors the validator's own
+    clamping math so the guard and the acceptance authority can never drift.
+    Used by the driver's ``_activity_log_stage`` (fail-fast operator guard
+    BEFORE any provider call) and by the Settings model validator.
+    """
+    before = max(0, int(before_minutes or 0))
+    after = max(0, int(after_minutes or 0))
+    if before + after > WINDOW_HARD_MAX_TOTAL_MINUTES:
+        ratio_before = before / max(1, before + after)
+        budget = WINDOW_HARD_MAX_TOTAL_MINUTES
+        before = int(budget * ratio_before)
+        after = budget - before
+    total_span_seconds = (before + after) * 60
+    return total_span_seconds >= MIN_ACTIVITY_LOG_ENTRIES - 1
+
+
 def validate_activity_log(
     entries: list[ActivityLogEntry],
     *,
@@ -859,6 +892,11 @@ def repair_findings(
     The returned tokens are the ONLY activity-log repair feedback a provider
     ever receives (plus the locked canonical time, re-pasted by the caller).
     They never carry the rejected log content or any truth material.
+
+    Phase19J-RI: the entry-count findings carry the DETERMINISTIC numeric
+    target without leaking content (``ENTRY_COUNT_TOO_LOW (need 15..20,
+    have N)``) so the repair prompt can restate the hard 15..20 bound. The
+    codes themselves are unchanged and the tokens stay machine-readable.
     """
     present = {getattr(code, "value", None) or str(code) for code in codes}
     findings: list[str] = []
@@ -866,9 +904,15 @@ def repair_findings(
         findings.append("SCHEMA_INVALID")
     if ActivityLogValidatorCode.ACTIVITY_LOG_ENTRY_COUNT_INVALID.value in present:
         if entry_count < MIN_ACTIVITY_LOG_ENTRIES:
-            findings.append("ENTRY_COUNT_TOO_LOW")
+            findings.append(
+                f"ENTRY_COUNT_TOO_LOW (need {MIN_ACTIVITY_LOG_ENTRIES}.."
+                f"{MAX_ACTIVITY_LOG_ENTRIES}, have {int(entry_count)})"
+            )
         else:
-            findings.append("ENTRY_COUNT_TOO_HIGH")
+            findings.append(
+                f"ENTRY_COUNT_TOO_HIGH (need {MIN_ACTIVITY_LOG_ENTRIES}.."
+                f"{MAX_ACTIVITY_LOG_ENTRIES}, have {int(entry_count)})"
+            )
     if ActivityLogValidatorCode.ACTIVITY_LOG_TIME_ORDER_INVALID.value in present:
         if duplicate_timestamp:
             findings.append("DUPLICATE_TIMESTAMP")
@@ -929,6 +973,7 @@ __all__ = [
     "WINDOW_DEFAULT_BEFORE_MINUTES",
     "WINDOW_HARD_MAX_TOTAL_MINUTES",
     "activity_log_window_bounds",
+    "activity_log_window_satisfiable",
     "activity_text_unsafe_tokens",
     "entity_leak_tokens",
     "log_validation_detail",

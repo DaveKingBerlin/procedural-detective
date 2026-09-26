@@ -628,6 +628,128 @@ def test_json_schema_derived_from_single_contract_source():
 
 
 # --------------------------------------------------------------------------- #
+# 6b — Phase19J-RI: repair-prompt phrasing + transport count bounds (the two
+#      root-cause levers of the observed hermes3:8b activity-log failure)
+# --------------------------------------------------------------------------- #
+
+
+def test_ri03_activity_log_transport_schema_carries_count_bounds():
+    """The derived transport JSON Schema (sent to Ollama in ``format``) now
+    carries minItems=15/maxItems=20 for ``entries`` on BOTH activity-log
+    stages, so the grammar itself can never emit a one-row repair wrapper —
+    while the strict validator stays the sole acceptance authority."""
+    schema = prompts.schema_contract_as_json_schema("activity_log")
+    entries = schema["properties"]["entries"]
+    assert entries["minItems"] == prompts.MIN_ACTIVITY_LOG_ENTRIES == 15
+    assert entries["maxItems"] == prompts.MAX_ACTIVITY_LOG_ENTRIES == 20
+    assert schema == prompts.schema_contract_as_json_schema("activity_log")
+    assert prompts.json_schema_for_generation_stage("activity_log") == \
+        prompts.json_schema_for_generation_stage("activity_log_repair")
+    # strengthened only: the closed shape + entry enum stay authoritative
+    assert schema["required"] == ["entries"]
+    assert set(entries["items"]["properties"]["activityType"]["enum"]) == \
+        prompts.ACTIVITY_LOG_ACTIVITY_TYPES
+
+
+def test_ri06_repair_prompt_requires_complete_15_to_20_replacement():
+    """The ACTIVITY_LOG_REPAIR prompt (the verbatim provider text) restates the
+    complete contract — the hard count floor/ceiling, the window, the
+    canonical-once rule and the "COMPLETE replacement ActivityLogDocument"
+    instruction — and NO longer carries the ambiguous "return it VERBATIM in
+    exactly one entry" output-count phrasing that let hermes3:8b emit a
+    one-row wrapper."""
+    blob = prompts.build_activity_log_repair_prompt(
+        "2026-09-11T23:42:00+02:00",
+        ("ENTRY_COUNT_TOO_LOW (need 15..20, have 1)",),
+    )
+    assert "activity_log_repair_v1" in blob
+    # count floor/ceiling restated EXACTLY like the initial template, from the
+    # SAME authoritative constants.
+    assert "Exactly 15 to 20 chronological entries" in blob
+    assert (
+        f"Exactly {prompts.MIN_ACTIVITY_LOG_ENTRIES} to "
+        f"{prompts.MAX_ACTIVITY_LOG_ENTRIES} chronological entries" in blob
+    )
+    # COMPLETE replacement semantics (never a single surrounding entry)
+    assert "COMPLETE replacement ActivityLogDocument" in blob
+    assert "never a single surrounding entry" in blob
+    assert "the locked canonical time is ONE of those rows" in blob
+    # canonical-once is unambiguous (ONE of the 15-20 rows, never a one-entry
+    # document); the misleading output-count phrase is gone from this template.
+    assert "must appear VERBATIM in exactly ONE of the 15 to 20 entries" in blob
+    assert "return it VERBATIM in exactly one entry" not in blob
+    # deterministic window + no-prose guard mirrored from the initial template
+    assert "-60 minutes" in blob and "+60 minutes" in blob
+    assert "No HTML, no markdown tables, no prose outside the JSON document" in blob
+    # Phase19J-RI (DEF-104): the repair prompt ALWAYS carries the concrete
+    # deterministic window endpoints (ISO-8601, app-owned, same
+    # ``activity_log_window_bounds`` math as the strict validator) and the
+    # canonical-anchor worked example filled with the EXACT locked value — a
+    # stateless 8B model never has to compute the relative ±N-minute window
+    # itself and never has to invent a canonical row shape.
+    assert (
+        "Every entry timestamp MUST lie inside the deterministic window "
+        "[2026-09-11T22:42:00+02:00 .. 2026-09-12T00:42:00+02:00]"
+    ) in blob
+    assert (
+        '{"timestamp": "2026-09-11T23:42:00+02:00", "activityType": '
+        '"LOCAL_ACTIVITY", "activity": "Local user activity detected"}'
+    ) in blob
+    # the findings->fix mapping restates the exact machine-readable tokens.
+    assert "Findings-to-fix mapping (deterministic)" in blob
+    assert "CANONICAL_TIME_MISSING" in blob
+    assert "TIMESTAMP_OUTSIDE_WINDOW" in blob
+    # the exact locked value appears as the standalone "Canonical evidence
+    # time" line + INSIDE the anchor row + once inside the COMPLETE
+    # worked-example scaffold + once inside the app-owned TIMESTAMP GRID
+    # (DEF-104 follow-up #3) = 4 occurrences total, and never anywhere else
+    # in the prompt.
+    assert blob.count("2026-09-11T23:42:00+02:00") == 4
+    # the repair prompt restates the simultaneous-constraint rule ("satisfy
+    # ALL of these at once") and the shape-scaffold qualification.
+    assert "satisfy ALL of these at once" in blob
+    assert "The complete worked example below shows the required shape/format only" in blob
+    # ADV-256 invariant kept: only the locked time + findings reach the model
+    for needle in (
+        "Paul Becker", "Anna Weiss", "bronze ceremonial ice pick",
+        "stolen research data", "solverProof", "caseTruth",
+    ):
+        assert needle not in blob, needle
+
+
+def test_grid_block_injected_into_both_activity_log_prompts():
+    """DEF-104 follow-up #3: BOTH built activity-log prompts embed the
+    app-owned TIMESTAMP GRID (exact comma-separated ISO list, deterministic
+    from ``activity_log_timestamp_grid``) plus the verbatim-copy
+    instruction — the canonical time occupies the grid's middle slot exactly
+    once, and the grid members all lie inside the validated window."""
+    from app.domain.time_interval import parse_iso8601
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    grid = prompts.activity_log_timestamp_grid(canonical)
+    assert len(grid) == prompts.ACTIVITY_LOG_GRID_COUNT == 18
+    assert grid[len(grid) // 2] == canonical
+    assert grid.count(canonical) == 1
+    tick, _offset = parse_iso8601(canonical)
+    lo, hi = prompts.activity_log_window_bounds(
+        tick, before_minutes=60, after_minutes=60
+    )
+    assert all(
+        lo < parse_iso8601(t)[0] < hi for t in grid
+    ), "every grid member strictly inside the validated window"
+    initial = prompts.build_activity_log_prompt(canonical)
+    repair = prompts.build_activity_log_repair_prompt(
+        canonical, ("CANONICAL_TIME_MISSING",)
+    )
+    expected_line = "  TIMESTAMP_GRID: " + ", ".join(grid)
+    for blob in (initial, repair):
+        assert expected_line in blob
+        assert "Copy EACH timestamp VERBATIM into exactly one row's 'timestamp' field" in blob
+        assert "Never add a timestamp outside the grid." in blob
+    assert "When repairing, copy the GIVEN timestamp grid verbatim" in repair
+
+
+# --------------------------------------------------------------------------- #
 # 6. smoke tool: sanitization + offline behavior (no network/server)
 # --------------------------------------------------------------------------- #
 
@@ -800,6 +922,109 @@ def test_smoke_stage_asset_spec_mocked_end_to_end(monkeypatch, capsys):
     assert [i["code"] for i in trace[0]["geometryIssues"]] == ["SILHOUETTE_HEURISTIC"]
     assert trace[1]["geometryIssues"] == []
     assert rt["finalProcId"].startswith("proc.")
+
+
+def test_smoke_stage_activity_log_mocked_end_to_end(monkeypatch, capsys):
+    """smoke.main --stage activity_log with a mocked provider reports the
+    sanitized PASS/FAIL: parsedOk, entryCount, validatorCodes and the truthful
+    lastFormat (what was ACTUALLY sent — never a hardcoded driver flag)."""
+    import tools.ollama_smoke as smoke
+    from app.generation import ollama_provider as ollama_mod
+    from app.generation.provider import ProviderResult as PR
+    from test_ollama_driver import _alog
+
+    payload = _j(_alog("2026-09-11T23:42:00+02:00"))
+
+    class FakeProvider:
+        last_format = "schema"
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate(self, request) -> PR:
+            return PR(content=payload)
+
+        @property
+        def structured_output_sent(self):
+            return self.last_format == "schema"
+
+    monkeypatch.setattr(ollama_mod, "ollama_available", lambda _s: (True, ""))
+    monkeypatch.setattr(ollama_mod, "ollama_structured_output_supported", lambda _s: True)
+    monkeypatch.setattr(ollama_mod, "OllamaProvider", FakeProvider)
+
+    rc = smoke.main(["--enable", "--stage", "activity_log"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    report = json.loads(captured.out)
+    gen = report["generation"]
+    assert gen["stageAlias"] == "activity_log"
+    assert gen["stageTemplate"] == "activity_log_v1"
+    assert gen["transportStructuredOutput"] is True
+    assert gen["lastFormat"] == "schema"
+    assert gen["parsedOk"] is True
+    assert gen["entryCount"] == 17
+    assert gen["validatorCodes"] == []
+    assert gen["pass"] is True
+    assert gen["responseBytes"] > 0
+    blob = captured.out
+    for token in ("127.0.0.1", "11434", "OLLAMA_BASE_URL", "prompt_context"):
+        assert token not in blob, token
+
+
+def test_smoke_activity_log_roundtrip_mocked(monkeypatch, capsys):
+    """smoke.main --enable --activity-log-roundtrip with a mocked provider
+    reports the sanitized result of EVERY pass (initial + bounded repairs):
+    the first pass fails with a typed validator code, the bounded repair
+    succeeds with 17 valid entries and zero validator codes."""
+    import tools.ollama_smoke as smoke
+    from app.generation import ollama_provider as ollama_mod
+    from app.generation.provider import ProviderResult as PR
+    from test_ollama_driver import _alog
+
+    canonical = "2026-09-11T23:42:00+02:00"
+    bad = _alog(canonical)
+    bad["entries"][8]["timestamp"] = "2026-09-11T23:40:00+02:00"  # canonical removed
+    good = _alog(canonical)
+    # content #0 feeds the default single-stage (case_truth) report; the
+    # round-trip then consumes bad (pass 0) and good (pass 1).
+    contents = ["<not-json>", _j(bad), _j(good)]
+
+    class FakeProvider:
+        last_format = "schema"
+
+        def __init__(self, **_kwargs):
+            self.contents = list(contents)
+
+        def generate(self, request) -> PR:
+            return PR(content=self.contents.pop(0) if self.contents else "<not-json>")
+
+        @property
+        def structured_output_sent(self):
+            return self.last_format == "schema"
+
+    monkeypatch.setattr(ollama_mod, "ollama_available", lambda _s: (True, ""))
+    monkeypatch.setattr(ollama_mod, "ollama_structured_output_supported", lambda _s: True)
+    monkeypatch.setattr(ollama_mod, "OllamaProvider", FakeProvider)
+
+    rc = smoke.main(["--enable", "--activity-log-roundtrip"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    report = json.loads(captured.out)
+    rt = report["activityLogRoundtrip"]
+    passes = rt["passes"]
+    assert [p["stage"] for p in passes] == ["activity_log", "activity_log_repair"]
+    assert passes[0]["parsedOk"] is True
+    assert passes[0]["entryCount"] == 17
+    assert "ACTIVITY_LOG_CANONICAL_TIME_MISSING" in passes[0]["validatorCodes"]
+    assert passes[0]["pass"] is False
+    assert passes[1]["lastFormat"] == "schema"
+    assert passes[1]["pass"] is True
+    assert passes[1]["entryCount"] == 17
+    assert passes[1]["validatorCodes"] == []
+    assert rt["maxRepairPasses"] == 2
+    blob = captured.out
+    for token in ("127.0.0.1", "11434", "OLLAMA_BASE_URL", "prompt_context"):
+        assert token not in blob, token
 
 
 @pytest.fixture(autouse=True)

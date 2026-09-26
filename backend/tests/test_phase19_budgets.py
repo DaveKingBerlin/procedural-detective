@@ -611,4 +611,65 @@ def test_ollamaprovider_compatible_with_budgeted_controller():
     assert record.budget.asset_calls == 0
 
 
+# --------------------------------------------------------------------------- #
+# Phase19J-RI — provider budget unchanged (the activity-log repair round trip
+# is a NORMAL bounded CORE-bucket path; global/core ceilings untouched).
+# --------------------------------------------------------------------------- #
+
+
+def test_ri09_activity_log_roundtrip_core_budget_unchanged():
+    """A full-bounded activity-log round trip (initial + the two bounded
+    repairs = EXACTLY 3 CORE-call provider calls for the ONE log) publishes
+    through the SAME hierarchical budget: every log call is a normal CORE
+    call (never a hidden/free pass), the global/core ceilings are untouched
+    (Settings defaults stay 128/12, MAX_ACTIVITY_LOG_REPAIR_PASSES stays 2)
+    and zero asset calls are spent."""
+    from app.core.config import Settings
+    from app.services.ollama_driver import MAX_ACTIVITY_LOG_REPAIR_PASSES
+    from test_ollama_driver import (
+        ICEPICK_SPEC,
+        _alog,
+        _case_people,
+        _evidence,
+        _world,
+    )
+
+    assert Settings().max_llm_calls_per_generation == 128
+    assert Settings().max_core_llm_calls_per_generation == 12
+    assert MAX_ACTIVITY_LOG_REPAIR_PASSES == 2
+
+    crime_canonical = "2026-09-11T23:42:00+02:00"
+    when_obs = "2026-09-11T23:41:50+02:00"
+    bad = _alog(when_obs)
+    bad["entries"][8]["timestamp"] = "2026-09-11T23:40:00+02:00"  # canonical removed
+    good = _alog(when_obs)
+    posts = [
+        _j(_case_people()),
+        _j(_evidence()),
+        json.dumps(bad),   # ACTIVITY_LOG (invalid)
+        json.dumps(bad),   # repair 1 (invalid)
+        json.dumps(good),  # repair 2 (valid -> exactly 3 log calls)
+        *_alog_posts(crime_canonical)[1:],
+        _j(_world()),
+    ]
+    posts.append(ICEPICK_SPEC)
+    record, transport = _run(posts)
+    assert record.state is GenerationState.PUBLISHED
+    # 1 case + 1 evidence + 3 (when_obs round trip) + 3 (other logs) + 1 world
+    # = 9 CORE calls; the ASSET_SPEC call goes to the independent per-asset
+    # bucket (1 asset call). Total transport calls = 10.
+    assert transport.call_count == 10
+    assert record.budget.calls == 10
+    assert record.budget.core_calls == 9
+    assert record.budget.asset_calls == 1
+    # the 3-call bounded activity-log round trip itself consumed EXACTLY 3
+    # CORE calls (never a hidden or free pass).
+    log_calls = sum(
+        1
+        for i in range(transport.call_count)
+        if "activity_log" in transport.prompt_of_call(i)[:80]
+    )
+    assert log_calls == 3 + 3
+
+
 __all__ = ["_tracker"]

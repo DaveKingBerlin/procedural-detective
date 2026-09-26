@@ -42,6 +42,9 @@ from sqlalchemy.exc import ArgumentError
 from app.core.timeout_envelope import (  # noqa: E402  (no circular import)
     BRIDGE_JOB_DEADLINE_MAX_SECONDS,
 )
+from app.domain.activity_log import (  # noqa: E402  (pure domain, no config dep)
+    activity_log_window_satisfiable,
+)
 
 SERVICE_NAME = "procedural-detective"
 SERVICE_VERSION = "0.1.0"
@@ -886,6 +889,37 @@ class Settings(BaseSettings):
                 "BRIDGE_HEARTBEAT_INTERVAL_SECONDS must be lower than "
                 "BRIDGE_IDLE_TIMEOUT_SECONDS (heartbeat keeps a healthy bridge "
                 "inside the idle window)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_activity_log_window_satisfiable(self) -> "Settings":
+        """Phase19J-RI (ADV-C) fail-fast operator guard at construction.
+
+        An ACTIVITY_LOG window whose TOTAL clamped span cannot geometrically
+        hold ``MIN_ACTIVITY_LOG_ENTRIES`` (15) distinct strictly-increasing
+        integer-second timestamps would make every generated log fail the
+        strict validator's window rule no matter what the model returns — the
+        prompt would contradict itself ("Exactly 15 to 20 entries" inside a
+        window with room for fewer). Reject the configuration HERE (before any
+        provider call) instead of a silent long tail of validation failures.
+        The pure domain guard (``activity_log_window_satisfiable``) mirrors the
+        validator's OWN ``activity_log_window_bounds`` clamping, so a 0/0
+        window is the only reachable unsatisfiable integer-minute setting.
+        """
+        if not activity_log_window_satisfiable(
+            self.activity_log_window_before_minutes,
+            self.activity_log_window_after_minutes,
+        ):
+            raise ValueError(
+                "ACTIVITY_LOG_WINDOW_BEFORE_MINUTES / "
+                "ACTIVITY_LOG_WINDOW_AFTER_MINUTES: the configured window "
+                f"(before={self.activity_log_window_before_minutes}, "
+                f"after={self.activity_log_window_after_minutes}) cannot "
+                "geometrically hold the 15 distinct strictly-increasing "
+                "timestamps the activity-log validator requires — no generated "
+                "log could ever pass. Configure at least 1 minute of total "
+                "span (the default before=60 after=60 is fine)."
             )
         return self
 

@@ -36,7 +36,7 @@ mechanism.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from app.assets.catalog import CATEGORY_ALLOWLIST
 from app.assets.materials import MATERIAL_VOCAB
@@ -59,8 +59,11 @@ from app.domain.activity_log import (
     WINDOW_DEFAULT_AFTER_MINUTES,
     WINDOW_DEFAULT_BEFORE_MINUTES,
     WINDOW_HARD_MAX_TOTAL_MINUTES,
+    activity_log_window_bounds,
+    entity_leak_tokens,
 )
 from app.domain.evidence import PROPOSITION_TYPES
+from app.domain.time_interval import epoch_to_iso, parse_iso8601
 from app.world.environment import ENVIRONMENT_IDS
 
 # --- schema-contract builder (deterministic, authoritative) ----------------
@@ -187,9 +190,22 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
         # marker derives the transport JSON Schema ``enum`` for Ollama
         # structured output; the strict Phase 19J validator stays the sole
         # acceptance authority. The provider NEVER emits HTML/tables.
+        # Phase19J-RI: the derived transport JSON Schema ALSO carries the hard
+        # entry-count bounds (``minItems``/``maxItems`` from the authoritative
+        # MIN_ACTIVITY_LOG_ENTRIES/MAX_ACTIVITY_LOG_ENTRIES constants) so the
+        # Ollama grammar itself can never emit a one-row repair wrapper (the
+        # observed 153/186-byte repair failures). Both ACTIVITY_LOG and
+        # ACTIVITY_LOG_REPAIR share this ONE contract via STAGE_TO_CONTRACT, so
+        # the bounds apply to both stages automatically.
         contract = {
-            "entries": [
-                {
+            "entries": {
+                "$note": (
+                    f"array of {MIN_ACTIVITY_LOG_ENTRIES}.."
+                    f"{MAX_ACTIVITY_LOG_ENTRIES} chronological entries"
+                ),
+                "minItems": MIN_ACTIVITY_LOG_ENTRIES,
+                "maxItems": MAX_ACTIVITY_LOG_ENTRIES,
+                "entrySchema": {
                     "timestamp": "ISO-8601 timestamp WITH timezone offset "
                         "(e.g. 2026-09-11T21:18:00+02:00 or 2026-09-11T20:18:00Z)",
                     "activityType": (
@@ -204,8 +220,8 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
                         "control characters, no person/weapon/motive/location "
                         "names, no crime wording"
                     ),
-                }
-            ]
+                },
+            }
         }
     elif stage == "evidence":
         contract = {
@@ -375,6 +391,33 @@ def _full_draft_contract() -> Mapping[str, Any]:
     }
 
 
+def _activity_log_prompt_contract() -> Mapping[str, Any]:
+    """The PROMPT-FACING activity-log contract: the unambiguous ARRAY shape.
+
+    Phase19J-RI (ADV-A): the TRANSPORT JSON Schema (``schema_contract_as_json_schema``)
+    intentionally carries the enriched directive object (``minItems=15`` /
+    ``maxItems=20`` / ``entrySchema``) so the Ollama grammar itself bounds the
+    entry count — but embedding THAT object verbatim in the prompt as the
+    "EXACT schema" made a literal-copying model emit ``entries`` as an OBJECT
+    instead of the ARRAY the transport schema and the worked example show.
+    The prompt therefore renders the plain, unambiguous array illustration
+    (a list containing one entry object, exactly like the pre-Phase19J-RI
+    contract) derived from the SAME authoritative directive contract's
+    ``entrySchema`` strings — one source, never a duplicate.
+    """
+    directive = _stage_contract("activity_log")["entries"]
+    entry_schema = directive["entrySchema"]
+    return {
+        "entries": [
+            {
+                "timestamp": entry_schema["timestamp"],
+                "activityType": entry_schema["activityType"],
+                "activity": entry_schema["activity"],
+            }
+        ],
+    }
+
+
 def schema_contract(stage: str) -> str:
     """Deterministic JSON text of the per-stage schema skeleton (authoritative).
 
@@ -384,9 +427,20 @@ def schema_contract(stage: str) -> str:
     rendered values equal the constants (schema-drift guard). Rendered from the
     single ``_stage_contract`` source (Phase17B: the transport JSON Schema and
     the prompt share this mapping — no duplicate).
+
+    Phase19J-RI (ADV-A): for ``activity_log`` (the ONLY stage whose contract
+    carries a directive object) the rendered PROMPT text shows the unambiguous
+    ARRAY illustration (``"entries": [{...}]``) instead of the directive keys
+    (``minItems``/``maxItems``/``entrySchema``) — the directive keys remain
+    authoritative ONLY in the derived transport JSON Schema, so the prompt can
+    never teach a literal-copying model an object-shaped ``entries``.
     """
+    if stage == "activity_log":
+        rendered = _activity_log_prompt_contract()
+    else:
+        rendered = _stage_contract(stage)
     return json.dumps(
-        _stage_contract(stage), sort_keys=True, ensure_ascii=False, indent=2
+        rendered, sort_keys=True, ensure_ascii=False, indent=2
     )
 
 
@@ -524,6 +578,11 @@ def _contract_to_json_schema(node: Any) -> dict[str, Any]:
     - ``$note`` keys carry a JSON-Schema ``description`` (never a property);
     - a dict carrying ``partSchema`` is an ARRAY whose items are the schema of
       ``partSchema`` and whose ``maxItems`` is the embedded ``maxParts`` integer;
+    - a dict carrying ``entrySchema`` (Phase19J-RI) is an ARRAY whose items are
+      the schema of ``entrySchema`` and whose ``minItems``/``maxItems`` are the
+      embedded optional integers (the activity-log contract's hard 15..20 entry
+      bound — the Ollama grammar can therefore never emit a one-row repair
+      wrapper); absent markers simply leave the JSON-Schema bounds unset;
     - a list of one dict is an array whose items are that dict's schema; a list
       of strings is an array of strings;
     - a hint containing ``[x,y,z]`` declares the documented vector object with
@@ -534,14 +593,22 @@ def _contract_to_json_schema(node: Any) -> dict[str, Any]:
     if isinstance(node, Mapping):
         container = dict(node)
         note = container.pop("$note", None)
-        if "partSchema" in container:
-            max_parts = container.pop("maxParts", None)
+        array_schema_key = (
+            "partSchema" if "partSchema" in container
+            else "entrySchema" if "entrySchema" in container
+            else None
+        )
+        if array_schema_key is not None:
+            min_items = container.pop("minItems", None)
+            max_items = container.pop("maxParts" if array_schema_key == "partSchema" else "maxItems", None)
             schema: dict[str, Any] = {
                 "type": "array",
-                "items": _contract_to_json_schema(container.pop("partSchema")),
+                "items": _contract_to_json_schema(container.pop(array_schema_key)),
             }
-            if isinstance(max_parts, int) and not isinstance(max_parts, bool):
-                schema["maxItems"] = int(max_parts)
+            if isinstance(min_items, int) and not isinstance(min_items, bool):
+                schema["minItems"] = int(min_items)
+            if isinstance(max_items, int) and not isinstance(max_items, bool):
+                schema["maxItems"] = int(max_items)
             if note is not None:
                 schema["description"] = str(note)
             return schema
@@ -1051,6 +1118,484 @@ REPAIR_PROMPT_v1 = (
 
 
 # --- Phase 19J activity-log templates (server owns the canonical fact) ------
+#
+# Phase19J-RI (DEF-104): the prompt gives the stateless model the concrete
+# ISO-8601 temporal window endpoints (computed with the EXACT same
+# ``activity_log_window_bounds`` clamp the strict validator applies) and a
+# machine-readable canonical-anchor example row filled with the locked value —
+# so an 8B-class model never has to compute the relative ±N-minute window
+# itself and never invents a second canonical instant.
+
+# The canonical-anchor worked example (template-fill only: the actual
+# ``__CANONICAL_TIME__`` value lands verbatim in this ONE example row; the
+# activityType token stays a closed-enum token and the activity text is the
+# existing neutral fixture phrase already used throughout the tree).
+_CANONICAL_ROW_ANCHOR_SENTENCE = (
+    "The locked canonical time is ONE row and must appear VERBATIM in exactly "
+    'one entry, e.g. {"timestamp": "__CANONICAL_TIME__", "activityType": '
+    '"LOCAL_ACTIVITY", "activity": "Local user activity detected"}.'
+)
+
+# DEF-104 follow-up #2 — COMPLETE worked example + simultaneous-constraint rule.
+# The observed hermes3:8b failure class was a simultaneous-constraint
+# compliance gap: the model satisfies (window) XOR (canonical-once) XOR
+# (schema), never all three at once. The fix gives the stateless model a
+# COMPLETE 15-row scaffold (generated at build time from the SAME
+# ``activity_log_window_bounds`` math the strict validator applies) plus an
+# explicit "satisfy ALL of these at once" rule and a shape-scaffold
+# qualification ("this is a shape, not the answer").
+#
+# DEF-104 follow-up #3 — THE TIMESTAMP GRID: the model still DROPPED the
+# locked canonical instant even with window endpoints + anchor row + full
+# scaffold + simultaneous rule. The final semantic lever hands the model the
+# app-owned DETERMINISTIC grid of EXACT timestamps (computed with the SAME
+# validated-window math) and makes the canonical-once property a pure
+# VERBATIM COPY task: the canonical instant IS one grid member (middle slot);
+# the model only writes the surrounding neutral text. The scaffold is aligned
+# to the SAME grid (its 15 rows are the grid's first 15 timestamps) so the two
+# signals agree byte-for-byte. The grid is NOT truth — it is a deterministic
+# sampling around the locked canonical fact (which stays separately injected).
+
+# App-owned neutral computer-log text pool for the scaffold example rows ONLY.
+# These are the phase-19J fixture vocabulary strings (a subset of the safe
+# neutral phrases the deterministic driver fixtures and the FakeProvider
+# golden path use): every phrase is harmless, bounded (<=120 chars) and
+# mismatch-free under ``activity_text_unsafe_tokens`` / ``truth_leak_tokens``
+# / ``entity_leak_tokens`` with no person/weapon/motive/location needles.
+# NOTE: the pool deliberately omits the fixture phrase "System resumed from
+# sleep" so the repair prompt can never echo the exact rejected-log content
+# the driver-repair regression asserts stays out (test_phase19j §11).
+ACTIVITY_LOG_NEUTRAL_TEXT_POOL: tuple[str, ...] = (
+    "User session login recorded",
+    "Mail client synchronized",
+    "Browser tab opened",
+    "Research document accessed",
+    "File explorer opened",
+    "Text editor application opened",
+    "Cloud synchronization completed",
+    "Background synchronization started",
+    "Network activity detected",
+    "Document autosaved",
+    "User session unlocked",
+    "Local file written",
+    "Keyboard activity detected",
+    "File copied to local workspace",
+    "Local user activity detected",
+    "Browser activity detected",
+    "System entered idle state",
+)
+
+# Phase19J-RI (ADV-D) — the SMALL reserved fallback pool used ONLY when a
+# canonical forbidden person/weapon/motive/location token collides with a
+# primary pool phrase or the canonical-anchor text ("Local user activity
+# detected"). Each phrase is harmless (bounded <= 120 chars, passes
+# ``activity_text_unsafe_tokens`` / ``truth_leak_tokens`` with no needles) and
+# deliberately avoids the ordinary computer-log vocabulary a hostile canonical
+# name could target (user/mail/local/workspace/server/network/...). The
+# substitution is deterministic (first non-colliding phrase in this fixed
+# order) and bounded; a pathological hostile set covering EVERY fallback
+# phrase too stays a documented LOW residual (the validator's own lexical
+# limits already carry the same bounded guarantee).
+ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL: tuple[str, ...] = (
+    "System clock synchronization heartbeat",
+    "Peripheral input device reconnected",
+    "Display framebuffer refresh scheduled",
+    "Network daemon handshake completed",
+    "Storage controller cache flushed",
+    "Process scheduler tick recorded",
+)
+
+# The scaffold (DEF-104 follow-up #2/#3) is the first
+# ``MIN_ACTIVITY_LOG_ENTRIES`` (15) timestamps of the app-owned TIMESTAMP GRID
+# (``activity_log_timestamp_grid``) — never a hand-computed row list.
+# Strictly increasing +3 minutes between the grid rows (deterministic
+# generator; the validator itself only requires strict increase, but the
+# grid shows the realistic cadence).
+# Pre-Phase19J-RI fixed +3-minute cadence (still the PREFERRED step for the
+# default/clamped-120 windows so the QA-closed path is byte-identical).
+_ACTIVITY_LOG_EXAMPLE_STEP_SECONDS = 3 * 60
+_ACTIVITY_LOG_EXAMPLE_CANONICAL_TYPE = "LOCAL_ACTIVITY"
+_ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT = "Local user activity detected"
+
+# Phase19J-RI (ADV-C) — the deterministic ADAPTIVE cadence chain for the
+# timestamp grid. The preferred 3-minute step is tried first (default
+# 60/60 and every clamped-120 case emit EXACTLY the pre-fix grid), then a
+# bounded geometric fine-grain chain down to the minimal 1-second step. The
+# FIRST step for which a grid of ``count`` members (largest count in
+# [MIN..ACTIVITY_LOG_GRID_COUNT]) fits inside the ACTUAL clamped window with
+# the canonical slot in the 15-row scaffold wins — so a sub-42-minute window
+# like 30/0 or 0/30 now yields a self-validating 15-row grid instead of a
+# self-contradictory count < MIN prompt. Every step is a whole number of
+# seconds >= 1 (bounded; deterministic; no fractional timestamps).
+_ACTIVITY_LOG_STEP_CANDIDATES: tuple[int, ...] = (3 * 60, 2 * 60, 60, 30, 15, 10, 5, 2, 1)
+
+# DEF-104 follow-up #3 — THE TIMESTAMP GRID (app-owned, deterministic). The
+# grid is NOT truth: it is a deterministic, app-owned sampling of the ACTUAL
+# validated window around the locked canonical fact (that fact is already
+# injected separately). The model's ONLY job with the grid is to copy these
+# timestamps VERBATIM into the rows and write the surrounding neutral text —
+# it never computes, reorders or redefines a time.
+#
+# Count: 18, derived from the authoritative entry bounds (inside
+# [MIN_ACTIVITY_LOG_ENTRIES .. MAX_ACTIVITY_LOG_ENTRIES] = [15..20]) and large
+# enough that a 15-row worked-example scaffold (the first
+# MIN_ACTIVITY_LOG_ENTRIES grid members) plus the remaining grid members prove
+# the canonical-once property on a copy, at the SMALLEST token cost that still
+# saturates the row-count contract.
+ACTIVITY_LOG_GRID_COUNT = 18
+
+# The explicit simultaneous-constraint rule (DEF-104 follow-up #2 step 2).
+# Shared fragment: the template prefixes "The generated" (initial) or "The
+# repaired" (repair) so both prompts carry the SAME "(a)..(e) ALL at once"
+# sentence with the SAME concrete window endpoints (``__WINDOW_START_ISO__ ..
+# __WINDOW_END_ISO__`` are replaced by the builder with the exact rendered
+# endpoints — identical to the sentence in the window bullet below).
+_ACTIVITY_LOG_SIMULTANEOUS_COMMON = (
+    " log MUST satisfy ALL of these at once:\n"
+    f"(a) {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries;\n"
+    "(b) every timestamp strictly increasing and inside "
+    "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__];\n"
+    "(c) the locked canonical time appears verbatim exactly once;\n"
+    "(d) every activityType is one of the closed tokens;\n"
+    "(e) every activity is harmless neutral text.\n"
+    "Fixing one rule must NEVER break another."
+)
+
+# DEF-104 follow-up #2 step 3 — the worked example is a SHAPE SCAFFOLD, not
+# the answer: the model must keep the shape and invent its own content.
+_ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD = (
+    "The complete worked example below shows the required shape/format only — "
+    "replace the row content with your own plausible harmless rows, keep the "
+    "same structure."
+)
+
+# DEF-104 follow-up #2 step 4 — repair-stage recheck line (the repair must
+# re-verify EVERY simultaneous rule and never trade one for another).
+_ACTIVITY_LOG_REPAIR_RECHECK_LINE = (
+    "When fixing the findings, re-verify ALL the simultaneous rules above — "
+    "never trade one rule for another."
+)
+
+# DEF-104 follow-up #3 — the machine-readable TIMESTAMP GRID block injected
+# into BOTH templates (requirement 2). ``__TIMESTAMP_GRID__`` is filled by the
+# builder with the compact comma-separated ISO list (never JSON, to minimize
+# tokens) generated by ``activity_log_timestamp_grid`` — the SAME deterministic
+# ``activity_log_window_bounds`` math the strict validator applies. The
+# canonical-once property becomes a pure COPY task: the locked instant is ONE
+# member of the grid (at the middle slot whenever the window allows), so a
+# model that "copies the grid" necessarily satisfies the validator's
+# canonical-once rule.
+_ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK = (
+    "- The EXACT timestamps for the entries are GIVEN below (server-owned; "
+    "deterministic):\n"
+    "  TIMESTAMP_GRID: __TIMESTAMP_GRID__\n"
+    "- Copy EACH timestamp VERBATIM into exactly one row's 'timestamp' "
+    "field, in the exact order shown; the row whose timestamp equals the "
+    "locked canonical time MUST be the ordinary neutral row. Never invent, "
+    "reformat, reorder, or omit any given timestamp. Never add a timestamp "
+    "outside the grid.\n"
+)
+
+# DEF-104 follow-up #3 requirement 4 — the repair stage's grid restatement:
+# the canonical missing finding is resolved by including the grid's canonical
+# row unchanged (the model never has to decide WHERE the canonical lands).
+_ACTIVITY_LOG_REPAIR_GRID_LINE = (
+    "When repairing, copy the GIVEN timestamp grid verbatim — the canonical "
+    "missing finding is resolved by including the grid's canonical row "
+    "unchanged."
+)
+
+
+def activity_log_timestamp_grid(
+    canonical_time: str,
+    *,
+    before_minutes: int = WINDOW_DEFAULT_BEFORE_MINUTES,
+    after_minutes: int = WINDOW_DEFAULT_AFTER_MINUTES,
+) -> tuple[str, ...]:
+    """The app-owned DETERMINISTIC timestamp grid (DEF-104 follow-up #3).
+
+    Returns strictly-increasing ISO-8601 timestamps computed with the SAME
+    ``activity_log_window_bounds`` math (and the same
+    ``parse_iso8601``/``epoch_to_iso`` helpers) the strict validator
+    applies. Guarantees (the tests assert every one):
+
+    - the locked canonical time appears EXACTLY once, VERBATIM (the original
+      string, never a re-render), at the slot CLOSEST to the grid middle
+      (``count // 2``) that the window geometry allows, with the slot ALWAYS
+      < ``MIN_ACTIVITY_LOG_ENTRIES`` so the 15-row worked-example scaffold
+      contains it;
+    - every member lies INSIDE the actual validated window ``[window_min ..
+      window_max]`` (the validator's own inclusive acceptance bound; for the
+      centered default the members are STRICTLY interior);
+    - the count is ``ACTIVITY_LOG_GRID_COUNT`` whenever the window can hold 18
+      members at +3 minutes; otherwise the count is the largest whole-second
+      cadence fit in ``[MIN_ACTIVITY_LOG_ENTRIES .. ACTIVITY_LOG_GRID_COUNT]``
+      (Phase19J-RI ADV-C ADAPTIVE GRID) — a sub-42-minute window such as 30/0
+      or 0/30 deterministically yields a 15-row grid at a finer cadence (e.g.
+      +2 minutes) instead of a self-contradictory count < MIN prompt.
+
+    Phase19J-RI (ADV-C) CANONICAL DEFAULT PRESERVED: the default 60/60 and
+    every clamped-120 case (90/90, 5/130, 0/120, 120/0, 15/130) emit EXACTLY
+    the pre-fix grid — count 18 at +3 minutes, canonical slot 9 (or slot 1 /
+    slot 0 / slot 14 for the clamped geometry) — so the QA-closed real path
+    never regresses.
+
+    Fallback (documented): only a window whose total clamped span is below
+    ``MIN_ACTIVITY_LOG_ENTRIES - 1`` (14) seconds cannot geometrically hold 15
+    distinct strictly-increasing integer-second ticks (the reachable 0/0
+    integer-minute config). The grid then deterministically emits the 1-second
+    rows the window's larger side fits. The driver NEVER builds a prompt for
+    such a window: the ``activity_log_window_satisfiable`` operator guard
+    fails fast BEFORE any provider call.
+
+    Raises ``ValueError`` on an unparseable canonical time (a server contract
+    error — identical to the validator's determinism: never silently rewrite a
+    locked instant).
+    """
+    tick, offset = parse_iso8601(canonical_time)
+    window_min, window_max = activity_log_window_bounds(
+        tick, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    span_seconds = window_max - window_min
+    if span_seconds < MIN_ACTIVITY_LOG_ENTRIES - 1:
+        # Fail-closed degenerate span (reachable only as the integer-minute
+        # 0/0 configuration): emit the densest bounded grid the window CAN
+        # hold at the minimal 1-second step, canonical once on the larger
+        # side. Never reached from the driver (the operator guard fails fast
+        # BEFORE a prompt is built for an unsatisfiable window).
+        step = 1
+        rows_before = (tick - window_min) // step if (tick - window_min) >= (window_max - tick) else 0
+        rows_after = (window_max - tick) // step if (window_max - tick) > (tick - window_min) else 0
+        grid = [canonical_time]
+        if rows_before:
+            grid = [
+                epoch_to_iso(tick - (rows_before - i) * step, offset)
+                for i in range(rows_before)
+            ] + grid
+        if rows_after:
+            grid = grid + [
+                epoch_to_iso(tick + k * step, offset)
+                for k in range(1, rows_after + 1)
+            ]
+        return tuple(grid)
+
+    # Adaptive cadence search (deterministic, bounded): the FIRST step for
+    # which a largest-first count in [MIN..GRID_COUNT] is feasible wins. The
+    # count loop prefers the largest feasible count (closest to the desired
+    # ACTIVITY_LOG_GRID_COUNT) at the CURRENT preferred step, so the default
+    # and clamped-120 windows resolve at +3 minutes BEFORE any finer step is
+    # ever considered.
+    for step in _ACTIVITY_LOG_STEP_CANDIDATES:
+        before_fit = (tick - window_min) // step
+        after_fit = (window_max - tick) // step
+        for count in range(ACTIVITY_LOG_GRID_COUNT, MIN_ACTIVITY_LOG_ENTRIES - 1, -1):
+            mid = count // 2
+            k_min = max(0, (count - 1) - after_fit)
+            k_max = min(
+                before_fit,
+                count - 1,
+                MIN_ACTIVITY_LOG_ENTRIES - 1,
+            )
+            if k_min > k_max:
+                continue
+            canon_index = min(max(mid, k_min), k_max)
+            return tuple(
+                canonical_time if i == canon_index else epoch_to_iso(tick + (i - canon_index) * step, offset)
+                for i in range(count)
+            )
+    # Defensive: unreachable (a span >= MIN - 1 seconds always admits a
+    # 15-row grid at the 1-second step). Deterministically fall back to the
+    # helper's canonical row alone rather than raise mid-prompt.
+    return (canonical_time,)
+
+
+def _neutral_text_collides(
+    text: str,
+    *,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> bool:
+    """Phase19J-RI (ADV-D): does ONE neutral scaffold phrase collide with the
+    injected canonical forbidden-name set under the REAL entity-leak filter?
+
+    Uses the strict validator's OWN ``entity_leak_tokens`` (never weakened):
+    a scaffold row the MODEL would be told to copy must not be a row the
+    VALIDATOR would reject. The canonical names themselves never appear in the
+    rendered prompt — they are used ONLY for this deterministic collision
+    check (ADV-256 keeps the identity sheet out of the prompt text).
+    """
+    if not any(
+        (person_names, weapon_names, motive_names, location_ids, location_names)
+    ):
+        return False
+    return bool(
+        entity_leak_tokens(
+            text,
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+    )
+
+
+def _first_safe_fallback_text(
+    start_at: int,
+    *,
+    person_names: Iterable[str],
+    weapon_names: Iterable[str],
+    motive_names: Iterable[str],
+    location_ids: Iterable[str],
+    location_names: Iterable[str],
+) -> str:
+    """Deterministic first non-colliding fallback phrase (ADV-D). Scans the
+    bounded reserved ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` cyclically from
+    ``start_at``; returns the pool's first phrase when every fallback phrase
+    collides (a pathological hostile set beyond the bounded pool — documented
+    LOW residual, same bound the validator's own lexical limits carry)."""
+    pool = ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL
+    for index in range(len(pool)):
+        phrase = pool[(start_at + index) % len(pool)]
+        if not _neutral_text_collides(
+            phrase,
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        ):
+            return phrase
+    return pool[start_at % len(pool)]
+
+
+def _activity_log_worked_example_json(
+    canonical_time: str,
+    *,
+    before_minutes: int,
+    after_minutes: int,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> str:
+    """Deterministic COMPLETE 15-row worked example log (DEF-104 follow-up #3).
+
+    The scaffold rows ARE the first ``MIN_ACTIVITY_LOG_ENTRIES`` timestamps of
+    the SAME ``activity_log_timestamp_grid`` that the prompt's
+    ``TIMESTAMP_GRID`` block injects — so the two signals agree byte-for-byte
+    and the scaffold proves that a model which verbatim-copies the grid passes
+    the strict validator. Guarantees (the tests assert every one of them):
+
+    - exactly ``MIN_ACTIVITY_LOG_ENTRIES`` (15) entries;
+    - every timestamp strictly increasing; every timestamp lies INSIDE the
+      deterministic window ``[window_min .. window_max]`` computed with the
+      validator's own ``activity_log_window_bounds`` math;
+    - the locked canonical time appears EXACTLY once, VERBATIM (the original
+      string, not a re-render), at an ordinary "Local user activity detected"
+      row;
+    - every activityType is one of the closed enum tokens and every activity
+      is one of the app-owned neutral pool strings.
+
+    Phase19J-RI (ADV-D — prompt-side mitigation, NO validator weakening): when
+    an injected canonical forbidden person/weapon/motive/location token
+    collides with a primary pool phrase or the canonical-anchor text, the
+    colliding scaffold row only is deterministically substituted with a
+    guaranteed-safe, non-colliding phrase from the small reserved
+    ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` — everything else stays identical,
+    so the built scaffold self-validates (entity_leak_tokens == zero codes)
+    even for hostile names like "Mail" / "User" / "Local" / "Workspace" or a
+    distinctive location like "ServerWorkspace". The canonical anmes NEVER
+    enter the rendered text (ADV-256).
+
+    Fail-closed degenerate windows (total span below ``MIN - 1`` seconds — the
+    reachable 0/0 configuration) cannot hold 15 distinct rows; the scaffold
+    then renders the rows the window CAN hold (those windows never reach a
+    prompt from the driver — the operator guard fails fast first).
+    """
+    grid = activity_log_timestamp_grid(
+        canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    rows = list(grid[:MIN_ACTIVITY_LOG_ENTRIES])
+    # Guaranteed present (the grid's canonical slot is always < MIN, so the
+    # scaffold's first 15 members contain it exactly once).
+    canon_index = rows.index(canonical_time)
+    tokens = tuple(sorted(ACTIVITY_LOG_ACTIVITY_TYPES))
+    pool = ACTIVITY_LOG_NEUTRAL_TEXT_POOL
+    forbidden = dict(
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
+    out: list[dict[str, str]] = []
+    position = 0  # deterministic cycle index for types/texts
+    for index, ts in enumerate(rows):
+        if index == canon_index:
+            text = _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT
+            if _neutral_text_collides(text, **forbidden):
+                text = _first_safe_fallback_text(0, **forbidden)
+            out.append(
+                {
+                    "timestamp": canonical_time,  # verbatim, exactly once
+                    "activityType": _ACTIVITY_LOG_EXAMPLE_CANONICAL_TYPE,
+                    "activity": text,
+                }
+            )
+        else:
+            text = pool[position % len(pool)]
+            if _neutral_text_collides(text, **forbidden):
+                text = _first_safe_fallback_text(position % len(ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL), **forbidden)
+            out.append(
+                {
+                    "timestamp": ts,
+                    "activityType": tokens[position % len(tokens)],
+                    "activity": text,
+                }
+            )
+            position += 1
+    return json.dumps(
+        {"entries": out}, ensure_ascii=False, separators=(",", ":")
+    )
+
+
+def _activity_log_window_context(
+    canonical_time: str,
+    *,
+    before_minutes: int,
+    after_minutes: int,
+) -> tuple[str, str, str, str]:
+    """Deterministic app-owned activity-log window context (DEF-104).
+
+    Computes the concrete ISO-8601 window endpoints with the SAME
+    ``activity_log_window_bounds`` math the strict validator applies and
+    renders both endpoints in the canonical instant's OWN timezone offset
+    (``epoch_to_iso`` — the exact helper the domain uses for ISO rendering),
+    so the prompt and the validator can never drift. Also returns the CLAMPED
+    relative minutes the actual window uses, so the relative sentence and the
+    concrete bounds always agree even when the 120-minute hard cap bites.
+
+    Returns ``(window_start_iso, window_end_iso, before_minutes_str,
+    after_minutes_str)``. Raises ``ValueError`` on an unparseable canonical
+    time (a server contract error — identical to the validator's
+    determinism: never silently rewrite a locked instant).
+    """
+    tick, offset = parse_iso8601(canonical_time)
+    window_min, window_max = activity_log_window_bounds(
+        tick, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    return (
+        epoch_to_iso(window_min, offset),
+        epoch_to_iso(window_max, offset),
+        str(max(0, (tick - window_min) // 60)),
+        str(max(0, (window_max - tick) // 60)),
+    )
+
 
 ACTIVITY_LOG_PROMPT_v1 = (
     "You are generating a realistic computer activity log for a detective "
@@ -1060,13 +1605,19 @@ ACTIVITY_LOG_PROMPT_v1 = (
     "return it VERBATIM in exactly one entry; never change it, never add a "
     "second occurrence, never call it the crime/murder/attack time.\n\n"
     "Canonical evidence time: __CANONICAL_TIME__\n\n"
-    "Requirements:\n"
+    + _CANONICAL_ROW_ANCHOR_SENTENCE
+    + "\n\nThe generated" + _ACTIVITY_LOG_SIMULTANEOUS_COMMON
+    + "\n\nRequirements:\n"
     f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
     "chronological entries (strictly increasing unique timestamps).\n"
     f"- Cover approximately the window around the canonical time: from "
     "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes relative to it "
     f"(the whole log spans at most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
-    "- Include the locked canonical evidence time EXACTLY ONCE, in an "
+    f"- Every entry timestamp MUST lie inside the deterministic window "
+    "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__] (the whole log spans at "
+    f"most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
+    + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
+    + "- Include the locked canonical evidence time EXACTLY ONCE, in an "
     "ordinary-looking row (e.g. \"Local user activity detected\", \"Foreground "
     "application activity recorded\"); NEVER label it as crime, murder, "
     "attack, death, weapon, evidence, clue, culprit or victim activity.\n"
@@ -1077,25 +1628,70 @@ ACTIVITY_LOG_PROMPT_v1 = (
     "- Do NOT mention: murder, crime, death, killer, murderer, victim, "
     "weapon, motive, witness, culprit, attack, or any conclusion.\n"
     "- Do NOT introduce named people, named weapons, motives, or locations.\n"
+    "\n"
+    + _ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD
+    + "\nComplete worked example:\n__WORKED_EXAMPLE__\n\n"
     "Return ONLY a single JSON document matching this EXACT schema:\n"
     + schema_contract("activity_log")
-    + "\n\nNo HTML, no markdown tables, no prose outside the JSON document."
+    + "\nNote: 'entries' is a JSON ARRAY of "
+    + f"{MIN_ACTIVITY_LOG_ENTRIES}..{MAX_ACTIVITY_LOG_ENTRIES} "
+    + "objects, every object exactly like the worked-example rows.\n\n"
+    "No HTML, no markdown tables, no prose outside the JSON document."
 )
 
 
 ACTIVITY_LOG_REPAIR_PROMPT_v1 = (
     "You are REPAIRING a computer activity log for a detective game — "
     "GENERATION_PROVIDER=ollama (prompt template version activity_log_repair_v1).\n"
-    "The server OWNS the canonical evidence fact. The time below is LOCKED: "
-    "return it VERBATIM in exactly one entry; never change it, never call it "
-    "the crime/murder/attack time.\n\n"
+    "The server OWNS the canonical evidence fact. The time below is LOCKED: it "
+    "must appear VERBATIM in exactly ONE of the "
+    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries; never "
+    "change it, never add a second occurrence, never call it the "
+    "crime/murder/attack time.\n\n"
     "Canonical evidence time: __CANONICAL_TIME__\n\n"
-    "Your PREVIOUS activity log failed validation. Fix EXACTLY the "
-    "machine-readable findings below (deterministic app rules):\n"
+    + _CANONICAL_ROW_ANCHOR_SENTENCE
+    + "\n\nThe repaired" + _ACTIVITY_LOG_SIMULTANEOUS_COMMON
+    + "\n\nYour PREVIOUS activity log failed validation. The repaired response is a "
+    "COMPLETE replacement ActivityLogDocument with "
+    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries - never "
+    "a single surrounding entry, never a patched wrapper; the locked canonical "
+    "time is ONE of those rows.\n\n"
+    "Fix EXACTLY the machine-readable findings below (deterministic app rules):\n"
     "__FINDINGS__\n\n"
-    "Return a corrected log satisfying the SAME schema and constraints as "
-    "before (only the structured JSON document; no explanations).\n"
+    "Findings-to-fix mapping (deterministic): if a finding says "
+    "CANONICAL_TIME_MISSING, the repair MUST include the locked canonical time "
+    "verbatim as exactly one of the "
+    f"{MIN_ACTIVITY_LOG_ENTRIES}-{MAX_ACTIVITY_LOG_ENTRIES} rows; if "
+    "TIMESTAMP_OUTSIDE_WINDOW, every row MUST be inside the deterministic "
+    "window bounds above.\n"
+    + _ACTIVITY_LOG_REPAIR_GRID_LINE
+    + "\n"
+    + _ACTIVITY_LOG_REPAIR_RECHECK_LINE
+    + "\n\nRequirements (deterministic, reapplied after this repair):\n"
+    f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
+    "chronological entries (strictly increasing unique timestamps).\n"
+    f"- Cover approximately the window around the canonical time: from "
+    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes relative to it "
+    f"(the whole log spans at most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
+    f"- Every entry timestamp MUST lie inside the deterministic window "
+    "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__] (the whole log spans at "
+    f"most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
+    + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
+    + "- Include the locked canonical evidence time EXACTLY ONCE, in an "
+    "ordinary-looking row (e.g. \"Local user activity detected\", \"Foreground "
+    "application activity recorded\"); NEVER label it as crime, murder, "
+    "attack, death, weapon, evidence, clue, culprit or victim activity.\n"
+    "- All other entries must be plausible harmless computer/system actions "
+    "(no named people, weapons, motives or locations; no crime wording).\n"
+    "\n"
+    + _ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD
+    + "\nComplete worked example:\n__WORKED_EXAMPLE__\n\n"
+    "Return ONLY a single JSON document matching this EXACT schema:\n"
     + schema_contract("activity_log")
+    + "\nNote: 'entries' is a JSON ARRAY of "
+    + f"{MIN_ACTIVITY_LOG_ENTRIES}..{MAX_ACTIVITY_LOG_ENTRIES} "
+    + "objects, every object exactly like the worked-example rows.\n\n"
+    "No HTML, no markdown tables, no prose outside the JSON document."
 )
 
 
@@ -1221,38 +1817,141 @@ def build_activity_log_prompt(
     *,
     before_minutes: int = WINDOW_DEFAULT_BEFORE_MINUTES,
     after_minutes: int = WINDOW_DEFAULT_AFTER_MINUTES,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
 ) -> str:
     """The Phase 19J activity-log prompt (locked canonical time + window).
 
     ``canonical_time`` is the app-owned evidence time injected as the locked
     constraint; the provider only ever receives this one temporal fact plus the
     neutral generation rules — no CaseTruth, no person/weapon/motive names.
+
+    Phase19J-RI (DEF-104): the concrete deterministic window endpoints
+    (``[WINDOW_START_ISO .. WINDOW_END_ISO]``) and the CLAMPED relative
+    minutes are computed with the EXACT same ``activity_log_window_bounds``
+    math the strict validator applies, so the prompt and the validator share
+    one window and a stateless model never has to compute the relative
+    ±N-minute instant range itself. DEF-104 follow-up #2 also injects a
+    COMPLETE 15-row worked example (same canonical time, same window,
+    strictly increasing +3-minute rows, canonical verbatim once, closed-enum
+    types, neutral texts) as a shape scaffold — never the answer.
+    DEF-104 follow-up #3 additionally injects the app-owned TIMESTAMP GRID
+    (same deterministic math): the model must copy the GIVEN timestamps
+    verbatim into the rows, so the canonical-once property is a pure copy task.
+
+    Phase19J-RI (ADV-C): the grid and scaffold are ADAPTIVE to the actual
+    clamped window span, so every satisfiable window (including 30/0 or 0/30)
+    yields a self-validating scaffold; the operator guard fails fast before
+    this builder for an unsatisfiable window. ADV-D: the canonical forbidden
+    name/location sets are accepted ONLY for deterministic collision
+    substitution inside the scaffold (reserved fallback pool); they are NEVER
+    rendered into the prompt text (ADV-256 holds).
     """
+    start_iso, end_iso, before_min, after_min = _activity_log_window_context(
+        canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    worked_example = _activity_log_worked_example_json(
+        canonical_time,
+        before_minutes=before_minutes,
+        after_minutes=after_minutes,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
     return _fill(
         template=ACTIVITY_LOG_PROMPT_v1,
         CANONICAL_TIME=canonical_time,
-        WINDOW_BEFORE=str(max(0, int(before_minutes or 0))),
-        WINDOW_AFTER=str(max(0, int(after_minutes or 0))),
+        WINDOW_BEFORE=before_min,
+        WINDOW_AFTER=after_min,
+        WINDOW_START_ISO=start_iso,
+        WINDOW_END_ISO=end_iso,
+        TIMESTAMP_GRID=", ".join(
+            activity_log_timestamp_grid(
+                canonical_time,
+                before_minutes=before_minutes,
+                after_minutes=after_minutes,
+            )
+        ),
+        WORKED_EXAMPLE=worked_example,
     )
 
 
 def build_activity_log_repair_prompt(
-    canonical_time: str, findings: tuple[str, ...]
+    canonical_time: str,
+    findings: tuple[str, ...],
+    *,
+    before_minutes: int = WINDOW_DEFAULT_BEFORE_MINUTES,
+    after_minutes: int = WINDOW_DEFAULT_AFTER_MINUTES,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
 ) -> str:
     """The Phase 19J repair prompt: machine-readable findings + locked time.
 
     The findings are the ONLY feedback (never the rejected log, never
     CaseTruth beyond the locked temporal constraint), so the repair can never
-    be steered by content or hidden truth (Phase19J §20).
+    be steered by content or hidden truth (Phase19J §20). The deterministic
+    window is restated from the SAME app-owned configuration the initial
+    prompt uses (Phase19J-RI: the repair must blind the model to the complete
+    contract - count floor/ceiling, chronology, canonical-once, window).
+
+    Phase19J-RI (DEF-104): the exponential repair also receives the concrete
+    ISO-8601 window endpoints and the canonical-anchor example row, because a
+    stateless 8B model cannot reliably compute the relative ±N-minute window
+    itself; the mapping from the machine-readable findings tokens to the fix
+    (CANONICAL_TIME_MISSING / TIMESTAMP_OUTSIDE_WINDOW) is restated
+    explicitly. DEF-104 follow-up #2 additionally injects the SAME complete
+    15-row worked example shape scaffold (valid under the actual configured
+    window) and the repair recheck line ("never trade one rule for another").
+    DEF-104 follow-up #3 additionally restates the SAME app-owned TIMESTAMP
+    GRID: the canonical missing finding is resolved by copying the grid's
+    canonical row unchanged. ADV-C/ADV-D: same adaptive grid + deterministic
+    scaffold collision substitution as the initial prompt (operational guard
+    still fails fast before an unsatisfiable window ever reaches a builder).
     """
+    start_iso, end_iso, before_min, after_min = _activity_log_window_context(
+        canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    worked_example = _activity_log_worked_example_json(
+        canonical_time,
+        before_minutes=before_minutes,
+        after_minutes=after_minutes,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
     return _fill(
         template=ACTIVITY_LOG_REPAIR_PROMPT_v1,
         CANONICAL_TIME=canonical_time,
         FINDINGS="\n".join(f"- {finding}" for finding in findings) or "- SCHEMA_INVALID",
+        WINDOW_BEFORE=before_min,
+        WINDOW_AFTER=after_min,
+        WINDOW_START_ISO=start_iso,
+        WINDOW_END_ISO=end_iso,
+        TIMESTAMP_GRID=", ".join(
+            activity_log_timestamp_grid(
+                canonical_time,
+                before_minutes=before_minutes,
+                after_minutes=after_minutes,
+            )
+        ),
+        WORKED_EXAMPLE=worked_example,
     )
 
 
 __all__ = [
+    "ACTIVITY_LOG_GRID_COUNT",
+    "ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL",
+    "ACTIVITY_LOG_NEUTRAL_TEXT_POOL",
     "ACTIVITY_LOG_PROMPT_v1",
     "ACTIVITY_LOG_REPAIR_PROMPT_v1",
     "ASSET_SPEC_PROMPT_v1",
@@ -1264,6 +1963,7 @@ __all__ = [
     "STAGE_TO_CONTRACT",
     "STAGE_TO_PROMPT_VERSION",
     "WORLD_REQUIREMENTS_PROMPT_v1",
+    "activity_log_timestamp_grid",
     "build_activity_log_prompt",
     "build_activity_log_repair_prompt",
     "build_asset_spec_prompt",
