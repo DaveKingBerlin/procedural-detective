@@ -40,15 +40,14 @@ services:
       # then the plain 404 envelope and the capabilities DTO omits remoteLocalAi.
       ENABLE_BRIDGE: ${ENABLE_BRIDGE:-false}
       # Phase 19J-RI2 canonical timeout envelope — declared in the DEV/CI
-      # profile too so the rendered-compose gate validates the SAME 300/180
+      # profile too so the rendered-compose gate validates the SAME 300/300
       # numbers as production (docs/DEPLOYMENT.md §16).
       CASE_GENERATION_DEADLINE_SECONDS: ${CASE_GENERATION_DEADLINE_SECONDS:-300}
-      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-180}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-300}
       TRUST_PROXY: ${TRUST_PROXY:-false}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
-      LIVE_PROVIDER_URL: ${LIVE_PROVIDER_URL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?OLLAMA_BASE_URL required}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-hermes3:8b}
       STATIC_DIR: ${STATIC_DIR:-/app/static}
     env_file:
       - path: .env

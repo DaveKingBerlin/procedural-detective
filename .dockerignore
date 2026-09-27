@@ -97,3 +97,11 @@ REQUIREMENTS.md
 *.egg-info
 build
 dist
+
+.pytest_cache/
+**/.pytest_cache/
+
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+**/.pytest_cache/
