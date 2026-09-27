@@ -380,6 +380,7 @@ class GenerationController:
             providerCallCount=attempt.budget.calls if attempt.budget is not None else None,
             repairCount=attempt.budget.repair_passes if attempt.budget is not None else None,
             regenerationCount=attempt.budget.regenerations if attempt.budget is not None else None,
+            stageTimingSummary=self._driver_stage_timing_summary(attempt),
         )
         return PublishResult(True, published=payload)
 
@@ -881,6 +882,7 @@ class GenerationController:
             regenerationCount=attempt.budget.regenerations if attempt.budget is not None else None,
             deadlineRemainingMs=_remaining_ms(attempt),
             totalElapsedMs=self._elapsed_ms(attempt),
+            stageTimingSummary=self._driver_stage_timing_summary(attempt),
         )
         _dt(
             "attempt.fail reason=%r state=%s calls=%s deadlineRemainingMs=%s"
@@ -902,6 +904,17 @@ class GenerationController:
         if started is None:
             return None
         return int((time.perf_counter() - started) * 1000)
+
+    def _driver_stage_timing_summary(self, attempt: AttemptRecord) -> tuple[str, ...]:
+        """Bounded safe timing summary exposed by structured stage drivers."""
+        getter = getattr(self._driver, "stage_timing_summary", None)
+        if not callable(getter):
+            return ()
+        try:
+            summary = tuple(getter(attempt.attempt_id))
+        except Exception:  # noqa: BLE001 - observability never breaks lifecycle
+            return ()
+        return tuple(str(item)[:120] for item in summary[:32])
 
     def _release_admission(self, attempt: AttemptRecord) -> None:
         if attempt._admission_released:

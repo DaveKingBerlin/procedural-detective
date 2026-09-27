@@ -17,7 +17,8 @@ Checks (all fail-closed; ANY ``fail`` finding exits 1):
          shipped Caddy-edge profile). An operator ``.env`` that sets
          ENVIRONMENT=development / TRUST_PROXY=false FAILS with a clear message
          (Phase21B Finding 2 — dev example must never be copied to prod);
-       - P-02 timeout envelope: backend deadline < frontend 360s < proxy 420s;
+       - P-02 timeout envelope: canonical runtime policy validates rendered
+         provider, per-call timeout, total deadline, frontend and proxy bounds;
        - json-file 10m x 5 log bounds on BOTH public services;
        - backend port NEVER publicly published (expose only, no `ports:`) and
          the Ollama port 11434 is never a published host port;

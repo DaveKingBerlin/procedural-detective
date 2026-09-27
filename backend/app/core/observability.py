@@ -21,6 +21,8 @@ _SAFE_FIELDS = frozenset(
         "caseId", "caseVersion", "generationId", "generationAttemptId", "playthroughId",
         "stage", "elapsedMs", "totalElapsedMs", "configuredGenerationDeadlineMs",
         "deadlineRemainingMs", "configuredProviderTimeoutMs", "effectiveProviderTimeoutMs",
+        "providerCallIndex", "deadlineRemainingBeforeMs",
+        "deadlineRemainingAfterMs", "stageTimingSummary",
         "providerCallCount", "repairCount", "regenerationCount", "provider", "model",
         "requestBytes", "responseBytes", "structuredOutput", "success", "published",
         "failureCode", "validationOutcome", "assetRequestCount", "assetRepairCount",
@@ -51,6 +53,12 @@ _SAFE_FIELDS = frozenset(
         # activity strings, prompts or CaseTruth.
         "topLevelType", "topLevelKeys", "expectedTopLevelKeys",
         "itemCountCandidate", "parseFailureClass",
+        # Phase19J-RI2 â€” evidence structured-output contract trace. Closed
+        # schema labels, booleans and bounded counts only. Unknown provider
+        # keys are projected to ``<unknown>`` before they reach this boundary;
+        # no evidence values, ids, names, clue text or hidden truth are logged.
+        "expectedSchemaId", "collectionField", "candidateItemCount",
+        "parseSuccess", "adapterProjectionResult",
         # Phase 23 — safe witness-interview lifecycle fields (§38). The closed
         # question type, the bounded per-interview discovery count and the
         # public witness id are player-safe metadata: NEVER the statement

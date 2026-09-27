@@ -103,6 +103,24 @@ def _remaining_ms(attempt: Any) -> int | None:
         return None
     return int(budget.remaining_seconds() * 1000)
 
+
+def _structured_output_sent(provider: Any, *, provider_label: str) -> bool:
+    """Truthfully report whether THIS completed call used a structured schema.
+
+    ``OllamaProvider`` exposes the actual last-wire format through
+    ``structured_output_sent``.  The remote-client bridge always dispatches an
+    authoritative ``schemaId`` and receives a ``structuredOutput`` object, so
+    that transport is structured by contract.  Unknown/legacy providers fail
+    closed to ``False`` instead of repeating the old unconditional ``True``.
+    """
+    if provider_label == "remote_client":
+        return True
+    try:
+        marker = getattr(provider, "structured_output_sent", False)
+        return bool(marker() if callable(marker) else marker)
+    except Exception:  # noqa: BLE001 - observability must never break generation
+        return False
+
 # Bounded AssetSpec repair passes INSIDE one AssetSpec round-trip (Phase16_2
 # Â§13: "bounded â‰¤2 per driver").
 MAX_SPEC_REPAIR_PASSES = 2
@@ -1012,6 +1030,140 @@ def _bounded_shape_key(value: Any) -> str:
     if not raw:
         return "<unsafe-or-empty>"
     return raw
+
+
+_EVIDENCE_EXPECTED_SCHEMA_ID = "EVIDENCE_v1"
+_EVIDENCE_COLLECTION_FIELD = "evidence"
+_EVIDENCE_SAFE_TOP_LEVEL_KEYS = frozenset({_EVIDENCE_COLLECTION_FIELD})
+
+
+def _bounded_evidence_item_count(count: int) -> int | str:
+    """Bound an untrusted evidence collection length for telemetry."""
+    from app.generation.schemas import MAX_EVIDENCE_ITEMS
+
+    if int(count) > MAX_EVIDENCE_ITEMS:
+        return f">={MAX_EVIDENCE_ITEMS + 1}"
+    return int(count)
+
+
+def _safe_evidence_top_level_keys(data: Mapping[Any, Any]) -> list[str]:
+    """Return only closed-vocabulary evidence key-shape tokens.
+
+    Unknown provider keys may themselves contain names, clue prose, URLs or
+    control characters.  They are therefore represented by ONE constant token
+    rather than truncated/echoed.  This is intentionally stricter than a
+    generic printable-key sanitizer: no raw key content crosses the telemetry
+    boundary.
+    """
+    present = {
+        str(key)
+        for key in data
+        if isinstance(key, str) and key in _EVIDENCE_SAFE_TOP_LEVEL_KEYS
+    }
+    result = sorted(present)
+    if any(
+        not isinstance(key, str) or key not in _EVIDENCE_SAFE_TOP_LEVEL_KEYS
+        for key in data
+    ):
+        result.append("<unknown>")
+    return result
+
+
+def _evidence_diagnostic_shape(content: str | None) -> dict[str, Any]:
+    """SAFE structural metadata for one completed EVIDENCE response.
+
+    The result contains types, allowlisted key-shape tokens and a bounded
+    collection count only.  Evidence text, ids, people, motives, weapons,
+    timestamps and every nested value are deliberately ignored.
+    """
+    from app.assets.depthguard import MAX_STRUCT_NESTING, bounded_json_loads
+
+    base: dict[str, Any] = {
+        "topLevelType": "non-json",
+        "topLevelKeys": [],
+        "candidateItemCount": None,
+        "validatorCode": "EVIDENCE_JSON_INVALID",
+    }
+    if not isinstance(content, str) or not content.strip():
+        return base
+    try:
+        data = bounded_json_loads(
+            content,
+            object_pairs_hook=_reject_duplicate_keys,
+            limit=MAX_STRUCT_NESTING,
+        )
+    except _DuplicateKeyError:
+        return {**base, "validatorCode": "EVIDENCE_DUPLICATE_KEY"}
+    except (TypeError, ValueError):
+        return base
+    if isinstance(data, list):
+        return {
+            **base,
+            "topLevelType": "array",
+            "candidateItemCount": _bounded_evidence_item_count(len(data)),
+            "validatorCode": "EVIDENCE_ROOT_NOT_OBJECT",
+        }
+    if not isinstance(data, dict):
+        return {
+            **base,
+            "topLevelType": "scalar",
+            "validatorCode": "EVIDENCE_ROOT_NOT_OBJECT",
+        }
+    keys = _safe_evidence_top_level_keys(data)
+    result = {
+        **base,
+        "topLevelType": "object",
+        "topLevelKeys": keys,
+    }
+    collection = data.get(_EVIDENCE_COLLECTION_FIELD)
+    if isinstance(collection, list):
+        result["candidateItemCount"] = _bounded_evidence_item_count(len(collection))
+    if set(data) != {_EVIDENCE_COLLECTION_FIELD}:
+        result["validatorCode"] = "EVIDENCE_TOP_LEVEL_KEYS_INVALID"
+        return result
+    if not isinstance(collection, list):
+        result["validatorCode"] = "EVIDENCE_COLLECTION_NOT_ARRAY"
+        return result
+    result["validatorCode"] = None
+    return result
+
+
+def _evidence_validator_code(error: BaseException) -> str:
+    """Map strict parser findings to a stable, content-free code.
+
+    Parser findings can contain raw provider ids/values, so they are inspected
+    in-process but never logged.  The emitted value comes from this closed
+    vocabulary only.
+    """
+    issues = tuple(str(issue) for issue in getattr(error, "issues", ()) or ())
+    diagnostic = " ".join(issues).casefold()
+    if not diagnostic:
+        return "EVIDENCE_DTO_INVALID"
+    classifiers = (
+        ("exceeds max_provider_output_chars", "EVIDENCE_RESPONSE_SIZE_INVALID"),
+        ("not valid json", "EVIDENCE_JSON_INVALID"),
+        ("duplicate key", "EVIDENCE_DUPLICATE_KEY"),
+        ("unknown proposition type", "EVIDENCE_PROPOSITION_TYPE_INVALID"),
+        ("duplicate evidence id", "EVIDENCE_DUPLICATE_ID"),
+        ("exceeds max_evidence_items", "EVIDENCE_COLLECTION_SIZE_INVALID"),
+        ("unknown key", "EVIDENCE_UNKNOWN_FIELD"),
+        ("missing required key", "EVIDENCE_REQUIRED_FIELD_MISSING"),
+        ("reliability must be one of", "EVIDENCE_ENUM_INVALID"),
+        ("not a valid in-domain iso-8601", "EVIDENCE_TIMESTAMP_INVALID"),
+        ("outside supported solver domain", "EVIDENCE_TIMESTAMP_INVALID"),
+        ("requires structured", "EVIDENCE_PROPOSITION_SCHEMA_INVALID"),
+        ("must be a json array", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be a json object", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be a non-empty string", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be a string", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be a bool", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be an integer", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("exceeds", "EVIDENCE_FIELD_SIZE_INVALID"),
+    )
+    for needle, code in classifiers:
+        if needle in diagnostic:
+            return code
+    return "EVIDENCE_DTO_INVALID"
 
 
 def _activity_log_diagnostic_shape(content: str | None) -> dict[str, Any]:
@@ -2078,7 +2230,9 @@ class OllamaAssetSpecProvider:
             configuredProviderTimeoutMs=configured_timeout_ms,
             effectiveProviderTimeoutMs=int(effective_timeout * 1000),
             responseBytes=len(result.content.encode("utf-8")),
-            structuredOutput=True,
+            structuredOutput=_structured_output_sent(
+                self._provider, provider_label=self._provider_label
+            ),
 deadlineRemainingMs=(
                 int(budget.remaining_seconds() * 1000)
                 if budget is not None and hasattr(budget, "remaining_seconds") else None
@@ -2222,6 +2376,22 @@ class OllamaStageDriver:
         # counts + match-value counts ONLY â€” never raw content, never the
         # prompt); read by the smoke CLI/operator tests.
         self.last_evidence_summary: dict[str, Any] = {}
+        # Per-attempt, bounded safe provider timing tokens. Each token contains
+        # only a closed stage name, integer milliseconds and a closed outcome.
+        # Raw prompts/responses and generated identifiers never enter it.
+        self._stage_timings: dict[str, list[str]] = {}
+
+    def stage_timing_summary(self, attempt_id: str) -> tuple[str, ...]:
+        """Return at most 32 safe timing tokens for final lifecycle events."""
+        return tuple(self._stage_timings.get(str(attempt_id), ())[:32])
+
+    def _record_stage_timing(
+        self, attempt: Any, stage: GenerationStage, elapsed_ms: int, outcome: str
+    ) -> None:
+        closed_outcome = outcome if outcome in {"success", "timeout", "error"} else "error"
+        entries = self._stage_timings.setdefault(str(attempt.attempt_id), [])
+        if len(entries) < 32:
+            entries.append(f"{stage.value}:{max(0, int(elapsed_ms))}:{closed_outcome}")
 
     # -- public driver entry points (controller lifecycle) -------------------
 
@@ -2292,18 +2462,11 @@ class OllamaStageDriver:
             deduction_seed=deduction_seed,
             deduction_feedback=deduction_feedback,
         )
-        evidence_spec = self._stage_parse(
+        evidence_spec, evidence_trace = self._evidence_stage_parse(
             provider,
             attempt,
-            GenerationStage.EVIDENCE,
             evidence_prompt,
             budget_consumer,
-            lambda content: stage_parser.parse_stage(
-                GenerationStage.EVIDENCE, content, non_throwing=False
-            ),
-            "evidence",
-            deferred,
-            retry_on_parse_failure=False,
         )
 
         # --- 2b. deterministic evidence completion (Phase17 Wave-2) ----------
@@ -2330,6 +2493,29 @@ class OllamaStageDriver:
                 projectionValid=completed_spec is not None,
                 elapsedMs=int((time.perf_counter() - projection_started) * 1000),
             )
+        projection_result = (
+            "NOT_USED"
+            if evidence_spec is not None
+            else "LOCAL_PROJECTION_ACCEPTED"
+            if completed_spec is not None
+            else "LOCAL_PROJECTION_REJECTED"
+        )
+        emit_event(
+            "evidence.structured_output.completed",
+            caseId=getattr(attempt, "case_id", None),
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            stage=GenerationStage.EVIDENCE.value,
+            structuredOutput=evidence_trace.get("structuredOutput"),
+            responseBytes=evidence_trace.get("responseBytes"),
+            topLevelType=evidence_trace.get("topLevelType"),
+            topLevelKeys=evidence_trace.get("topLevelKeys"),
+            expectedSchemaId=_EVIDENCE_EXPECTED_SCHEMA_ID,
+            collectionField=_EVIDENCE_COLLECTION_FIELD,
+            candidateItemCount=evidence_trace.get("candidateItemCount"),
+            parseSuccess=evidence_trace.get("parseSuccess"),
+            validatorCode=evidence_trace.get("validatorCode"),
+            adapterProjectionResult=projection_result,
+        )
         self.last_evidence_injections = tuple(injected)
         self.last_evidence_completed = bool(injected or extra_rules)
         if completed_spec is not None:
@@ -3062,6 +3248,8 @@ class OllamaStageDriver:
             seed=attempt.seed,
             timeout_seconds=effective_timeout,
         )
+        deadline_before_ms = _remaining_ms(attempt)
+        provider_call_index = getattr(attempt.budget, "calls", None)
         emit_event(
             "provider.call.start",
             caseId=getattr(attempt, "case_id", None),
@@ -3074,15 +3262,43 @@ class OllamaStageDriver:
                 if getattr(attempt, "budget", None) is not None else None
             ),
             deadlineRemainingMs=_remaining_ms(attempt),
+            deadlineRemainingBeforeMs=deadline_before_ms,
             configuredProviderTimeoutMs=int(self._configured_provider_timeout() * 1000),
             effectiveProviderTimeoutMs=int(effective_timeout * 1000),
             providerCallCount=getattr(attempt.budget, "calls", None),
+            providerCallIndex=provider_call_index,
             repairCount=getattr(attempt.budget, "repair_passes", None),
             regenerationCount=getattr(attempt.budget, "regenerations", None),
             requestBytes=len(prompt.encode("utf-8")),
         )
         _t0 = time.perf_counter()
-        result: ProviderResult = self._invoke(provider, request)
+        try:
+            result: ProviderResult = self._invoke(provider, request)
+        except StageDriverProviderFailure as exc:
+            elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+            deadline_after_ms = _remaining_ms(attempt)
+            self._record_stage_timing(attempt, stage, elapsed_ms, "error")
+            emit_event(
+                "provider.call.error",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                stage=stage.value,
+                provider=self._provider_label,
+                failureCode=getattr(exc, "code", GenerationFailureCode.PROVIDER_UNAVAILABLE.value),
+                elapsedMs=elapsed_ms,
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=deadline_after_ms,
+                deadlineRemainingBeforeMs=deadline_before_ms,
+                deadlineRemainingAfterMs=deadline_after_ms,
+                providerCallCount=provider_call_index,
+                providerCallIndex=provider_call_index,
+                repairCount=getattr(attempt.budget, "repair_passes", None),
+                regenerationCount=getattr(attempt.budget, "regenerations", None),
+            )
+            raise
+        elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+        deadline_after_ms = _remaining_ms(attempt)
         if _PD_DEV_TRACE:
             if result.content is not None:
                 summary = "ok(content)"
@@ -3102,6 +3318,7 @@ class OllamaStageDriver:
                 )
             )
         if result.timed_out:
+            self._record_stage_timing(attempt, stage, elapsed_ms, "timeout")
             emit_event(
                 "provider.call.timeout",
                 caseId=getattr(attempt, "case_id", None),
@@ -3109,9 +3326,16 @@ class OllamaStageDriver:
                 stage=stage.value,
                 provider=self._provider_label,
                 failureCode=GenerationFailureCode.PROVIDER_TIMEOUT.value,
+                elapsedMs=elapsed_ms,
                 configuredProviderTimeoutMs=configured_timeout_ms,
                 effectiveProviderTimeoutMs=int(effective_timeout * 1000),
                 deadlineRemainingMs=_remaining_ms(attempt),
+                deadlineRemainingBeforeMs=deadline_before_ms,
+                deadlineRemainingAfterMs=deadline_after_ms,
+                providerCallCount=provider_call_index,
+                providerCallIndex=provider_call_index,
+                repairCount=getattr(attempt.budget, "repair_passes", None),
+                regenerationCount=getattr(attempt.budget, "regenerations", None),
             )
             raise StageDriverProviderFailure(
                 "provider request timed out",
@@ -3119,6 +3343,7 @@ class OllamaStageDriver:
             )
         if result.error is not None:
             code = infer_failure_code(result.error)
+            self._record_stage_timing(attempt, stage, elapsed_ms, "error")
             emit_event(
                 "provider.call.error",
                 caseId=getattr(attempt, "case_id", None),
@@ -3126,18 +3351,27 @@ class OllamaStageDriver:
                 stage=stage.value,
                 provider=self._provider_label,
                 failureCode=code.value,
+                elapsedMs=elapsed_ms,
                 configuredProviderTimeoutMs=configured_timeout_ms,
                 effectiveProviderTimeoutMs=int(effective_timeout * 1000),
                 deadlineRemainingMs=_remaining_ms(attempt),
+                deadlineRemainingBeforeMs=deadline_before_ms,
+                deadlineRemainingAfterMs=deadline_after_ms,
+                providerCallCount=provider_call_index,
+                providerCallIndex=provider_call_index,
+                repairCount=getattr(attempt.budget, "repair_passes", None),
+                regenerationCount=getattr(attempt.budget, "regenerations", None),
             )
             raise StageDriverProviderFailure(
                 "provider returned an unusable response", code=code
             )
         if result.content is None:
+            self._record_stage_timing(attempt, stage, elapsed_ms, "error")
             raise StageDriverProviderFailure(
                 "provider returned an invalid response",
                 code=GenerationFailureCode.PROVIDER_INVALID_RESPONSE,
             )
+        self._record_stage_timing(attempt, stage, elapsed_ms, "success")
         emit_event(
             "provider.call.complete",
             caseId=getattr(attempt, "case_id", None),
@@ -3146,12 +3380,21 @@ class OllamaStageDriver:
             provider=self._provider_label,
             model=self._event_model,
             success=True,
+            elapsedMs=elapsed_ms,
             requestBytes=len(prompt.encode("utf-8")),
             responseBytes=len(result.content.encode("utf-8")),
-            structuredOutput=True,
+            structuredOutput=_structured_output_sent(
+                provider, provider_label=self._provider_label
+            ),
             configuredProviderTimeoutMs=configured_timeout_ms,
             effectiveProviderTimeoutMs=int(effective_timeout * 1000),
             deadlineRemainingMs=_remaining_ms(attempt),
+            deadlineRemainingBeforeMs=deadline_before_ms,
+            deadlineRemainingAfterMs=deadline_after_ms,
+            providerCallCount=provider_call_index,
+            providerCallIndex=provider_call_index,
+            repairCount=getattr(attempt.budget, "repair_passes", None),
+            regenerationCount=getattr(attempt.budget, "regenerations", None),
         )
         return result.content
 
@@ -3205,6 +3448,64 @@ class OllamaStageDriver:
                     return None
             deferred.append(f"{label} stage parse failed: {exc}")
             return None
+
+    def _evidence_stage_parse(
+        self,
+        provider: Any,
+        attempt: Any,
+        prompt: str,
+        budget: Callable[[str | None], bool],
+    ) -> tuple[Any, dict[str, Any]]:
+        """Call and strictly parse EVIDENCE with safe structural trace data.
+
+        Evidence deliberately has no remote parse retry because the existing
+        deterministic local projection is its bounded recovery path.  The
+        returned diagnostic dictionary contains only closed structural tokens,
+        booleans, byte/count values and the truthful transport-schema flag.
+        """
+        content = self._call(
+            provider,
+            attempt,
+            GenerationStage.EVIDENCE,
+            prompt,
+            budget,
+        )
+        # ``_call`` raises for a missing result, but keep the defensive branch
+        # so this helper remains total if that contract is ever relaxed.
+        if content is None:
+            trace = _evidence_diagnostic_shape(None)
+            trace.update(
+                structuredOutput=_structured_output_sent(
+                    provider, provider_label=self._provider_label
+                ),
+                responseBytes=0,
+                parseSuccess=False,
+            )
+            return None, trace
+
+        trace = _evidence_diagnostic_shape(content)
+        trace.update(
+            structuredOutput=_structured_output_sent(
+                provider, provider_label=self._provider_label
+            ),
+            responseBytes=len(content.encode("utf-8")),
+            parseSuccess=False,
+        )
+        try:
+            parsed = stage_parser.parse_stage(
+                GenerationStage.EVIDENCE,
+                content,
+                non_throwing=False,
+            )
+        except (TypeError, ValueError) as exc:
+            # A more specific structural code wins; otherwise classify the
+            # strict DTO/parser finding without ever emitting its raw message.
+            if trace.get("validatorCode") is None:
+                trace["validatorCode"] = _evidence_validator_code(exc)
+            return None, trace
+        trace["parseSuccess"] = True
+        trace["validatorCode"] = "EVIDENCE_ACCEPTED"
+        return parsed, trace
 
     @staticmethod
     def _invoke(provider: Any, request: GenerateRequest) -> ProviderResult:

@@ -22,6 +22,13 @@ ALEMBIC_INI = BACKEND_DIR / "alembic.ini"
 
 DEFAULT_CORS = ["http://localhost:5173"]
 
+# Test modules import ``app.main`` during collection, before autouse fixtures
+# run. Keep that module-level application instance hermetic against an
+# operator's real-Ollama .env so runtime timeout admission is tested only when
+# a test explicitly constructs an Ollama app profile.
+os.environ["ENV_FILE"] = os.devnull
+os.environ["GENERATION_PROVIDER"] = "fake"
+
 
 def make_alembic_config(database_url: str) -> AlembicConfig:
     cfg = AlembicConfig(str(ALEMBIC_INI))

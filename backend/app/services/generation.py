@@ -64,6 +64,7 @@ from app.services.publication import (
     public_case_dict_from_payload,
 )
 from app.core.observability import emit_event
+from app.core.timeout_envelope import enforce_runtime_timeout_envelope
 
 # Terminal/sanitized progress snapshots (REQUIREMENTS 40.3 progress).
 _STATE_PROGRESS = {
@@ -1319,6 +1320,20 @@ class GenerationService:
     ) -> tuple[Any, Any, float]:
         """Fresh per-request controller; admission inside; synchronous run."""
         settings = self._settings
+        # Phase19J-RI2: capabilities, health checks and app construction do not
+        # execute a real model and must remain available under a local/default
+        # profile. Enforce the supported Ollama latency envelope at the actual
+        # generation boundary, before driver construction, admission mutation
+        # or any provider call. Production preflight independently validates
+        # the rendered profile before deployment.
+        try:
+            enforce_runtime_timeout_envelope(settings)
+        except RuntimeError:
+            # Typed and sanitized at the service boundary: the API maps this
+            # without exposing rendered values or operator configuration.
+            raise ProviderConfigError(
+                "unsupported generation deadline configuration"
+            ) from None
         # Phase 16_2/Phase 22: a selected local-Llama provider (ollama) or the
         # BYO-Ollama bridge (remote_client) runs through the stage driver
         # (structured per-stage calls producing a full draft), classified

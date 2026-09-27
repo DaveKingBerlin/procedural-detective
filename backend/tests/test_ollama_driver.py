@@ -302,19 +302,25 @@ def _controller(driver, transport, admission, clock, ids, **overrides):
     )
 
 
-def _make_driver(transport):
+def _make_driver(transport, *, structured_output=False):
     def factory():
-        return OllamaProvider(base_url=OLLAMA_BASE, model=OLLAMA_MODEL, timeout_seconds=5, transport=transport)
+        return OllamaProvider(
+            base_url=OLLAMA_BASE,
+            model=OLLAMA_MODEL,
+            timeout_seconds=5,
+            transport=transport,
+            structured_output=structured_output,
+        )
     return OllamaStageDriver(settings=Settings(), provider_factory=factory)
 
 
-def _run(posts, prompt=PROMPT, **controller_overrides):
+def _run(posts, prompt=PROMPT, *, structured_output=False, **controller_overrides):
     clock = ManualClock()
     ids = IdSource()
     admission = _admission(clock, ids)
     session = admission.create_anonymous_quota_session()
     transport = MockOllamaTransport(posts=posts)
-    driver = _make_driver(transport)
+    driver = _make_driver(transport, structured_output=structured_output)
     controller = _controller(driver, transport, admission, clock, ids, **controller_overrides)
     handle = controller.start_generation(prompt, anonymous_quota_session_id=session.session_id)
     return controller.attempt(handle.attempt_id), transport
@@ -363,8 +369,16 @@ def _invalid_raw_evidence(*, semantic: bool) -> dict:
     return payload
 
 
-@pytest.mark.parametrize("semantic", (False, True))
-def test_18a_malformed_evidence_uses_local_projection_without_remote_retry(caplog, semantic):
+@pytest.mark.parametrize(
+    ("semantic", "expected_validator_code"),
+    (
+        (False, "EVIDENCE_PROPOSITION_TYPE_INVALID"),
+        (True, "EVIDENCE_PROPOSITION_SCHEMA_INVALID"),
+    ),
+)
+def test_18a_malformed_evidence_uses_local_projection_without_remote_retry(
+    caplog, semantic, expected_validator_code
+):
     """A rejected raw evidence response is locally replaced, not retried.
 
     This drives the real controller/driver with the Ollama transport mock.  It
@@ -430,6 +444,20 @@ def test_18a_malformed_evidence_uses_local_projection_without_remote_retry(caplo
         "projectionValid": True,
         "elapsedMs": getattr(projection_events[0], "pd_fields")["elapsedMs"],
     }
+    structure_events = [
+        event for event in caplog.records
+        if getattr(event, "pd_event", None)
+        == "evidence.structured_output.completed"
+    ]
+    assert len(structure_events) == 1
+    structure = getattr(structure_events[0], "pd_fields")
+    assert structure["structuredOutput"] is False
+    assert structure["topLevelType"] == "object"
+    assert structure["topLevelKeys"] == ["evidence"]
+    assert structure["candidateItemCount"] == 16
+    assert structure["parseSuccess"] is False
+    assert structure["validatorCode"] == expected_validator_code
+    assert structure["adapterProjectionResult"] == "LOCAL_PROJECTION_ACCEPTED"
 
 
 def test_18b_valid_evidence_keeps_existing_ollama_path_without_local_projection(caplog):
@@ -447,6 +475,75 @@ def test_18b_valid_evidence_keeps_existing_ollama_path_without_local_projection(
         getattr(event, "pd_event", None) == "evidence.local_projection.used"
         for event in caplog.records
     )
+
+
+@pytest.mark.parametrize("structured_output", (False, True))
+def test_18b_evidence_structural_telemetry_is_safe_and_transport_truthful(
+    caplog, structured_output
+):
+    """A completed EVIDENCE call emits shape only and the actual wire mode.
+
+    The exact same valid DTO is accepted in JSON fallback and authoritative
+    schema modes; telemetry must not claim structured output for the former.
+    """
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        record, _transport = _run(
+            _staged(),
+            max_llm_calls_per_generation=12,
+            structured_output=structured_output,
+        )
+
+    assert record.state is GenerationState.PUBLISHED
+    events = [
+        event
+        for event in caplog.records
+        if getattr(event, "pd_event", None)
+        == "evidence.structured_output.completed"
+    ]
+    assert len(events) == 1
+    fields = getattr(events[0], "pd_fields")
+    assert fields == {
+        "caseId": record.case_id,
+        "generationAttemptId": record.attempt_id,
+        "stage": "evidence",
+        "structuredOutput": structured_output,
+        "responseBytes": fields["responseBytes"],
+        "topLevelType": "object",
+        "topLevelKeys": ["evidence"],
+        "expectedSchemaId": "EVIDENCE_v1",
+        "collectionField": "evidence",
+        "candidateItemCount": 16,
+        "parseSuccess": True,
+        "validatorCode": "EVIDENCE_ACCEPTED",
+        "adapterProjectionResult": "NOT_USED",
+    }
+    assert isinstance(fields["responseBytes"], int) and fields["responseBytes"] > 0
+    provider_events = [
+        event
+        for event in caplog.records
+        if getattr(event, "pd_event", None) == "provider.call.complete"
+        and getattr(event, "pd_fields", {}).get("stage") == "evidence"
+    ]
+    assert len(provider_events) == 1
+    assert getattr(provider_events[0], "pd_fields")["structuredOutput"] is structured_output
+
+
+def test_18b_evidence_shape_never_echoes_unknown_provider_key_content():
+    """Unknown top-level keys become one constant token, never raw content."""
+    from app.services.ollama_driver import _evidence_diagnostic_shape
+
+    private_key = "person-name hidden-clue http://private-host weapon motive"
+    shape = _evidence_diagnostic_shape(
+        _j({"evidence": [], private_key: "undiscovered evidence text"})
+    )
+    assert shape == {
+        "topLevelType": "object",
+        "topLevelKeys": ["evidence", "<unknown>"],
+        "candidateItemCount": 0,
+        "validatorCode": "EVIDENCE_TOP_LEVEL_KEYS_INVALID",
+    }
+    assert private_key not in json.dumps(shape)
+    assert "undiscovered evidence text" not in json.dumps(shape)
 
 
 def test_18c_invalid_deterministic_projection_stays_fail_closed(monkeypatch, caplog):
