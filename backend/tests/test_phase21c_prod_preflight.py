@@ -34,7 +34,9 @@ def _rendered_config(
                     "ENVIRONMENT": environment,
                     "PD_DEV_TRACE": dev_trace,
                     "TRUST_PROXY": trust_proxy,
+                    "GENERATION_PROVIDER": "ollama",
                     "CASE_GENERATION_DEADLINE_SECONDS": "300",
+                    "OLLAMA_TIMEOUT_SECONDS": "180",
                 },
                 "expose": ["8000"],
                 "logging": {

@@ -51,6 +51,11 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
       PD_DEV_TRACE: ${PD_DEV_TRACE:-false}
       GENERATION_PROVIDER: ${GENERATION_PROVIDER:-fake}
+      # Phase 19J-RI2: keep the production timeout envelope explicit in the
+      # rendered Compose model. Shell/.env overrides therefore affect both
+      # the real container and the preflight that certifies that exact render.
+      CASE_GENERATION_DEADLINE_SECONDS: ${CASE_GENERATION_DEADLINE_SECONDS:-300}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-180}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       # TRUST_PROXY=true is honored ONLY by the app's own forwarded-header
       # authority (resolve_client_ip). uvicorn runs with --no-proxy-headers

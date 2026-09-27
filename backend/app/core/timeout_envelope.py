@@ -1,163 +1,183 @@
-"""P-02 (Phase 21) — strict timeout envelope for a generation request.
+"""Canonical timeout-envelope contract for generation requests.
 
-Deployment contract (docs/DEPLOYMENT.md § timeout envelope; the ENVELOPE the
-frontend, proxy and backend deadlines must satisfy for every code path that
-serves a generation):
+Runtime admission and rendered-deployment preflight both call the same pure,
+value-based validator in this module.  No helper here reads environment state.
 
-    provider timeout  <  remaining backend generation deadline
-                       <  frontend request timeout
-                       <  reverse-proxy upstream timeout
+The supported server-local real-Ollama profile is sized as::
 
-with EXPLICIT margins at every hop. This module is the single documented
-source of the coordinated frontend/proxy constants and of the margin policy,
-so a Python config-wiring test can pin the relationship of every layer.
+    configured provider timeout <= 300s backend generation deadline
+    backend deadline + 60s <= 360s frontend request timeout
+    frontend timeout + 60s <= 420s reverse-proxy timeout
 
-Envelope (choose from clamping math, not from the phase example):
-
-- ``CASE_GENERATION_DEADLINE_SECONDS``  = 300 max (showcase; default 60).
-  The **provider call timeout is clamped to ``remaining_deadline - 0.1s``**
-  (``BudgetTracker.effective_provider_timeout``, margin
-  ``PROVIDER_CALL_SAFETY_MARGIN_SECONDS``) so the strictly-smaller operator
-  ``provider < deadline`` ALWAYS holds mechanically — even when the configured
-  ``OLLAMA_TIMEOUT_SECONDS`` (bounded 5..300 by Settings) equals the deadline
-  (the showcase 300 == 300), the effective call timeout is ``299.9``.
-- FRONTEND request timeout = **360s** (``frontend/src/api/client.ts
-  REQUEST_TIMEOUT_MS``): 60s over the max 300s deadline — the browser never
-  aborts a request the backend still legitimately allows, and a full max-length
-  provider call starting at t=0 still lands before the browser boundary.
-- CADDY upstream timeout = **420s** (``docker/Caddyfile response_header_timeout``):
-  60s over the frontend — the TLS edge never aborts before the browser does,
-  and it covers the frontend's 360s plus the browser's own scheduling slack.
-
-Margins (documented policy):
-
-- ``PROVIDER_CLASSIFICATION_MARGIN_SECONDS`` (0.1s) — reserved between the
-  effective provider timeout and the remaining deadline so the controller has
-  time to classify a timeout and persist the terminal state.
-- ``DEADLINE_TO_FRONTEND_MARGIN_SECONDS`` (60s) — worst-case backend deadline
-  (300s) + 60s <= frontend 360s.
-- ``FRONTEND_TO_PROXY_MARGIN_SECONDS`` (60s) — frontend 360s + 60s <= proxy 420s.
-
-The DEFAULT (60s deadline) and the recommended showcase (300s deadline) both
-satisfy the envelope. ``envelope_violations`` flags a configuration that does
-NOT (e.g. a deadline above the documented max, or an operator provider
-timeout configured ABOVE the deadline so the clamp silently shortens every
-call).
+``BudgetTracker`` separately clamps each effective provider call below the
+shrinking remaining backend deadline by the 0.1s classification margin.  An
+operator may therefore configure provider timeout == total deadline without
+violating the effective strict ordering.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
-# --------------------------------------------------------------------------- #
-# Coordinated constants — single documented source. These MUST match:
-#   frontend/src/api/client.ts  -> REQUEST_TIMEOUT_MS
-#   docker/Caddyfile             -> response_header_timeout
-# (the config-wiring test test_phase21_timeout_envelope.py parses BOTH files
-#  and fails on drift).
-# --------------------------------------------------------------------------- #
-
-# Frontend fetch abort after this many SECONDS (client.ts, ms value / 1000).
 FRONTEND_REQUEST_TIMEOUT_SECONDS = 360
-
-# Reverse-proxy (Caddy) upstream response-header timeout in SECONDS.
 CADDY_UPSTREAM_TIMEOUT_SECONDS = 420
-
-# Margin: maximum backend deadline + margin must be <= FRONTEND (300 + 60).
 DEADLINE_TO_FRONTEND_MARGIN_SECONDS = 60.0
-
-# Margin: frontend + margin must be <= CADDY (360 + 60).
 FRONTEND_TO_PROXY_MARGIN_SECONDS = 60.0
-
-# Margin reserved between the effective provider timeout and the remaining
-# deadline (must stay == PROVIDER_CALL_SAFETY_MARGIN_SECONDS in budgets.py).
 PROVIDER_CLASSIFICATION_MARGIN_SECONDS = 0.1
-
-# The maximum backend generation deadline the envelope supports (showcase).
-# Operator deadlines ABOVE this must raise the frontend/proxy constants with
-# the same margins — the browser would otherwise abort a request the backend
-# still legitimately allows.
 MAX_RECOMMENDED_GENERATION_DEADLINE_SECONDS = 300
-
-# The operator-configurable provider timeout bound
-# (Settings ``OLLAMA_TIMEOUT_SECONDS`` doc bound: 5..300). The strict
-# ``provider < deadline`` relation is guaranteed by the CLAMP, not by this
-# bound (a 300 == 300 showcase config is fine; effective timeout is 299.9).
+MIN_OLLAMA_TIMEOUT_SECONDS = 5.0
 MAX_OLLAMA_TIMEOUT_SECONDS = 300.0
 
-# --------------------------------------------------------------------------- #
-# ADV-250 — the BRIDGE_JOB_DEADLINE_SECONDS ceiling (Phase 22 BYO-Ollama).
-# The per-job deadline the server puts on a bridge job frame (``timeoutMs``)
-# is clamped to min(remaining generation deadline, BRIDGE_JOB_DEADLINE_SECONDS
-# configured by the operator). The CONFIGURED value is additionally bounded by
-# BOTH the maximum generation deadline the app allows (the envelope showcase
-# bound) AND a hard 1800s cap, so a hostile/oversized configured value can
-# never reach a job frame even if the transport-level clamp were bypassed.
+# One supported server-local real-Ollama profile. Fake/demo deliberately keeps
+# the quick 60s Settings default and is not forced into this profile.
+SUPPORTED_OLLAMA_GENERATION_DEADLINE_SECONDS = 300.0
+
+# Phase 22 BYO-Ollama bridge job ceiling.
 BRIDGE_JOB_DEADLINE_HARD_CAP_SECONDS = 1800.0
 BRIDGE_JOB_DEADLINE_MAX_SECONDS: float = min(
     MAX_RECOMMENDED_GENERATION_DEADLINE_SECONDS,
     BRIDGE_JOB_DEADLINE_HARD_CAP_SECONDS,
 )
 
+_GENERATION_PROVIDERS = frozenset({"fake", "live", "ollama", "remote_client"})
+
 
 def provider_timeout_violation(configured_seconds: float) -> bool:
-    """True when an operator configured the provider timeout ABOVE the deadline
-    bound (the clamp would silently shorten every call)."""
+    """Whether the configured provider timeout exceeds its documented bound."""
+
     return float(configured_seconds) > MAX_OLLAMA_TIMEOUT_SECONDS
 
 
-def envelope_violations(settings: Any) -> list[str]:
-    """Sanitized list of P-02 envelope problems for one Settings object.
+def _positive_finite_number(value: object) -> float | None:
+    """Return a positive finite float or ``None`` without ever raising."""
 
-    Returns [] for the DEFAULT (60s) and the recommended showcase (300s)
-    configurations. Never raises and never returns internal details — the
-    strings are operator-facing and intentionally free of secrets/paths.
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return parsed
+
+
+def _positive_integer(value: object) -> int | None:
+    """Match Settings' positive integer semantics without coercing fractions."""
+
+    parsed = _positive_finite_number(value)
+    if parsed is None or not parsed.is_integer():
+        return None
+    return int(parsed)
+
+
+def timeout_envelope_violations(
+    *,
+    generation_provider: str,
+    generation_deadline_seconds: object,
+    provider_timeout_seconds: object,
+    frontend_timeout_seconds: object = FRONTEND_REQUEST_TIMEOUT_SECONDS,
+    proxy_timeout_seconds: object = CADDY_UPSTREAM_TIMEOUT_SECONDS,
+) -> list[str]:
+    """Return sanitized violations for explicit rendered/runtime values.
+
+    The helper never raises and fails closed for unknown providers, malformed,
+    non-finite, boolean and non-positive values.  A provider timeout may equal
+    the total deadline because the runtime clamp reserves the 0.1s
+    classification margin from the effective per-call timeout.
     """
-    violations: list[str] = []
-    deadline = int(settings.generation_deadline_seconds)
-    provider = float(settings.ollama_timeout_seconds)
 
-    if provider_timeout_violation(provider):
+    violations: list[str] = []
+    # Settings uses a Literal: case and surrounding whitespace are invalid,
+    # so rendered/preflight values must use the exact same token semantics.
+    provider_name = generation_provider if isinstance(generation_provider, str) else ""
+    deadline = _positive_integer(generation_deadline_seconds)
+    provider_timeout = _positive_finite_number(provider_timeout_seconds)
+    frontend_timeout = _positive_finite_number(frontend_timeout_seconds)
+    proxy_timeout = _positive_finite_number(proxy_timeout_seconds)
+
+    if provider_name not in _GENERATION_PROVIDERS:
         violations.append(
-            "OLLAMA_TIMEOUT_SECONDS above the documented bound (300s) — the "
-            "per-call provider timeout is clamped to the remaining deadline "
-            "anyway; lower it to the documented 5..300 range."
+            "GENERATION_PROVIDER must be one of fake, live, ollama, remote_client."
         )
-    if provider > deadline:
+    if deadline is None:
         violations.append(
-            "OLLAMA_TIMEOUT_SECONDS above CASE_GENERATION_DEADLINE_SECONDS — "
-            "every provider call is clamped to the remaining deadline minus the "
-            "0.1s classification margin, so the configured timeout is never used "
-            "in full; set OLLAMA_TIMEOUT_SECONDS <= the deadline."
+            "CASE_GENERATION_DEADLINE_SECONDS must be a positive finite number."
+        )
+    if provider_timeout is None:
+        violations.append("OLLAMA_TIMEOUT_SECONDS must be a positive finite number.")
+    if frontend_timeout is None:
+        violations.append("frontend generation timeout must be a positive finite number.")
+    if proxy_timeout is None:
+        violations.append("reverse-proxy timeout must be a positive finite number.")
+    if violations:
+        return violations
+
+    assert deadline is not None
+    assert provider_timeout is not None
+    assert frontend_timeout is not None
+    assert proxy_timeout is not None
+
+    if provider_timeout < MIN_OLLAMA_TIMEOUT_SECONDS:
+        violations.append(
+            "OLLAMA_TIMEOUT_SECONDS must be at least 5 seconds."
+        )
+    if provider_timeout > MAX_OLLAMA_TIMEOUT_SECONDS:
+        violations.append(
+            "OLLAMA_TIMEOUT_SECONDS above the documented bound (300s)."
+        )
+    if provider_name == "ollama" and provider_timeout > deadline:
+        violations.append(
+            "OLLAMA_TIMEOUT_SECONDS must be <= "
+            "CASE_GENERATION_DEADLINE_SECONDS; otherwise every call is "
+            "silently shortened by the remaining-deadline clamp."
+        )
+    if (
+        provider_name == "ollama"
+        and deadline != SUPPORTED_OLLAMA_GENERATION_DEADLINE_SECONDS
+    ):
+        violations.append(
+            "GENERATION_PROVIDER=ollama requires the supported real-generation "
+            "profile CASE_GENERATION_DEADLINE_SECONDS=300."
         )
     if deadline > MAX_RECOMMENDED_GENERATION_DEADLINE_SECONDS:
         violations.append(
-            "CASE_GENERATION_DEADLINE_SECONDS above the envelope maximum (300s): "
-            "the frontend request timeout (360s) must remain strictly larger "
-            "with margin; reduce the deadline or raise the frontend/proxy "
-            "constants together."
+            "CASE_GENERATION_DEADLINE_SECONDS above the envelope maximum (300s)."
         )
-    if deadline + DEADLINE_TO_FRONTEND_MARGIN_SECONDS > FRONTEND_REQUEST_TIMEOUT_SECONDS:
+    if deadline + DEADLINE_TO_FRONTEND_MARGIN_SECONDS > frontend_timeout:
         violations.append(
-            "timeout envelope broken: CASE_GENERATION_DEADLINE_SECONDS plus the "
-            "60s margin exceeds the frontend request timeout (360s); the browser "
-            "can abort a request the backend still allows."
+            "timeout envelope broken: CASE_GENERATION_DEADLINE_SECONDS plus "
+            "the 60s margin exceeds the frontend generation timeout."
         )
-    if (
-        FRONTEND_REQUEST_TIMEOUT_SECONDS + FRONTEND_TO_PROXY_MARGIN_SECONDS
-        > CADDY_UPSTREAM_TIMEOUT_SECONDS
-    ):
+    if frontend_timeout + FRONTEND_TO_PROXY_MARGIN_SECONDS > proxy_timeout:
         violations.append(
-            "timeout envelope broken: the frontend request timeout (360s) plus "
-            "the 60s margin exceeds the reverse-proxy timeout (420s); the proxy "
-            "can abort before the browser."
-        )
-    if MAX_OLLAMA_TIMEOUT_SECONDS >= FRONTEND_REQUEST_TIMEOUT_SECONDS:
-        violations.append(
-            "timeout envelope broken: a max-length provider call (300s) must stay "
-            "strictly under the frontend request timeout (360s)."
+            "timeout envelope broken: frontend generation timeout plus the "
+            "60s margin exceeds the reverse-proxy timeout."
         )
     return violations
+
+
+def envelope_violations(settings: Any) -> list[str]:
+    """Compatibility wrapper for one Settings-like object."""
+
+    return timeout_envelope_violations(
+        generation_provider=getattr(settings, "generation_provider", ""),
+        generation_deadline_seconds=getattr(
+            settings, "generation_deadline_seconds", None
+        ),
+        provider_timeout_seconds=getattr(settings, "ollama_timeout_seconds", None),
+    )
+
+
+def enforce_runtime_timeout_envelope(settings: Any) -> None:
+    """Reject an unsupported profile before the application starts serving."""
+
+    violations = envelope_violations(settings)
+    if violations:
+        raise RuntimeError(
+            "unsupported generation timeout configuration: " + " ".join(violations)
+        )
 
 
 __all__ = [
@@ -167,9 +187,13 @@ __all__ = [
     "FRONTEND_TO_PROXY_MARGIN_SECONDS",
     "PROVIDER_CLASSIFICATION_MARGIN_SECONDS",
     "MAX_RECOMMENDED_GENERATION_DEADLINE_SECONDS",
+    "MIN_OLLAMA_TIMEOUT_SECONDS",
     "MAX_OLLAMA_TIMEOUT_SECONDS",
+    "SUPPORTED_OLLAMA_GENERATION_DEADLINE_SECONDS",
     "BRIDGE_JOB_DEADLINE_HARD_CAP_SECONDS",
     "BRIDGE_JOB_DEADLINE_MAX_SECONDS",
+    "timeout_envelope_violations",
     "envelope_violations",
+    "enforce_runtime_timeout_envelope",
     "provider_timeout_violation",
 ]

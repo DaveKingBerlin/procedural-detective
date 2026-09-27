@@ -74,8 +74,9 @@ guarantee the result.
 - Deterministic demo: **instant** (shipped golden case).
 - Local AI (Ollama, e.g. hermes3:8b on a capable machine): roughly **1-2
   minutes** for a full Prompt-to-World generation including validation,
-  repair and rendering — varies with machine, model and prompt. The default
-  generation deadline is 300 s.
+  repair and rendering — varies with machine, model and prompt. The documented
+  real-AI deployment profile uses a 300 s total generation deadline (the
+  deterministic demo retains the shorter runtime default).
 
 ## Deployment constraints
 

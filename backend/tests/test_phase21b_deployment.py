@@ -73,8 +73,10 @@ def _write_prod_example(
         "ENVIRONMENT=production\n"
         "PD_DEV_TRACE=false\n"
         "TRUST_PROXY=true\n"
+        "GENERATION_PROVIDER=ollama\n"
         f"CADDY_DOMAIN={domain}\n"
-        "CASE_GENERATION_DEADLINE_SECONDS=300\n",
+        "CASE_GENERATION_DEADLINE_SECONDS=300\n"
+        "OLLAMA_TIMEOUT_SECONDS=180\n",
         encoding="utf-8",
     )
 
@@ -294,7 +296,9 @@ def test_deadline_above_frontend_timeout_fails(tmp_path):
     (tmp_path / ".env").write_text(
         "ENVIRONMENT=production\nPD_DEV_TRACE=false\nTRUST_PROXY=true\n"
         "CADDY_DOMAIN=detective.procedural-game.dev\n"
-        "CASE_GENERATION_DEADLINE_SECONDS=400\n",
+        "GENERATION_PROVIDER=ollama\n"
+        "CASE_GENERATION_DEADLINE_SECONDS=400\n"
+        "OLLAMA_TIMEOUT_SECONDS=180\n",
         encoding="utf-8",
     )
     findings = release_check.check_prod_effective_config(
@@ -302,7 +306,7 @@ def test_deadline_above_frontend_timeout_fails(tmp_path):
         client_ts_path=_real_client_ts(), caddyfile_path=_real_caddyfile(),
     )
     fail_messages = [f.message for f in findings if f.severity == "fail"]
-    assert any("deadline" in m for m in fail_messages), fail_messages
+    assert any("deadline" in m.casefold() for m in fail_messages), fail_messages
 
 
 def test_backend_port_publication_fails(tmp_path):

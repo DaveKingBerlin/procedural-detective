@@ -316,7 +316,7 @@ provider timeout  <  remaining backend generation deadline
 | Layer | Value | Where configured |
 | --- | --- | --- |
 | Provider per-call timeout | `OLLAMA_TIMEOUT_SECONDS`, bounded `5..300` — clamped to `remaining deadline − 0.1s` by `BudgetTracker.effective_provider_timeout` (`backend/app/generation/budgets.py`) | `.env.example` (`180`) / `.env.production.example` (`180`, line below) |
-| Backend generation deadline | `CASE_GENERATION_DEADLINE_SECONDS`, default `60`, recommended showcase `300` (max supported by this envelope) | `.env.example` / `.env.production.example` (`300`) |
+| Backend generation deadline | `CASE_GENERATION_DEADLINE_SECONDS`; runtime default `60` is supported for deterministic fake/demo, while the supported real-Ollama development/production profile is `300` (max supported by this envelope) | `.env.example` / `.env.production.example` / rendered production Compose (`300`) |
 | Frontend request timeout | `360s` (`REQUEST_TIMEOUT_MS = 360000`, `frontend/src/api/client.ts`) | source constant |
 | Reverse-proxy upstream timeout | `420s` (`response_header_timeout 420s`, `docker/Caddyfile`) | `docker/Caddyfile` |
 
@@ -347,6 +347,10 @@ provider timeout  <  remaining backend generation deadline
   the backend still allows.
 - `OLLAMA_TIMEOUT_SECONDS` is bounded `5..300` by configuration validation and
   is clamped to the remaining deadline regardless.
+- Production Compose renders both timeout variables explicitly (defaults:
+  `300` / `180`). `python -m tools.prod_preflight` validates the actual
+  rendered values after `.env`, `--env-file`, and shell precedence; a shell
+  override cannot silently select an unsupported real-provider envelope.
 - The config-wiring test `backend/tests/test_phase21_timeout_envelope.py`
   reads the documented constants AND parses `frontend/src/api/client.ts` +
   `docker/Caddyfile`, so any drift between this table and the real files fails

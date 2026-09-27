@@ -44,10 +44,13 @@ from app.core.timeout_envelope import (  # noqa: E402
     DEADLINE_TO_FRONTEND_MARGIN_SECONDS,
     FRONTEND_REQUEST_TIMEOUT_SECONDS,
     FRONTEND_TO_PROXY_MARGIN_SECONDS,
+    MIN_OLLAMA_TIMEOUT_SECONDS,
     MAX_OLLAMA_TIMEOUT_SECONDS,
     MAX_RECOMMENDED_GENERATION_DEADLINE_SECONDS,
     PROVIDER_CLASSIFICATION_MARGIN_SECONDS,
+    SUPPORTED_OLLAMA_GENERATION_DEADLINE_SECONDS,
     envelope_violations,
+    timeout_envelope_violations,
 )
 from app.generation.budgets import (  # noqa: E402
     PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
@@ -176,6 +179,7 @@ def test_default_settings_satisfy_envelope():
 
 def test_showcase_settings_satisfy_envelope():
     settings = Settings(
+        generation_provider="ollama",
         CASE_GENERATION_DEADLINE_SECONDS=300,
         OLLAMA_TIMEOUT_SECONDS=300,
     )
@@ -191,16 +195,111 @@ def test_deadline_above_envelope_maximum_is_flagged():
 
 def test_provider_timeout_above_deadline_is_flagged():
     viol = envelope_violations(
-        Settings(CASE_GENERATION_DEADLINE_SECONDS=60, OLLAMA_TIMEOUT_SECONDS=120)
+        Settings(
+            generation_provider="ollama",
+            CASE_GENERATION_DEADLINE_SECONDS=60,
+            OLLAMA_TIMEOUT_SECONDS=120,
+        )
     )
-    assert any("above CASE_GENERATION_DEADLINE_SECONDS" in v for v in viol)
-    assert any("clamped" in v for v in viol)
+    assert any("must be <=" in v for v in viol)
+    assert any("supported real-generation profile" in v for v in viol)
+
+
+def test_real_ollama_profile_is_exact_and_fake_demo_keeps_fast_default():
+    assert SUPPORTED_OLLAMA_GENERATION_DEADLINE_SECONDS == 300.0
+    assert MIN_OLLAMA_TIMEOUT_SECONDS == 5.0
+    assert timeout_envelope_violations(
+        generation_provider="fake",
+        generation_deadline_seconds=60,
+        provider_timeout_seconds=60,
+    ) == []
+    assert timeout_envelope_violations(
+        generation_provider="ollama",
+        generation_deadline_seconds=300,
+        provider_timeout_seconds=180,
+    ) == []
+    short = timeout_envelope_violations(
+        generation_provider="ollama",
+        generation_deadline_seconds=60,
+        provider_timeout_seconds=60,
+    )
+    assert any("requires the supported real-generation profile" in item for item in short)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("generation_provider", "unknown"),
+        ("generation_provider", "OLLAMA"),
+        ("generation_provider", " ollama "),
+        ("generation_deadline_seconds", 0),
+        ("generation_deadline_seconds", "not-a-number"),
+        ("generation_deadline_seconds", 60.5),
+        ("provider_timeout_seconds", -1),
+        ("provider_timeout_seconds", 4.999),
+        ("provider_timeout_seconds", float("nan")),
+        ("frontend_timeout_seconds", True),
+        ("proxy_timeout_seconds", float("inf")),
+    ),
+)
+def test_explicit_envelope_helper_fails_closed_for_malformed_values(field, value):
+    values = {
+        "generation_provider": "ollama",
+        "generation_deadline_seconds": 300,
+        "provider_timeout_seconds": 180,
+        "frontend_timeout_seconds": 360,
+        "proxy_timeout_seconds": 420,
+    }
+    values[field] = value
+    assert timeout_envelope_violations(**values)
+
+
+def test_runtime_rejects_unsupported_ollama_profile_at_generation_boundary():
+    from app.services.generation import GenerationService, ProviderConfigError
+
+    settings = Settings(
+        generation_provider="ollama",
+        CASE_GENERATION_DEADLINE_SECONDS=60,
+        OLLAMA_TIMEOUT_SECONDS=60,
+    )
+    service = object.__new__(GenerationService)
+    service._settings = settings
+    with pytest.raises(
+        ProviderConfigError, match="unsupported generation deadline configuration"
+    ):
+        service._run_generation(
+            "bounded test prompt",
+            anonymous_quota_session_id="AQS-test",
+            creator_token=None,
+        )
+
+
+def test_runtime_rejects_subminimum_provider_timeout_before_provider_call():
+    from types import SimpleNamespace
+
+    from app.services.generation import GenerationService, ProviderConfigError
+
+    service = object.__new__(GenerationService)
+    service._settings = SimpleNamespace(
+        generation_provider="ollama",
+        generation_deadline_seconds=300,
+        ollama_timeout_seconds=1,
+    )
+    with pytest.raises(
+        ProviderConfigError, match="unsupported generation deadline configuration"
+    ):
+        service._run_generation(
+            "bounded test prompt",
+            anonymous_quota_session_id="AQS-test",
+            creator_token=None,
+        )
 
 
 def test_fixed_boundaries_cannot_be_torn_down_by_operator_config():
     """Even a maximally generous operator config can never push the effective
     provider timeout past the frontend/proxy bounds (they are code constants)."""
     assert MAX_OLLAMA_TIMEOUT_SECONDS < FRONTEND_REQUEST_TIMEOUT_SECONDS
+    assert Settings(ollama_timeout_seconds=5).ollama_timeout_seconds == 5.0
     assert FRONTEND_REQUEST_TIMEOUT_SECONDS < CADDY_UPSTREAM_TIMEOUT_SECONDS
     # bounds are ALSO the maximum the Settings validator accepts
     assert Settings(ollama_timeout_seconds=300).ollama_timeout_seconds == 300.0

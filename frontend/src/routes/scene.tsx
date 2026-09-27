@@ -36,6 +36,7 @@ import { buildNotebookModel } from "../notebook/notebookModel";
 import NotebookPanel from "../notebook/NotebookPanel";
 import WitnessPanel from "../witness/WitnessPanel";
 import { boundedText, handleWitnessPanelKey, MAX_WITNESS_DISPLAY_NAME } from "../witness/witnessModel";
+import { loadWitnessStatements, saveWitnessStatements } from "../witness/witnessStatementStore";
 
 type PageStatus =
   | { status: "loading" }
@@ -104,6 +105,14 @@ export default function ScenePage() {
    * REMOTE_STATEMENT / accessibility path).
    */
   const [witnessPanel, setWitnessPanel] = useState<WitnessListEntryDTO | null>(null);
+  /**
+   * Phase 23 — InvestigationSession owns the mutable, in-memory asked-answer
+   * cache. A successful neutral answer does not necessarily change the scene
+   * model, and `hasInteracted` may already be true, so neither existing state
+   * path guarantees a render. This revision makes that session mutation an
+   * explicit React observation point for panel markers and notebook entries.
+   */
+  const [witnessRevision, setWitnessRevision] = useState(0);
 
   const retry = () => {
     setRunId((n) => n + 1);
@@ -122,6 +131,7 @@ export default function ScenePage() {
     setSelectedObjectId(null);
     setCaptionPos({});
     setWitnessPanel(null);
+    setWitnessRevision(0);
     setStatus({ status: "no-token" });
   };
 
@@ -219,7 +229,21 @@ export default function ScenePage() {
     }
     const outcome = await session.askWitness(witnessId, questionType);
     if (outcome.ok) {
-      if (!outcome.cached) setHasInteracted(true);
+      if (!outcome.cached) {
+        setHasInteracted(true);
+        const playthroughId = getPlaythroughId();
+        if (playthroughId) {
+          saveWitnessStatements(
+            playthroughId,
+            session.witnessesSnapshot(),
+            session.askedWitnessStatementsSnapshot(),
+          );
+        }
+        // `askWitness` has just appended to its asked-statement cache. Force
+        // the route to re-read that cache even when this neutral answer did
+        // not change knowledge/model state and hasInteracted was already true.
+        setWitnessRevision((revision) => revision + 1);
+      }
       if (outcome.record !== null) {
         // Reuse the existing record/panel mechanics: the discovery record
         // opens the evidence panel (no object context — the witness is the
@@ -340,6 +364,12 @@ export default function ScenePage() {
     void session.start(canvas).then((outcome) => {
       if (cancelled) return;
       if (outcome.ok) {
+        // Neutral answers create no server knowledge row. Restore only the
+        // bounded answers that this player already saw, after the authenticated
+        // bootstrap established the allowlisted witness identities.
+        session.restoreAskedWitnessStatements(
+          loadWitnessStatements(playthroughId, session.witnessesSnapshot()),
+        );
         sessionRef.current = session;
         setStatus({ status: "ready", model: outcome.model });
         setSceneStatus("ready");
@@ -453,6 +483,7 @@ export default function ScenePage() {
   // hydration forces a re-derivation (groups catch up without a reload).
   const session = sessionRef.current;
   void notebookRev; // re-derive when the lazy record hydration lands
+  void witnessRevision; // re-derive after the session's asked-answer cache grows
   const notebookModel =
     status.status === "ready" && session !== null
       ? buildNotebookModel({

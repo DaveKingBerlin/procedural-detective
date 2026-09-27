@@ -56,7 +56,8 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
       asserts: ``ENVIRONMENT=production``, ``PD_DEV_TRACE=false``,
       ``TRUST_PROXY=true`` for the Caddy ingress profile (a ``.env`` that
       overrides with dev values FAILS with a clear message), the P-02 timeout
-      envelope (frontend 360s > backend deadline; proxy 420s > frontend), Docker
+      envelope from the canonical backend validator (provider profile,
+      per-call timeout, total deadline, frontend and proxy bounds), Docker
       log bounds on both public services, the backend port is never publicly
       published (``expose`` only, no ``ports:``), the Ollama port ``11434`` is
       never a published host port, and the production frontend bundle uses the
@@ -99,6 +100,8 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from backend.app.core.timeout_envelope import timeout_envelope_violations
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = _SCRIPT_DIR.parent
@@ -1102,7 +1105,10 @@ def check_prod_env_profile(repo_root: Path) -> list[Finding]:
         (``ENVIRONMENT=production``, ``PD_DEV_TRACE=false``,
         ``TRUST_PROXY=true``) and never carries a dev-only value
         (``ENVIRONMENT=development`` / ``TRUST_PROXY=false`` / ``PD_DEV_TRACE=true``
-        as an ACTIVE assignment).
+        as an ACTIVE assignment);
+      - both examples explicitly carry the canonical supported real-Ollama
+        timeout profile, even though fake/demo remains their safe default
+        generation provider.
     """
     problems: list[str] = []
 
@@ -1127,6 +1133,20 @@ def check_prod_env_profile(repo_root: Path) -> list[Finding]:
         ]
     dev = _read_env_file(repo_root, _ENV_EXAMPLE_DEV)
     prod = _read_env_file(repo_root, _ENV_EXAMPLE_PROD)
+
+    for profile_name, profile in ((".env.example", dev), (".env.production.example", prod)):
+        timeout_problems = timeout_envelope_violations(
+            generation_provider="ollama",
+            generation_deadline_seconds=profile.get(
+                "CASE_GENERATION_DEADLINE_SECONDS"
+            ),
+            provider_timeout_seconds=profile.get("OLLAMA_TIMEOUT_SECONDS"),
+        )
+        if timeout_problems:
+            problems.append(
+                f"{profile_name} does not declare the supported real-Ollama "
+                "timeout profile: " + " ".join(timeout_problems)
+            )
 
     if dev_path.is_file() and dev:
         if dev.get("ENVIRONMENT") != "development":
@@ -1175,7 +1195,8 @@ def check_prod_env_profile(repo_root: Path) -> list[Finding]:
             "TRUST_PROXY=false) and .env.production.example is the PRODUCTION "
             "profile (ENVIRONMENT=production, PD_DEV_TRACE=false, TRUST_PROXY=true "
             "behind the Caddy edge), with no dev-only value in the production "
-            "example",
+            "example; both examples declare the canonical real-Ollama timeout "
+            "profile",
         )
     ]
 
@@ -1393,10 +1414,11 @@ def check_prod_effective_config(
       - ``ENVIRONMENT=production`` and ``PD_DEV_TRACE=false``; the Caddy profile
         requires ``TRUST_PROXY=true`` while an unverified alternate ingress
         requires the safe ``TRUST_PROXY=false`` default;
-      - P-02 timeout envelope: backend deadline
-        (``CASE_GENERATION_DEADLINE_SECONDS`` effective) < FRONTEND request
-        timeout (``frontend/src/api/client.ts`` ``REQUEST_TIMEOUT_MS``) < proxy
-        timeout (``docker/Caddyfile`` ``response_header_timeout``);
+      - P-02 timeout envelope: the canonical backend policy validates the
+        rendered provider, provider-call timeout and generation deadline plus
+        the FRONTEND request timeout (``frontend/src/api/client.ts``
+        ``REQUEST_TIMEOUT_MS``) and proxy timeout (``docker/Caddyfile``
+        ``response_header_timeout``);
       - rendered Docker log bounds json-file 10m x 5 on BOTH public services;
       - the backend port is NEVER publicly published, no service publishes the
         Ollama port 11434, and the backend mounts a declared volume at ``/data``;
@@ -1456,13 +1478,12 @@ def check_prod_effective_config(
     backend_env = _rendered_environment(backend)
     caddy_env = _rendered_environment(caddy)
 
-    # The backend Settings default is 60 seconds when the rendered container
-    # environment does not explicitly set the deadline.
-    deadline_raw = backend_env.get("CASE_GENERATION_DEADLINE_SECONDS") or "60"
-    try:
-        deadline = int(float(deadline_raw))
-    except (TypeError, ValueError):
-        deadline = -1  # unparseable -> fail-closed below
+    # Timeout inputs come ONLY from the authoritative Compose render. The
+    # production Compose declares them explicitly, so a missing value is a
+    # fail-closed deployment defect rather than an implicit runtime default.
+    provider_name = backend_env.get("GENERATION_PROVIDER")
+    deadline_raw = backend_env.get("CASE_GENERATION_DEADLINE_SECONDS")
+    provider_timeout_raw = backend_env.get("OLLAMA_TIMEOUT_SECONDS")
 
     client_ts = client_ts_path or (repo_root / "frontend" / "src" / "api" / "client.ts")
     frontend_timeout = 0
@@ -1523,34 +1544,23 @@ def check_prod_effective_config(
             )
         )
 
-    # 2. P-02 timeout envelope: deadline < frontend < proxy.
-    if deadline < 0:
-        findings.append(
-            Finding(
-                "prod-effective-config", "fail",
-                "rendered CASE_GENERATION_DEADLINE_SECONDS is unparseable; "
-                "the P-02 envelope cannot be verified "
-                "(fail closed)",
-            )
+    # 2. P-02 timeout envelope. Runtime Settings and deployment preflight share
+    # this exact pure validator, preventing policy drift between code paths.
+    timeout_problems = timeout_envelope_violations(
+        generation_provider=provider_name,
+        generation_deadline_seconds=deadline_raw,
+        provider_timeout_seconds=provider_timeout_raw,
+        frontend_timeout_seconds=frontend_timeout,
+        proxy_timeout_seconds=proxy_timeout,
+    )
+    findings.extend(
+        Finding(
+            "prod-effective-config",
+            "fail",
+            f"rendered timeout envelope is unsupported: {problem}",
         )
-    elif frontend_timeout <= 0:
-        findings.append(
-            Finding(
-                "prod-effective-config", "fail",
-                "frontend request timeout could not be read from "
-                "frontend/src/api/client.ts (REQUEST_TIMEOUT_MS) — envelope "
-                "cannot be verified (fail closed)",
-            )
-        )
-    elif deadline >= frontend_timeout:
-        findings.append(
-            Finding(
-                "prod-effective-config", "fail",
-                f"backend generation deadline ({deadline}s) is NOT below the "
-                f"frontend request timeout ({frontend_timeout}s) — the browser "
-                "can abort a request the backend still allows (P-02 envelope)",
-            )
-        )
+        for problem in timeout_problems
+    )
     if ingress_profile == "alternate":
         findings.append(
             Finding(
@@ -1560,24 +1570,6 @@ def check_prod_effective_config(
                 "publishes Caddy and does not describe the exact selected-service "
                 "startup or external edge; TRUST_PROXY remains false, and the "
                 "alternate deployment requires separate verification (fail closed)",
-            )
-        )
-    elif proxy_timeout <= 0:
-        findings.append(
-            Finding(
-                "prod-effective-config", "fail",
-                "reverse-proxy timeout could not be read from docker/Caddyfile "
-                "(response_header_timeout) — envelope cannot be verified "
-                "(fail closed)",
-            )
-        )
-    elif frontend_timeout > 0 and proxy_timeout <= frontend_timeout:
-        findings.append(
-            Finding(
-                "prod-effective-config", "fail",
-                f"reverse-proxy timeout ({proxy_timeout}s) is NOT above the "
-                f"frontend request timeout ({frontend_timeout}s) — the TLS edge "
-                "can abort before the browser (P-02 envelope)",
             )
         )
 
@@ -1690,8 +1682,7 @@ def check_prod_effective_config(
                 "effective production configuration validated (fail-closed): "
                 "ENVIRONMENT=production, PD_DEV_TRACE=false, "
                 f"TRUST_PROXY={expected_trust_proxy} ({ingress_profile} ingress), "
-                f"deadline {deadline}s < frontend {frontend_timeout}s "
-                f"< proxy {proxy_timeout}s, log bounds present, backend private, "
+                "canonical timeout envelope valid, log bounds present, backend private, "
                 "no published Ollama port, persistent data volume present, "
                 "same-origin production bundle"
             )
