@@ -915,6 +915,83 @@ def check_dockerignore(repo_root: Path) -> list[Finding]:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 24 §46 — credential / token / key / password leak scan in TRACKED files
+# --------------------------------------------------------------------------- #
+
+# High-precision token/key/password markers that never belong in a tracked
+# release surface. The set is deliberately conservative (documented examples
+# and hermetic test vectors stay free of these exact markers). The scan
+# enforces PRECISELY the literal vectors below — no more, no less:
+#   - PEM private key blocks (``-----BEGIN ... PRIVATE KEY-----`` for
+#     RSA / EC / DSA / OPENSSH / PGP and the plain form);
+#   - an OpenAI-style API key: ``sk-`` + 20+ alphanumerics;
+#   - the classic GitHub PAT prefix ``ghp_`` + 36+ characters;
+#   - the GitLab PAT prefix ``glpat-`` + 20+ alphanumerics/``_``/``-``;
+#   - the AWS access-key prefix ``AKIA`` + 16 uppercase alphanumerics;
+#   - the HashiCorp Vault/HCP token prefix ``hvs.`` + 20+ characters.
+# Generic KEY/PASSWORD assignment heuristics and git-host PAT spellings other
+# than the two prefixes above are deliberately NOT part of this vector set.
+_TOKEN_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
+    (
+        "PEM private key",
+        re.compile(
+            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |)PRIVATE KEY-----",
+            re.IGNORECASE,
+        ),
+    ),
+    ("OpenAI-style API key (sk-)", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
+    ("GitHub PAT", re.compile(r"\bghp_[A-Za-z0-9]{36,}\b")),
+    ("GitLab PAT", re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b")),
+    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("Vault/HCP token", re.compile(r"\bhvs\.[A-Za-z0-9._\-]{20,}\b")),
+)
+
+
+def scan_credentials(repo_root: Path, tracked: list[str]) -> list[Finding]:
+    """Phase 24 §46 — fail on committed tokens/private keys/passwords.
+
+    Scans the same tracked textual release surface as ``scan_private_endpoints``
+    (sanctioned example files + hermetic test vectors are excluded the same
+    way) for high-precision credential markers. A highly-unlikely-but-real
+    committed key/token must block a release even when no ``.env`` is tracked.
+    """
+    if tracked is None:
+        return [
+            Finding(
+                "credentials", "fail",
+                "cannot enumerate tracked files (git ls-files failed) — "
+                "fail-closed: cannot prove the tree is credential-free",
+            )
+        ]
+    targets = _interface_scan_targets(repo_root, tracked)
+    findings: list[Finding] = []
+    for rel, path in targets:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            for label, pattern in _TOKEN_PATTERNS:
+                if pattern.search(line):
+                    findings.append(
+                        Finding(
+                            "credentials", "fail",
+                            f"{rel}:{number}: {label} literal in the tracked "
+                            "release surface (§46)",
+                        )
+                    )
+    if not findings:
+        findings.append(
+            Finding(
+                "credentials", "ok",
+                "no PEM private key / provider API-key / git-host PAT / AWS "
+                "access-key / Vault token literal in the tracked release surface",
+            )
+        )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
 # Phase 21 F-04 — bounded container stdout logs in the PROD compose profile
 # --------------------------------------------------------------------------- #
 
@@ -1223,6 +1300,31 @@ def _render_prod_compose_config(
     Errors are deliberately sanitized because the rendered model may contain
     provider credentials from the service ``env_file``.
     """
+    return _render_compose_config(
+        repo_root, [compose], env_file=env_file, runner=runner
+    )
+
+
+def _render_compose_config(
+    repo_root: Path,
+    composes: list[Path],
+    *,
+    env_file: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> dict[str, object]:
+    """Return Docker Compose's effective model of ONE overlay chain as JSON.
+
+    ``composes`` is the ordered ``-f`` file list (first = base, later files =
+    overlays), exactly like the real invocation. Phase 24 uses it for the CI
+    profile (``docker-compose.yml`` + ``docker-compose.ci.yml``); the
+    production profile stays on the single-file path above.
+
+    Compose remains the ONLY interpolation authority — including the shell and
+    the selected ``--env-file`` — so a shell/timeout override that bypasses a
+    gate here also changes the render this helper validates.
+    """
+    if not composes:
+        raise _ComposeRenderError("docker compose config: no compose files")
     invoke = runner or subprocess.run
     command = [
         "docker",
@@ -1232,7 +1334,9 @@ def _render_prod_compose_config(
     ]
     if env_file is not None:
         command.extend(["--env-file", str(env_file.resolve())])
-    command.extend(["-f", str(compose), "config", "--format", "json"])
+    for compose in composes:
+        command.extend(["-f", str(compose)])
+    command.extend(["config", "--format", "json"])
 
     try:
         completed = invoke(
@@ -1691,6 +1795,198 @@ def check_prod_effective_config(
 
 
 # --------------------------------------------------------------------------- #
+# Phase 24 §9/§38 — CI (docker-smoke) rendered-compose validation
+# --------------------------------------------------------------------------- #
+
+# The CI deterministic overlay: base dev compose + the docker-compose.ci.yml
+# overlay (Phase 24). Both stay single-origin on the same backend service.
+_CI_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.ci.yml")
+# The CI deterministic profile env file (documented under compose/profiles/).
+_CI_PROFILE_ENV = "compose/profiles/ci.env"
+# Phase 24 §8: the CI deterministic profile must stay fake + bridge-disabled so
+# every normal push/MR pipeline is hermetic and offline.
+_CI_PROFILE_PROVIDER = "fake"
+_CI_PROFILE_BRIDGE = "false"
+
+
+def check_ci_compose_config(
+    repo_root: Path,
+    *,
+    compose_paths: tuple[Path, ...] | None = None,
+    compose_env_file: Path | None = None,
+    compose_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    client_ts_path: Path | None = None,
+    caddyfile_path: Path | None = None,
+) -> list[Finding]:
+    """Phase 24 §9/§38 — fail-closed gate over the RENDERED CI compose chain.
+
+    Renders the CI deterministic profile (``docker-compose.yml`` +
+    ``docker-compose.ci.yml`` with ``compose/profiles/ci.env``) through Docker
+    Compose itself — the shell/``--env-file`` interpolation is authoritative,
+    so a shell override that would evade the gate ALSO changes the render that
+    is validated here (same design as ``check_prod_effective_config``). Asserts:
+
+      - the CI profile is deterministically fake + bridge-disabled
+        (GENERATION_PROVIDER=fake, ENABLE_BRIDGE=false);
+      - the canonical P-02 timeout envelope (through the SAME backend
+        ``timeout_envelope_violations`` validator used by production preflight
+        and the runtime adopt-path) — no CI-only timeout semantics;
+      - bounded json-file 10m x 5 logging on the single smoke service (§44);
+      - the backend port 8000 is published ONLY for the local smoke job and the
+        Ollama port 11434 is NEVER published (§5);
+      - the persistent ``pd-data`` volume stays mounted at /data (§6).
+
+    The CI smoke uses a LOCAL/TEST CADDY_DOMAIN for the prod-like profile; this
+    check covers the dev/CI-side stack. Production preflight
+    (``tools.prod_preflight``) still rejects placeholder domains and remains the
+    strict ready-to-host verdict.
+    """
+    files = list(compose_paths) if compose_paths else [
+        (repo_root / name).resolve() for name in _CI_COMPOSE_FILES
+    ]
+    if not all(path.is_file() for path in files):
+        return [
+            Finding(
+                "ci-compose-config", "skip",
+                "CI compose chain not present (" + ", ".join(str(p) for p in files)
+                + ") — the CI rendered-config gate applies only when the "
+                "docker-compose.ci.yml overlay exists (deployment artifact check)",
+            )
+        ]
+    env_file = compose_env_file
+    if env_file is None:
+        profile = (repo_root / _CI_PROFILE_ENV).resolve()
+        env_file = profile if profile.is_file() else None
+
+    try:
+        rendered = _render_compose_config(
+            repo_root.resolve(), files, env_file=env_file, runner=compose_runner
+        )
+    except _ComposeRenderError as exc:
+        return [
+            Finding(
+                "ci-compose-config", "fail",
+                f"{exc}; the rendered CI deterministic configuration was not "
+                "validated (fail closed, §9/§38)",
+            )
+        ]
+
+    service = _rendered_service(rendered, "procedural-detective")
+    if service is None:
+        return [
+            Finding(
+                "ci-compose-config", "fail",
+                "rendered CI configuration is missing the backend service "
+                "(fail closed, §9/§38)",
+            )
+        ]
+    env = _rendered_environment(service)
+    findings: list[Finding] = []
+
+    provider = env.get("GENERATION_PROVIDER")
+    bridge = env.get("ENABLE_BRIDGE")
+    if provider != _CI_PROFILE_PROVIDER:
+        findings.append(
+            Finding(
+                "ci-compose-config", "fail",
+                f"rendered CI GENERATION_PROVIDER is {provider!r}; the CI "
+                f"deterministic profile requires {_CI_PROFILE_PROVIDER!r} so "
+                "every ordinary pipeline stays hermetic and offline (§8)",
+            )
+        )
+    if bridge != _CI_PROFILE_BRIDGE:
+        findings.append(
+            Finding(
+                "ci-compose-config", "fail",
+                f"rendered CI ENABLE_BRIDGE is {bridge!r}; the CI deterministic "
+                f"profile requires {_CI_PROFILE_BRIDGE!r} (§8/§15)",
+            )
+        )
+
+    # Canonical P-02 timeout envelope — the SAME pure validator runtime +
+    # production preflight share. Rendered values only, never a CI-specific
+    # copy of the semantics.
+    client_ts = client_ts_path or (repo_root / "frontend" / "src" / "api" / "client.ts")
+    frontend_timeout = 0
+    if client_ts.is_file():
+        try:
+            m = re.search(r"REQUEST_TIMEOUT_MS\s*=\s*(\d+)",
+                          client_ts.read_text(encoding="utf-8", errors="replace"))
+            if m:
+                frontend_timeout = int(m.group(1)) // 1000
+        except OSError:
+            pass
+    caddyfile = caddyfile_path or (repo_root / "docker" / "Caddyfile")
+    proxy_timeout = 0
+    if caddyfile.is_file():
+        try:
+            m = re.search(r"response_header_timeout\s+(\d+)\s*s",
+                          caddyfile.read_text(encoding="utf-8", errors="replace"))
+            if m:
+                proxy_timeout = int(m.group(1))
+        except OSError:
+            pass
+    timeout_problems = timeout_envelope_violations(
+        generation_provider=str(provider),
+        generation_deadline_seconds=env.get("CASE_GENERATION_DEADLINE_SECONDS"),
+        provider_timeout_seconds=env.get("OLLAMA_TIMEOUT_SECONDS"),
+        frontend_timeout_seconds=frontend_timeout,
+        proxy_timeout_seconds=proxy_timeout,
+    )
+    findings.extend(
+        Finding(
+            "ci-compose-config", "fail",
+            f"rendered CI timeout envelope is unsupported: {problem} (§9)",
+        )
+        for problem in timeout_problems
+    )
+
+    log_problem = _rendered_log_bounds_problem("procedural-detective", service)
+    if log_problem:
+        findings.append(
+            Finding("ci-compose-config", "fail", f"{log_problem} (§44)")
+        )
+
+    if _rendered_port_targets(service) and "11434" in _rendered_port_targets(service):
+        findings.append(
+            Finding(
+                "ci-compose-config", "fail",
+                "the CI stack must never publish the Ollama port 11434 (§5)",
+            )
+        )
+    services = rendered.get("services")
+    if isinstance(services, dict):
+        for other in services.values():
+            if isinstance(other, dict) and "11434" in _rendered_port_targets(other):
+                findings.append(
+                    Finding(
+                        "ci-compose-config", "fail",
+                        "the CI stack renders a published Ollama port 11434 (§5)",
+                    )
+                )
+                break
+    if not _has_private_data_volume(rendered, service):
+        findings.append(
+            Finding(
+                "ci-compose-config", "fail",
+                "the CI stack has no declared named volume mounted at /data (§6)",
+            )
+        )
+
+    if not any(f.severity == "fail" for f in findings):
+        findings.append(
+            Finding(
+                "ci-compose-config", "ok",
+                "rendered CI deterministic configuration validated (fail-closed, "
+                "§9/§38): GENERATION_PROVIDER=fake, ENABLE_BRIDGE=false, canonical "
+                "timeout envelope valid, bounded logs, no published Ollama port, "
+                "persistent /data volume",
+            )
+        )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
 # orchestration
 # --------------------------------------------------------------------------- #
 
@@ -1715,12 +2011,14 @@ def run_all(
     findings.extend(check_third_party(repo_root))
     findings.extend(check_tracked_secrets(tracked))
     findings.extend(scan_private_endpoints(repo_root, tracked))
+    findings.extend(scan_credentials(repo_root, tracked))
     findings.extend(check_dockerignore(repo_root))
     findings.extend(check_compose_logging_bounds(repo_root))
     findings.extend(check_prod_env_profile(repo_root))
     findings.extend(
         check_prod_effective_config(repo_root, allow_local=prod_allow_local)
     )
+    findings.extend(check_ci_compose_config(repo_root))
     findings.extend(scan_frontend_build(frontend_dir))
     return findings
 

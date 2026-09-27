@@ -75,8 +75,63 @@ describe("resolveApiBaseUrl (PD-SEC-04 — same-origin API base)", () => {
     expect(resolveApiBaseUrl("https://detective.example.com/api/v1")).toBe("https://detective.example.com/api/v1");
   });
 
+  /* ==================================================================
+   * Phase 24 §45 — an injected hostile override must NEVER point the
+   * browser at Ollama (:11434) or a private/loopback/LAN/docker-host
+   * endpoint; every such value falls back to the same-origin root.
+   * ================================================================== */
+
+  it("refuses every Ollama service endpoint (:11434) with the same-origin fallback", () => {
+    expect(resolveApiBaseUrl("http://localhost:11434")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://localhost:11434/api/v1")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://127.0.0.1:11434")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://10.0.0.7:11434")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://192.168.1.9:11434")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://172.16.5.2:11434")).toBe("/api/v1");
+  });
+
+  it("refuses private/loopback/LAN host overrides even on a non-Ollama port", () => {
+    expect(resolveApiBaseUrl("http://127.0.0.1:8000")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://10.1.2.3:8080")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://192.168.1.50:8080")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://172.31.0.1:8000")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://host.docker.internal:8000")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://host.docker.internal")).toBe("/api/v1");
+  });
+
+  it("still honors the documented localhost:8000 dev override and public origins (no over-reach)", () => {
+    expect(resolveApiBaseUrl("http://localhost:8000")).toBe("http://localhost:8000");
+    expect(resolveApiBaseUrl("https://detective.example.com")).toBe("https://detective.example.com");
+    expect(resolveApiBaseUrl("https://detective.example.com:443")).toBe("https://detective.example.com:443");
+  });
+
+  /* ==================================================================
+   * ADV-003 — DNS hostnames are case-insensitive, so the guard MUST
+   * case-fold the captured host before comparing: `LOCALHOST` still
+   * resolves to loopback, but the documented dev override stays the
+   * pinned port ONLY — case variants of the Ollama service port, other
+   * local ports, and private/loopback/docker-host names stay REFUSED
+   * under ANY casing.
+   * ================================================================== */
+
+  it("case-folds the host so case variants can never smuggle a private endpoint (ADV-003)", () => {
+    // The documented local-dev override still works case-insensitively:
+    expect(resolveApiBaseUrl("http://LOCALHOST:8000")).toBe("http://LOCALHOST:8000");
+    // …but the audited Ollama service port stays refused under any casing:
+    expect(resolveApiBaseUrl("http://LOCALHOST:11434")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://LocalHost:11434")).toBe("/api/v1");
+    // …another undocumented local port stays refused:
+    expect(resolveApiBaseUrl("http://LOCALHOST:9999")).toBe("/api/v1");
+    // …loopback IP stays refused even on the documented dev port:
+    expect(resolveApiBaseUrl("http://127.0.0.1:8000")).toBe("/api/v1");
+    // …and the docker-host alias stays refused under any casing:
+    expect(resolveApiBaseUrl("http://HOST.DOCKER.INTERNAL:8000")).toBe("/api/v1");
+    expect(resolveApiBaseUrl("http://Host.Docker.Internal:11434")).toBe("/api/v1");
+  });
+
   it("rejects garbage / non-http(s) overrides with the same-origin safe fallback", () => {
     expect(resolveApiBaseUrl("localhost:8000")).toBe("/api/v1"); // bare host, no scheme
+    expect(resolveApiBaseUrl("localhost:11434")).toBe("/api/v1"); // bare Ollama host, no scheme
     expect(resolveApiBaseUrl("ftp://localhost:8000")).toBe("/api/v1"); // non-http scheme
     expect(resolveApiBaseUrl("http://")).toBe("/api/v1"); // no host
     expect(resolveApiBaseUrl("http:///path")).toBe("/api/v1");

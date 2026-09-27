@@ -259,3 +259,5 @@ tmp/
 
 # Optional runtime lifecycle logs
 logs/
+
+.tmp/

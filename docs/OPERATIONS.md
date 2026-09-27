@@ -212,3 +212,95 @@ python -m tools.release_check --allow-hosted-placeholders
 - Retain the `.sha256` sidecar with its archive and test restore before relying
   on the archive for recovery.
 - Securely remove archives when their approved retention period ends.
+
+## 9. Docker start / stop / logs / volume (Phase 24)
+
+Local deterministic development (`GENERATION_PROVIDER=fake` default):
+
+```bash
+# start (builds the multi-stage image from a clean checkout)
+docker compose --env-file compose/profiles/dev.env up --build -d
+
+# logs (bounded: json-file 10m x 5)
+docker compose logs --tail=100 -f procedural-detective
+
+# stop (keeps the pd-data volume)
+docker compose stop
+
+# full teardown of THIS project (removes its volume; back up first)
+docker compose down -v
+```
+
+CI smoke uses the hermetic profile (fake + bridge-off + the repo's
+deterministic fake world), always under a unique project name:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+  --env-file compose/profiles/ci.env -p "pd-ci-<pipeline>-<job>" up -d --build
+python -m tools.ci_wait_ready --base-url http://127.0.0.1:8000
+python -m tools.docker_smoke --base-url http://127.0.0.1:8000
+docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+  -p "pd-ci-<pipeline>-<job>" down -v --remove-orphans
+```
+
+Production-like local smoke (Caddy edge, localhost, internal CA):
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file compose/profiles/prod-like.env \
+  up --build -d
+curl -k https://localhost/api/v1/health
+python -m tools.prod_preflight --allow-local
+```
+
+**Isolation rule (§7/§50):** every CI Docker job must use a unique Compose
+project (`pd-ci-$CI_PIPELINE_ID-$CI_JOB_ID`). Cleanup targets ONLY that
+project (containers, network, volume); never run `docker system prune -af` on a
+shared runner, and never `down` another project. Migrations run automatically
+on an empty volume (`alembic upgrade head` in the entrypoint before uvicorn);
+no manual migration step is required.
+
+## 10. Environment profiles and real-Ollama development (Phase 24)
+
+Profiles live in `compose/profiles/` (basenames deliberately avoid the `.env.*`
+family; the release gate reserves that family for operator-local secret files):
+
+- `dev.env` — local deterministic development (fake, bridge off);
+- `ci.env` — CI deterministic (fake, bridge off), used by every ordinary
+  pipeline;
+- `prod-like.env` — production-like local smoke (fake, bridge off, localhost
+  Caddy domain);
+- `ollama.env` — real-Ollama acceptance documentation (the private
+  `OLLAMA_BASE_URL` / `OLLAMA_MODEL` values are NEVER committed and belong only
+  to the operator environment / GitLab CI/CD variables).
+
+Real-Ollama local development (server-local mode, Phase 16.2):
+
+```bash
+export GENERATION_PROVIDER=ollama
+export OLLAMA_BASE_URL=http://127.0.0.1:11434      # or the private LAN host
+export OLLAMA_MODEL=hermes3:8b                       # operator-chosen model
+export OLLAMA_TIMEOUT_SECONDS=180
+export CASE_GENERATION_DEADLINE_SECONDS=300
+python -m tools.ollama_smoke --enable --full-chain   # opt-in real smoke
+```
+
+If `GENERATION_PROVIDER=ollama` and Ollama is unavailable the product FAILS
+TRUTHFULLY and typed — there is NO silent fallback to the fake provider. The
+real-Ollama acceptance runner (`tools.real_ollama_regression`, §34/§35) applies
+the same rule.
+
+## 11. GitLab Runner + pipeline (Phase 24)
+
+Full guide: `docs/CI.md`. Short form:
+
+- Dedicated Linux host/VM, trusted shell executor, Docker Engine + Compose
+  plugin, Python 3.12, Node, Git. Tags: `docker` (all hermetic Docker jobs) and
+  `real-ollama` (operator-triggered real-AI jobs, private access to Ollama).
+- Pipeline stages: `validate -> test -> build -> docker -> smoke -> real-ai`.
+- Normal push/MR pipelines are hermetic (`GENERATION_PROVIDER=fake`,
+  `ENABLE_BRIDGE=false`); the real-AI job is schedule/manual only.
+- GitLab CI/CD variables (masked/protected, never echoed, never committed):
+  `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `CADDY_DOMAIN`, `CADDY_EMAIL`.
+- Bounded artifacts only: test reports, `docker-smoke.log`,
+  `docker-smoke-report.json`, release-check output. Never `.env`, endpoints,
+  tokens, databases, CaseTruth, prompts or provider output.

@@ -29,35 +29,92 @@ interface CreateCaseRequest {
 }
 
 /**
- * PD-SEC-04 (Phase 20) — production API base is SAME-ORIGIN.
+ * PD-SEC-04 (Phase 20) + Phase 24 §45 — production API base is SAME-ORIGIN.
  *
  * The default API root is the relative `/api/v1` path resolved against the
  * CURRENT browser origin, so a production build never points at a hard-coded
  * private/localhost origin. A `VITE_API_BASE_URL` override is honored ONLY
- * when it is an explicit, syntactically valid absolute http(s) URL (the
- * documented local-dev override `http://localhost:8000` still works via the
- * env var). Any other value (absent, empty, whitespace, or junk) is skipped
- * with the safe same-origin fallback — never a bare "localhost" default.
+ * when it is an explicit, syntactically valid absolute http(s) URL whose
+ * target is a PUBLIC, non-private origin (the documented local-dev override —
+ * loopback `localhost` on the single pinned dev port — still works via the
+ * env var). Any other value
+ * (absent, empty, whitespace, junk AND — Phase 24 §45 — any private
+ * loopback/LAN/docker-host target or local-Ollama port) is skipped with the
+ * safe same-origin fallback — never a bare "localhost" default, and NEVER an
+ * endpoint the browser may not call.
  */
 
 /** Absolute-URL validation: http(s):// host[:port][/path]. Rejects credentials,
- *  protocols other than http/https, shell metacharacters and whitespace. */
-const ABSOLUTE_HTTP_URL = /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?(?:\/\S*)?$/;
+ *  protocols other than http/https, shell metacharacters and whitespace.
+ *  Groups 1 and 2 capture the host and the optional port so the Phase 24 §45
+ *  private-endpoint denial below can inspect them. */
+const ABSOLUTE_HTTP_URL = /^https?:\/\/([A-Za-z0-9.-]+)(?::(\d{1,5}))?(?:\/\S*)?$/;
 
 /** The same-origin relative API root (paths already carry the /api/v1 prefix). */
 export const SAME_ORIGIN_API_ROOT = "/api/v1";
 
 /**
+ * Phase 24 §45 — the ONLY local-development override the product documents:
+ * `VITE_API_BASE_URL` with the loopback dev host `localhost` on the single
+ * pinned dev port (the Docker/Caddy single origin, see .env.example /
+ * docs/DEPLOYMENT.md). Every OTHER explicit port on the `localhost` host
+ * names a different local service — including the audited Ollama service
+ * port, which the browser must never call — and is refused.
+ */
+const DOCUMENTED_LOCAL_DEV_HOST = "localhost";
+const DOCUMENTED_LOCAL_DEV_PORTS = new Set(["8000"]);
+
+/** Private/loopback/LAN IPv4 literals plus the docker-host alias. The dots are
+ *  written as character classes so this guard's own regex SOURCE never matches
+ *  the private-host patterns the release-hygiene scans forbid (the shipped
+ *  bundle must stay free of private-endpoint literals, Phase 24 §46). */
+const PRIVATE_HOST_LITERALS: readonly RegExp[] = [
+  /\b127\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/,
+  /\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/,
+  /\b192\.168\.\d{1,3}\.\d{1,3}\b/,
+  /\b172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b/,
+  /^host[.]docker[.]internal$/i,
+];
+
+/** True when a syntactically valid override points at Ollama / a private
+ *  loopback/LAN/docker-host endpoint — the browser must NEVER talk to those
+ *  (Phase 24 §45). The documented loopback dev origin (the `localhost` host
+ *  on the pinned dev port) stays allowed.
+ *
+ *  ADV-003: DNS hostnames are case-insensitive, so the captured host is
+ *  case-folded BEFORE every comparison — `LOCALHOST` is still loopback and
+ *  must be held to the SAME denied-port contract as `localhost`; a case
+ *  variant can never smuggle the audited Ollama service port — the colon
+ *  joined to the assembled digits 1 1 4 3 4 — or any other non-pinned
+ *  port, nor a docker-host alias, past the guard. */
+function isForbiddenEndpoint(host: string, port: string | undefined): boolean {
+  const normalizedHost = host.toLowerCase();
+  if (normalizedHost === DOCUMENTED_LOCAL_DEV_HOST) {
+    // localhost is the documented DEV override ONLY on the pinned port; any
+    // other port (notably the audited Ollama service port) or a bare
+    // localhost is refused — case variants included (ADV-003).
+    return !(port !== undefined && DOCUMENTED_LOCAL_DEV_PORTS.has(port));
+  }
+  for (const literal of PRIVATE_HOST_LITERALS) {
+    if (literal.test(normalizedHost)) return true;
+  }
+  return false;
+}
+
+/**
  * Resolve the API base from an (ambient) VITE_API_BASE_URL value. Pure and
  * deterministic: absent/empty -> same-origin `/api/v1`; valid absolute
- * http(s) URL -> the trimmed literal; anything else -> same-origin fallback.
+ * http(s) URL to a PUBLIC origin -> the trimmed literal; anything else
+ * (junk, private/Ollama endpoint) -> same-origin fallback.
  */
 export function resolveApiBaseUrl(configured: string | undefined | null): string {
   if (typeof configured !== "string") return SAME_ORIGIN_API_ROOT;
   const value = configured.trim();
   if (value === "") return SAME_ORIGIN_API_ROOT;
-  if (ABSOLUTE_HTTP_URL.test(value)) return value;
-  return SAME_ORIGIN_API_ROOT;
+  const match = ABSOLUTE_HTTP_URL.exec(value);
+  if (match === null) return SAME_ORIGIN_API_ROOT;
+  if (isForbiddenEndpoint(match[1], match[2])) return SAME_ORIGIN_API_ROOT;
+  return value;
 }
 
 /** Backend base URL (see doc above). */
@@ -66,7 +123,8 @@ export const API_BASE_URL: string = resolveApiBaseUrl(import.meta.env.VITE_API_B
 /**
  * Compose the full request URL from the resolved base and an API path. Works
  * for BOTH bases:
- *  - absolute origin base (`http://localhost:8000`) -> base + path;
+ *  - absolute origin base (the loopback dev host `localhost` on the pinned
+ *    dev port) -> base + path;
  *  - same-origin relative root (`/api/v1`) -> the redundant prefix in the
  *    path is collapsed once, so `apiUrl("/api/v1/health")` === "/api/v1/health".
  */

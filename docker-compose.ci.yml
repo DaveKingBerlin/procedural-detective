@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# Procedural Detective — CI DETERMINISTIC overlay (Phase 24).
+#
+# OVERLAY FILE — extend the development compose, never a parallel stack:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+#     -p "pd-ci-$CI_PIPELINE_ID-$CI_JOB_ID" up -d --build
+#
+# What it adds on top of the dev compose:
+#   1. Hermetic CI determinism — GENERATION_PROVIDER=fake + ENABLE_BRIDGE=false
+#      are EXPLICIT (never inherited from a developer's environment); timeout
+#      envelope pinned to the canonical 300/180 profile.
+#   2. The Phase 24 docker-smoke fake world (compose/fake-worlds/
+#      ci-activity-log-world.json) is bind-mounted READ-ONLY and selected via
+#      FAKE_PROVIDER_SCRIPT=... so the smoke can discover/read the golden
+#      ACTIVITY_LOG record over the wire (§13). The mount is read-only and
+#      contains only deterministic demo data — no secrets.
+#   3. Bounded container logging (json-file 10m x 5) so the CI smoke never
+#      ships unbounded logs (§44), and the artifacts (docker-smoke.log) stay
+#      bounded.
+#
+# ISOLATION (§7/§50): use a UNIQUE project name per job (the gitlab job sets
+# -p "pd-ci-..."). Every resource created by this stack (containers, network,
+# volume) is project-scoped; `down -v --remove-orphans` removes ONLY this
+# job's resources. This stack alone must never run `docker system prune`.
+#
+# This file is always safe to diff/review: no secrets, no private endpoints,
+# no real provider configuration.
+# ---------------------------------------------------------------------------
+
+services:
+  # The server container. `build: .` is inherited from docker-compose.yml —
+  # this overlay only re-pins the environment for a hermetic CI smoke.
+  procedural-detective:
+    environment:
+      GENERATION_PROVIDER: ${GENERATION_PROVIDER:-fake}
+      ENABLE_BRIDGE: ${ENABLE_BRIDGE:-false}
+      # Canonical Phase 19J-RI2 timeout envelope (docs/DEPLOYMENT.md §16) —
+      # the SAME 300/180 numbers the production compose declares.
+      CASE_GENERATION_DEADLINE_SECONDS: ${CASE_GENERATION_DEADLINE_SECONDS:-300}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-180}
+      # Deterministic CI fake world (read-only mount below): the golden case
+      # with the laptop re-linked to the golden ACTIVITY_LOG record.
+      FAKE_PROVIDER_SCRIPT: /app/ci_fake_world.json
+    volumes:
+      - ./compose/fake-worlds/ci-activity-log-world.json:/app/ci_fake_world.json:ro
+    # F-04/§44: bounded container stdout for the smoke job (identical policy
+    # to the production compose json-file 10m x 5).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# The `pd-data` volume is inherited from docker-compose.yml and is therefore
+# project-scoped per CI job (`-p` above), so a job can never touch another
+# job's volume.
