@@ -149,9 +149,10 @@ export class InvestigationSession {
   /**
    * Phase 23 — in-memory ASKED witness statements, keyed by
    * witnessQuestionKey(witnessId, questionType). This is cosmetic session
-   * state (idempotent re-ask, panel + notebook dedupe). Statements that
-   * discovered evidence ALSO flow into `records`/`knowledge`, so they survive
-   * a reload via the server while the store itself is never persisted.
+   * state (idempotent re-ask, panel + notebook dedupe). The route may restore
+   * an allowlisted player-known cache after bootstrap validation; that cache
+   * never creates knowledge/evidence. Statements that discovered evidence
+   * ALSO flow into authoritative `records`/`knowledge`.
    */
   private readonly askedStatements = new Map<string, AskedWitnessStatement>();
 
@@ -457,11 +458,10 @@ export class InvestigationSession {
    *
    * The ONLY browser request is POST .../witnesses/{id}/interview with a
    * closed question type. Ids come exclusively from the player-safe bootstrap
-   * list. Statements are stored in-memory (idempotent re-ask; no duplicate
-   * button state / notebook line, no re-POST); statements that DISCOVERED
-   * evidence ALSO flow into the existing records cache + knowledge snapshot,
-   * so the notebook re-derives them after a reload from the server-persisted
-   * discovery (never from a client-side statement store).
+   * list. Statements are cached in-session (idempotent re-ask; no duplicate
+   * button state / notebook line, no re-POST) and the route may restore its
+   * bounded player-known cache after reload. Statements that DISCOVERED
+   * evidence ALSO flow into the authoritative records/knowledge path.
    * ==================================================================== */
 
   /** Snapshot of the player-safe witness list (empty on pre-23 servers). */
@@ -506,6 +506,26 @@ export class InvestigationSession {
   /** All asked statements (the notebook "Witness statements" source). */
   askedWitnessStatementsSnapshot(): AskedWitnessStatement[] {
     return [...this.askedStatements.values()];
+  }
+
+  /**
+   * Restore player-known interview answers after reload. Only witnesses from
+   * the current validated bootstrap and closed question types are accepted;
+   * restored answers never mutate records, knowledge, solver state or reveal.
+   */
+  restoreAskedWitnessStatements(statements: readonly AskedWitnessStatement[]): void {
+    const witnesses = new Map(this.witnessesValue.map((witness) => [witness.witnessId, witness]));
+    for (const statement of statements) {
+      const witness = witnesses.get(statement.witnessId);
+      if (!witness || !WITNESS_QUESTION_ORDER.includes(statement.questionType)) continue;
+      this.askedStatements.set(witnessQuestionKey(statement.witnessId, statement.questionType), {
+        witnessId: statement.witnessId,
+        displayName: witness.displayName,
+        questionType: statement.questionType,
+        statement: statement.statement,
+        evidenceId: null,
+      });
+    }
   }
 
   /** True when this (witness, question) was already answered this session. */

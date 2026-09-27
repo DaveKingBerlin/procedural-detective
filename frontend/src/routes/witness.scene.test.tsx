@@ -199,6 +199,7 @@ function questionButton(container: HTMLElement, questionType: string): HTMLButto
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   holders.bootstrap = makeWitnessBootstrap();
   holders.lastOnPick = null;
   mounted = mountScene();
@@ -384,6 +385,41 @@ describe("Phase 23 — interview question flow on /scene", () => {
     expect(lines).toHaveLength(1);
   });
 
+  it("refreshes answered state and notebook after a neutral answer when the scene was already interacted with", async () => {
+    await flushAsync();
+    await waitForReady(mounted!.container);
+
+    // Reproduce the live journey: an ordinary object inspection already set
+    // hasInteracted=true before the witness interview began.
+    click(mounted!.container, '[data-testid="object-apartment_lamp"]');
+    await flushAsync();
+    expect(
+      mounted!.container.querySelector('[data-testid="object-inspected-apartment_lamp"]'),
+    ).not.toBeNull();
+
+    click(mounted!.container, `[data-testid="witness-${EMILY_WITNESS_ID}"]`);
+    await flushAsync();
+    click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+    await flushAsync();
+    expect(interviewWitness).toHaveBeenCalledTimes(1);
+    expect(
+      mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+    ).toBe("No. Nothing stood out to me.");
+
+    click(mounted!.container, '[data-testid="witness-ask-another"]');
+    await flushAsync();
+
+    expect(
+      mounted!.container.querySelector('[data-testid="witness-question-OBSERVATION-asked"]'),
+    ).not.toBeNull();
+    const witnessLines = mounted!.container
+      .querySelector('[data-testid="notebook-group-witness-statements-list"]')!
+      .querySelectorAll("li");
+    expect(witnessLines).toHaveLength(1);
+    expect(witnessLines[0].textContent).toContain("What did you see?");
+    expect(witnessLines[0].textContent).toContain("No. Nothing stood out to me.");
+  });
+
   it("a NEUTRAL answer renders cleanly: no evidence panel, no discovery strip, no notebook line", async () => {
     await flushAsync();
     await waitForReady(mounted!.container);
@@ -434,6 +470,52 @@ describe("Phase 23 — interview question flow on /scene", () => {
     // No statement content leaked into the Witnesses buttons (names only).
     const witnessesSection = mounted!.container.querySelector('[data-testid="witnesses"]')!;
     expect(witnessesSection.textContent).not.toContain("heavy impact");
+  });
+
+  it("RELOAD persistence: six neutral answers survive without replaying interview requests or fabricating evidence", async () => {
+    await flushAsync();
+    await waitForReady(mounted!.container);
+    click(mounted!.container, `[data-testid="witness-${LISA_WITNESS_ID}"]`);
+    await flushAsync();
+
+    const questionTypes = ["OBSERVATION", "TIME", "SOUND", "PERSON", "OBJECT", "LOCATION"];
+    for (const [index, questionType] of questionTypes.entries()) {
+      click(mounted!.container, `[data-testid="witness-question-${questionType}"]`);
+      await flushAsync();
+      if (index < questionTypes.length - 1) {
+        click(mounted!.container, '[data-testid="witness-ask-another"]');
+        await flushAsync();
+      }
+    }
+    expect(interviewWitness).toHaveBeenCalledTimes(6);
+    expect(
+      mounted!.container
+        .querySelector('[data-testid="notebook-group-witness-statements-list"]')!
+        .querySelectorAll("li"),
+    ).toHaveLength(6);
+    expect(mounted!.container.querySelector('[data-testid^="discovered-entry-"]')).toBeNull();
+
+    mounted!.unmount();
+    mounted = mountScene();
+    await flushAsync();
+    await waitForReady(mounted!.container);
+
+    // Reload is a local, player-known re-derivation: no interview replay and
+    // no server knowledge/evidence is fabricated.
+    expect(interviewWitness).toHaveBeenCalledTimes(6);
+    const restoredLines = mounted!.container
+      .querySelector('[data-testid="notebook-group-witness-statements-list"]')!
+      .querySelectorAll("li");
+    expect(restoredLines).toHaveLength(6);
+    expect(mounted!.container.querySelector('[data-testid^="discovered-entry-"]')).toBeNull();
+
+    click(mounted!.container, `[data-testid="witness-${LISA_WITNESS_ID}"]`);
+    await flushAsync();
+    for (const questionType of questionTypes) {
+      expect(
+        mounted!.container.querySelector(`[data-testid="witness-question-${questionType}-asked"]`),
+      ).not.toBeNull();
+    }
   });
 
   it("a witness without a scene object still formats the panel from the remote entry", () => {
