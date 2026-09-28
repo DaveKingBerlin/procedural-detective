@@ -98,10 +98,13 @@ REQUIREMENTS.md
 build
 dist
 
+# ---- Phase 24: pytest/cache artefacts never enter the build context ----
+# Local pytest caches (backend\.pytest_cache — "Zugriff verweigert" with a
+# locked cache during Windows Docker acceptance) and Python bytecode must
+# never reach a builder/daemon/build cache (PD-SEC-07 hardens the same
+# boundary as the .env exclusions above).
 .pytest_cache/
 **/.pytest_cache/
 
 **/__pycache__/
 **/*.pyc
-.pytest_cache/
-**/.pytest_cache/

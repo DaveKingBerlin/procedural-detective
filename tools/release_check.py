@@ -75,6 +75,15 @@ is not a production-deployment root must not be gate-blocked. When the files
 ARE present the checks still fail-closed on every asserted violation
 (dev overrides, placeholder domains, unbounded logs, published ports, ...).
 
+Phase24A-FP adds the ``base-compose-config`` gate over the BASE dev profile
+(``docker-compose.yml`` alone, rendered with an EMPTY env file): a clean
+checkout must run ``docker compose up --build`` with GENERATION_PROVIDER=fake
+and NO provider-specific variable required/hardcoded in the base env block
+(OLLAMA_BASE_URL / OLLAMA_MODEL arrive only via ``env_file: .env`` / operator
+overlays / GitLab CI variables), and the base profile must never inject
+LLM_API_KEY / LLM_MODEL / LIVE_PROVIDER_URL as EMPTY strings (Settings rejects
+them — the first Phase 24 Docker acceptance defect).
+
 Exit code: 0 ONLY when every non-optional check passes (with
 ``--allow-hosted-placeholders``, hosting/video-only placeholders and
 query-gated debug-aid tokens are REPORTED separately and never fail the run).
@@ -97,6 +106,7 @@ import ipaddress
 import json
 import re
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1987,6 +1997,157 @@ def check_ci_compose_config(
 
 
 # --------------------------------------------------------------------------- #
+# Phase 24A-FP — BASE dev compose render gate (clean-checkout contract)
+# --------------------------------------------------------------------------- #
+
+# The BASE dev compose alone: the profile a CLEAN CHECKOUT runs with
+# `docker compose up --build` and GENERATION_PROVIDER=fake (no operator .env,
+# no OLLAMA_BASE_URL anywhere). It must render on its own and must never
+# REQUIRE or HARDCODE provider-specific variables (they arrive ONLY via
+# env_file: .env and/or operator overlays / GitLab CI variables).
+_BASE_COMPOSE_FILE = "docker-compose.yml"
+
+# Provider-specific settings that must NEVER be injected as EMPTY strings by
+# the base fake/ollama-capable profile (Phase24A-FP item C). The backend
+# Settings validator rejects them (LIVE_PROVIDER_URL="" broke the container),
+# so the base checks the RENDERED model for these EXACT keys holding "" —
+# values legitimately configured by an operator .env / overlay are fine.
+_FORBIDDEN_EMPTY_PROVIDER_ENV_KEYS = ("LLM_API_KEY", "LLM_MODEL", "LIVE_PROVIDER_URL")
+
+
+def check_base_compose_config(
+    repo_root: Path,
+    *,
+    compose_path: Path | None = None,
+    compose_env_file: Path | None = None,
+    compose_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> list[Finding]:
+    """Phase 24A-FP — fail-closed gate over the RENDERED BASE dev compose.
+
+    Renders ``docker-compose.yml`` ALONE through Docker Compose with an EMPTY
+    ``--env-file`` (a clean checkout has no operator ``.env`` for
+    interpolation), exactly like ``check_ci_compose_config`` renders its chain
+    through the authoritative Compose engine. Asserts:
+
+      - the base profile renders successfully WITHOUT a required
+        OLLAMA_BASE_URL / OLLAMA_MODEL (Phase24A-FP R1): provider-specific
+        variables must not be required or hardcoded in the base env block, or
+        both `docker compose up --build` on a clean checkout AND this gate die
+        at interpolation;
+      - the rendered environment never carries LLM_API_KEY / LLM_MODEL /
+        LIVE_PROVIDER_URL as EMPTY strings (the original Phase 24 acceptance
+        defect 2) — Settings rejects them; values configured by an operator
+        ``.env`` / overlay are legitimate and pass;
+      - the canonical Phase 19J-RI2 timeout envelope (300/180 defaults) is
+        valid for the rendered provider profile (same pure validator as the
+        CI and production gates).
+
+    Like the other compose gates this never prints a rendered value — only
+    key names and verdicts.
+    """
+    files = [(compose_path or (repo_root / _BASE_COMPOSE_FILE)).resolve()]
+    if not files[0].is_file():
+        return [
+            Finding(
+                "base-compose-config", "skip",
+                f"{_BASE_COMPOSE_FILE} not present in this document tree — "
+                "the base dev-compose render gate applies only when the dev "
+                "compose exists",
+            )
+        ]
+    env_file = compose_env_file
+    cleanup: Path | None = None
+    if env_file is None:
+        # A truly EMPTY env file: interpolation must succeed with no provider
+        # variables at all — the clean-checkout contract (a local operator
+        # .env would only be consulted via env_file: below, subject to the
+        # empty-string assertion).
+        tmp = tempfile.TemporaryDirectory(prefix="pd-base-compose-")
+        env_file = Path(tmp.name) / "empty.env"
+        env_file.write_text("", encoding="utf-8")
+        cleanup = Path(tmp.name)
+
+    try:
+        try:
+            rendered = _render_compose_config(
+                repo_root.resolve(), files, env_file=env_file, runner=compose_runner
+            )
+        finally:
+            if cleanup is not None:
+                # rmtree keeps the temporary empty env file off the tree.
+                import shutil
+
+                shutil.rmtree(cleanup, ignore_errors=True)
+    except _ComposeRenderError as exc:
+        return [
+            Finding(
+                "base-compose-config", "fail",
+                f"{exc}; the base dev profile must render WITHOUT any required "
+                "provider-specific variable (OLLAMA_BASE_URL / OLLAMA_MODEL are "
+                "operator-injected via env_file/overlays only, never required "
+                "or hardcoded in the base compose — Phase24A-FP R1)",
+            )
+        ]
+
+    service = _rendered_service(rendered, "procedural-detective")
+    if service is None:
+        return [
+            Finding(
+                "base-compose-config", "fail",
+                "rendered base configuration is missing the backend service "
+                "(fail closed)",
+            )
+        ]
+    env = _rendered_environment(service)
+    findings: list[Finding] = []
+
+    empty_injected = [
+        key for key in _FORBIDDEN_EMPTY_PROVIDER_ENV_KEYS
+        if env.get(key, "\x00") == ""
+    ]
+    if empty_injected:
+        findings.append(
+            Finding(
+                "base-compose-config", "fail",
+                "the base dev profile injects provider settings as EMPTY "
+                "strings: " + ", ".join(empty_injected)
+                + " — Settings rejects them (original Phase 24 acceptance "
+                "defect 2); they must stay UNSET unless the operator really "
+                "configures them",
+            )
+        )
+
+    # Canonical P-02 timeout envelope over the RENDERED values (same pure
+    # validator the CI/production gates and the runtime share).
+    timeout_problems = timeout_envelope_violations(
+        generation_provider=env.get("GENERATION_PROVIDER", ""),
+        generation_deadline_seconds=env.get("CASE_GENERATION_DEADLINE_SECONDS"),
+        provider_timeout_seconds=env.get("OLLAMA_TIMEOUT_SECONDS"),
+    )
+    findings.extend(
+        Finding(
+            "base-compose-config",
+            "fail",
+            f"rendered base timeout envelope is unsupported: {problem}",
+        )
+        for problem in timeout_problems
+    )
+
+    if not any(f.severity == "fail" for f in findings):
+        findings.append(
+            Finding(
+                "base-compose-config", "ok",
+                "rendered base dev profile validated (fail-closed): renders "
+                "cleanly with an empty env file (no required/hardcoded "
+                "OLLAMA_BASE_URL / OLLAMA_MODEL), no empty-string provider "
+                "settings (LLM_API_KEY / LLM_MODEL / LIVE_PROVIDER_URL), "
+                "canonical timeout envelope valid",
+            )
+        )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
 # orchestration
 # --------------------------------------------------------------------------- #
 
@@ -2019,6 +2180,7 @@ def run_all(
         check_prod_effective_config(repo_root, allow_local=prod_allow_local)
     )
     findings.extend(check_ci_compose_config(repo_root))
+    findings.extend(check_base_compose_config(repo_root))
     findings.extend(scan_frontend_build(frontend_dir))
     return findings
 
