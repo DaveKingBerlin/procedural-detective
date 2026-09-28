@@ -1114,3 +1114,42 @@ def test_http_bridge_routes_404_when_disabled(database_url):
     assert status.status_code == 404
     app_disabled.state.engine.dispose()
     app_disabled.state.store.dispose()
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    (
+        ("GET", "/api/v1/bridge/pairing"),
+        ("POST", "/api/v1/bridge/pairing"),
+        ("PUT", "/api/v1/bridge/x"),
+        ("PATCH", "/api/v1/bridge/x"),
+        ("DELETE", "/api/v1/bridge/x"),
+        ("GET", "/api/v1/bridge"),
+        ("POST", "/api/v1/bridge"),
+    ),
+)
+def test_http_bridge_routes_404_when_disabled_with_static_dir(
+    database_url, tmp_path, method, path
+):
+    from app.main import create_app as _create_app
+    from fastapi.testclient import TestClient
+
+    upgrade_db(database_url)
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
+    app_disabled = _create_app(
+        Settings(
+            database_url=database_url,
+            enable_bridge=False,
+            static_dir=static_dir,
+        )
+    )
+    with TestClient(app_disabled) as client:
+        response = client.request(method, path)
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {"code": "NOT_FOUND", "message": "Not found", "details": None}
+    }
+    app_disabled.state.engine.dispose()
+    app_disabled.state.store.dispose()

@@ -68,6 +68,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from app.api.v1 import api_router
+from app.api.v1.errors import http_error
 from app.core.config import SERVICE_NAME, SERVICE_VERSION, Settings
 from app.core.observability import (
     configure_logging,
@@ -781,6 +782,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         )
         app.include_router(bridge_rest_router)
         app.include_router(bridge_ws_router)
+    else:
+        # The production SPA GET catch-all would otherwise make non-GET bridge
+        # requests look like method mismatches (405). Keep the disabled bridge
+        # HTTP surface uniformly absent for every documented method instead.
+        @app.api_route(
+            "/api/v1/bridge",
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+            include_in_schema=False,
+        )
+        @app.api_route(
+            "/api/v1/bridge/{bridge_path:path}",
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+            include_in_schema=False,
+        )
+        async def bridge_disabled_http() -> None:
+            raise http_error(404, "NOT_FOUND", "Not found")
+
     _configure_static_serving(app, settings)
     register_exception_handlers(app)
     return app
