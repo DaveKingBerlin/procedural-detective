@@ -261,6 +261,26 @@ export function getGenerationCapabilities(): Promise<GenerationCapabilitiesRespo
   return request<GenerationCapabilitiesResponse>("/api/v1/generation-capabilities");
 }
 
+/**
+ * GET {base}/api/v1/generation-capabilities WITH the anonymous-session bearer
+ * (Phase 24 P0 §2).
+ *
+ * Same public endpoint as {@link getGenerationCapabilities}, but scoped when
+ * the caller presents a valid anonymous session: the backend then reports THAT
+ * session's truthful `remoteLocalAi.connected` (a session that paired the
+ * bridge shows connected). The unauthenticated default call stays untouched
+ * for every other consumer — an anonymous caller keeps seeing connected:false,
+ * the backend's INTENTIONAL cross-session isolation (never weakened here).
+ */
+export function getGenerationCapabilitiesWithSession(
+  anonymousSessionToken: string,
+): Promise<GenerationCapabilitiesResponse> {
+  return authedRequest<GenerationCapabilitiesResponse>(
+    "/api/v1/generation-capabilities",
+    anonymousSessionToken,
+  );
+}
+
 /* ======================================================================
  * Phase 6 investigation endpoints (frozen contract).
  *

@@ -19,6 +19,15 @@ Locks the four Phase 24A-FP outcomes WITHOUT a Docker daemon:
      ``backend/.pytest_cache``, nested ``__pycache__`` dirs and ``*.pyc`` files
      (the original acceptance defect 1 — "Zugriff verweigert") while keeping
      real source files (``backend/app/main.py``).
+  5. F-3 LAN-overlay guard (Phase 22–24 bridge fix): ``check_lan_overlay_config``
+     derives the internal-TLS mode from the RENDERED model (the ``caddy``
+     service mounts ``docker/Caddyfile.internal`` at ``/etc/caddy/Caddyfile``)
+     and FAILS when that LAN overlay is combined with a public-looking
+     ``CADDY_DOMAIN`` (the public name would be served from Caddy's INTERNAL CA
+     — browsers/bridge reject it). The guard is ADDITIVE: a single-label LAN
+     host still fails ``_caddy_domain_problem`` in both modes, the canonical
+     prod compose + public domain stays ready-to-host unchanged, and explicit
+     local-smoke hostnames (localhost / .local / .localhost) are not blocked.
 
 No Docker daemon, no network, no live stack: compose ``config`` renders use the
 local Compose engine when present (the same CLI the release gate runs) or an
@@ -31,6 +40,8 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from tools import release_check
 
@@ -300,3 +311,558 @@ def test_run_all_includes_base_compose_gate() -> None:
     assert not [f for f in findings if f.severity == "fail"], [
         f.render() for f in findings
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 24 §9 — Caddy local-LAN TLS mechanism (Caddyfile.internal overlay)
+# --------------------------------------------------------------------------- #
+
+CADDY_CANONICAL = REPO_ROOT / "docker" / "Caddyfile"
+CADDY_INTERNAL = REPO_ROOT / "docker" / "Caddyfile.internal"
+COMPOSE_PROD = REPO_ROOT / "docker-compose.prod.yml"
+COMPOSE_LAN = REPO_ROOT / "docker-compose.lan.yml"
+_COMPOSE_LAN_MARKER = "docker/Caddyfile.internal:/etc/caddy/Caddyfile:ro"
+_COMPOSE_PROD_MARKER = "./docker/Caddyfile:/etc/caddy/Caddyfile:ro"
+
+
+def _compose_cli_available() -> bool:
+    import shutil
+
+    if shutil.which("docker") is None:
+        return False
+    probe = subprocess.run(
+        ["docker", "compose", "version"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
+def test_caddy_canonical_has_no_tls_internal_internal_variant_has_it() -> None:
+    """Phase 24 §9 — the canonical public Caddyfile must NEVER carry
+    `tls internal` (public deployments keep Caddy's normal public ACME), while
+    the `.internal` LAN variant DOES."""
+    canonical = CADDY_CANONICAL.read_text(encoding="utf-8")
+    internal = CADDY_INTERNAL.read_text(encoding="utf-8")
+    assert "tls internal" not in canonical
+    assert "tls internal" in internal
+
+
+def test_caddy_internal_is_byte_copy_plus_tls_internal() -> None:
+    """The `.internal` variant is a byte-copy of the canonical file with `tls
+    internal` added exactly once inside the site block — so a drift in the
+    canonical (timeouts, ports, headers) must be mirrored to the LAN variant or
+    this assertion fails."""
+    canonical = CADDY_CANONICAL.read_bytes()
+    internal = CADDY_INTERNAL.read_bytes()
+    assert internal.count(b"tls internal") == 1
+    # Internal minus the tls internal line == the canonical file bytes.
+    without = internal.replace(b"\ttls internal\n\n", b"", 1)
+    without = without.replace(b"\ttls internal\n", b"", 1)
+    assert without == canonical, "Caddyfile.internal drifted from the canonical file"
+
+
+def test_caddy_prod_compose_never_references_internal_and_lan_override_does() -> None:
+    """The production compose does NOT reference the internal file; the LAN
+    override DOES reference it; and the canonical prod compose still mounts the
+    PUBLIC Caddyfile at the container Caddy path."""
+    prod = COMPOSE_PROD.read_text(encoding="utf-8")
+    lan = COMPOSE_LAN.read_text(encoding="utf-8")
+    assert "Caddyfile.internal" not in prod
+    assert _COMPOSE_LAN_MARKER in lan
+    assert _COMPOSE_PROD_MARKER in prod  # public Caddyfile stays the prod mount
+    # The override only specifies the caddy mount (no other service keys).
+    assert "procedural-detective" not in lan.split("services:")[1].split("caddy:")[0]
+
+
+def test_caddy_lan_overlay_real_render_swaps_mount() -> None:
+    """Compose render (no daemon, `config` only): `-f docker-compose.prod.yml
+    -f docker-compose.lan.yml` renders the caddy service with Caddyfile.internal
+    mounted at /etc/caddy/Caddyfile, while the prod-only render keeps the
+    canonical public Caddyfile — everything else (backend ports/networks) is
+    inherited."""
+    if not _compose_cli_available():
+        pytest.skip("Docker Compose CLI is unavailable")
+    empty = Path(__file__).parent / ".tmp-empty-caddy.env"
+    empty.write_text("", encoding="utf-8")
+    try:
+        rendered_lan = release_check._render_compose_config(
+            REPO_ROOT,
+            [COMPOSE_PROD.resolve(), COMPOSE_LAN.resolve()],
+            env_file=empty,
+        )
+        rendered_prod = release_check._render_compose_config(
+            REPO_ROOT, [COMPOSE_PROD.resolve()], env_file=empty
+        )
+    finally:
+        empty.unlink(missing_ok=True)
+
+    def _caddy_mounts(doc: dict) -> list[tuple[str, str]]:
+        caddy = (doc.get("services") or {}).get("caddy") or {}
+        out: list[tuple[str, str]] = []
+        for mount in caddy.get("volumes") or []:
+            if isinstance(mount, dict):
+                out.append((str(mount.get("source") or ""), str(mount.get("target") or "")))
+        return out
+
+    lan_mounts = _caddy_mounts(rendered_lan)
+    assert any("Caddyfile.internal" in src and tgt == "/etc/caddy/Caddyfile"
+               for src, tgt in lan_mounts), lan_mounts
+    prod_mounts = _caddy_mounts(rendered_prod)
+    assert any("Caddyfile" in src and "internal" not in src and tgt == "/etc/caddy/Caddyfile"
+               for src, tgt in prod_mounts), prod_mounts
+    # Both renders keep the same backend service shape (inherited, not a
+    # parallel deployment system).
+    for doc in (rendered_lan, rendered_prod):
+        backend = (doc.get("services") or {}).get("procedural-detective") or {}
+        assert isinstance(backend.get("environment"), dict)
+        assert not backend.get("ports"), "backend must stay private (no host ports)"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 24 §12 — rendered compose regression checks (remote_client profile)
+# --------------------------------------------------------------------------- #
+
+_PD_EMPTY_ENV = ""
+
+
+def _write_env(tmp_path: Path, content: str) -> Path:
+    path = tmp_path / "profile.env"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_section12_base_and_ci_empty_env_render_no_ollama_vars() -> None:
+    """`docker compose -f docker-compose.yml --env-file <empty> config` and the
+    CI overlay chain render deterministic clean defaults (fake / bridge off) and
+    NEVER render OLLAMA_BASE_URL / OLLAMA_MODEL / a published 11434."""
+    if not _compose_cli_available():
+        pytest.skip("Docker Compose CLI is unavailable")
+    empty = Path(__file__).parent / ".tmp-empty-s12.env"
+    empty.write_text(_PD_EMPTY_ENV, encoding="utf-8")
+    try:
+        base = release_check._render_compose_config(
+            REPO_ROOT, [REPO_ROOT / "docker-compose.yml"], env_file=empty
+        )
+        ci = release_check._render_compose_config(
+            REPO_ROOT,
+            [REPO_ROOT / "docker-compose.yml", REPO_ROOT / "docker-compose.ci.yml"],
+            env_file=empty,
+        )
+    finally:
+        empty.unlink(missing_ok=True)
+
+    for label, doc in (("base", base), ("ci", ci)):
+        backend = release_check._rendered_service(doc, "procedural-detective")
+        assert backend is not None
+        env = release_check._rendered_environment(backend)
+        assert env.get("GENERATION_PROVIDER") == "fake", (label, env)
+        assert env.get("ENABLE_BRIDGE") == "false", (label, env)
+        raw = json.dumps(doc)
+        assert "OLLAMA_BASE_URL" not in raw, label
+        assert "OLLAMA_MODEL" not in raw, label
+        assert "11434" not in raw, label
+
+
+def test_section12_prod_remote_client_profile_never_given_ollama_vars(
+    tmp_path: Path,
+) -> None:
+    """§12 INPUT profile that intentionally sets remote_client+true: the
+    rendered PRODUCTION compose resolves GENERATION_PROVIDER=remote_client while
+    OLLAMA_BASE_URL / OLLAMA_MODEL never appear, Caddy publishes 80/443, the
+    backend has no host :8000, and no service publishes :11434."""
+    if not _compose_cli_available():
+        pytest.skip("Docker Compose CLI is unavailable")
+    profile = _write_env(
+        tmp_path,
+        "GENERATION_PROVIDER=remote_client\nENABLE_BRIDGE=true\n",
+    )
+    rendered = release_check._render_prod_compose_config(
+        REPO_ROOT, (REPO_ROOT / "docker-compose.prod.yml").resolve(),
+        env_file=profile,
+    )
+    backend = release_check._rendered_service(rendered, "procedural-detective")
+    caddy = release_check._rendered_service(rendered, "caddy")
+    assert backend is not None and caddy is not None
+    env = release_check._rendered_environment(backend)
+    assert env.get("GENERATION_PROVIDER") == "remote_client", env
+    # The RUNNING backend for a remote_client deployment is never given Ollama
+    # provider vars (Level-0 constraint: no OLLAMA_BASE_URL/OLLAMA_MODEL).
+    raw = json.dumps(rendered)
+    assert "OLLAMA_BASE_URL" not in raw
+    assert "OLLAMA_MODEL" not in raw
+    # Caddy publishes 80/443; backend never publishes host :8000.
+    caddy_ports = release_check._rendered_port_targets(caddy)
+    assert "80" in caddy_ports and "443" in caddy_ports, caddy_ports
+    assert release_check._rendered_port_targets(backend) == [], (
+        release_check._rendered_port_targets(backend)
+    )
+    exposes = backend.get("expose")
+    assert isinstance(exposes, list) and "8000" in {str(item) for item in exposes}
+    # No service publishes :11434.
+    services = rendered.get("services")
+    assert isinstance(services, dict)
+    for service in services.values():
+        if isinstance(service, dict):
+            assert "11434" not in release_check._rendered_port_targets(service)
+
+
+def test_section12_prod_source_never_references_ollama_vars() -> None:
+    """Source-level pin (no daemon): `docker-compose.prod.yml` and the LAN
+    overlay never interpolate OLLAMA_BASE_URL / OLLAMA_MODEL, so a remote_client
+    (BYO-Ollama bridge) deployment can never carry Ollama env vars."""
+    prod = COMPOSE_PROD.read_text(encoding="utf-8")
+    lan = COMPOSE_LAN.read_text(encoding="utf-8")
+    for text in (prod, lan):
+        for token in ("${OLLAMA_BASE_URL", "${OLLAMA_MODEL", "OLLAMA_BASE_URL:", "OLLAMA_MODEL:"):
+            assert token not in text, token
+
+
+# --------------------------------------------------------------------------- #
+# Phase 24 F-3 — LAN overlay (`tls internal`) must never serve a PUBLIC name
+# --------------------------------------------------------------------------- #
+
+# The certified chain an operator who deployed the LAN overlay passes to the
+# preflight (`--compose-overlay docker-compose.lan.yml`, mirroring --env-file).
+_LAN_CHAIN = (REPO_ROOT / "docker-compose.prod.yml", COMPOSE_LAN)
+
+
+def _lan_prod_body(domain: str, *, lan: bool = True) -> dict:
+    """A canned RENDERED prod-config model; ``lan`` controls whether the caddy
+    service mounts the INTERNAL Caddyfile (LAN overlay applied -> ``tls
+    internal``) or the canonical PUBLIC Caddyfile (default production edge)."""
+    return {
+        "services": {
+            "procedural-detective": {
+                "environment": {
+                    "ENVIRONMENT": "production",
+                    "PD_DEV_TRACE": "false",
+                    "TRUST_PROXY": "true",
+                    "GENERATION_PROVIDER": "ollama",
+                    "CASE_GENERATION_DEADLINE_SECONDS": "300",
+                    "OLLAMA_TIMEOUT_SECONDS": "180",
+                },
+                "expose": ["8000"],
+                "logging": {
+                    "driver": "json-file",
+                    "options": {"max-size": "10m", "max-file": "5"},
+                },
+                "volumes": [
+                    {"type": "volume", "source": "pd-data", "target": "/data"}
+                ],
+            },
+            "caddy": {
+                "environment": {
+                    "CADDY_DOMAIN": domain,
+                    "CADDY_EMAIL": "operator@example.com",
+                },
+                "logging": {
+                    "driver": "json-file",
+                    "options": {"max-size": "10m", "max-file": "5"},
+                },
+                "ports": [
+                    {"target": 80, "published": "80"},
+                    {"target": 443, "published": "443"},
+                ],
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": (
+                            "./docker/Caddyfile.internal"
+                            if lan
+                            else "./docker/Caddyfile"
+                        ),
+                        "target": "/etc/caddy/Caddyfile",
+                        "read_only": True,
+                    }
+                ],
+            },
+        },
+        "volumes": {"pd-data": {"name": "project_pd-data"}},
+    }
+
+
+def _lan_body_runner(body: dict):
+    def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return _render(body)
+
+    return runner
+
+
+def _check_prod(body: dict, *, allow_local: bool = False) -> list[release_check.Finding]:
+    return release_check.check_prod_effective_config(
+        REPO_ROOT,
+        allow_local=allow_local,
+        compose_runner=_lan_body_runner(body),
+        frontend_dir=REPO_ROOT / "__phase24_f3_missing_dist__",
+    )
+
+
+def test_lan_overlay_detection_from_rendered_model() -> None:
+    """The guard derives the internal-TLS mode from the RENDERED model (the
+    caddy volume mount), NOT from a source-file string match."""
+    assert release_check._lan_overlay_rendered(_lan_prod_body("localhost", lan=True))
+    assert not release_check._lan_overlay_rendered(_lan_prod_body("localhost", lan=False))
+    # No caddy service in the model -> not the LAN mode (fail-closed skip later).
+    assert not release_check._lan_overlay_rendered({"services": {}})
+
+
+def test_lan_overlay_public_fqdn_fails_guard() -> None:
+    """F-3 requirement (1) — the new-gate regression: a public FQDN passes the
+    existing ``_caddy_domain_problem`` syntax gate (no CADDY_DOMAIN finding), so
+    BEFORE this fix NOTHING caught that the LAN overlay would serve it from the
+    INTERNAL CA. The new guard FAILS the combination when the certified chain is
+    prod + the LAN overlay."""
+    domain = "detective.procedural-game.dev"
+    assert release_check._caddy_domain_problem(domain) == (None, False)
+    findings = release_check.check_lan_overlay_config(
+        REPO_ROOT,
+        compose_paths=_LAN_CHAIN,
+        compose_runner=_lan_body_runner(_lan_prod_body(domain, lan=True)),
+    )
+    fails = [f for f in findings if f.severity == "fail"]
+    assert any(
+        f.check == "lan-overlay-config" and "INTERNAL CA" in f.message
+        for f in fails
+    ), [f.render() for f in findings]
+    # The public FQDN in the CANONICAL (non-LAN) render still has no finding.
+    canonical = _check_prod(_lan_prod_body(domain, lan=False))
+    assert not [f for f in canonical if f.severity == "fail"], [
+        f.render() for f in canonical
+    ]
+
+
+def test_lan_overlay_public_example_domain_still_reports_fail() -> None:
+    """F-3 requirement (1) with the finding's example name: LAN overlay +
+    ``detective.example.com`` reports a FAIL — the existing ready-to-host gate
+    rejects the RESERVED example domain (and the LAN guard adds no second
+    failure for a name that can never be certified)."""
+    body = _lan_prod_body("detective.example.com", lan=True)
+    lan_findings = release_check.check_lan_overlay_config(
+        REPO_ROOT,
+        compose_paths=_LAN_CHAIN,
+        compose_runner=_lan_body_runner(body),
+    )
+    assert not [f for f in lan_findings if f.severity == "fail"], [
+        f.render() for f in lan_findings
+    ]
+    prod_findings = _check_prod(body)
+    fails = [f for f in prod_findings if f.severity == "fail"]
+    assert any("CADDY_DOMAIN" in f.message for f in fails), [
+        f.render() for f in prod_findings
+    ]
+    # The domain VALUE stays sanitized everywhere.
+    for f in lan_findings + prod_findings:
+        assert "detective.example.com" not in f.message
+
+
+def test_lan_overlay_single_label_still_fails_in_plain_and_allow_local() -> None:
+    """F-3 requirement (2) — the guard is ADDITIVE: ``Enshrouded-Server``
+    (single label, no dot) still FAILS the existing ``_caddy_domain_problem``
+    gate in BOTH plain and ``--allow-local`` modes even when the LAN overlay
+    render is in scope; the new guard itself reports ok (it only owns the
+    public-domain combination)."""
+    problem, explicit_local = release_check._caddy_domain_problem("Enshrouded-Server")
+    assert problem is not None
+    assert explicit_local is False  # single-label is NOT an explicit local smoke
+    body = _lan_prod_body("Enshrouded-Server", lan=True)
+    for allow_local in (False, True):
+        findings = _check_prod(body, allow_local=allow_local)
+        fails = [f for f in findings if f.severity == "fail"]
+        assert any("CADDY_DOMAIN" in f.message for f in fails), (
+            allow_local, [f.render() for f in findings]
+        )
+        assert all("Enshrouded-Server" not in f.message for f in findings), (
+            "domain value must stay sanitized"
+        )
+    lan_findings = release_check.check_lan_overlay_config(
+        REPO_ROOT,
+        compose_paths=_LAN_CHAIN,
+        compose_runner=_lan_body_runner(body),
+    )
+    assert not [f for f in lan_findings if f.severity == "fail"], [
+        f.render() for f in lan_findings
+    ]
+
+
+def test_canonical_prod_compose_public_domain_no_new_finding() -> None:
+    """F-3 requirement (3) — canonical prod compose (NO LAN overlay) + public
+    domain stays ready-to-host unchanged: the effective-config gate passes and
+    the LAN guard reports ok (overlay not in effect)."""
+    body = _lan_prod_body("detective.procedural-game.dev", lan=False)
+    prod_findings = _check_prod(body)
+    assert not [f for f in prod_findings if f.severity == "fail"], [
+        f.render() for f in prod_findings
+    ]
+    lan_findings = release_check.check_lan_overlay_config(
+        REPO_ROOT, compose_runner=_lan_body_runner(body)
+    )
+    assert not [f for f in lan_findings if f.severity == "fail"], [
+        f.render() for f in lan_findings
+    ]
+    assert any(
+        f.check == "lan-overlay-config" and f.severity == "ok" for f in lan_findings
+    )
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["localhost", "host.localhost", "lab.local", "gaming-pc.local"],
+)
+def test_lan_overlay_local_hostname_not_blocked(domain: str) -> None:
+    """F-3 requirement (4) — LAN overlay + explicit local-smoke hostname is the
+    documented local-TLS use (internal CA serving a LAN/local name); the new
+    guard reports ok and never blocks it."""
+    findings = release_check.check_lan_overlay_config(
+        REPO_ROOT,
+        compose_paths=_LAN_CHAIN,
+        compose_runner=_lan_body_runner(_lan_prod_body(domain, lan=True)),
+    )
+    assert not [f for f in findings if f.severity == "fail"], [
+        f.render() for f in findings
+    ]
+    assert any(
+        f.check == "lan-overlay-config" and f.severity == "ok" for f in findings
+    )
+
+
+def test_lan_overlay_guard_skip_when_overlay_absent(tmp_path: Path) -> None:
+    """Deployment-artifact behavior (same pattern as the prod/CI gates): no
+    docker-compose.lan.yml in the tree -> skip, never fail."""
+    findings = release_check.check_lan_overlay_config(
+        tmp_path, compose_runner=_lan_body_runner(_lan_prod_body("localhost"))
+    )
+    assert any(
+        f.check == "lan-overlay-config" and f.severity == "skip" for f in findings
+    )
+
+
+def test_lan_overlay_guard_fails_closed_on_render_error() -> None:
+    """A broken overlay chain (render error) is fail-closed, exactly like the
+    other compose gates."""
+
+    def error_runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 2, "", "compose exploded")
+
+    findings = release_check.check_lan_overlay_config(
+        REPO_ROOT, compose_runner=error_runner
+    )
+    fails = [f for f in findings if f.severity == "fail"]
+    assert any(
+        f.check == "lan-overlay-config" and "fail closed" in f.message
+        for f in fails
+    ), [f.render() for f in findings]
+
+
+def test_run_all_includes_lan_overlay_gate() -> None:
+    """run_all (the release_check CLI gate) wires the F-3 guard in and stays
+    green on the shipped tree (default CADDY_DOMAIN=localhost with an empty/env
+    -free shell -> LAN render reports ok)."""
+    findings = release_check.run_all(
+        REPO_ROOT, allow_hosted=True, frontend_dir=None,
+    )
+    assert any(f.check == "lan-overlay-config" for f in findings)
+    assert not [f for f in findings if f.severity == "fail"], [
+        f.render() for f in findings
+    ]
+
+
+def test_lan_overlay_real_render_guard_ok_on_default_localhost() -> None:
+    """Real Compose render (client-side ``config`` only, no daemon): the repo's
+    own LAN chain with an EMPTY env file defaults CADDY_DOMAIN=localhost, so
+    the new guard reports ok and the shipped tree stays gate-green even when an
+    operator certifies the LAN overlay chain."""
+    if not _compose_cli_available():
+        pytest.skip("Docker Compose CLI is unavailable")
+    empty = Path(__file__).parent / ".tmp-empty-f3.env"
+    empty.write_text("", encoding="utf-8")
+    try:
+        findings = release_check.check_lan_overlay_config(
+            REPO_ROOT, compose_paths=_LAN_CHAIN, compose_env_file=empty
+        )
+    finally:
+        empty.unlink(missing_ok=True)
+    assert not [f for f in findings if f.severity == "fail"], [
+        f.render() for f in findings
+    ]
+    assert any(
+        f.check == "lan-overlay-config" and f.severity == "ok" for f in findings
+    )
+
+
+def _require_compose() -> None:
+    if not _compose_cli_available():
+        pytest.skip("Docker Compose CLI is unavailable")
+
+
+def test_prod_preflight_cli_lan_overlay_public_domain_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-3 at the CLI: an operator who APPLIES the LAN overlay (`--compose-overlay
+    docker-compose.lan.yml`, the same -f they pass to `docker compose up`) and
+    sets a public CADDY_DOMAIN gets a FAILING preflight — the internal CA would
+    serve the public name and browsers/bridge reject it."""
+    _require_compose()
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("PD_DEV_TRACE", "false")
+    monkeypatch.setenv("TRUST_PROXY", "true")
+    monkeypatch.setenv("CADDY_DOMAIN", "detective.procedural-game.dev")
+
+    import sys
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "tools.prod_preflight", "--compose-overlay", "docker-compose.lan.yml"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "lan-overlay-config" in completed.stdout
+    assert "INTERNAL CA" in completed.stdout
+    # The domain VALUE stays sanitized in the output.
+    assert "detective.procedural-game.dev" not in completed.stdout + completed.stderr
+
+
+def test_prod_preflight_cli_lan_overlay_local_smoke_pass_and_plain_still_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The LAN overlay guard never blocks the documented local-TLS use: with
+    CADDY_DOMAIN=localhost, `--allow-local --compose-overlay docker-compose.lan.yml`
+    passes (all findings ok); the STRICT plain run still FAILS on the explicit
+    local-smoke name exactly as before (the existing gate stays intact)."""
+    _require_compose()
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("PD_DEV_TRACE", "false")
+    monkeypatch.setenv("TRUST_PROXY", "true")
+    monkeypatch.setenv("CADDY_DOMAIN", "localhost")
+
+    import sys
+
+    allow_local = subprocess.run(
+        [sys.executable, "-m", "tools.prod_preflight", "--allow-local",
+         "--compose-overlay", "docker-compose.lan.yml"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert allow_local.returncode == 0, allow_local.stdout + allow_local.stderr
+    assert "lan-overlay-config" in allow_local.stdout
+
+    strict = subprocess.run(
+        [sys.executable, "-m", "tools.prod_preflight",
+         "--compose-overlay", "docker-compose.lan.yml"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert strict.returncode == 1, strict.stdout + strict.stderr
+    assert "CADDY_DOMAIN" in strict.stdout  # the pre-existing local-smoke gate

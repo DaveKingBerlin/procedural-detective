@@ -3,9 +3,16 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GenerationJourney } from "./generating";
+import { GenerationJourney, type RunFn } from "./generating";
 import type { CapabilityLoader } from "./generating";
-import type { DemoFlowResult } from "../journey/demoFlow";
+import type { DemoFlowResult, DemoFlowServices } from "../journey/demoFlow";
+import { runDemo } from "../journey/demoFlow";
+import { ApiError } from "../api/client";
+import {
+  createOrReuseAnonymousSession,
+  getCachedAnonymousSession,
+  resetAnonymousSessionCache,
+} from "../api/anonymousSession";
 import type { JourneyParams } from "../journey/context";
 
 // React's test utilities need the act() environment flag (same as the other
@@ -46,6 +53,9 @@ let root: ReturnType<typeof createRoot>;
 beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
+  // Phase 24 P0 §8 — the in-memory anonymous-session holder is module-global;
+  // reset it so each test starts with a clean one-session-per-page state.
+  resetAnonymousSessionCache();
   // Stale/tampered stored mode: every scenario below starts from this state.
   localStorage.setItem("pd_generation_mode", "local");
 });
@@ -56,6 +66,7 @@ afterEach(() => {
   });
   container.remove();
   localStorage.clear();
+  resetAnonymousSessionCache();
 });
 
 /** Let the async capability probe + effect chain settle inside an act scope. */
@@ -156,5 +167,201 @@ describe("ADV-212 — the /generating label sequence requires LIVE capability co
     expect(run.mock.calls[0][3]).toBe("local");
     expect(stageLabel()).toBe("Understanding the case…");
     await releaseRun();
+  });
+});
+
+describe("Phase 24 P0 §8 — a /generating retry reuses the cached anonymous session (churn fix)", () => {
+  it("a failed run + Try again mints the anonymous session EXACTLY ONCE and the retried createCase stays authorized under the SAME token", async () => {
+    // The counting mint supplier backs createOrReuseAnonymousSession: the
+    // underlying createAnonymousSession call must happen exactly once even
+    // across the runId retry.
+    const supplier = vi.fn<(...args: readonly unknown[]) => Promise<{ anonymousSessionToken: string; quotaWindowEndsAt: number }>>(
+      async () => ({ anonymousSessionToken: "anon-retry-0001", quotaWindowEndsAt: 1e12 }),
+    );
+    // First run: the session has not paired its bridge yet -> the backend
+    // rejects POST /cases with BRIDGE_NOT_CONNECTED. Second run (after Try
+    // again, with the bridge now bound to the SAME session): PUBLISHED.
+    const createCase = vi
+      .fn<(...args: readonly unknown[]) => Promise<{
+        caseId: string;
+        generationId: string;
+        generationAttemptId: string;
+        creatorAccessToken: string;
+        status: string;
+        failureCode?: string | null;
+      }>>()
+      .mockResolvedValueOnce({
+        caseId: "CASE-1",
+        generationId: "GEN-1",
+        generationAttemptId: "ATT-1",
+        creatorAccessToken: "creator-1",
+        status: "FAILED",
+        failureCode: "BRIDGE_NOT_CONNECTED",
+      })
+      .mockResolvedValueOnce({
+        caseId: "CASE-2",
+        generationId: "GEN-2",
+        generationAttemptId: "ATT-2",
+        creatorAccessToken: "creator-2",
+        status: "PUBLISHED",
+      });
+
+    const services: DemoFlowServices = {
+      createSession: () => createOrReuseAnonymousSession(supplier),
+      createCase,
+      pollGeneration: vi.fn(async () => ({
+        caseId: "CASE-2",
+        generationId: "GEN-2",
+        status: "PUBLISHED",
+        progress: 100,
+        stage: null,
+      })),
+      createPlaythrough: vi.fn(async () => ({
+        playthroughId: "PT-0001",
+        caseId: "CASE-2",
+        caseVersion: 1,
+        playthroughAccessToken: "pt-token-0001",
+        status: "PLAYING",
+      })),
+    };
+
+    const run: RunFn = (prompt, difficulty, onProgress, mode, anonymousSessionToken) =>
+      runDemo(prompt, {
+        services,
+        difficulty,
+        mode,
+        onProgress,
+        wait: async () => {},
+        anonymousSessionToken,
+      });
+
+    let enterCalls = 0;
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/generating"]}>
+          <GenerationJourney
+            params={PARAMS}
+            run={run}
+            onSuccess={() => {
+              enterCalls += 1;
+            }}
+            loadCapabilities={demoOnly}
+          />
+        </MemoryRouter>,
+      );
+    });
+    await settleEffects();
+
+    // First run: exactly ONE anonymous-session mint, and createCase was
+    // called under that session (then failed with BRIDGE_NOT_CONNECTED).
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(createCase).toHaveBeenCalledTimes(1);
+    expect(createCase.mock.calls[0][0]).toBe("anon-retry-0001");
+    expect(failedView()).toBe(true);
+
+    // Try again: runId increments -> the journey re-runs runDemo. The
+    // in-memory holder returns the SAME session, so the underlying minting
+    // call stays at exactly once and createCase is authorized under the SAME
+    // token this time.
+    const retryButton = container.querySelector<HTMLElement>(
+      'button[data-testid="generation-failed"]',
+    );
+    if (!retryButton) throw new Error("expected the Try again button");
+    act(() => {
+      retryButton.click();
+    });
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(createCase).toHaveBeenCalledTimes(2);
+    expect(createCase.mock.calls[1][0]).toBe("anon-retry-0001");
+    // The retried run really reached the published/done state (its render
+    // carries the Enter investigation action).
+    expect(container.querySelector('[data-testid="enter-investigation"]')).not.toBeNull();
+    // Auto-entry into the investigation only happens after its own beat — we
+    // assert the run itself reached the done state, not a premature auto-nav.
+    expect(enterCalls).toBe(0);
+  });
+});
+
+describe("Phase 24 F-2 — a session-window-DENIED run recovers by reload, never by auto-minting", () => {
+  it("a 429 ADMISSION_DENIED run clears the module holder, shows the reload guidance and mints NO fresh session", async () => {
+    // Counting mint supplier backs createOrReuseAnonymousSession: exactly ONE
+    // underlying mint may happen (the initial session). The 429 denial must
+    // NOT trigger a second mint — the server rate limit stays authoritative.
+    const supplier = vi.fn<
+      (...args: readonly unknown[]) => Promise<{
+        anonymousSessionToken: string;
+        quotaWindowEndsAt: number;
+      }>
+    >(async () => ({ anonymousSessionToken: "anon-window-0001", quotaWindowEndsAt: 1e12 }));
+    // The backend admits the first attempt under the freshly-minted session,
+    // then denies the per-session generation window on POST /cases with the
+    // sanitized 429 ADMISSION_DENIED envelope (the F-2 lock scenario: the
+    // page previously consumed the whole per-session window).
+    const createCase = vi.fn<(...args: readonly unknown[]) => Promise<never>>(async () => {
+      throw new ApiError(429, "ADMISSION_DENIED", "admission denied", null);
+    });
+
+    const services: DemoFlowServices = {
+      createSession: () => createOrReuseAnonymousSession(supplier),
+      createCase,
+      pollGeneration: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+      createPlaythrough: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+    };
+
+    const run: RunFn = (prompt, difficulty, onProgress, mode, anonymousSessionToken) =>
+      runDemo(prompt, {
+        services,
+        difficulty,
+        mode,
+        onProgress,
+        wait: async () => {},
+        anonymousSessionToken,
+      });
+
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/generating"]}>
+          <GenerationJourney
+            params={PARAMS}
+            run={run}
+            onSuccess={() => {
+              throw new Error("must never auto-enter on a denied run");
+            }}
+            loadCapabilities={demoOnly}
+          />
+        </MemoryRouter>,
+      );
+    });
+    await settleEffects();
+
+    // The run really happened under exactly one freshly-minted session.
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(createCase).toHaveBeenCalledTimes(1);
+    expect(createCase.mock.calls[0][0]).toBe("anon-window-0001");
+
+    // The window-denied run CLEARED the module holder (recovery = a reload /
+    // next page gets a clean session; no auto-mint on the 429).
+    expect(getCachedAnonymousSession()).toBeNull();
+    expect(supplier).toHaveBeenCalledTimes(1);
+
+    // Explicit recovery guidance is shown instead of a Try-again error.
+    expect(
+      container.querySelector('[data-testid="generation-session-limit"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="generation-session-limit-reload"]'),
+    ).not.toBeNull();
+    // Deliberately NO Try-again button: re-running would reuse the exhausted
+    // holder session and fail forever (or auto-mint, which would defeat the
+    // limit) — reload is the only recovery beyond Back to start.
+    expect(container.querySelector('button[data-testid="generation-failed"]')).toBeNull();
   });
 });

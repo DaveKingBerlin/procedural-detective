@@ -149,6 +149,14 @@ export interface RunDemoOptions {
    * it travels as a note in every progress snapshot logged by this flow.
    */
   mode?: GenerationModeId | null;
+  /**
+   * Phase 24 P0 — an OPTIONAL pre-existing anonymous-session bearer (the
+   * in-memory journey token carried from /new after a bridge pairing). When
+   * present, the flow uses it for POST /cases and SKIPS createSession();
+   * when absent it mints a fresh session exactly as before (the demo /
+   * non-bridge paths are byte-identical).
+   */
+  anonymousSessionToken?: string;
 }
 
 /** Map any thrown value to a typed, safe failure (pure, unit-testable). */
@@ -195,8 +203,16 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
 
   let sessionToken: string;
   try {
-    const session = await services.createSession();
-    sessionToken = session.anonymousSessionToken;
+    const preexistingToken = options.anonymousSessionToken;
+    if (typeof preexistingToken === "string" && preexistingToken !== "") {
+      // Phase 24 P0 — reuse the anonymous session that paired the bridge:
+      // POST /cases is authorized under that session and createSession() is
+      // SKIPPED (no second anonymous session, no bridge lookup miss).
+      sessionToken = preexistingToken;
+    } else {
+      const session = await services.createSession();
+      sessionToken = session.anonymousSessionToken;
+    }
   } catch (error) {
     return { ok: false, failure: mapDemoError(error) };
   }

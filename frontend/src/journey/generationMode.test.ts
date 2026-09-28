@@ -3,6 +3,7 @@ import type { GenerationCapabilitiesResponse } from "../api/types";
 import {
   GENERATION_MODE_STORAGE_KEY,
   LOCAL_AI_SHOWCASE_NOTE,
+  DEMO_CTA_NOTE_UNKNOWN,
   availabilityTag,
   clearGenerationMode,
   demoCtaLabel,
@@ -1080,5 +1081,44 @@ describe("demoCtaNote — Phase 21B Finding 3 truthful per-state note", () => {
     expect(note).not.toContain("11434");
     expect(note).not.toContain("@");
     expect(note).toContain("Local AI");
+  });
+});
+
+describe("Phase 24 P0 §7 — generationModeLine gates the 'Deterministic demo' copy on demo.available", () => {
+  const caps = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("a remote-client bridge DTO (configuredProvider 'fake' + demo unavailable) -> the NEUTRAL line, never 'Deterministic demo'", () => {
+    const remoteClient = caps({
+      configuredProvider: "fake",
+      modes: [
+        { id: "demo", available: false },
+        { id: "local", available: false, label: "Local AI" },
+      ],
+      remoteLocalAi: { available: true, connected: true, model: "hermes3:8b", ready: true },
+    });
+    expect(generationModeLine(remoteClient)).toBe(
+      "Generation mode: Available once the service is reachable.",
+    );
+    expect(generationModeLine(remoteClient)).not.toContain("Deterministic demo");
+  });
+
+  it("the genuine fake backend (configuredProvider 'fake' + demo.available:true) still emits the deterministic-demo line", () => {
+    const genuineFake = caps({ configuredProvider: "fake", modes: [{ id: "demo", available: true }] });
+    expect(generationModeLine(genuineFake)).toBe("Generation mode: Deterministic demo");
+  });
+
+  it("demoCtaState keeps its existing demo-requires-available rule for the same fixture (mirror)", () => {
+    const remoteClient = caps({
+      configuredProvider: "fake",
+      modes: [
+        { id: "demo", available: false },
+        { id: "local", available: false, label: "Local AI" },
+      ],
+    });
+    // demo.available:false -> never the demo CTA even with configuredProvider
+    // "fake" (the deterministic promise would be untrue).
+    expect(demoCtaState(remoteClient)).toBe("unknown");
+    expect(demoCtaLabel(remoteClient)).toBe("Try an example case");
+    expect(demoCtaNote(remoteClient)).toBe(DEMO_CTA_NOTE_UNKNOWN);
   });
 });

@@ -295,3 +295,51 @@ describe("effectiveProviderMode — Phase 21B configuredProvider is authoritativ
     expect(providerIsReported(parseGenerationCapabilities({ configuredProvider: "ollama", modes: [] }))).toBe(false);
   });
 });
+
+describe("Phase 24 P0 §7 — configuredProvider 'fake' requires demo.available (remote-client bridge truthfulness)", () => {
+  const parse = (raw: unknown) => parseGenerationCapabilities(raw);
+
+  it("a remote-client bridge DTO (configuredProvider 'fake' + demo unavailable) resolves 'unknown' and emits the NEUTRAL copy, never 'Deterministic demo'", () => {
+    const remoteClient = parse({
+      configuredProvider: "fake",
+      modes: [
+        { id: "demo", available: false },
+        { id: "local", available: false, label: "Local AI" },
+      ],
+      remoteLocalAi: { available: true, connected: true, model: "hermes3:8b", ready: true },
+    });
+    // The backend field is the INTENDED compat projection (untouched server-side).
+    expect(remoteClient.configuredProvider).toBe("fake");
+    // The resolver no longer collapses to the fake/deterministic story.
+    expect(effectiveProviderMode(remoteClient)).toBe("unknown");
+    // Every copy surface emits the existing NEUTRAL copy — no deterministic claim.
+    expect(providerPathNoteFromCapabilities(remoteClient)).toBe(PROVIDER_PATH_NOTE_UNKNOWN);
+    expect(providerQualifierFromCapabilities(remoteClient)).toBe(PROVIDER_QUALIFIER_UNKNOWN);
+    expect(providerPathNoteFromCapabilities(remoteClient)).not.toContain("deterministic");
+    expect(providerQualifierFromCapabilities(remoteClient)).not.toContain("Demo build");
+    expect(providerQualifierFromCapabilities(remoteClient)).not.toContain("no API keys");
+  });
+
+  it("the genuine fake backend (configuredProvider 'fake' + demo.available:true) still resolves 'fake' and emits the deterministic copy", () => {
+    const genuineFake = parse({
+      configuredProvider: "fake",
+      modes: [{ id: "demo", available: true }],
+    });
+    expect(effectiveProviderMode(genuineFake)).toBe("fake");
+    expect(providerPathNoteFromCapabilities(genuineFake)).toBe(providerPathNote("fake"));
+    expect(providerQualifierFromCapabilities(genuineFake)).toBe(providerQualifier("fake"));
+  });
+
+  it("providerPathNote / providerQualifier handle the 'unknown' story with the neutral constants", () => {
+    expect(providerPathNote("unknown")).toBe(PROVIDER_PATH_NOTE_UNKNOWN);
+    expect(providerQualifier("unknown")).toBe(PROVIDER_QUALIFIER_UNKNOWN);
+  });
+
+  it("the availability-based fallback (configuredProvider ABSENT) is unchanged for the pre-21B shapes", () => {
+    // Older-server shapes keep their exact resolution — only the configured
+    // 'fake' + demo-unavailable case resolves to 'unknown'.
+    expect(effectiveProviderMode(DEMO_ONLY)).toBe("fake");
+    expect(effectiveProviderMode({ modes: [] })).toBe("fake");
+    expect(effectiveProviderMode(null)).toBe("fake");
+  });
+});

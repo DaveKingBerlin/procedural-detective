@@ -537,6 +537,12 @@ export function generationModeLine(capabilities: GenerationCapabilitiesResponse 
       // DEF-096: a configured live backend with the probe down stays truthful.
       return `Generation mode: ${label} — Unavailable`;
     }
+    case "unknown":
+      // Phase 24 P0 §7 — configuredProvider "fake" with demo UNAVAILABLE (the
+      // remote-client / BYO-Ollama bridge backend): the deterministic story is
+      // NOT server-enforced, so the line is the existing neutral reachability
+      // copy — never "Deterministic demo".
+      return GENERATION_MODE_LINE_UNKNOWN;
     case "fake":
     default:
       return "Generation mode: Deterministic demo";

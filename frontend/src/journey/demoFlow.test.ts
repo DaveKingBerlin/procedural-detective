@@ -220,6 +220,69 @@ describe("runDemo — Phase 16 Track B generation-mode note", () => {
   });
 });
 
+describe("runDemo — Phase 24 P0 reuse of a pre-existing anonymous session token", () => {
+  it("reuses the provided token for createCase and SKIPS createSession", async () => {
+    const services = makeServices();
+    const result = await runDemo("prompt", {
+      services,
+      anonymousSessionToken: "paired-session-tok",
+      wait: NO_WAIT,
+    });
+    expect(result.ok).toBe(true);
+    expect(services.createSession).not.toHaveBeenCalled();
+    expect(services.createCase).toHaveBeenCalledWith("paired-session-tok", "prompt", undefined);
+  });
+
+  it("the reuse path passes the difficulty label through to createCase", async () => {
+    const services = makeServices();
+    await runDemo("prompt", {
+      services,
+      difficulty: "hard",
+      anonymousSessionToken: "paired-session-tok",
+      wait: NO_WAIT,
+    });
+    expect(services.createSession).not.toHaveBeenCalled();
+    expect(services.createCase).toHaveBeenCalledWith("paired-session-tok", "prompt", "hard");
+  });
+
+  it("an empty-string token is treated as absent (fresh mint — current behavior preserved)", async () => {
+    const services = makeServices();
+    const result = await runDemo("prompt", {
+      services,
+      anonymousSessionToken: "",
+      wait: NO_WAIT,
+    });
+    expect(result.ok).toBe(true);
+    expect(services.createSession).toHaveBeenCalledTimes(1);
+    expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined);
+  });
+
+  it("with a pre-existing token a 429 on createCase still maps to the quota failure (authorization path unchanged)", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => {
+        throw new ApiError(429, "ADMISSION_DENIED", "admission denied", null);
+      }),
+    });
+    const result = await runDemo("prompt", {
+      services,
+      anonymousSessionToken: "paired-session-tok",
+      wait: NO_WAIT,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.failure.kind).toBe("quota");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.quota);
+    expect(services.createSession).not.toHaveBeenCalled();
+  });
+
+  it("without a token the minting behavior is byte-identical (createSession called once, createCase with the minted token)", async () => {
+    const services = makeServices();
+    await runDemo("prompt", { services, wait: NO_WAIT });
+    expect(services.createSession).toHaveBeenCalledTimes(1);
+    expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined);
+  });
+});
+
 describe("runDemo — generation FAILED", () => {
   it("fails immediately when POST /cases reports FAILED", async () => {
     const services = makeServices({

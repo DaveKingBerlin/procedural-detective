@@ -5,7 +5,7 @@ including current shell overrides. It runs the same check suite as
 ``tools.release_check`` with the strict ready-to-host verdict on
 ``CADDY_DOMAIN``:
 
-    python -m tools.prod_preflight [--allow-local] [--env-file PATH]
+    python -m tools.prod_preflight [--allow-local] [--env-file PATH] [--compose-overlay PATH]
 
 Checks (all fail-closed; ANY ``fail`` finding exits 1):
 
@@ -19,13 +19,20 @@ Checks (all fail-closed; ANY ``fail`` finding exits 1):
          (Phase21B Finding 2 — dev example must never be copied to prod);
        - P-02 timeout envelope: canonical runtime policy validates rendered
          provider, per-call timeout, total deadline, frontend and proxy bounds;
-       - json-file 10m x 5 log bounds on BOTH public services;
-       - backend port NEVER publicly published (expose only, no `ports:`) and
-         the Ollama port 11434 is never a published host port;
-       - CADDY_DOMAIN is a plausible non-reserved FQDN — local, IP, malformed
-         and reserved/example names FAIL the ready-to-host verdict. DNS and
-         certificate issuance remain part of the public TLS smoke;
-       - production frontend bundle is same-origin/clean when present;
+- json-file 10m x 5 log bounds on BOTH public services;
+        - backend port NEVER publicly published (expose only, no `ports:`) and
+          the Ollama port 11434 is never a published host port;
+        - CADDY_DOMAIN is a plausible non-reserved FQDN — local, IP, malformed
+          and reserved/example names FAIL the ready-to-host verdict. DNS and
+          certificate issuance remain part of the public TLS smoke;
+        - LAN-overlay/public-domain guard (F-3): when the certified chain
+          includes a compose OVERLAY (``--compose-overlay``, e.g.
+          ``docker-compose.lan.yml``) whose rendered model carries the internal
+          ``tls internal`` Caddyfile swap AND ``CADDY_DOMAIN`` is a
+          public-looking FQDN, the run FAILS — the public name would be served
+          from Caddy's INTERNAL CA and browsers/bridge reject it. The default
+          chain is canonical prod compose alone (ready-to-host unchanged);
+        - production frontend bundle is same-origin/clean when present;
   3. compose logging bounds (F-04) — repeated as its own finding.
 
 The preflight invokes ``docker compose config --format json`` with the current
@@ -88,7 +95,28 @@ def main(argv: list[str] | None = None) -> int:
             "command. Omit it for the documented automatic .env behavior."
         ),
     )
+    parser.add_argument(
+        "--compose-overlay",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "An extra -f compose OVERLAY the startup command ALSO passes "
+            "(e.g. docker-compose.lan.yml). The LAN internal-TLS/public-domain "
+            "guard (F-3, check_lan_overlay_config) then validates the certified "
+            "prod + overlay chain and FAILS when the LAN overlay would serve a "
+            "public CADDY_DOMAIN from Caddy's internal CA (browsers/bridge "
+            "reject it). Omit it for the canonical public-ACME deployment."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    lan_chain: tuple[Path, ...] | None = None
+    if args.compose_overlay is not None:
+        lan_chain = (
+            (_REPO_ROOT / "docker-compose.prod.yml").resolve(),
+            args.compose_overlay.resolve(),
+        )
 
     findings: list[release_check.Finding] = []
     findings.extend(release_check.check_prod_env_profile(_REPO_ROOT))
@@ -97,6 +125,13 @@ def main(argv: list[str] | None = None) -> int:
             _REPO_ROOT,
             allow_local=args.allow_local,
             ingress_profile=args.ingress_profile,
+            compose_env_file=args.env_file,
+        )
+    )
+    findings.extend(
+        release_check.check_lan_overlay_config(
+            _REPO_ROOT,
+            compose_paths=lan_chain,
             compose_env_file=args.env_file,
         )
     )

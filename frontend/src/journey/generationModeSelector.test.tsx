@@ -163,6 +163,31 @@ describe("read-only generation-mode display — truthfulness (Phase 21 F-03)", (
     expect(html).toContain('data-testid="generation-mode-selector"');
   });
 
+  it("Phase 24 P0 §7 — a remote-client bridge DTO (configuredProvider 'fake' + demo unavailable) shows the NEUTRAL line and NO demo notice", () => {
+    // The backend projects a remote_client (BYO-Ollama bridge) deployment onto
+    // configuredProvider "fake" WITH demo.available:false (documented compat —
+    // the field is not changed server-side). The deterministic "Demo mode
+    // active" story must NOT appear because the deterministic pipeline is not
+    // actually available.
+    const html = render({
+      capabilities: {
+        configuredProvider: "fake",
+        modes: [
+          { id: "demo", available: false },
+          { id: "local", available: false, label: "Local AI" },
+        ],
+        remoteLocalAi: { available: true, connected: true, model: "hermes3:8b", ready: true },
+      },
+    });
+    expect(html).toContain(
+      "Generation mode: Available once the service is reachable.",
+    );
+    expect(html).not.toContain("Generation mode: Deterministic demo");
+    expect(html).not.toContain('data-testid="generation-mode-demo-notice"');
+    expect(html).not.toContain("Demo mode active");
+    expect(html).toContain('data-testid="generation-mode-line"');
+  });
+
   it("hostile DTO — never renders host/IP, credential, prompt or diagnostic strings", () => {
     const hostile: GenerationCapabilitiesResponse = {
       modes: [

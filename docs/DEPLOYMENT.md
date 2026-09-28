@@ -253,6 +253,78 @@ Local-AI mode is operator-configured (`GENERATION_PROVIDER=ollama` +
 from a prompt, and in production the Ollama host must remain on the private
 network (never the public edge, never the Internet).
 
+## 13b. BYO-Ollama bridge (remote_client) + LAN TLS acceptance (Phase 22/24)
+
+The BYO-Ollama bridge lets a visitor's OWN machine (Gaming-PC) run a local
+Ollama and serve generation jobs to the deployment over a WebSocket. The
+server-side profile is:
+
+```bash
+# operator .env (dev or prod, via the service env_file: .env)
+GENERATION_PROVIDER=remote_client
+ENABLE_BRIDGE=true
+```
+
+Rules (Level-0 contract):
+
+- **Never set `OLLAMA_BASE_URL` / `OLLAMA_MODEL`** on the server for a
+  `remote_client` deployment. The bridge is the ONLY Ollama client; the server
+  never talks to Ollama directly. The rendered-compose regression (§12) and the
+  release gate assert these names never appear in the base/CI/prod/LAN compose
+  renders or the production source.
+- `remote_client` is a **closed-set projection** in the capability DTO:
+  `configuredProvider` stays `"fake"` (Phase 21B fail-closed) while
+  `demo.available:false` and the truthful `remoteLocalAi` block carries the
+  bridge state (Phase22-24-Fix.md §7). `python -m tools.prod_preflight` still
+  validates the same 300/180 timeout envelope for this provider.
+- The bridge only ever connects OUTBOUND over **HTTPS/WSS** for a non-loopback
+  server; plain `ws://` is rejected unless the host is loopback
+  (`bridge/pd_ollama_bridge/urls.py`). Certificate verification is NEVER disabled.
+
+### LAN / single-label acceptance host (`Enshrouded-Server`)
+
+A LAN acceptance hostname such as `Enshrouded-Server` has no dot, so Caddy's
+public ACME cannot issue for it (`Domain name needs at least one dot`). The
+smallest safe mechanism is the **LAN TLS overlay** — NOT a change to the
+canonical public Caddyfile:
+
+```bash
+# 1. Boot the production-like stack with the LAN overlay (swap Caddy site config).
+#    `.env` carries the remote_client profile (GENERATION_PROVIDER=remote_client,
+#    ENABLE_BRIDGE=true) and CADDY_DOMAIN=<the LAN hostname>:
+docker compose -f docker-compose.prod.yml -f docker-compose.lan.yml up --build -d
+```
+
+- `docker-compose.lan.yml` is an OVERLAY that mounts
+  `./docker/Caddyfile.internal:/etc/caddy/Caddyfile:ro` on the existing
+  `caddy` service; everything else is inherited from `docker-compose.prod.yml`.
+- `docker/Caddyfile.internal` is a byte-copy of the canonical `docker/Caddyfile`
+  with `tls internal` added inside the site block, so Caddy serves the
+  single-label host from its **internal CA** (`issuer=local`).
+- The canonical `docker/Caddyfile` NEVER carries `tls internal`: real public
+  deployments keep Caddy's normal public ACME certificate management.
+- Export the internal root CA to the Gaming-PC trust store for acceptance. The
+  root certificate / CA private key material is **never committed**; the bridge
+  client's certificate verification is never disabled.
+
+**LAN acceptance is an OPERATOR/DEV procedure, not a product-certified domain.**
+`python -m tools.prod_preflight` REJECTS a single-label `CADDY_DOMAIN` in BOTH
+plain and `--allow-local` modes — `--allow-local` forgives only
+`localhost` / `.localhost` / `.local` (`_caddy_domain_problem` +
+`check_prod_effective_config`, pinned by
+`backend/tests/test_phase21c_prod_preflight.py`).
+
+**F-3 guard — never combine the LAN overlay with a public `CADDY_DOMAIN`.**
+`tools.prod_preflight` / `tools.release_check` also render the LAN overlay
+chain (`docker-compose.prod.yml` + `docker-compose.lan.yml`,
+`check_lan_overlay_config`) and FAIL when the internal `tls internal` Caddyfile
+swap is combined with a public-looking `CADDY_DOMAIN`: Caddy would serve the
+public name from its **internal CA**, so browsers and the bridge reject the
+certificate (silent TLS failure) and no ready-to-host verdict may be given. A
+real public domain belongs with the CANONICAL `docker/Caddyfile` (public ACME,
+no LAN overlay); the LAN overlay is ONLY for explicit LAN / localhost /
+single-label acceptance hostnames.
+
 ## 14. Docker build-context hygiene (PD-SEC-07)
 
 The repo-root `.dockerignore` excludes `.env` / `.env.*` (keeping `.env.example`),

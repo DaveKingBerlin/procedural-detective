@@ -66,6 +66,21 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
        reserved/example hostnames. ``--allow-local`` / ``allow_local`` forgives
        only an explicit local-smoke hostname; the strict single command is
        ``python -m tools.prod_preflight``.
+  10. LAN OVERLAY / PUBLIC-DOMAIN GUARD (F-3) — validates the CERTIFIED
+      deployment chain and FAILS when that chain carries the LAN
+      internal-TLS swap (``docker/Caddyfile.internal`` with ``tls internal``)
+      AND ``CADDY_DOMAIN`` is a public-looking FQDN that passes the
+      ``_caddy_domain_problem`` syntax gate: the deployment would serve the
+      public hostname from Caddy's INTERNAL CA — browsers and the bridge
+      reject it (silent TLS failure) and the run FAILS closed. The LAN
+      overlay is OPT-IN (``tools.prod_preflight --compose-overlay
+      docker-compose.lan.yml``, mirroring ``--env-file``); the default chain
+      is canonical prod compose alone, so a canonical public deployment stays
+      ready-to-host unchanged. The guard is ADDITIVE: it never weakens the
+      single-label / reserved-domain rejection (``Enshrouded-Server`` still
+      FAILS ``_caddy_domain_problem`` in both plain and ``--allow-local``
+      modes) and it stays silent for explicit local-smoke hostnames
+      (localhost / .localhost / .local).
 
 The production-DEPLOYMENT checks (7, 8, 9) apply ONLY when the deployment
 artifacts exist: a document tree without ``docker-compose.prod.yml`` or the
@@ -1805,6 +1820,188 @@ def check_prod_effective_config(
 
 
 # --------------------------------------------------------------------------- #
+# F-3 — LAN overlay must never serve a PUBLIC hostname from the internal CA
+# (``tls internal`` in docker/Caddyfile.internal, applied via the LAN overlay)
+# --------------------------------------------------------------------------- #
+
+# The LAN overlay chain (docker-compose.lan.yml header comment + §9): the base
+# production compose plus the single-purpose overlay that swaps the caddy site
+# config for the Caddyfile.internal variant (``tls internal``). This is an
+# OPERATOR/DEV procedure for LAN / single-label acceptance hosts — NEVER a
+# product-certified domain. F-3, reproduced: an operator applies the overlay
+# while CADDY_DOMAIN is a PUBLIC name; ``check_prod_effective_config`` certifies
+# that canonical public domain as ready-to-host, while Caddy actually serves the
+# public hostname from its INTERNAL CA → browsers and the bridge reject the
+# certificate and no gate catches the silent TLS failure.
+#
+# The overlay is OPT-IN, so the guard is chain-driven (mirroring the existing
+# ``--env-file`` discipline): the tool validates the SAME effective chain the
+# operator deploys. The default chain is the canonical production compose alone
+# (a canonical public deployment stays ready-to-host unchanged); an operator
+# whose startup command adds ``-f docker-compose.lan.yml`` must pass that same
+# overlay to the preflight (``--compose-overlay``) and then the F-3 guard
+# validates the [prod + lan] chain and FAILS the public-domain combination.
+_LAN_COMPOSE_BASE = "docker-compose.prod.yml"
+# The rendered overlay signature: the caddy service mounts the INTERNAL
+# Caddyfile at the canonical container Caddy path. Deriving from the RENDERED
+# model ties the detection to what the deployment would actually run — a future
+# change in the overlay mechanism must keep this signature or the guard's
+# rendered-detection branch stops firing (fail-open would be worse: pin it).
+_LAN_CADDYFILE_MARKER = "Caddyfile.internal"
+_LAN_CADDY_MOUNT_TARGET = "/etc/caddy/Caddyfile"
+
+
+def _lan_overlay_rendered(rendered: dict[str, object]) -> bool:
+    """True when the RENDERED chain carries the LAN internal-TLS site config.
+
+    Inspects the composed model (``docker compose config --format json``) rather
+    than the source file: the ``caddy`` service mounts
+    ``docker/Caddyfile.internal`` at ``/etc/caddy/Caddyfile`` iff the LAN
+    overlay was applied (``-f docker-compose.prod.yml -f
+    docker-compose.lan.yml``). ``docker compose config`` normalizes ``:ro``
+    mounts to a dict with ``source`` / ``target`` / ``read_only`` keys.
+    """
+    caddy = _rendered_service(rendered, "caddy")
+    if caddy is None:
+        return False
+    for mount in caddy.get("volumes") or []:
+        if not isinstance(mount, dict):
+            continue
+        source = str(mount.get("source") or "")
+        target = str(mount.get("target") or "")
+        if target == _LAN_CADDY_MOUNT_TARGET and _LAN_CADDYFILE_MARKER in source:
+            return True
+    return False
+
+
+def check_lan_overlay_config(
+    repo_root: Path,
+    *,
+    compose_paths: tuple[Path, ...] | None = None,
+    compose_env_file: Path | None = None,
+    compose_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> list[Finding]:
+    """F-3 — fail-closed guard: LAN ``tls internal`` must not serve a PUBLIC name.
+
+    Validates the certified deployment chain through Docker Compose itself
+    (client-side ``config`` only — no daemon needed, same authority as the
+    other rendered gates). ``compose_paths`` is the SAME ``-f`` chain the
+    deployment uses (default: the canonical ``docker-compose.prod.yml`` alone,
+    so a canonical public deployment stays ready-to-host unchanged). When the
+    rendered model shows the internal Caddyfile swap (``docker/Caddyfile.internal``
+    mounted at ``/etc/caddy/Caddyfile`` — the LAN overlay applied) AND
+    ``CADDY_DOMAIN`` is a public-looking FQDN (passes ``_caddy_domain_problem``
+    — i.e. has a dot, is not localhost/.local/.localhost and is not a
+    reserved/placeholder name), the deployment would serve the public hostname
+    from Caddy's INTERNAL CA: browsers and the bridge reject the certificate and
+    the stack must NOT receive a ready-to-host verdict. A FAIL is emitted for
+    that exact combination.
+
+    The LAN overlay is OPT-IN: an operator whose startup command is ``docker
+    compose -f docker-compose.prod.yml -f docker-compose.lan.yml up`` passes the
+    same overlay chain here (``tools.prod_preflight --compose-overlay
+    docker-compose.lan.yml``) — the exact ``--env-file`` discipline.
+
+    The guard is ADDITIVE. It never weakens the existing gates:
+
+      - ``Enshrouded-Server`` (single label, no dot) still FAILS
+        ``_caddy_domain_problem`` in BOTH plain and ``--allow-local`` modes —
+        the existing ``check_prod_effective_config`` rejection is untouched;
+      - an explicit local-smoke hostname (``localhost`` / ``.localhost`` /
+        ``.local``) with the LAN overlay is the documented local-TLS use and is
+        NOT blocked here (reported as ok with a NOT-ready-to-host note);
+      - reserved / IP / malformed names stay failures of the existing
+        ``_caddy_domain_problem`` gate, not this one.
+
+    The certified chain is ``skip`` when the artifacts are absent (deployment
+    artifact check, like the other compose gates) and the run is fail-closed on
+    a render error.
+    """
+    files = list(compose_paths) if compose_paths else [
+        (repo_root / _LAN_COMPOSE_BASE).resolve()
+    ]
+    if not all(path.is_file() for path in files):
+        return [
+            Finding(
+                "lan-overlay-config", "skip",
+                "certified compose chain not present (" + ", ".join(str(p) for p in files)
+                + ") — the LAN internal-TLS/public-domain guard validates the "
+                "effective deployment chain (canonical prod compose alone, or "
+                "prod + an overlay such as docker-compose.lan.yml passed as "
+                "--compose-overlay)",
+            )
+        ]
+    try:
+        rendered = _render_compose_config(
+            repo_root.resolve(), files, env_file=compose_env_file, runner=compose_runner
+        )
+    except _ComposeRenderError as exc:
+        return [
+            Finding(
+                "lan-overlay-config", "fail",
+                f"{exc}; the rendered deployment chain was not validated "
+                "(fail closed, F-3) — an overlay such as docker-compose.lan.yml "
+                "requires docker/Caddyfile.internal to exist next to the "
+                "canonical production compose",
+            )
+        ]
+
+    if not _lan_overlay_rendered(rendered):
+        return [
+            Finding(
+                "lan-overlay-config", "ok",
+                "LAN internal-TLS overlay is not in effect in the rendered "
+                "chain — no internal-CA/public-domain guard applies; the "
+                "canonical public-ACME Caddyfile stays the deployment edge",
+            )
+        ]
+
+    caddy = _rendered_service(rendered, "caddy")
+    domain = _rendered_environment(caddy).get("CADDY_DOMAIN", "") if caddy else ""
+    domain_problem, explicit_local = _caddy_domain_problem(domain)
+    if domain_problem is None:
+        # Public-looking FQDN that the existing gate would ACCEPT — exactly the
+        # F-3 gap: the canonical preflight certifies it while Caddy serves it
+        # from the internal CA.
+        return [
+            Finding(
+                "lan-overlay-config", "fail",
+                "LAN/internal-TLS mode (docker-compose.lan.yml swaps in "
+                "docker/Caddyfile.internal which adds `tls internal`) is used "
+                "with a public-looking CADDY_DOMAIN: Caddy would serve the "
+                "public name from its INTERNAL CA, so browsers and the bridge "
+                "reject the certificate (silent TLS failure) and this stack "
+                "must NOT receive a ready-to-host verdict. Use a real public "
+                "CADDY_DOMAIN with the CANONICAL docker/Caddyfile (public ACME, "
+                "no LAN overlay), or apply the LAN overlay only with an "
+                "explicit LAN / localhost / single-label hostname (local "
+                "acceptance only)",
+            )
+        ]
+    if explicit_local:
+        return [
+            Finding(
+                "lan-overlay-config", "ok",
+                "LAN internal-TLS mode with an explicit local-smoke hostname "
+                "(localhost/.localhost/.local): the internal CA serving a "
+                "LAN/local name is the documented local-TLS use — NOT a "
+                "ready-to-host verdict; the strict CADDY_DOMAIN gate in "
+                "check_prod_effective_config still applies",
+            )
+        ]
+    return [
+        Finding(
+            "lan-overlay-config", "ok",
+            "LAN internal-TLS mode with a hostname that is not a public FQDN — "
+            "the existing CADDY_DOMAIN ready-to-host gate still governs "
+            "(single-label, reserved, IP and malformed names stay rejected); "
+            "LAN acceptance is an operator/DEV procedure, never a "
+            "product-certified domain",
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Phase 24 §9/§38 — CI (docker-smoke) rendered-compose validation
 # --------------------------------------------------------------------------- #
 
@@ -2158,6 +2355,8 @@ def run_all(
     allow_hosted: bool = False,
     frontend_dir: Path | None = None,
     prod_allow_local: bool = True,
+    compose_env_file: Path | None = None,
+    compose_overlay: Path | None = None,
 ) -> list[Finding]:
     """Every release check; the CLI exits 1 when any finding has severity fail.
 
@@ -2165,6 +2364,11 @@ def run_all(
     the documented local-smoke REPORT; the STRICT
     ready-to-host verdict lives in ``python -m tools.prod_preflight`` (which
     runs the same ``check_prod_effective_config`` with ``allow_local=False``).
+
+    ``compose_overlay`` (``--compose-overlay`` in ``tools.prod_preflight``) is
+    an extra ``-f`` compose file the deployment ALSO uses (e.g.
+    ``docker-compose.lan.yml``); the F-3 LAN-overlay guard then validates the
+    certified prod + overlay chain. Default: the canonical prod compose alone.
     """
     findings: list[Finding] = []
     tracked = git_tracked_files(repo_root)
@@ -2177,7 +2381,25 @@ def run_all(
     findings.extend(check_compose_logging_bounds(repo_root))
     findings.extend(check_prod_env_profile(repo_root))
     findings.extend(
-        check_prod_effective_config(repo_root, allow_local=prod_allow_local)
+        check_prod_effective_config(
+            repo_root,
+            allow_local=prod_allow_local,
+            compose_env_file=compose_env_file,
+        )
+    )
+    if compose_overlay is not None:
+        lan_chain = (
+            (repo_root / "docker-compose.prod.yml").resolve(),
+            compose_overlay.resolve(),
+        )
+    else:
+        lan_chain = None
+    findings.extend(
+        check_lan_overlay_config(
+            repo_root,
+            compose_paths=lan_chain,
+            compose_env_file=compose_env_file,
+        )
     )
     findings.extend(check_ci_compose_config(repo_root))
     findings.extend(check_base_compose_config(repo_root))

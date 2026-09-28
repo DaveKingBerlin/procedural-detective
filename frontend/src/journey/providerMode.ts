@@ -45,8 +45,16 @@ import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/ty
  * and no provider/prompt details ever reach the DOM.
  */
 
-/** The three display stories the demo UI may claim. "fake" is the default. */
-export type AppProviderMode = "fake" | "local" | "live";
+/**
+ * The display stories the demo UI may claim. "fake" is the default.
+ *
+ * Phase 24 P0 §7 adds "unknown": a REPORTED DTO whose `configuredProvider` is
+ * "fake" but whose demo mode is UNAVAILABLE (the remote-client / BYO-Ollama
+ * bridge backend projects onto "fake" with demo.available=false — documented
+ * backend compat) must NOT claim the deterministic story. It resolves to
+ * "unknown", which every copy surface renders as the existing NEUTRAL copy.
+ */
+export type AppProviderMode = "fake" | "local" | "live" | "unknown";
 
 /**
  * Deterministic parser for the legacy `VITE_APP_PROVIDER` value: only the
@@ -73,6 +81,11 @@ export function providerPathNote(mode: AppProviderMode): string {
     case "local":
       return "uses the local AI pipeline — the model proposes structured data; "
         + "deterministic validators build the investigation";
+    case "unknown":
+      // Phase 24 P0 §7 — configuredProvider "fake" with demo UNAVAILABLE (the
+      // remote-client bridge backend): the deterministic generator is not
+      // usable, so no deterministic claim; the existing neutral copy instead.
+      return PROVIDER_PATH_NOTE_UNKNOWN;
     case "fake":
     default:
       return "uses the built-in deterministic generator in this demo build";
@@ -105,6 +118,11 @@ export function providerQualifier(mode: AppProviderMode): string {
       return "Local AI is available: the model proposes structured data; "
         + "deterministic validators verify and construct the investigation — "
         + "no API keys, no cost. Live AI is opt-in and not enabled in this build.";
+    case "unknown":
+      // Phase 24 P0 §7 — configuredProvider "fake" with demo UNAVAILABLE (the
+      // remote-client bridge backend): no deterministic/no-cost claim; the
+      // existing neutral qualifier instead.
+      return PROVIDER_QUALIFIER_UNKNOWN;
     case "fake":
     default:
       return "Demo build: deterministic built-in generator — no API keys, no cost. "
@@ -184,7 +202,19 @@ export function effectiveProviderMode(
   // it is present — an ollama/live deploy keeps its real identity even when
   // the availability probe FAILED (the runtime still runs that provider).
   const configured = capabilities.configuredProvider;
-  if (configured === "fake") return "fake";
+  if (configured === "fake") {
+    // Phase 24 P0 §7 — the fake/deterministic story is truthful ONLY when the
+    // deterministic demo pipeline is actually available. A remote-client
+    // (BYO-Ollama bridge) backend projects onto configuredProvider "fake" with
+    // demo.available:false (integrated backend compat — the field is NOT
+    // changed server-side). Mirroring demoCtaState: "fake" WITHOUT a usable
+    // demo resolves to "unknown", and every copy surface emits the existing
+    // neutral copy instead of a false "Deterministic demo" claim.
+    const demoAvailable = modes.some(
+      (mode) => mode.id === "demo" && mode.available === true,
+    );
+    return demoAvailable ? "fake" : "unknown";
+  }
   if (configured === "ollama") return "local";
   if (configured === "live") return "live";
   // configuredProvider absent (older server): availability-based derivation.

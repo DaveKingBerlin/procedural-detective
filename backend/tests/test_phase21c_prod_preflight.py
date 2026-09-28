@@ -229,6 +229,30 @@ def test_allow_local_only_downgrades_explicit_local_hostname():
     assert any(finding.severity == "fail" for finding in reserved)
 
 
+def test_single_label_domain_rejected_in_plain_and_allow_local_modes():
+    """Phase22-24-Fix.md §9: the LAN hostname (`Enshrouded-Server`, a
+    single-label domain) must FAIL the production preflight in BOTH plain and
+    --allow-local modes — --allow-local forgives only
+    localhost/.localhost/.local. LAN acceptance is an operator/dev procedure,
+    not a product-certified domain."""
+    problem, explicit_local = release_check._caddy_domain_problem("Enshrouded-Server")
+    assert problem is not None
+    assert explicit_local is False  # single-label is NOT an explicit local smoke
+
+    for allow_local in (False, True):
+        findings = _check(
+            _ShellAwareComposeRunner(result=_rendered_config(domain="Enshrouded-Server")),
+            allow_local=allow_local,
+        )
+        failures = [f.message for f in findings if f.severity == "fail"]
+        assert any("CADDY_DOMAIN" in message for message in failures), (
+            allow_local, failures
+        )
+        assert all("enshrouded-server" not in message for message in failures), (
+            "domain value must stay sanitized"
+        )
+
+
 def _require_compose_cli() -> None:
     if shutil.which("docker") is None:
         pytest.skip("Docker Compose CLI is unavailable")
