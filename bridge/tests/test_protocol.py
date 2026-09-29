@@ -82,8 +82,48 @@ def test_job_unknown_schema_rejected():
         "temperature": 0.1,
         "timeoutMs": 120000,
     }
-    with pytest.raises(BridgeProtocolError):
+    with pytest.raises(BridgeProtocolError) as exc:
         _decode_ok(encode_frame(msg))
+    assert exc.value.close_code == CLOSE_PROTOCOL_ERROR
+
+
+def test_job_activity_log_schema_validated():
+    """Fix C (H5): the server may dispatch an ACTIVITY_LOG_v1 job frame (Phase
+    19J grew the SERVER copy's AUTHORITATIVE_SCHEMA_IDS). The client copy must
+    validate it exactly like any other authoritative job — no 1002."""
+    msg = {
+        "protocolVersion": 1,
+        "type": "job",
+        "jobId": "JOB-C63BHy1KXNtSL4h6",
+        "jobType": "STRUCTURED_INFERENCE",
+        "schemaId": "ACTIVITY_LOG_v1",
+        "model": "hermes3:8b",
+        "prompt": "solve it",
+        "temperature": 0.1,
+        "timeoutMs": 120000,
+    }
+    out = _decode_ok(encode_frame(msg))
+    assert out["jobId"] == "JOB-C63BHy1KXNtSL4h6"
+    assert out["schemaId"] == "ACTIVITY_LOG_v1"
+
+
+def test_job_activity_log_repair_schema_validated():
+    """Fix C (H5): ACTIVITY_LOG_REPAIR_v1 is also in the SERVER copy's closed
+    vocabulary; the client copy must validate it identically."""
+    msg = {
+        "protocolVersion": 1,
+        "type": "job",
+        "jobId": "JOB-repair-0001",
+        "jobType": "STRUCTURED_INFERENCE",
+        "schemaId": "ACTIVITY_LOG_REPAIR_v1",
+        "model": "hermes3:8b",
+        "prompt": "fix it",
+        "temperature": 0.1,
+        "timeoutMs": 120000,
+    }
+    out = _decode_ok(encode_frame(msg))
+    assert out["jobId"] == "JOB-repair-0001"
+    assert out["schemaId"] == "ACTIVITY_LOG_REPAIR_v1"
 
 
 def test_job_extraneous_instruction_field_rejected():

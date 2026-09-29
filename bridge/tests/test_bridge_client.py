@@ -298,6 +298,127 @@ def test_jobs_processed_sequentially():
 
 
 # --------------------------------------------------------------------------- #
+# Fix C (H5) — the real client receive path accepts the Phase 19J ACTIVITY_LOG
+# schema ids the SERVER dispatches when an Easy case reaches its THIRD
+# sequential bridge job. The server's closed vocabulary
+# (app.generation.bridge_protocol.AUTHORITATIVE_SCHEMA_IDS, Phase 19J) includes
+# ACTIVITY_LOG_v1 / ACTIVITY_LOG_REPAIR_v1; before Fix C the client copy did
+# NOT, so the third job frame was rejected here as a protocol violation (close
+# 1002) and the job failed BRIDGE_DISCONNECTED server-side.
+# --------------------------------------------------------------------------- #
+
+
+def test_c1_three_real_production_message_types_one_session_no_1002():
+    """C1 (defining): ONE bridge session processes the three REAL production
+    message types CASE_PEOPLE_v1 -> EVIDENCE_v1 -> ACTIVITY_LOG_v1, each
+    succeeds, the socket NEVER closes (no 1002) and ping/pong stay healthy.
+
+    Fail-before: with the pre-Fix-C client vocabulary the third frame
+    (ACTIVITY_LOG_v1) is rejected with close 1002 and the scenario's
+    ``conn.recv_json()`` raises instead of returning the third result, so the
+    test fails. Fails-before is additionally pinned by the protocol-level
+    tests in ``test_protocol.py`` and the backend vocabulary drift test."""
+    mock = MockOllama()
+
+    async def scenario(conn, server):
+        if not hasattr(server, "hellos"):
+            server.hellos = []
+        hello = await conn.recv_json()
+        server.hellos.append(hello["type"])
+        await conn.send(pairing_accepted_with_token(token=TEST_TOKEN))
+        produced = []
+        for job_id, schema in (
+            ("JOB-case-truth-v1", "CASE_PEOPLE_v1"),
+            ("JOB-evidence-v1", "EVIDENCE_v1"),
+            ("JOB-activity-log-v1", "ACTIVITY_LOG_v1"),
+        ):
+            await conn.send(
+                job_frame(job_id=job_id, schema_id=schema, prompt=f"job:{schema}")
+            )
+            result = await conn.recv_json()
+            assert result["type"] == "job_result"
+            assert result["jobId"] == job_id
+            assert result["status"] == "SUCCESS"
+            produced.append((job_id, schema))
+        assert [schema for _, schema in produced] == [
+            "CASE_PEOPLE_v1",
+            "EVIDENCE_v1",
+            "ACTIVITY_LOG_v1",
+        ]
+        # The socket is STILL open after three jobs (no 1002 close) — the
+        # fourth job works on the SAME connection.
+        await conn.send(
+            job_frame(job_id="JOB-after-actvity", schema_id="ASSET_SPEC_v1")
+        )
+        result4 = await conn.recv_json()
+        assert result4["jobId"] == "JOB-after-actvity"
+        assert result4["status"] == "SUCCESS"
+
+    async def post(server, mock, events):
+        assert await server.wait_until(lambda: len(events["connected"]) == 1)
+        # Client stayed on ONE paired connection — a reconnect (which the
+        # pre-fix 1002 close would have triggered) never happened.
+        hellos = getattr(server, "hellos", [])
+        assert hellos == ["pairing_hello"]
+        assert mock.requests  # every job reached the local "Ollama"
+
+    asyncio.run(_harness(scenario, mock=mock, post=post))
+
+
+def test_c2_c9_activity_log_and_repair_job_accepted_and_routed():
+    """C2 + C9 (boundary pin): the server's ACTIVITY_LOG_v1 and
+    ACTIVITY_LOG_REPAIR_v1 job frames reach the REAL client and are accepted
+    (no 1002) and routed to the local model for inference."""
+    mock = MockOllama()
+
+    async def scenario(conn, server):
+        await conn.recv_json()
+        await conn.send(pairing_accepted_with_token(token=TEST_TOKEN))
+        for frame in (
+            job_frame(job_id="JOB-alog", schema_id="ACTIVITY_LOG_v1"),
+            job_frame(job_id="JOB-alog-repair", schema_id="ACTIVITY_LOG_REPAIR_v1"),
+        ):
+            await conn.send(frame)
+            result = await conn.recv_json()
+            assert result["status"] == "SUCCESS"
+        # Two distinct jobs -> two local inference calls (routed correctly).
+        assert mock.max_inflight == 1  # one job at a time preserved
+
+    asyncio.run(_harness(scenario, mock=mock))
+
+
+def test_c4_heartbeat_result_job_interleavings_no_1002():
+    """C4: heartbeat/result/job interleavings — both ``result -> heartbeat ->
+    next job`` and ``heartbeat -> result -> next job`` stay healthy: the real
+    client answers the app-level ping with pong while jobs flow; no starvation,
+    no job mismatch, no 1002."""
+    mock = MockOllama()
+
+    async def scenario(conn, server):
+        await conn.recv_json()
+        await conn.send(pairing_accepted_with_token(token=TEST_TOKEN))
+        # result -> heartbeat -> next job
+        await conn.send(job_frame(job_id="JOB-order-a", schema_id="EVIDENCE_v1"))
+        result_a = await conn.recv_json()
+        assert result_a["jobId"] == "JOB-order-a"
+        await conn.send({"protocolVersion": 1, "type": "ping"})
+        pong = await conn.recv_json()
+        assert pong == {"type": "pong"}
+        await conn.send(job_frame(job_id="JOB-order-b", schema_id="ACTIVITY_LOG_v1"))
+        result_b = await conn.recv_json()
+        assert result_b["jobId"] == "JOB-order-b"
+        # heartbeat -> result -> next job
+        await conn.send({"protocolVersion": 1, "type": "ping"})
+        assert await conn.recv_json() == {"type": "pong"}
+        await conn.send(job_frame(job_id="JOB-order-c", schema_id="CASE_PEOPLE_v1"))
+        result_c = await conn.recv_json()
+        assert result_c["jobId"] == "JOB-order-c"
+        assert result_c["status"] == "SUCCESS"
+
+    asyncio.run(_harness(scenario, mock=mock))
+
+
+# --------------------------------------------------------------------------- #
 # control: ping/pong, cancel, idle
 # --------------------------------------------------------------------------- #
 

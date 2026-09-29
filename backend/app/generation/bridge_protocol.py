@@ -128,6 +128,15 @@ MODEL_LABEL_RE = re.compile(r"[A-Za-z0-9._:\-]+")
 MAX_MODEL_LABEL_LENGTH = 80
 MAX_SCHEMA_ID_LENGTH = 64
 MAX_PROMPT_CHARS = 120_000  # mirrors MAX_OLLAMA_PROMPT_CHARS
+# F2 — the prompt BYTE bound is a SYMMETRIC protocol bound: the bridge CLIENT
+# copy (``bridge/pd_ollama_bridge/protocol.py``) rejects a decoded job frame
+# whose prompt exceeds this many UTF-8 bytes (close 1002), so this copy applies
+# the SAME cap to a job frame. The whole-frame bound (``decode_frame``
+# ``max_bytes`` -> close 1009) is checked FIRST and still dominates any
+# frame-size rejection; this is the tighter per-field bound and equals the
+# character bound for single-byte (ASCII) prompts. The cross-copy drift guard
+# (``bridge/tests/test_vocabulary_drift.py``) pins the equality.
+MAX_PROMPT_BYTES = MAX_PROMPT_CHARS
 MAX_JOB_ID_LENGTH = 96
 MAX_BRIDGE_SESSION_ID_LENGTH = 160
 MAX_FAILURE_CODE_LENGTH = 64
@@ -333,6 +342,12 @@ def _validate_job_schema(msg: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(prompt, str):
         _reject(CLOSE_PROTOCOL_ERROR, "invalid frame")
     if len(prompt) > MAX_PROMPT_CHARS:
+        _reject(CLOSE_PROTOCOL_ERROR, "invalid frame")
+    # F2 — symmetric prompt BYTE cap (mirrors the bridge client copy so a job
+    # frame rejected by one copy is rejected by the other with the SAME close
+    # code 1002). For single-byte prompts this never binds tighter than the
+    # char cap above; for multi-byte prompts it matches the client exactly.
+    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
         _reject(CLOSE_PROTOCOL_ERROR, "invalid frame")
     temperature = msg.get("temperature")
     if _is_bool(temperature) or not isinstance(temperature, (int, float)):
