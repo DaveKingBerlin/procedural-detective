@@ -40,6 +40,7 @@ _SAFE_FIELDS = frozenset(
         # Ollama URL or client IP.
         "bridgeSessionId", "pairingSessionId", "jobId", "schemaId",
         "timeoutMs", "latencyMs", "expiresInSeconds", "resultStatus",
+        "closeCode",
         # Phase 19J — safe activity-log lifecycle fields (§40). Sanitized
         # counts/codes only: NEVER CaseTruth, raw provider responses, full log
         # text, prompts or hidden evidence. ``evidenceIdSafe`` is the
