@@ -5,6 +5,10 @@ import type {
   GenerationModeId,
   RemoteLocalAiDTO,
 } from "../api/types";
+import {
+  parseDefaultGenerationProvider,
+  parseGenerationProviders,
+} from "./generationProvider";
 import { effectiveProviderMode, providerIsReported } from "./providerMode";
 
 /**
@@ -100,8 +104,13 @@ const IPV4_DOTTED_LITERAL = /\d{1,3}(?:\.\d{1,3}){3}/;
  * The rule is deliberately conservative: a legitimate model/label never
  * needs `@`, a dotted IP or a raw angle bracket, so dropping is safe and
  * deterministic (labels fall back to the frozen public copy, models to null).
+ *
+ * Phase 25 — exported so the generation-provider parser
+ * (src/journey/generationProvider.ts) reuses the SAME trust-boundary guard for
+ * provider labels/models/reasons (a hostile provider offer can never smuggle a
+ * URL/IP/host hint or raw markup into the selector).
  */
-function isUnsafeDisplayString(value: string): boolean {
+export function isUnsafeDisplayString(value: string): boolean {
   const lowered = value.toLowerCase();
   if (FORBIDDEN_URL_TOKENS.some((token) => lowered.includes(token))) return true;
   if (IPV4_DOTTED_LITERAL.test(value)) return true;
@@ -336,6 +345,23 @@ export function parseGenerationCapabilities(raw: unknown): GenerationCapabilitie
   if (remoteLocalAi !== null) {
     parsed.remoteLocalAi = remoteLocalAi;
   }
+  // Phase 25 — the ADDITIVE provider-selection keys. Both are UNTRUSTED server
+  // data re-parsed through src/journey/generationProvider.ts: `defaultProvider`
+  // is the closed "fake"|"ollama"|"frontier" enum (any other value dropped),
+  // and `providers[]` keeps ONLY known provider ids with sanitized
+  // labels/models/reasons/transports. They are OMITTED when absent (an OLDER
+  // server) so every pre-25 parsed payload stays byte-identical — no provider
+  // selector is then offered.
+  const defaultProvider = parseDefaultGenerationProvider(
+    (raw as { defaultProvider?: unknown }).defaultProvider,
+  );
+  if (defaultProvider !== null) {
+    parsed.defaultProvider = defaultProvider;
+  }
+  const providers = parseGenerationProviders((raw as { providers?: unknown }).providers);
+  if (providers.length > 0) {
+    parsed.providers = providers;
+  }
   return parsed;
 }
 
@@ -482,8 +508,11 @@ export function generationModeOptionLabel(mode: SelectableGenerationMode): strin
  * DTO-provided display field with the module's last-line sanitizer: a value
  * carrying a URL/host/IP/raw-markup token (or an empty/undefined value) is
  * replaced by the frozen public fallback. Never fails, never throws.
+ *
+ * Phase 25 — exported so the generation-provider parser reuses the SAME
+ * last-line guard for provider labels/models/reasons.
  */
-function safeDisplay(value: string | undefined, fallback: string | null): string {
+export function safeDisplay(value: string | undefined, fallback: string | null): string {
   if (typeof value === "string" && value !== "" && !isUnsafeDisplayString(value)) return value;
   return fallback ?? "";
 }
@@ -537,6 +566,12 @@ export function generationModeLine(capabilities: GenerationCapabilitiesResponse 
       // DEF-096: a configured live backend with the probe down stays truthful.
       return `Generation mode: ${label} — Unavailable`;
     }
+    case "unknown":
+      // Phase 24 P0 §7 — configuredProvider "fake" with demo UNAVAILABLE (the
+      // remote-client / BYO-Ollama bridge backend): the deterministic story is
+      // NOT server-enforced, so the line is the existing neutral reachability
+      // copy — never "Deterministic demo".
+      return GENERATION_MODE_LINE_UNKNOWN;
     case "fake":
     default:
       return "Generation mode: Deterministic demo";

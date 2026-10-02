@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Procedural Detective — LAN / single-label local-TLS overlay (Phase 24 §9).
+#
+# OVERLAY FILE — extend the PRODUCTION compose, never a parallel stack:
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.lan.yml \
+#     --env-file <empty> up --build -d
+#
+# This overlay does ONE thing: it swaps the Caddy site config from the canonical
+# public-ACME `docker/Caddyfile` to the identical `docker/Caddyfile.internal`
+# variant that adds `tls internal` inside the site block. Everything else
+# (backend build/env, ports 80/443, networks, volumes, healthchecks, logging)
+# is inherited from `docker-compose.prod.yml`.
+#
+# Why: a LAN / single-label acceptance hostname (e.g. `Enshrouded-Server`)
+# cannot be issued by Caddy's public ACME (`Domain name needs at least one dot`).
+# `tls internal` lets Caddy serve it from its internal CA so the BYO-Ollama
+# bridge can pair over HTTPS/WSS on the LAN.
+#
+# IMPORTANT:
+#   * This is an OPERATOR/DEV procedure, NOT a product-certified domain.
+#     `python -m tools.prod_preflight` REJECTS a single-label CADDY_DOMAIN in
+#     BOTH plain and --allow-local modes (--allow-local forgives only
+#     localhost/.localhost/.local); LAN acceptance never weakens that gate.
+#   * `tls internal` is NEVER added to the canonical `docker/Caddyfile`: real
+#     public deployments keep Caddy's normal public ACME certificate management.
+#   * The local root CA certificate may be exported to a client trust store for
+#     acceptance, but the root CA / private key material is NEVER committed and
+#     certificate verification is NEVER disabled in the bridge client (remote
+#     HTTPS/WSS enforcement stays intact).
+#
+# Compose merge semantics: this overlay's `volumes` entry for the `caddy`
+# service is matched by its target path `/etc/caddy/Caddyfile`, so it REPLACES
+# the base mount while the `caddy-data` / `caddy-config` mounts (different
+# targets) are preserved.
+# ---------------------------------------------------------------------------
+
+services:
+  caddy:
+    volumes:
+      - ./docker/Caddyfile.internal:/etc/caddy/Caddyfile:ro

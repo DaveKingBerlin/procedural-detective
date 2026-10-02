@@ -1,40 +1,71 @@
 # ---------------------------------------------------------------------------
-# Procedural Detective — single-service production deployment (Phase8 J3/K).
+# Procedural Detective — single-service LOCAL DEVELOPMENT compose (Phase8 J3/K
+# + Phase 24 hardening).
 #
-#   docker compose up --build
+#   docker compose up --build            (local deterministic fake provider)
+#   docker compose --env-file compose/profiles/ci.env -f docker-compose.yml \
+#     -f docker-compose.ci.yml -p "pd-ci-$CI_PIPELINE_ID-$CI_JOB_ID" up --build -d
+#                                        (hermetic CI smoke, see CI doc)
 #
 # One container serves the React SPA + FastAPI from the same origin on :8000
-# (production single-origin: CORS is moot for same-origin requests; for a
-# separately-hosted UI set CORS_ALLOWED_ORIGINS to the deployed UI origin).
-# SQLite persists in the `pd-data` named volume at /data.
+# (single-origin: CORS is moot for same-origin requests; for a separately-
+# hosted UI set CORS_ALLOWED_ORIGINS to the deployed UI origin). SQLite
+# persists in the `pd-data` named volume at /data.
 #
 # GENERATION_PROVIDER=fake is the default demo mode (deterministic, offline,
 # zero credentials). Live mode is opt-in: set GENERATION_PROVIDER=live plus
 # LLM_API_KEY / LLM_MODEL / LIVE_PROVIDER_URL in your .env / environment.
 # NEVER commit real credentials — .env is git-ignored.
+#
+# Phase 24 CI isolation (§7/§50): there is deliberately NO fixed
+# `container_name`. Compose derives the container name from the project, so
+# every CI job's stack is uniquely named (`-p "pd-ci-<pipeline>-<job>"`) and a
+# job can never clash with or touch another job's containers. Local `docker
+# compose ps` shows the project-prefixed name.
 # ---------------------------------------------------------------------------
 
 services:
   procedural-detective:
     build: .
     image: procedural-detective:latest
-    container_name: procedural-detective
     ports:
       - "8000:8000"
     volumes:
       - pd-data:/data
     environment:
       DATABASE_URL: ${DATABASE_URL:-sqlite:////data/procedural_detective.db}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       GENERATION_PROVIDER: ${GENERATION_PROVIDER:-fake}
+      # Phase 22 bridge flag: OFF by default; every /api/v1/bridge/* route is
+      # then the plain 404 envelope and the capabilities DTO omits remoteLocalAi.
+      ENABLE_BRIDGE: ${ENABLE_BRIDGE:-false}
+      # Phase 19J-RI2 canonical timeout envelope — declared in the DEV/CI
+      # profile too so the rendered-compose gate validates the SAME 300/180
+      # numbers as production (docs/DEPLOYMENT.md §16).
+      CASE_GENERATION_DEADLINE_SECONDS: ${CASE_GENERATION_DEADLINE_SECONDS:-300}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-180}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
-      LIVE_PROVIDER_URL: ${LIVE_PROVIDER_URL:-}
+      # Provider-specific configuration (LLM_API_KEY, LLM_MODEL,
+      # LIVE_PROVIDER_URL, OLLAMA_BASE_URL, OLLAMA_MODEL, ...) is injected
+      # ONLY via the optional .env file (env_file below) and/or operator
+      # overlays / platform variables: Settings rejects EMPTY-string values
+      # for the live/ollama provider settings, so the base profile must leave
+      # them UNSET (defaults apply) unless the operator really configures them
+      # — never required, never hardcoded, never injected as "" here.
       STATIC_DIR: ${STATIC_DIR:-/app/static}
     env_file:
       - path: .env
         required: false
     restart: unless-stopped
+    # F-04/§44: bounded container stdout (json-file 10m x 5) — the same policy
+    # the production compose applies. uvicorn access logs can never grow
+    # without limit in local dev or CI.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test:
         - "CMD"

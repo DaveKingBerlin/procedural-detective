@@ -222,8 +222,10 @@ def test_capabilities_env_driven_selection(monkeypatch, database_url):
 
 
 def test_case_create_request_ignores_provider_extra_keys():
-    """The public POST /cases DTO exposes NO provider fields: extra keys
-    (provider/mode/base_url) are silently ignored and never change selection."""
+    """The public POST /cases DTO keeps its hostile-extra-key rejection: the
+    legacy provider-shaped keys (provider/mode/base_url/llm_api_key) stay
+    UNDECLARED and are silently ignored — the Phase 25 fields use the official
+    ``generationProvider``/``ollamaTransport``/``ollamaModel`` names only."""
     body = CaseCreateRequest(
         prompt="Victim: sarah_miller\nMurderer: thomas_reed\n",
         provider="live",
@@ -238,9 +240,12 @@ def test_case_create_request_ignores_provider_extra_keys():
     assert not hasattr(body, "mode")
     assert not hasattr(body, "base_url")
     assert not hasattr(body, "llm_api_key")
-    # Pydantic model_fields is the exact public surface: no provider keys.
+    # Pydantic model_fields is the exact public surface: the LEGACY hostile
+    # names are absent; the Phase 25 official selection fields ARE declared.
     declared = {name for name in CaseCreateRequest.model_fields}
     assert {"provider", "mode", "base_url", "llm_api_key"} & declared == set()
+    for formal in ("generationProvider", "ollamaTransport", "ollamaModel"):
+        assert formal in declared
 
 
 def test_post_cases_with_hostile_provider_keys_uses_fake(database_url):
@@ -290,6 +295,9 @@ def test_provider_factory_selection_is_config_driven(monkeypatch, database_url):
     from app.services.generation import GenerationService, ProviderConfigError
 
     # ---- fake: creds + ollama url present but provider=fake -> FakeProvider.
+    # Phase 25: the no-arg factory resolves the CONFIGURED DEFAULT through the
+    # per-attempt resolver (``app.generation.selection``) — the mapping below
+    # is unchanged.
     store = Store(database_url)
     try:
         fake_settings = Settings(
@@ -306,6 +314,8 @@ def test_provider_factory_selection_is_config_driven(monkeypatch, database_url):
         store.dispose()
 
     # ---- live: missing credential -> ProviderConfigError (fail-fast).
+    # The sanitized operator message is preserved verbatim by the resolver
+    # translation (identical contract as phase 18A).
     for missing in ("llm_api_key", "llm_model", "live_provider_url"):
         kwargs = dict(
             generation_provider="live",

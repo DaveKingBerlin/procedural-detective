@@ -18,6 +18,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Runtime-only extra (DEF-005): the container image installs "./backend[runtime]"
+# so dev/test tooling (pytest and friends) never ships in the runtime image.
+# httpx is the ONE dependency the app imports at runtime that is not already a
+# top-level `dependencies` entry (backend/app/generation/live_provider.py and
+# backend/app/generation/ollama_provider.py both `import httpx` at module
+# import time). Host dev keeps `[dev]` (httpx + pytest).
+runtime = [
+    "httpx>=0.27.0,<1.0.0",
+]
 dev = [
     "httpx>=0.27.0,<1.0.0",
     "pytest>=8.0.0,<10.0.0",

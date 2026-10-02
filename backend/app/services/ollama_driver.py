@@ -2341,6 +2341,7 @@ class OllamaStageDriver:
         spec_provider: Any = None,
         session_scope: str | None = None,
         provider_label: str = "ollama",
+        provider_model: str | None = None,
     ) -> None:
         from app.assets.generated_cache import GeneratedAssetCache
 
@@ -2358,8 +2359,13 @@ class OllamaStageDriver:
         # Truthful observability label: "ollama" for the server-local provider
         # (byte-identical events), "remote_client" for the bridge transport.
         self._provider_label = provider_label if provider_label else "ollama"
+        # Phase 25 — the FROZEN per-attempt model for driver events. Legacy
+        # behavior is unchanged when a caller does not pass one (the label
+        # decides between the settings model and None).
         self._event_model = (
-            getattr(settings, "ollama_model", None)
+            provider_model
+            if provider_model is not None
+            else getattr(settings, "ollama_model", None)
             if self._provider_label == "ollama"
             else None
         )

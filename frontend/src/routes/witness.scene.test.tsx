@@ -9,6 +9,7 @@ import {
   EMILY_TIME_EVIDENCE_ID,
   EMILY_WITNESS_ID,
   LISA_WITNESS_ID,
+  LISA_WITNESS_NAME,
   makeEmilyTimeDiscoveryRecord,
   makeLisaPersonResponse,
   makeWitnessBootstrap,
@@ -370,9 +371,8 @@ describe("Phase 23 — interview question flow on /scene", () => {
     await flushAsync();
     expect(interviewWitness).toHaveBeenCalledTimes(1);
 
-    // Return to the question grid, then re-ask TIME.
-    click(mounted!.container, '[data-testid="witness-ask-another"]');
-    await flushAsync();
+    // Phase 26: questions stay visible above the answer, so re-selecting TIME
+    // is a direct cached re-ask (no 'Ask another question' step in between).
     click(mounted!.container, '[data-testid="witness-question-TIME"]');
     await flushAsync();
 
@@ -406,9 +406,8 @@ describe("Phase 23 — interview question flow on /scene", () => {
       mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
     ).toBe("No. Nothing stood out to me.");
 
-    click(mounted!.container, '[data-testid="witness-ask-another"]');
-    await flushAsync();
-
+    // Phase 26: the asked marker is PERMANENTLY visible above the answer (the
+    // old 'Ask another question' return step is gone).
     expect(
       mounted!.container.querySelector('[data-testid="witness-question-OBSERVATION-asked"]'),
     ).not.toBeNull();
@@ -479,13 +478,11 @@ describe("Phase 23 — interview question flow on /scene", () => {
     await flushAsync();
 
     const questionTypes = ["OBSERVATION", "TIME", "SOUND", "PERSON", "OBJECT", "LOCATION"];
-    for (const [index, questionType] of questionTypes.entries()) {
+    for (const questionType of questionTypes) {
+      // Phase 26: each new selection REPLACES the previous answer in place — no
+      // 'Ask another question' return step exists anymore.
       click(mounted!.container, `[data-testid="witness-question-${questionType}"]`);
       await flushAsync();
-      if (index < questionTypes.length - 1) {
-        click(mounted!.container, '[data-testid="witness-ask-another"]');
-        await flushAsync();
-      }
     }
     expect(interviewWitness).toHaveBeenCalledTimes(6);
     expect(
@@ -516,6 +513,49 @@ describe("Phase 23 — interview question flow on /scene", () => {
         mounted!.container.querySelector(`[data-testid="witness-question-${questionType}-asked"]`),
       ).not.toBeNull();
     }
+  });
+
+  it("switching witnesses while the panel stays mounted RESETS the answer — no stale statement carries over", async () => {
+    await flushAsync();
+    await waitForReady(mounted!.container);
+    click(mounted!.container, `[data-testid="witness-${EMILY_WITNESS_ID}"]`);
+    await flushAsync();
+    click(mounted!.container, '[data-testid="witness-question-TIME"]');
+    await flushAsync();
+
+    // Emily's grounded answer (with discovery) is shown inside the panel.
+    const panelBefore = mounted!.container.querySelector('[data-testid="witness-panel"]')!;
+    expect(panelBefore.querySelector('[data-testid="witness-statement-summary"]')?.textContent).toContain(
+      "heavy impact",
+    );
+    expect(interviewWitness).toHaveBeenCalledTimes(1);
+
+    // The Witnesses section can re-open the SAME mounted panel instance with a
+    // different witness (the route just swaps the witness prop).
+    click(mounted!.container, `[data-testid="witness-${LISA_WITNESS_ID}"]`);
+    await flushAsync();
+
+    const panel = mounted!.container.querySelector('[data-testid="witness-panel"]')!;
+    expect(panel.querySelector('[data-testid="witness-panel-name"]')?.textContent).toBe(
+      LISA_WITNESS_NAME,
+    );
+    // Clean answer state: neutral hint, NO answer content, zero selection.
+    expect(panel.querySelector('[data-testid="witness-answer"]')).toBeNull();
+    expect(panel.querySelector('[data-testid="witness-answer-hint"]')).not.toBeNull();
+    expect(panel.textContent).not.toContain("heavy impact");
+    for (const questionType of ["OBSERVATION", "TIME", "SOUND", "PERSON", "OBJECT", "LOCATION"]) {
+      expect(
+        panel.querySelector(`[data-testid="witness-question-${questionType}"]`)?.getAttribute(
+          "aria-current",
+        ),
+      ).toBeNull();
+    }
+    // Emily's ONE-time discovery still lives exactly once in the notebook.
+    const witnessLines = mounted!.container
+      .querySelector('[data-testid="notebook-group-witness-statements-list"]')!
+      .querySelectorAll("li");
+    expect(witnessLines).toHaveLength(1);
+    expect(interviewWitness).toHaveBeenCalledTimes(1);
   });
 
   it("a witness without a scene object still formats the panel from the remote entry", () => {

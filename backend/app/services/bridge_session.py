@@ -28,6 +28,8 @@ from app.generation.bridge_protocol import (
     CLOSE_IDLE_TIMEOUT,
     CLOSE_MESSAGE_TOO_BIG,
     CLOSE_POLICY_VIOLATION,
+    CLOSE_PROTOCOL_ERROR,
+    CLOSE_SERVER_ERROR,
     CLOSE_UNSUPPORTED_TYPE,
     MSG_BRIDGE_HELLO,
     MSG_JOB_RESULT,
@@ -48,6 +50,8 @@ __all__ = [
     "CLOSE_IDLE_TIMEOUT",
     "CLOSE_MESSAGE_TOO_BIG",
     "CLOSE_POLICY_VIOLATION",
+    "CLOSE_PROTOCOL_ERROR",
+    "CLOSE_SERVER_ERROR",
     "CLOSE_UNSUPPORTED_TYPE",
     "MSG_JOB_RESULT",
     "MSG_PONG",
@@ -91,6 +95,12 @@ def route_job_result(
     A late/duplicate/cross-session result (jobId not current on THIS
     connection) is DISCARDED with zero state mutation (Phase22 §17/§33)."""
     job_id = frame["jobId"]
+    emit_event(
+        "bridge.result.received",
+        bridgeSessionId=conn.bridge_session_id,
+        jobId=job_id,
+        reasonCode=str(frame["status"]),
+    )
     if frame["status"] == "SUCCESS":
         applied = registry.resolve_job(conn, job_id, "content", frame["structuredOutput"])
     else:
@@ -186,12 +196,15 @@ def authenticate_handshake(
             model=binding.model,
         )
         return conn, ack
-    # bridge_hello (reconnect)
+# bridge_hello (reconnect)
     row = pairing_service.authenticate_bridge_token(
         frame["bridgeSessionToken"], now=now
     )
     if row is None:
-        raise BridgeFrameRejected(1008, "bridge session invalid")
+        # NO bridge session id on a rejected reconnect (never leak the
+        # presenter's credential or a stale id into the observability path).
+        emit_event("bridge.reconnect.rejected", reasonCode="RECONNECT_REJECTED")
+        raise BridgeFrameRejected(1008, "bridge session invalid") from None
     conn = registry.bind(
         bridge_session_id=row.bridge_session_id,
         session_scope=row.session_scope,
@@ -207,6 +220,11 @@ def authenticate_handshake(
         bridge_session_token=None,
         model=row.model,
         capabilities=row.capabilities,
+    )
+    emit_event(
+        "bridge.reconnect.accepted",
+        bridgeSessionId=row.bridge_session_id,
+        reasonCode="RECONNECT_ACCEPTED",
     )
     emit_event(
         "bridge.connected",

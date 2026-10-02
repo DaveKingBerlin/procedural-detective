@@ -44,6 +44,8 @@ from app.services.bridge_session import (
     CLOSE_IDLE_TIMEOUT,
     CLOSE_MESSAGE_TOO_BIG,
     CLOSE_POLICY_VIOLATION,
+    CLOSE_PROTOCOL_ERROR,
+    CLOSE_SERVER_ERROR,
     CLOSE_UNSUPPORTED_TYPE,
     MSG_JOB_RESULT,
     MSG_PONG,
@@ -61,6 +63,20 @@ logger = logging.getLogger("procedural-detective")
 router = APIRouter(tags=["bridge-ws"])
 
 _WS_PATH = "/api/v1/bridge/ws"
+
+# Fix B (§11) — the closed token vocabulary projecting a WS close code onto the
+# ``bridge.disconnected`` reasonCode (replacing the unconditional
+# ``SOCKET_CLOSED`` with the ACTUAL teardown reason). NEVER the peer-supplied
+# free-text reason: only the numeric code is projected onto this closed set.
+_DISCONNECT_REASON_BY_CODE: dict[int, str] = {
+    1000: "SOCKET_CLOSED",
+    CLOSE_IDLE_TIMEOUT: "IDLE_TIMEOUT",
+    CLOSE_PROTOCOL_ERROR: "PROTOCOL_ERROR",
+    CLOSE_UNSUPPORTED_TYPE: "UNSUPPORTED_TYPE",
+    CLOSE_POLICY_VIOLATION: "POLICY_VIOLATION",
+    CLOSE_MESSAGE_TOO_BIG: "MESSAGE_TOO_BIG",
+    CLOSE_SERVER_ERROR: "SERVER_ERROR",
+}
 
 
 class BridgeMessageSizeGuard:
@@ -243,35 +259,62 @@ async def bridge_ws_endpoint(websocket: WebSocket) -> None:
     idle = float(getattr(settings, "bridge_idle_timeout_seconds", 300.0) or 300.0)
     max_bytes = int(getattr(settings, "bridge_max_message_bytes", 256 * 1024))
     last_activity = time.monotonic()
+    # Fix B (§11) — carry the ACTUAL teardown close code into
+    # ``bridge.disconnected`` (never the peer's free-text reason; a None code
+    # at finally time means an abnormal/unknown teardown -> SERVER_ERROR).
+    close_code: int | None = None
+
+    # Fix B (B9/H4 refutation, server side) — heartbeat lives in a SIBLING task
+    # so the main receive is bounded ONLY by the idle window. The previous
+    # single-loop design awaited ``receive_text()`` with a ``max(0, ...)``
+    # heartbeat-derived timeout: as soon as the WIRE was silent for one
+    # heartbeat the receive was cancelled with a ZERO timeout, so an
+    # already-queued pong/job-result frame was starved forever (the loop spun
+    # sending a ping storm and swallowed EVERY later inbound frame — the
+    # healthy client's pongs AND the long job's result). The sibling pinger
+    # keeps the cadence (1 ping per heartbeat, fully outbound) and the main
+    # loop consumes every inbound frame promptly. No timeout envelope changed.
+    async def _heartbeat_send() -> None:
+        try:
+            while True:
+                await asyncio.sleep(heartbeat)
+                await websocket.send_text(ping_frame())
+        except Exception:  # noqa: BLE001 - dead peer/closed socket ends the task
+            return
+
+    heartbeat_task = asyncio.create_task(_heartbeat_send())
     try:
         while True:
-            wait_for = max(0.0, (last_activity + heartbeat) - time.monotonic())
+            wait_for = max(0.0, (last_activity + idle) - time.monotonic())
             try:
                 raw = await asyncio.wait_for(
                     websocket.receive_text(), timeout=wait_for
                 )
             except asyncio.TimeoutError:
-                if time.monotonic() - last_activity >= idle:
-                    await _close_later(websocket, CLOSE_IDLE_TIMEOUT, "idle timeout")
-                    break
-                try:
-                    await websocket.send_text(ping_frame())
-                except Exception:  # noqa: BLE001 - dead peer
-                    break
-                continue
-            except (WebSocketDisconnect, RuntimeError):
+                # The idle bound lapsed with ZERO inbound frames -> 1001. (A
+                # silent-but-alive peer keeps last_activity fresh through the
+                # sibling task's pings, so a healthy job never reaches here.)
+                close_code = CLOSE_IDLE_TIMEOUT
+                await _close_later(websocket, CLOSE_IDLE_TIMEOUT, "idle timeout")
+                break
+            except (WebSocketDisconnect, RuntimeError) as exc:
+                candidate = getattr(exc, "code", None)
+                close_code = candidate if isinstance(candidate, int) else None
                 break
             except Exception:  # noqa: BLE001 - abnormal close
                 break
             if len(raw.encode("utf-8")) > max_bytes:
+                close_code = CLOSE_MESSAGE_TOO_BIG
                 await _close_later(websocket, CLOSE_MESSAGE_TOO_BIG, "message too large")
                 break
             try:
                 frame = decode_inbound_frame(raw, max_bytes=max_bytes)
             except BridgeFrameRejected as exc:
+                close_code = exc.close_code
                 await _close_later(websocket, exc.close_code, exc.reason)
                 break
             if not rate.allow():
+                close_code = CLOSE_POLICY_VIOLATION
                 await _close_later(
                     websocket, CLOSE_POLICY_VIOLATION, "bridge frame rate limit"
                 )
@@ -284,15 +327,23 @@ async def bridge_ws_endpoint(websocket: WebSocket) -> None:
                 route_job_result(conn, frame, registry)
                 continue
             # Unauthorized/unknown message type -> close with reason.
+            close_code = CLOSE_UNSUPPORTED_TYPE
             await _close_later(websocket, CLOSE_UNSUPPORTED_TYPE, "unknown message type")
             break
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - teardown
+            pass
         now = float(websocket.app.state.clock.now())
         registry.detach(conn.bridge_session_id, now=now, epoch=connection_epoch)
+        telegraph = close_code if close_code is not None else CLOSE_SERVER_ERROR
         emit_event(
             "bridge.disconnected",
             bridgeSessionId=conn.bridge_session_id,
-            reasonCode="SOCKET_CLOSED",
+            reasonCode=_DISCONNECT_REASON_BY_CODE.get(telegraph, "SOCKET_CLOSED"),
+            closeCode=telegraph,
         )
 
 

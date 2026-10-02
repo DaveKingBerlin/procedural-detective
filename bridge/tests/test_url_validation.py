@@ -30,6 +30,15 @@ def test_server_remote_http_rejected():
         resolve_server_ws_url("http://detective.example.com")
 
 
+def test_server_remote_ws_url_rejected():
+    """A non-local ws:// server is rejected (plain ws is accepted ONLY for
+    loopback/development; remote bridge traffic must stay HTTPS/WSS)."""
+    with pytest.raises(UrlValidationError):
+        resolve_server_ws_url("ws://detective.example.com")
+    with pytest.raises(UrlValidationError):
+        resolve_server_ws_url("ws://192.168.178.48")
+
+
 def test_server_url_with_path_rejected():
     with pytest.raises(UrlValidationError):
         resolve_server_ws_url("https://detective.example.com/something")

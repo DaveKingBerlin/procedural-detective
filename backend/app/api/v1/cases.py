@@ -82,6 +82,13 @@ def create_case(
             anonymous_quota_session_id=session_row.session_id,
             difficulty=body.difficulty,
             environment=body.environment,
+            # Phase 25 — the optional browser-supplied provider selection (all
+            # None => the configured default; every value is validated by the
+            # service; unknown/unavailable requests are rejected with the
+            # canonical envelope — never a silent fallback).
+            generation_provider=body.generationProvider,
+            ollama_transport=body.ollamaTransport,
+            ollama_model=body.ollamaModel,
         )
     except HTTPException:
         raise

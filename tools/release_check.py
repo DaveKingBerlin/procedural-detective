@@ -66,6 +66,21 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
        reserved/example hostnames. ``--allow-local`` / ``allow_local`` forgives
        only an explicit local-smoke hostname; the strict single command is
        ``python -m tools.prod_preflight``.
+  10. LAN OVERLAY / PUBLIC-DOMAIN GUARD (F-3) — validates the CERTIFIED
+      deployment chain and FAILS when that chain carries the LAN
+      internal-TLS swap (``docker/Caddyfile.internal`` with ``tls internal``)
+      AND ``CADDY_DOMAIN`` is a public-looking FQDN that passes the
+      ``_caddy_domain_problem`` syntax gate: the deployment would serve the
+      public hostname from Caddy's INTERNAL CA — browsers and the bridge
+      reject it (silent TLS failure) and the run FAILS closed. The LAN
+      overlay is OPT-IN (``tools.prod_preflight --compose-overlay
+      docker-compose.lan.yml``, mirroring ``--env-file``); the default chain
+      is canonical prod compose alone, so a canonical public deployment stays
+      ready-to-host unchanged. The guard is ADDITIVE: it never weakens the
+      single-label / reserved-domain rejection (``Enshrouded-Server`` still
+      FAILS ``_caddy_domain_problem`` in both plain and ``--allow-local``
+      modes) and it stays silent for explicit local-smoke hostnames
+      (localhost / .localhost / .local).
 
 The production-DEPLOYMENT checks (7, 8, 9) apply ONLY when the deployment
 artifacts exist: a document tree without ``docker-compose.prod.yml`` or the
@@ -74,6 +89,15 @@ pattern as the frontend-build bundle scan), never ``fail`` — a repo that simpl
 is not a production-deployment root must not be gate-blocked. When the files
 ARE present the checks still fail-closed on every asserted violation
 (dev overrides, placeholder domains, unbounded logs, published ports, ...).
+
+Phase24A-FP adds the ``base-compose-config`` gate over the BASE dev profile
+(``docker-compose.yml`` alone, rendered with an EMPTY env file): a clean
+checkout must run ``docker compose up --build`` with GENERATION_PROVIDER=fake
+and NO provider-specific variable required/hardcoded in the base env block
+(OLLAMA_BASE_URL / OLLAMA_MODEL arrive only via ``env_file: .env`` / operator
+overlays / GitLab CI variables), and the base profile must never inject
+LLM_API_KEY / LLM_MODEL / LIVE_PROVIDER_URL as EMPTY strings (Settings rejects
+them — the first Phase 24 Docker acceptance defect).
 
 Exit code: 0 ONLY when every non-optional check passes (with
 ``--allow-hosted-placeholders``, hosting/video-only placeholders and
@@ -97,6 +121,7 @@ import ipaddress
 import json
 import re
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -915,6 +940,83 @@ def check_dockerignore(repo_root: Path) -> list[Finding]:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 24 §46 — credential / token / key / password leak scan in TRACKED files
+# --------------------------------------------------------------------------- #
+
+# High-precision token/key/password markers that never belong in a tracked
+# release surface. The set is deliberately conservative (documented examples
+# and hermetic test vectors stay free of these exact markers). The scan
+# enforces PRECISELY the literal vectors below — no more, no less:
+#   - PEM private key blocks (``-----BEGIN ... PRIVATE KEY-----`` for
+#     RSA / EC / DSA / OPENSSH / PGP and the plain form);
+#   - an OpenAI-style API key: ``sk-`` + 20+ alphanumerics;
+#   - the classic GitHub PAT prefix ``ghp_`` + 36+ characters;
+#   - the GitLab PAT prefix ``glpat-`` + 20+ alphanumerics/``_``/``-``;
+#   - the AWS access-key prefix ``AKIA`` + 16 uppercase alphanumerics;
+#   - the HashiCorp Vault/HCP token prefix ``hvs.`` + 20+ characters.
+# Generic KEY/PASSWORD assignment heuristics and git-host PAT spellings other
+# than the two prefixes above are deliberately NOT part of this vector set.
+_TOKEN_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
+    (
+        "PEM private key",
+        re.compile(
+            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |)PRIVATE KEY-----",
+            re.IGNORECASE,
+        ),
+    ),
+    ("OpenAI-style API key (sk-)", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
+    ("GitHub PAT", re.compile(r"\bghp_[A-Za-z0-9]{36,}\b")),
+    ("GitLab PAT", re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b")),
+    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("Vault/HCP token", re.compile(r"\bhvs\.[A-Za-z0-9._\-]{20,}\b")),
+)
+
+
+def scan_credentials(repo_root: Path, tracked: list[str]) -> list[Finding]:
+    """Phase 24 §46 — fail on committed tokens/private keys/passwords.
+
+    Scans the same tracked textual release surface as ``scan_private_endpoints``
+    (sanctioned example files + hermetic test vectors are excluded the same
+    way) for high-precision credential markers. A highly-unlikely-but-real
+    committed key/token must block a release even when no ``.env`` is tracked.
+    """
+    if tracked is None:
+        return [
+            Finding(
+                "credentials", "fail",
+                "cannot enumerate tracked files (git ls-files failed) — "
+                "fail-closed: cannot prove the tree is credential-free",
+            )
+        ]
+    targets = _interface_scan_targets(repo_root, tracked)
+    findings: list[Finding] = []
+    for rel, path in targets:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            for label, pattern in _TOKEN_PATTERNS:
+                if pattern.search(line):
+                    findings.append(
+                        Finding(
+                            "credentials", "fail",
+                            f"{rel}:{number}: {label} literal in the tracked "
+                            "release surface (§46)",
+                        )
+                    )
+    if not findings:
+        findings.append(
+            Finding(
+                "credentials", "ok",
+                "no PEM private key / provider API-key / git-host PAT / AWS "
+                "access-key / Vault token literal in the tracked release surface",
+            )
+        )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
 # Phase 21 F-04 — bounded container stdout logs in the PROD compose profile
 # --------------------------------------------------------------------------- #
 
@@ -1223,6 +1325,31 @@ def _render_prod_compose_config(
     Errors are deliberately sanitized because the rendered model may contain
     provider credentials from the service ``env_file``.
     """
+    return _render_compose_config(
+        repo_root, [compose], env_file=env_file, runner=runner
+    )
+
+
+def _render_compose_config(
+    repo_root: Path,
+    composes: list[Path],
+    *,
+    env_file: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> dict[str, object]:
+    """Return Docker Compose's effective model of ONE overlay chain as JSON.
+
+    ``composes`` is the ordered ``-f`` file list (first = base, later files =
+    overlays), exactly like the real invocation. Phase 24 uses it for the CI
+    profile (``docker-compose.yml`` + ``docker-compose.ci.yml``); the
+    production profile stays on the single-file path above.
+
+    Compose remains the ONLY interpolation authority — including the shell and
+    the selected ``--env-file`` — so a shell/timeout override that bypasses a
+    gate here also changes the render this helper validates.
+    """
+    if not composes:
+        raise _ComposeRenderError("docker compose config: no compose files")
     invoke = runner or subprocess.run
     command = [
         "docker",
@@ -1232,7 +1359,9 @@ def _render_prod_compose_config(
     ]
     if env_file is not None:
         command.extend(["--env-file", str(env_file.resolve())])
-    command.extend(["-f", str(compose), "config", "--format", "json"])
+    for compose in composes:
+        command.extend(["-f", str(compose)])
+    command.extend(["config", "--format", "json"])
 
     try:
         completed = invoke(
@@ -1691,6 +1820,531 @@ def check_prod_effective_config(
 
 
 # --------------------------------------------------------------------------- #
+# F-3 — LAN overlay must never serve a PUBLIC hostname from the internal CA
+# (``tls internal`` in docker/Caddyfile.internal, applied via the LAN overlay)
+# --------------------------------------------------------------------------- #
+
+# The LAN overlay chain (docker-compose.lan.yml header comment + §9): the base
+# production compose plus the single-purpose overlay that swaps the caddy site
+# config for the Caddyfile.internal variant (``tls internal``). This is an
+# OPERATOR/DEV procedure for LAN / single-label acceptance hosts — NEVER a
+# product-certified domain. F-3, reproduced: an operator applies the overlay
+# while CADDY_DOMAIN is a PUBLIC name; ``check_prod_effective_config`` certifies
+# that canonical public domain as ready-to-host, while Caddy actually serves the
+# public hostname from its INTERNAL CA → browsers and the bridge reject the
+# certificate and no gate catches the silent TLS failure.
+#
+# The overlay is OPT-IN, so the guard is chain-driven (mirroring the existing
+# ``--env-file`` discipline): the tool validates the SAME effective chain the
+# operator deploys. The default chain is the canonical production compose alone
+# (a canonical public deployment stays ready-to-host unchanged); an operator
+# whose startup command adds ``-f docker-compose.lan.yml`` must pass that same
+# overlay to the preflight (``--compose-overlay``) and then the F-3 guard
+# validates the [prod + lan] chain and FAILS the public-domain combination.
+_LAN_COMPOSE_BASE = "docker-compose.prod.yml"
+# The rendered overlay signature: the caddy service mounts the INTERNAL
+# Caddyfile at the canonical container Caddy path. Deriving from the RENDERED
+# model ties the detection to what the deployment would actually run — a future
+# change in the overlay mechanism must keep this signature or the guard's
+# rendered-detection branch stops firing (fail-open would be worse: pin it).
+_LAN_CADDYFILE_MARKER = "Caddyfile.internal"
+_LAN_CADDY_MOUNT_TARGET = "/etc/caddy/Caddyfile"
+
+
+def _lan_overlay_rendered(rendered: dict[str, object]) -> bool:
+    """True when the RENDERED chain carries the LAN internal-TLS site config.
+
+    Inspects the composed model (``docker compose config --format json``) rather
+    than the source file: the ``caddy`` service mounts
+    ``docker/Caddyfile.internal`` at ``/etc/caddy/Caddyfile`` iff the LAN
+    overlay was applied (``-f docker-compose.prod.yml -f
+    docker-compose.lan.yml``). ``docker compose config`` normalizes ``:ro``
+    mounts to a dict with ``source`` / ``target`` / ``read_only`` keys.
+    """
+    caddy = _rendered_service(rendered, "caddy")
+    if caddy is None:
+        return False
+    for mount in caddy.get("volumes") or []:
+        if not isinstance(mount, dict):
+            continue
+        source = str(mount.get("source") or "")
+        target = str(mount.get("target") or "")
+        if target == _LAN_CADDY_MOUNT_TARGET and _LAN_CADDYFILE_MARKER in source:
+            return True
+    return False
+
+
+def check_lan_overlay_config(
+    repo_root: Path,
+    *,
+    compose_paths: tuple[Path, ...] | None = None,
+    compose_env_file: Path | None = None,
+    compose_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> list[Finding]:
+    """F-3 — fail-closed guard: LAN ``tls internal`` must not serve a PUBLIC name.
+
+    Validates the certified deployment chain through Docker Compose itself
+    (client-side ``config`` only — no daemon needed, same authority as the
+    other rendered gates). ``compose_paths`` is the SAME ``-f`` chain the
+    deployment uses (default: the canonical ``docker-compose.prod.yml`` alone,
+    so a canonical public deployment stays ready-to-host unchanged). When the
+    rendered model shows the internal Caddyfile swap (``docker/Caddyfile.internal``
+    mounted at ``/etc/caddy/Caddyfile`` — the LAN overlay applied) AND
+    ``CADDY_DOMAIN`` is a public-looking FQDN (passes ``_caddy_domain_problem``
+    — i.e. has a dot, is not localhost/.local/.localhost and is not a
+    reserved/placeholder name), the deployment would serve the public hostname
+    from Caddy's INTERNAL CA: browsers and the bridge reject the certificate and
+    the stack must NOT receive a ready-to-host verdict. A FAIL is emitted for
+    that exact combination.
+
+    The LAN overlay is OPT-IN: an operator whose startup command is ``docker
+    compose -f docker-compose.prod.yml -f docker-compose.lan.yml up`` passes the
+    same overlay chain here (``tools.prod_preflight --compose-overlay
+    docker-compose.lan.yml``) — the exact ``--env-file`` discipline.
+
+    The guard is ADDITIVE. It never weakens the existing gates:
+
+      - ``Enshrouded-Server`` (single label, no dot) still FAILS
+        ``_caddy_domain_problem`` in BOTH plain and ``--allow-local`` modes —
+        the existing ``check_prod_effective_config`` rejection is untouched;
+      - an explicit local-smoke hostname (``localhost`` / ``.localhost`` /
+        ``.local``) with the LAN overlay is the documented local-TLS use and is
+        NOT blocked here (reported as ok with a NOT-ready-to-host note);
+      - reserved / IP / malformed names stay failures of the existing
+        ``_caddy_domain_problem`` gate, not this one.
+
+    The certified chain is ``skip`` when the artifacts are absent (deployment
+    artifact check, like the other compose gates) and the run is fail-closed on
+    a render error.
+    """
+    files = list(compose_paths) if compose_paths else [
+        (repo_root / _LAN_COMPOSE_BASE).resolve()
+    ]
+    if not all(path.is_file() for path in files):
+        return [
+            Finding(
+                "lan-overlay-config", "skip",
+                "certified compose chain not present (" + ", ".join(str(p) for p in files)
+                + ") — the LAN internal-TLS/public-domain guard validates the "
+                "effective deployment chain (canonical prod compose alone, or "
+                "prod + an overlay such as docker-compose.lan.yml passed as "
+                "--compose-overlay)",
+            )
+        ]
+    try:
+        rendered = _render_compose_config(
+            repo_root.resolve(), files, env_file=compose_env_file, runner=compose_runner
+        )
+    except _ComposeRenderError as exc:
+        return [
+            Finding(
+                "lan-overlay-config", "fail",
+                f"{exc}; the rendered deployment chain was not validated "
+                "(fail closed, F-3) — an overlay such as docker-compose.lan.yml "
+                "requires docker/Caddyfile.internal to exist next to the "
+                "canonical production compose",
+            )
+        ]
+
+    if not _lan_overlay_rendered(rendered):
+        return [
+            Finding(
+                "lan-overlay-config", "ok",
+                "LAN internal-TLS overlay is not in effect in the rendered "
+                "chain — no internal-CA/public-domain guard applies; the "
+                "canonical public-ACME Caddyfile stays the deployment edge",
+            )
+        ]
+
+    caddy = _rendered_service(rendered, "caddy")
+    domain = _rendered_environment(caddy).get("CADDY_DOMAIN", "") if caddy else ""
+    domain_problem, explicit_local = _caddy_domain_problem(domain)
+    if domain_problem is None:
+        # Public-looking FQDN that the existing gate would ACCEPT — exactly the
+        # F-3 gap: the canonical preflight certifies it while Caddy serves it
+        # from the internal CA.
+        return [
+            Finding(
+                "lan-overlay-config", "fail",
+                "LAN/internal-TLS mode (docker-compose.lan.yml swaps in "
+                "docker/Caddyfile.internal which adds `tls internal`) is used "
+                "with a public-looking CADDY_DOMAIN: Caddy would serve the "
+                "public name from its INTERNAL CA, so browsers and the bridge "
+                "reject the certificate (silent TLS failure) and this stack "
+                "must NOT receive a ready-to-host verdict. Use a real public "
+                "CADDY_DOMAIN with the CANONICAL docker/Caddyfile (public ACME, "
+                "no LAN overlay), or apply the LAN overlay only with an "
+                "explicit LAN / localhost / single-label hostname (local "
+                "acceptance only)",
+            )
+        ]
+    if explicit_local:
+        return [
+            Finding(
+                "lan-overlay-config", "ok",
+                "LAN internal-TLS mode with an explicit local-smoke hostname "
+                "(localhost/.localhost/.local): the internal CA serving a "
+                "LAN/local name is the documented local-TLS use — NOT a "
+                "ready-to-host verdict; the strict CADDY_DOMAIN gate in "
+                "check_prod_effective_config still applies",
+            )
+        ]
+    return [
+        Finding(
+            "lan-overlay-config", "ok",
+            "LAN internal-TLS mode with a hostname that is not a public FQDN — "
+            "the existing CADDY_DOMAIN ready-to-host gate still governs "
+            "(single-label, reserved, IP and malformed names stay rejected); "
+            "LAN acceptance is an operator/DEV procedure, never a "
+            "product-certified domain",
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 24 §9/§38 — CI (docker-smoke) rendered-compose validation
+# --------------------------------------------------------------------------- #
+
+# The CI deterministic overlay: base dev compose + the docker-compose.ci.yml
+# overlay (Phase 24). Both stay single-origin on the same backend service.
+_CI_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.ci.yml")
+# The CI deterministic profile env file (documented under compose/profiles/).
+_CI_PROFILE_ENV = "compose/profiles/ci.env"
+# Phase 24 §8: the CI deterministic profile must stay fake + bridge-disabled so
+# every normal push/MR pipeline is hermetic and offline.
+_CI_PROFILE_PROVIDER = "fake"
+_CI_PROFILE_BRIDGE = "false"
+
+
+def check_ci_compose_config(
+    repo_root: Path,
+    *,
+    compose_paths: tuple[Path, ...] | None = None,
+    compose_env_file: Path | None = None,
+    compose_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    client_ts_path: Path | None = None,
+    caddyfile_path: Path | None = None,
+) -> list[Finding]:
+    """Phase 24 §9/§38 — fail-closed gate over the RENDERED CI compose chain.
+
+    Renders the CI deterministic profile (``docker-compose.yml`` +
+    ``docker-compose.ci.yml`` with ``compose/profiles/ci.env``) through Docker
+    Compose itself — the shell/``--env-file`` interpolation is authoritative,
+    so a shell override that would evade the gate ALSO changes the render that
+    is validated here (same design as ``check_prod_effective_config``). Asserts:
+
+      - the CI profile is deterministically fake + bridge-disabled
+        (GENERATION_PROVIDER=fake, ENABLE_BRIDGE=false);
+      - the canonical P-02 timeout envelope (through the SAME backend
+        ``timeout_envelope_violations`` validator used by production preflight
+        and the runtime adopt-path) — no CI-only timeout semantics;
+      - bounded json-file 10m x 5 logging on the single smoke service (§44);
+      - the backend port 8000 is published ONLY for the local smoke job and the
+        Ollama port 11434 is NEVER published (§5);
+      - the persistent ``pd-data`` volume stays mounted at /data (§6).
+
+    The CI smoke uses a LOCAL/TEST CADDY_DOMAIN for the prod-like profile; this
+    check covers the dev/CI-side stack. Production preflight
+    (``tools.prod_preflight``) still rejects placeholder domains and remains the
+    strict ready-to-host verdict.
+    """
+    files = list(compose_paths) if compose_paths else [
+        (repo_root / name).resolve() for name in _CI_COMPOSE_FILES
+    ]
+    if not all(path.is_file() for path in files):
+        return [
+            Finding(
+                "ci-compose-config", "skip",
+                "CI compose chain not present (" + ", ".join(str(p) for p in files)
+                + ") — the CI rendered-config gate applies only when the "
+                "docker-compose.ci.yml overlay exists (deployment artifact check)",
+            )
+        ]
+    env_file = compose_env_file
+    if env_file is None:
+        profile = (repo_root / _CI_PROFILE_ENV).resolve()
+        env_file = profile if profile.is_file() else None
+
+    try:
+        rendered = _render_compose_config(
+            repo_root.resolve(), files, env_file=env_file, runner=compose_runner
+        )
+    except _ComposeRenderError as exc:
+        return [
+            Finding(
+                "ci-compose-config", "fail",
+                f"{exc}; the rendered CI deterministic configuration was not "
+                "validated (fail closed, §9/§38)",
+            )
+        ]
+
+    service = _rendered_service(rendered, "procedural-detective")
+    if service is None:
+        return [
+            Finding(
+                "ci-compose-config", "fail",
+                "rendered CI configuration is missing the backend service "
+                "(fail closed, §9/§38)",
+            )
+        ]
+    env = _rendered_environment(service)
+    findings: list[Finding] = []
+
+    provider = env.get("GENERATION_PROVIDER")
+    bridge = env.get("ENABLE_BRIDGE")
+    if provider != _CI_PROFILE_PROVIDER:
+        findings.append(
+            Finding(
+                "ci-compose-config", "fail",
+                f"rendered CI GENERATION_PROVIDER is {provider!r}; the CI "
+                f"deterministic profile requires {_CI_PROFILE_PROVIDER!r} so "
+                "every ordinary pipeline stays hermetic and offline (§8)",
+            )
+        )
+    if bridge != _CI_PROFILE_BRIDGE:
+        findings.append(
+            Finding(
+                "ci-compose-config", "fail",
+                f"rendered CI ENABLE_BRIDGE is {bridge!r}; the CI deterministic "
+                f"profile requires {_CI_PROFILE_BRIDGE!r} (§8/§15)",
+            )
+        )
+
+    # Canonical P-02 timeout envelope — the SAME pure validator runtime +
+    # production preflight share. Rendered values only, never a CI-specific
+    # copy of the semantics.
+    client_ts = client_ts_path or (repo_root / "frontend" / "src" / "api" / "client.ts")
+    frontend_timeout = 0
+    if client_ts.is_file():
+        try:
+            m = re.search(r"REQUEST_TIMEOUT_MS\s*=\s*(\d+)",
+                          client_ts.read_text(encoding="utf-8", errors="replace"))
+            if m:
+                frontend_timeout = int(m.group(1)) // 1000
+        except OSError:
+            pass
+    caddyfile = caddyfile_path or (repo_root / "docker" / "Caddyfile")
+    proxy_timeout = 0
+    if caddyfile.is_file():
+        try:
+            m = re.search(r"response_header_timeout\s+(\d+)\s*s",
+                          caddyfile.read_text(encoding="utf-8", errors="replace"))
+            if m:
+                proxy_timeout = int(m.group(1))
+        except OSError:
+            pass
+    timeout_problems = timeout_envelope_violations(
+        generation_provider=str(provider),
+        generation_deadline_seconds=env.get("CASE_GENERATION_DEADLINE_SECONDS"),
+        provider_timeout_seconds=env.get("OLLAMA_TIMEOUT_SECONDS"),
+        frontend_timeout_seconds=frontend_timeout,
+        proxy_timeout_seconds=proxy_timeout,
+    )
+    findings.extend(
+        Finding(
+            "ci-compose-config", "fail",
+            f"rendered CI timeout envelope is unsupported: {problem} (§9)",
+        )
+        for problem in timeout_problems
+    )
+
+    log_problem = _rendered_log_bounds_problem("procedural-detective", service)
+    if log_problem:
+        findings.append(
+            Finding("ci-compose-config", "fail", f"{log_problem} (§44)")
+        )
+
+    if _rendered_port_targets(service) and "11434" in _rendered_port_targets(service):
+        findings.append(
+            Finding(
+                "ci-compose-config", "fail",
+                "the CI stack must never publish the Ollama port 11434 (§5)",
+            )
+        )
+    services = rendered.get("services")
+    if isinstance(services, dict):
+        for other in services.values():
+            if isinstance(other, dict) and "11434" in _rendered_port_targets(other):
+                findings.append(
+                    Finding(
+                        "ci-compose-config", "fail",
+                        "the CI stack renders a published Ollama port 11434 (§5)",
+                    )
+                )
+                break
+    if not _has_private_data_volume(rendered, service):
+        findings.append(
+            Finding(
+                "ci-compose-config", "fail",
+                "the CI stack has no declared named volume mounted at /data (§6)",
+            )
+        )
+
+    if not any(f.severity == "fail" for f in findings):
+        findings.append(
+            Finding(
+                "ci-compose-config", "ok",
+                "rendered CI deterministic configuration validated (fail-closed, "
+                "§9/§38): GENERATION_PROVIDER=fake, ENABLE_BRIDGE=false, canonical "
+                "timeout envelope valid, bounded logs, no published Ollama port, "
+                "persistent /data volume",
+            )
+        )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
+# Phase 24A-FP — BASE dev compose render gate (clean-checkout contract)
+# --------------------------------------------------------------------------- #
+
+# The BASE dev compose alone: the profile a CLEAN CHECKOUT runs with
+# `docker compose up --build` and GENERATION_PROVIDER=fake (no operator .env,
+# no OLLAMA_BASE_URL anywhere). It must render on its own and must never
+# REQUIRE or HARDCODE provider-specific variables (they arrive ONLY via
+# env_file: .env and/or operator overlays / GitLab CI variables).
+_BASE_COMPOSE_FILE = "docker-compose.yml"
+
+# Provider-specific settings that must NEVER be injected as EMPTY strings by
+# the base fake/ollama-capable profile (Phase24A-FP item C). The backend
+# Settings validator rejects them (LIVE_PROVIDER_URL="" broke the container),
+# so the base checks the RENDERED model for these EXACT keys holding "" —
+# values legitimately configured by an operator .env / overlay are fine.
+_FORBIDDEN_EMPTY_PROVIDER_ENV_KEYS = ("LLM_API_KEY", "LLM_MODEL", "LIVE_PROVIDER_URL")
+
+
+def check_base_compose_config(
+    repo_root: Path,
+    *,
+    compose_path: Path | None = None,
+    compose_env_file: Path | None = None,
+    compose_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> list[Finding]:
+    """Phase 24A-FP — fail-closed gate over the RENDERED BASE dev compose.
+
+    Renders ``docker-compose.yml`` ALONE through Docker Compose with an EMPTY
+    ``--env-file`` (a clean checkout has no operator ``.env`` for
+    interpolation), exactly like ``check_ci_compose_config`` renders its chain
+    through the authoritative Compose engine. Asserts:
+
+      - the base profile renders successfully WITHOUT a required
+        OLLAMA_BASE_URL / OLLAMA_MODEL (Phase24A-FP R1): provider-specific
+        variables must not be required or hardcoded in the base env block, or
+        both `docker compose up --build` on a clean checkout AND this gate die
+        at interpolation;
+      - the rendered environment never carries LLM_API_KEY / LLM_MODEL /
+        LIVE_PROVIDER_URL as EMPTY strings (the original Phase 24 acceptance
+        defect 2) — Settings rejects them; values configured by an operator
+        ``.env`` / overlay are legitimate and pass;
+      - the canonical Phase 19J-RI2 timeout envelope (300/180 defaults) is
+        valid for the rendered provider profile (same pure validator as the
+        CI and production gates).
+
+    Like the other compose gates this never prints a rendered value — only
+    key names and verdicts.
+    """
+    files = [(compose_path or (repo_root / _BASE_COMPOSE_FILE)).resolve()]
+    if not files[0].is_file():
+        return [
+            Finding(
+                "base-compose-config", "skip",
+                f"{_BASE_COMPOSE_FILE} not present in this document tree — "
+                "the base dev-compose render gate applies only when the dev "
+                "compose exists",
+            )
+        ]
+    env_file = compose_env_file
+    cleanup: Path | None = None
+    if env_file is None:
+        # A truly EMPTY env file: interpolation must succeed with no provider
+        # variables at all — the clean-checkout contract (a local operator
+        # .env would only be consulted via env_file: below, subject to the
+        # empty-string assertion).
+        tmp = tempfile.TemporaryDirectory(prefix="pd-base-compose-")
+        env_file = Path(tmp.name) / "empty.env"
+        env_file.write_text("", encoding="utf-8")
+        cleanup = Path(tmp.name)
+
+    try:
+        try:
+            rendered = _render_compose_config(
+                repo_root.resolve(), files, env_file=env_file, runner=compose_runner
+            )
+        finally:
+            if cleanup is not None:
+                # rmtree keeps the temporary empty env file off the tree.
+                import shutil
+
+                shutil.rmtree(cleanup, ignore_errors=True)
+    except _ComposeRenderError as exc:
+        return [
+            Finding(
+                "base-compose-config", "fail",
+                f"{exc}; the base dev profile must render WITHOUT any required "
+                "provider-specific variable (OLLAMA_BASE_URL / OLLAMA_MODEL are "
+                "operator-injected via env_file/overlays only, never required "
+                "or hardcoded in the base compose — Phase24A-FP R1)",
+            )
+        ]
+
+    service = _rendered_service(rendered, "procedural-detective")
+    if service is None:
+        return [
+            Finding(
+                "base-compose-config", "fail",
+                "rendered base configuration is missing the backend service "
+                "(fail closed)",
+            )
+        ]
+    env = _rendered_environment(service)
+    findings: list[Finding] = []
+
+    empty_injected = [
+        key for key in _FORBIDDEN_EMPTY_PROVIDER_ENV_KEYS
+        if env.get(key, "\x00") == ""
+    ]
+    if empty_injected:
+        findings.append(
+            Finding(
+                "base-compose-config", "fail",
+                "the base dev profile injects provider settings as EMPTY "
+                "strings: " + ", ".join(empty_injected)
+                + " — Settings rejects them (original Phase 24 acceptance "
+                "defect 2); they must stay UNSET unless the operator really "
+                "configures them",
+            )
+        )
+
+    # Canonical P-02 timeout envelope over the RENDERED values (same pure
+    # validator the CI/production gates and the runtime share).
+    timeout_problems = timeout_envelope_violations(
+        generation_provider=env.get("GENERATION_PROVIDER", ""),
+        generation_deadline_seconds=env.get("CASE_GENERATION_DEADLINE_SECONDS"),
+        provider_timeout_seconds=env.get("OLLAMA_TIMEOUT_SECONDS"),
+    )
+    findings.extend(
+        Finding(
+            "base-compose-config",
+            "fail",
+            f"rendered base timeout envelope is unsupported: {problem}",
+        )
+        for problem in timeout_problems
+    )
+
+    if not any(f.severity == "fail" for f in findings):
+        findings.append(
+            Finding(
+                "base-compose-config", "ok",
+                "rendered base dev profile validated (fail-closed): renders "
+                "cleanly with an empty env file (no required/hardcoded "
+                "OLLAMA_BASE_URL / OLLAMA_MODEL), no empty-string provider "
+                "settings (LLM_API_KEY / LLM_MODEL / LIVE_PROVIDER_URL), "
+                "canonical timeout envelope valid",
+            )
+        )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
 # orchestration
 # --------------------------------------------------------------------------- #
 
@@ -1701,6 +2355,8 @@ def run_all(
     allow_hosted: bool = False,
     frontend_dir: Path | None = None,
     prod_allow_local: bool = True,
+    compose_env_file: Path | None = None,
+    compose_overlay: Path | None = None,
 ) -> list[Finding]:
     """Every release check; the CLI exits 1 when any finding has severity fail.
 
@@ -1708,6 +2364,11 @@ def run_all(
     the documented local-smoke REPORT; the STRICT
     ready-to-host verdict lives in ``python -m tools.prod_preflight`` (which
     runs the same ``check_prod_effective_config`` with ``allow_local=False``).
+
+    ``compose_overlay`` (``--compose-overlay`` in ``tools.prod_preflight``) is
+    an extra ``-f`` compose file the deployment ALSO uses (e.g.
+    ``docker-compose.lan.yml``); the F-3 LAN-overlay guard then validates the
+    certified prod + overlay chain. Default: the canonical prod compose alone.
     """
     findings: list[Finding] = []
     tracked = git_tracked_files(repo_root)
@@ -1715,12 +2376,33 @@ def run_all(
     findings.extend(check_third_party(repo_root))
     findings.extend(check_tracked_secrets(tracked))
     findings.extend(scan_private_endpoints(repo_root, tracked))
+    findings.extend(scan_credentials(repo_root, tracked))
     findings.extend(check_dockerignore(repo_root))
     findings.extend(check_compose_logging_bounds(repo_root))
     findings.extend(check_prod_env_profile(repo_root))
     findings.extend(
-        check_prod_effective_config(repo_root, allow_local=prod_allow_local)
+        check_prod_effective_config(
+            repo_root,
+            allow_local=prod_allow_local,
+            compose_env_file=compose_env_file,
+        )
     )
+    if compose_overlay is not None:
+        lan_chain = (
+            (repo_root / "docker-compose.prod.yml").resolve(),
+            compose_overlay.resolve(),
+        )
+    else:
+        lan_chain = None
+    findings.extend(
+        check_lan_overlay_config(
+            repo_root,
+            compose_paths=lan_chain,
+            compose_env_file=compose_env_file,
+        )
+    )
+    findings.extend(check_ci_compose_config(repo_root))
+    findings.extend(check_base_compose_config(repo_root))
     findings.extend(scan_frontend_build(frontend_dir))
     return findings
 

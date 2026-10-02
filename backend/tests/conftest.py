@@ -255,6 +255,14 @@ _OPERATOR_DOTENV_KEYS = (
     "LIVE_PROVIDER_URL",
     "LLM_API_KEY",
     "LLM_MODEL",
+    # Phase 25 — Frontier hosted-provider operator configuration (server-only
+    # secret + endpoint + model); a developer shell .env must never leak them
+    # into the suite or flip the default provider.
+    "FRONTIER_ENABLED",
+    "FRONTIER_BASE_URL",
+    "FRONTIER_API_KEY",
+    "FRONTIER_MODEL",
+    "FRONTIER_TIMEOUT_SECONDS",
     "FAKE_PROVIDER_SCRIPT",
     # Phase 20 (PD-SEC-02/PD-SEC-06): the public-admission rate limits, the
     # production environment marker and the trusted-proxy flag are operator

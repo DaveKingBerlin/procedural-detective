@@ -56,6 +56,10 @@ from typing import Any, Callable
 from app.generation.ollama_provider import (
     ollama_available as _probe_ollama,
 )
+from app.generation.selection import (
+    frontier_configured as _selection_frontier_configured,
+    ollama_server_configured as _selection_ollama_server_configured,
+)
 from app.persistence.timebase import EpochClock
 
 # Sentinel identity for the DEFAULT httpx transport (the API never passes one).
@@ -231,4 +235,28 @@ def reset_capability_probe_cache(
     _probe_cache = CapabilityProbeCache(clock=clock, probe=probe)
 
 
-__all__ = ["CapabilityProbeCache", "ollama_available", "reset_capability_probe_cache"]
+# --------------------------------------------------------------------------- #
+# Phase 25 — provider-configuration availability predicates (one source of
+# truth shared with the per-attempt resolver ``app.generation.selection``).
+# The capability DTO and the request-time resolver must agree on what counts as
+# "configured"; these thin re-exports keep exactly ONE implementation.
+# --------------------------------------------------------------------------- #
+
+
+def ollama_server_configured(settings: object) -> bool:
+    """True when a server/direct Ollama endpoint is configured (Phase25 §3.1)."""
+    return _selection_ollama_server_configured(settings)
+
+
+def frontier_configured(settings: object) -> bool:
+    """True when every FRONTIER_* member is present (Phase25 §3.1)."""
+    return _selection_frontier_configured(settings)
+
+
+__all__ = [
+    "CapabilityProbeCache",
+    "frontier_configured",
+    "ollama_available",
+    "ollama_server_configured",
+    "reset_capability_probe_cache",
+]

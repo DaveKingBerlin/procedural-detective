@@ -1,18 +1,23 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import {
-  createAnonymousSession,
   createCase,
   createPlaythrough,
+  getGenerationCapabilitiesWithSession,
   getGenerationProgress,
 } from "../api/client";
-import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
+import {
+  createOrReuseAnonymousSession,
+  resetAnonymousSessionCache,
+} from "../api/anonymousSession";
+import type { CreateCaseGeneration, GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { setPlaythroughId, setPlaythroughToken } from "../api/playthroughToken";
 import { clearJourneyParams, getJourneyParams, type JourneyParams } from "../journey/context";
 import {
   getGenerationMode,
   validatedJourneyMode,
 } from "../journey/generationMode";
+import { toCreateCaseGeneration } from "../journey/generationProvider";
 import { loadGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import {
   runDemo,
@@ -56,19 +61,44 @@ import { stageInfoFromPhase, type StageInfo } from "../journey/generationProgres
  *
  * On PUBLISHED the journey stores {pd_playthrough_token, pd_playthrough_id}
  * (reuse playthroughToken.ts) and navigates to /scene (automatic after a
- * short beat, or immediately via "Enter investigation"). On FAILED / quota /
- * network errors the page shows a clear safe message with a Retry action and
- * a Back-to-start link. A hard refresh (no journey context) shows a friendly
- * "start again" state. No prompts, diagnostics or provider details are ever
- * shown.
+ * short beat, or immediately via "Enter investigation"). On FAILED / network
+ * errors the page shows a clear safe message with a Retry action and a
+ * Back-to-start link. A quota-denied run (backend 429 ADMISSION_DENIED) shows
+ * the Phase 24 F-2 session-limit recovery state instead (clear holder + reload
+ * guidance — never an auto-mint). A hard refresh (no journey context) shows a
+ * friendly "start again" state. No prompts, diagnostics or provider details
+ * are ever shown.
  */
 
 const DEMO_SERVICES: DemoFlowServices = {
-  createSession: createAnonymousSession,
+  // Phase 24 P0 §8 — the route mints at most ONE anonymous session per page
+  // lifetime (the module-level in-memory holder), so a retry / re-run no
+  // longer creates a second session (churn fix); combined with the journey
+  // context token this keeps the bridge-pairing session identity stable.
+  createSession: createOrReuseAnonymousSession,
   createCase,
   pollGeneration: getGenerationProgress,
   createPlaythrough,
 };
+
+/**
+ * Phase 24 F-2 — frozen recovery copy for a session-window-DENIED run.
+ *
+ * The backend sanitizes EVERY admission denial to the same safe 429
+ * ADMISSION_DENIED envelope (per-session window exhausted, global window
+ * exhausted, unknown/expired session) — no internal gate is ever revealed.
+ * Under the P0 one-session-per-page holder a per-session window denial would
+ * pin the page into "generation window exhausted" forever (every retry reuses
+ * the same exhausted session). Recovery is therefore EXPLICIT: clear the
+ * module holder and tell the user to reload the page, which starts a fresh
+ * session — while the server-side per-IP generation budget stays untouched
+ * (a fresh session still consumes it). NO auto-mint happens on the denial: the
+ * server rate limit stays authoritative.
+ */
+export const SESSION_LIMIT_HEADING = "Generation limit reached";
+export const SESSION_LIMIT_MESSAGE =
+  "This page's generation session has reached its limit. Reload the page to start a fresh session.";
+export const SESSION_LIMIT_RELOAD_LABEL = "Reload page";
 
 /** Injectable live capability probe (real route: GET /generation-capabilities). */
 export type CapabilityLoader = () => Promise<GenerationCapabilitiesResponse>;
@@ -102,12 +132,16 @@ function runJourney(
   difficulty: string,
   onProgress: (progress: DemoProgress) => void,
   mode: GenerationModeId | null,
+  anonymousSessionToken?: string,
+  generation?: CreateCaseGeneration,
 ): Promise<DemoFlowResult> {
   return runDemo(prompt, {
     services: DEMO_SERVICES,
     difficulty,
     mode,
     onProgress,
+    anonymousSessionToken,
+    generation,
   });
 }
 
@@ -117,6 +151,18 @@ export type RunFn = (
   onProgress: (progress: DemoProgress) => void,
   /** ADV-212 — the mode validated against live capabilities (never raw storage). */
   mode: GenerationModeId | null,
+  /**
+   * Phase 24 P0 — the in-memory anonymous-session bearer carried from /new
+   * (the session that paired the bridge). runDemo reuses it for POST /cases
+   * and skips createSession(); undefined keeps the fresh-mint behavior.
+   */
+  anonymousSessionToken?: string,
+  /**
+   * Phase 25 — the optional browser-selected generation block carried from
+   * /new into POST /cases (see {@link CreateCaseGeneration}). undefined keeps
+   * the byte-identical no-selection request (§13).
+   */
+  generation?: CreateCaseGeneration,
 ) => Promise<DemoFlowResult>;
 
 /**
@@ -138,11 +184,24 @@ export function stageFromProgress(progress: DemoProgress): StageInfo {
 export default function GeneratingPage() {
   const navigate = useNavigate();
   const params = getJourneyParams();
+  const anonymousSessionToken = params?.anonymousSessionToken;
+  // Phase 24 P0 §2 — when the journey carries the pairing session bearer, the
+  // capability probe is made AUTHENTICATED so the backend scopes the truthful
+  // remoteLocalAi block to THIS session. The unauthenticated default call
+  // stays untouched for every other consumer (cross-session isolation is
+  // server-side and intentional).
+  const capabilityLoader: CapabilityLoader = anonymousSessionToken
+    ? () =>
+        loadGenerationCapabilities(() =>
+          getGenerationCapabilitiesWithSession(anonymousSessionToken),
+        )
+    : DEFAULT_CAPABILITY_LOADER;
 
   return (
     <GenerationJourney
       params={params}
       run={runJourney}
+      loadCapabilities={capabilityLoader}
       onSuccess={(result) => {
         setPlaythroughToken(result.playthroughToken);
         setPlaythroughId(result.playthroughId);
@@ -165,19 +224,32 @@ export interface GenerationJourneyProps {
    * journey mode before any label is chosen (defaults to the real endpoint).
    */
   loadCapabilities?: CapabilityLoader;
+  /**
+   * Phase 24 F-2 — recovery action for a session-window-DENIED run (defaults
+   * to a full page reload, which gives the next page a clean session without
+   * ever auto-minting).
+   */
+  onReload?: () => void;
 }
 
 type JourneyView =
   | { status: "no-session" }
   | { status: "running"; stage: StageInfo }
   | { status: "done"; result: Extract<DemoFlowResult, { ok: true }> }
-  | { status: "error"; kind: string; message: string };
+  | { status: "error"; kind: string; message: string }
+  | { status: "session-limit" };
+
+/** Phase 24 F-2 — recovery action for a session-denied run (a page reload). */
+const reloadPage = (): void => {
+  window.location.reload();
+};
 
 export function GenerationJourney({
   params,
   run,
   onSuccess,
   loadCapabilities = DEFAULT_CAPABILITY_LOADER,
+  onReload = reloadPage,
 }: GenerationJourneyProps) {
   const [view, setView] = useState<JourneyView>(() =>
     params === null
@@ -200,16 +272,39 @@ export function GenerationJourney({
     void resolveJourneyMode(loadCapabilities).then((mode) => {
       if (cancelled) return;
       setView({ status: "running", stage: stageInfoFromPhase("session", null, null, null, mode) });
+      // Phase 25 — build the optional generation-selection block from the
+      // journey params ONLY when a provider was actually carried from /new
+      // (transport/model travel only for Ollama). Absent -> undefined -> the
+      // byte-identical no-selection POST /cases request (§13).
+      const generation: CreateCaseGeneration | undefined =
+        params.generationProvider !== undefined
+          ? toCreateCaseGeneration({
+              generationProvider: params.generationProvider,
+              ollamaTransport: params.ollamaTransport ?? null,
+              ollamaModel: params.ollamaModel ?? "",
+            })
+          : undefined;
       void run(params.prompt, params.difficulty, (progress) => {
         if (cancelled) return;
         setView({
           status: "running",
           stage: stageFromProgress(progress),
         });
-      }, mode).then((result) => {
+      }, mode, params.anonymousSessionToken, generation).then((result) => {
         if (cancelled) return;
         if (result.ok) {
           setView({ status: "done", result });
+        } else if (result.failure.kind === "quota") {
+          // Phase 24 F-2 — a session-window-DENIED run (the backend's sanitized
+          // 429 ADMISSION_DENIED on POST /cases). Under the P0 one-session-per-
+          // page holder a retry would reuse the SAME exhausted session and fail
+          // forever; recover EXPLICITLY instead: clear the in-memory holder (a
+          // RELOAD / next page then mints a clean session under the unchanged
+          // server-side per-IP budget) and present the recover-by-reload state.
+          // No auto-mint happens here — the server rate limit stays
+          // authoritative.
+          resetAnonymousSessionCache();
+          setView({ status: "session-limit" });
         } else {
           setView({ status: "error", kind: result.failure.kind, message: result.failure.message });
         }
@@ -237,20 +332,25 @@ export function GenerationJourney({
     if (view.status === "done") onSuccess(view.result);
   };
 
-  return <GenerationJourneyView view={view} onEnter={enter} onRetry={retry} />;
+  return <GenerationJourneyView view={view} onEnter={enter} onRetry={retry} onReload={onReload} />;
 }
 
 export interface GenerationJourneyViewProps {
   view: JourneyView;
   onEnter: () => void;
   onRetry: () => void;
+  /**
+   * Phase 24 F-2 — recovery action for the session-limit state (a page
+   * reload by default; the parent injects it so the renderer stays pure).
+   */
+  onReload: () => void;
 }
 
 /**
  * Pure renderer for the generation route states — exported separately so the
  * states are unit-testable with react-dom/server (no effects, no network).
  */
-export function GenerationJourneyView({ view, onEnter, onRetry }: GenerationJourneyViewProps) {
+export function GenerationJourneyView({ view, onEnter, onRetry, onReload }: GenerationJourneyViewProps) {
   if (view.status === "no-session") {
     return (
       <section className="page generating">
@@ -262,6 +362,37 @@ export function GenerationJourneyView({ view, onEnter, onRetry }: GenerationJour
               Back to start
             </Link>
           </p>
+        </div>
+      </section>
+    );
+  }
+
+  if (view.status === "session-limit") {
+    // Phase 24 F-2 — session-window-denied recovery: a page reload is the
+    // recovery (a fresh page starts a clean session under the unchanged
+    // server-side rate limit). This is the ONLY action besides Back to start —
+    // deliberately NO "Try again" that would re-run the same exhausted session.
+    return (
+      <section className="page generating">
+        <h2>{SESSION_LIMIT_HEADING}</h2>
+        <div
+          className="generation-state generation-state--session-limit"
+          data-testid="generation-session-limit"
+          role="status"
+        >
+          <p className="generation-error-message">{SESSION_LIMIT_MESSAGE}</p>
+          <div className="generation-actions">
+            <button
+              type="button"
+              data-testid="generation-session-limit-reload"
+              onClick={onReload}
+            >
+              {SESSION_LIMIT_RELOAD_LABEL}
+            </button>
+            <Link to="/new" data-testid="generation-back-to-start">
+              Back to start
+            </Link>
+          </div>
         </div>
       </section>
     );

@@ -259,3 +259,9 @@ tmp/
 
 # Optional runtime lifecycle logs
 logs/
+
+.tmp/
+.qa_ri2_bridge_final/
+.qa_ri2_bridge_full/
+
+*.crt

@@ -1,0 +1,333 @@
+# ---------------------------------------------------------------------------
+# Procedural Detective — GitLab CI/CD (Phase 24, §17-§56).
+#
+# Pipeline stages (§19):
+#   validate  -> test -> build -> docker -> smoke -> real-ai
+#
+# Triggers (§18) via `workflow: rules`:
+#   * branch push         (CI_COMMIT_BRANCH)
+#   * merge request       (CI_PIPELINE_SOURCE == merge_request_event)
+#   * scheduled pipeline  (CI_PIPELINE_SOURCE == schedule)
+#   * manual web trigger  (CI_PIPELINE_SOURCE == web)
+#
+# HARD RULES (Level 0):
+#   * ordinary pushes/MRs are hermetic: GENERATION_PROVIDER=fake,
+#     ENABLE_BRIDGE=false — no Ollama reachability is ever required (§32).
+#   * real-AI runs ONLY on the `real-ollama` tagged runner, manually or via
+#     schedule, reading OLLAMA_BASE_URL / OLLAMA_MODEL / CADDY_DOMAIN /
+#     CADDY_EMAIL from GitLab CI/CD variables (masked/protected). NO job ever
+#     echoes those values (§31). VALUES ALSO NEVER APPEAR IN ARTIFACTS (§27).
+#   * every Docker job uses the UNIQUE project "pd-ci-$CI_PIPELINE_ID-$CI_JOB_ID"
+#     and cleans up ONLY its own resources — cleanup never includes the
+#     environment-wide prune commands (see test_gitlab_ci_lint.py: any such
+#     command is a hard lint failure) and never touches foreign resources
+#     (§7/§50).
+#   * REQUIREDMENTS.md is byte-identical (sha256 pin below).
+#
+# Runner (decicated, shell executor, trusted host: docker + compose plugin +
+# Python 3.12 + Node + Git; tags: `docker`, `real-ollama`) — see docs/CI.md.
+# ---------------------------------------------------------------------------
+
+stages:
+  - validate
+  - test
+  - build
+  - docker
+  - smoke
+  - real-ai
+
+default:
+  interruptible: true
+  timeout: 40m
+
+variables:
+  # Hermetic by default for every branch push / MR.
+  GENERATION_PROVIDER: "fake"
+  ENABLE_BRIDGE: "false"
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # The canonical REQUIREMENTS.md integrity pin (Phase 24 §20 / immutable spec).
+  REQUIREMENTS_SHA256: "b2e568c029b02de79a74c43bb0e2ecd4d44a7fbec65d7de191a890a6dec9970d"
+  # CI_COMPOSE_PROJECT is always per-job (set INSIDE each docker job; never
+  # inherited as a fixed value so two jobs can never share a project).
+
+workflow:
+  rules:
+    # MR pipelines: all required hermetic jobs.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # Branch pushes (including merge-train / default branch).
+    - if: '$CI_COMMIT_BRANCH'
+    # Scheduled real-AI acceptance.
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    # Manual web trigger.
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# --------------------------------------------------------------------------- #
+# validate — fast gates BEFORE any expensive Docker work (§20)
+# --------------------------------------------------------------------------- #
+
+validate:
+  stage: validate
+  # Every pipeline job must carry a documented runner tag (DEF-003): the
+  # dedicated docker-tagged shell runner is registered with --run-untagged=false,
+  # so an untagged job would NEVER be picked up and the whole pipeline would
+  # stall. `validate` only runs repo commands (git/python on the checkout) —
+  # exactly what the docker-tagged runner covers.
+  tags: [docker]
+  script:
+    # ADV-001: propagate the release_check gate's REAL exit status through the
+    # `tee` artifact pipe. Without `set -o pipefail` a release_check FAIL would
+    # return tee's 0 and this job would stay GREEN while every §20/§46/§9/§38
+    # verdict is FAIL — the pipe must never mask the gate.
+    - set -o pipefail
+    - git diff --check
+    # Release-hygiene gate: placeholders, tracked .env/logs/db, private-endpoint
+    # leakage (§46), credential tokens/keys (§46), .dockerignore (§47), prod
+    # compose logging bounds (§44), DEV/PROD env-profile split, and the
+    # rendered PROD + CI compose gates (§9/§38 — CANONICAL timeout envelope
+    # through the backend's own timeout_envelope_violations validator).
+    - python -m tools.release_check --allow-hosted-placeholders | tee release-check-out.txt
+    - python -m tools.catalog_report
+    # Adapter drift (RAD 3) — generated adapters must exactly match .rad.
+    - python tools/generate_adapters.py --check
+    # REQUIREMENTS.md byte-identity guard.
+    - python -c "import hashlib,pathlib; h=hashlib.sha256(pathlib.Path('REQUIREMENTS.md').read_bytes()).hexdigest(); assert h.lower()=='$REQUIREMENTS_SHA256', ('REQUIREMENTS.md hash mismatch', h)"
+    # CI fake-world fixture drift guard (docker-smoke Activity Log world).
+    - python -m tools.generate_ci_fake_world --check
+  artifacts:
+    when: always
+    paths:
+      - release-check-out.txt
+    expire_in: 7 days
+
+# --------------------------------------------------------------------------- #
+# test — hermetic Python/Node/Bridge suites (§21-§24, §43)
+# --------------------------------------------------------------------------- #
+
+backend-tests:
+  stage: test
+  tags: [docker]
+  script:
+    # Isolated writable tmp storage; on MANUAL Windows runs use
+    # --basetemp=C:\Temp\pd-pytest-backend (documented workaround §21). Linux
+    # CI uses the runner workspace tmp dir. The junit XML is written to an
+    # EXPLICIT path under $CI_PROJECT_DIR/.tmp so the artifact is deterministic
+    # (pytest writes .pytest_cache under the ROOTDIR inferred from the args —
+    # backend/ — NOT backend/tests/, so a nodeids-cache artifact path was
+    # wrong; DEF-002 fixed by switching to the junit report the job really
+    # produces instead of depending on rootdir/cache inference).
+    - python -m pytest backend/tests -q --basetemp="$CI_PROJECT_DIR/.tmp/pytest-backend" -o junit_family=legacy --junitxml="$CI_PROJECT_DIR/.tmp/pytest-backend-junit.xml"
+  artifacts:
+    when: always
+    paths:
+      - .tmp/pytest-backend-junit.xml
+    reports:
+      junit:
+        - .tmp/pytest-backend-junit.xml
+    expire_in: 7 days
+
+root-tests:
+  stage: test
+  tags: [docker]
+  script:
+    - python -m pytest tests -q --basetemp="$CI_PROJECT_DIR/.tmp/pytest-root"
+
+frontend-tests:
+  stage: test
+  tags: [docker]
+  script:
+    - cd frontend
+    - npm ci
+    - npm test
+
+bridge-tests:
+  stage: test
+  tags: [docker]
+  script:
+    - cd bridge
+    - pip install -e . --quiet
+    - python -m pytest tests -q
+
+frontend-build:
+  stage: build
+  tags: [docker]
+  script:
+    # Controlled Node version comes from the runner (docs/CI.md § runner);
+    # the Vite production build itself is ALSO performed inside the Docker
+    # image stage (Dockerfile frontend-build) — this job typechecks + builds
+    # the bundle for the repo-level gate AND catches TS drift early.
+    - cd frontend
+    - npm ci
+    - npm run typecheck
+    - npm run build
+  artifacts:
+    when: always
+    paths:
+      - frontend/dist/index.html
+    expire_in: 7 days
+
+# --------------------------------------------------------------------------- #
+# docker — reproducible image + rendered-compose validation (§25, §38)
+# --------------------------------------------------------------------------- #
+
+docker-build:
+  stage: docker
+  tags: [docker]
+  script:
+    - docker version
+    - docker compose version
+    # Rendered compose validation (CANONICAL timeout envelope gate) for BOTH
+    # profiles with the current shell — shell overrides cannot bypass it.
+    - docker compose -f docker-compose.yml -f docker-compose.ci.yml config --quiet
+    - python -m tools.release_check --allow-hosted-placeholders
+    - docker compose build
+  after_script:
+    # ADV-005: diagnostics docker command is failure-guarded like every other
+    # after_script docker command (consistent with the smoke after_scripts).
+    - docker image ls --format "{{.Repository}}:{{.Tag}}" | head -40 || true
+
+# --------------------------------------------------------------------------- #
+# smoke — deterministic Docker stack + full REST journey (§10-§15, §26)
+# --------------------------------------------------------------------------- #
+
+docker-smoke:
+  stage: smoke
+  tags: [docker]
+  # ADV-004: a running smoke must NEVER be auto-canceled by a newer push —
+  # GitLab does not run after_script on cancel, which could strand a
+  # 127.0.0.1:8000 (or 80/443) binding. `default.interruptible: true` stays
+  # for the fast test/build jobs only.
+  interruptible: false
+  variables:
+    # Unique per-job project name isolates containers/networks/volumes (§50).
+    # This is set as a job variable so every command in this job uses the SAME
+    # id without exporting it into the pipeline log.
+    CI_COMPOSE_PROJECT: "pd-ci-$CI_PIPELINE_ID-$CI_JOB_ID"
+  script:
+    - export CI_COMPOSE_PROJECT="${CI_COMPOSE_PROJECT}"
+    - test -f compose/fake-worlds/ci-activity-log-world.json
+    # Bounded readiness poll (NOT arbitrary sleeps). The CI profile is passed
+    # EXPLICITLY so the stack can never inherit a developer's local .env.
+    - docker compose -f docker-compose.yml -f docker-compose.ci.yml --env-file compose/profiles/ci.env -p "$CI_COMPOSE_PROJECT" up -d --build
+    - python -m tools.ci_wait_ready --base-url http://127.0.0.1:8000 --timeout 180
+    # Phase 19J-RI2 canonical timeout envelope on the rendered CI profile.
+    - python -m tools.release_check --allow-hosted-placeholders
+    - python -m tools.docker_smoke --base-url http://127.0.0.1:8000 --report docker-smoke-report.json
+  after_script:
+    # Bounded diagnostics artifact + EXACT cleanup of THIS job's resources.
+    # ADV-004: cleanup failures stay VISIBLE (non-fatal), never silently
+    # swallowed by a bare `|| true` — an operator can see a leftover
+    # 127.0.0.1:8000 binding / unfinished teardown (§50).
+    - docker compose -f docker-compose.yml -f docker-compose.ci.yml --env-file compose/profiles/ci.env -p "$CI_COMPOSE_PROJECT" logs --no-color > docker-smoke.log 2>&1 || { echo "docker-smoke teardown failed (non-fatal): logs capture error"; true; }
+    - docker compose -f docker-compose.yml -f docker-compose.ci.yml --env-file compose/profiles/ci.env -p "$CI_COMPOSE_PROJECT" down -v --remove-orphans || { echo "docker-smoke cleanup failed (non-fatal): stack teardown incomplete"; true; }
+  artifacts:
+    when: always
+    paths:
+      - docker-smoke.log
+      - docker-smoke-report.json
+    expire_in: 7 days
+
+# prod-like local smoke (§39): production compose on a local TEST domain,
+# canonical prod preflight (still rejects placeholder CADDY_DOMAIN without
+# --allow-local; CI explicitly passes it for the local TEST domain only).
+prod-like-smoke:
+  stage: smoke
+  tags: [docker]
+  # ADV-004: never auto-cancel a running prod-like smoke (GitLab skips
+  # after_script on cancel; a stranded Caddy edge would hold 80/443).
+  interruptible: false
+  variables:
+    CI_COMPOSE_PROJECT_PROD_LIKE: "pd-ci-prodlike-$CI_PIPELINE_ID-$CI_JOB_ID"
+  script:
+    - export CI_COMPOSE_PROJECT="${CI_COMPOSE_PROJECT_PROD_LIKE}"
+    - export COMPOSE_ENV_FILE="compose/profiles/prod-like.env"   # local/TEST domain
+    - docker compose -f docker-compose.prod.yml --env-file "$COMPOSE_ENV_FILE" -p "$CI_COMPOSE_PROJECT" config --quiet
+    - python -m tools.prod_preflight --allow-local --env-file "$COMPOSE_ENV_FILE"
+    - docker compose -f docker-compose.prod.yml --env-file "$COMPOSE_ENV_FILE" -p "$CI_COMPOSE_PROJECT" up -d --build
+    # The LOCAL/TEST Caddy edge uses Caddy's internal CA (not in the runner
+    # trust store) — --insecure-tls is the operator opt-in for this local
+    # smoke only; production preflight still validates a PUBLIC CADDY_DOMAIN.
+    - python -m tools.ci_wait_ready --base-url https://localhost --request-timeout 15 --timeout 150 --interval 4 --insecure-tls
+    - python -m tools.prod_preflight --allow-local --env-file "$COMPOSE_ENV_FILE"
+    # Minimal HTTPS-entry smoke through the Caddy edge (health via edge origin).
+    - python -c "import ssl,urllib.request; ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE; print(urllib.request.urlopen('https://localhost/api/v1/health', context=ctx, timeout=15).status)"
+  after_script:
+    # ADV-004: visible (non-fatal) teardown/cleanup failure — never a bare `|| true`.
+    - docker compose -f docker-compose.prod.yml --env-file "compose/profiles/prod-like.env" -p "$CI_COMPOSE_PROJECT_PROD_LIKE" logs --no-color > prod-like-smoke.log 2>&1 || { echo "prod-like teardown failed (non-fatal): logs capture error"; true; }
+    - docker compose -f docker-compose.prod.yml --env-file "compose/profiles/prod-like.env" -p "$CI_COMPOSE_PROJECT_PROD_LIKE" down -v --remove-orphans || { echo "prod-like cleanup failed (non-fatal): stack teardown incomplete"; true; }
+  artifacts:
+    when: always
+    paths:
+      - prod-like-smoke.log
+    expire_in: 7 days
+
+# Optional GitLab Container Registry push (§41): tag with $CI_COMMIT_SHA —
+# NEVER only `latest`, NEVER bake secrets (the image is secret-free by
+# construction; .env is .dockerignore-excluded).
+# docker-push:
+#   stage: docker
+#   tags: [docker]
+#   rules:
+#     - if: '$CI_PIPELINE_SOURCE == "web"'
+#       when: manual
+#   variables:
+#     IMAGE_TAG: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+#   script:
+#     - docker compose build
+#     - docker tag procedural-detective:latest "$IMAGE_TAG"
+#     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+#     - docker push "$IMAGE_TAG"
+
+# --------------------------------------------------------------------------- #
+# real-ai — OPT-IN real-Ollama regression (§33-§36)
+#
+# §56 RISK-BASED SURFACING: a change touching backend/app/generation/,
+# backend/app/services/ollama_driver.py, backend/app/domain/activity_log.py,
+# provider adapters, structured schemas, the timeout envelope or
+# RemoteClientProvider should NOT be released without a manual/scheduled
+# real-AI validation. This job is the surface point: schedule + manual only,
+# never on an ordinary push, so a model outage never blocks CI.
+# --------------------------------------------------------------------------- #
+
+real-ollama-regression:
+  stage: real-ai
+  tags: [real-ollama]
+  variables:
+    # The real provider is FORCED for this job only. OLLAMA_BASE_URL /
+    # OLLAMA_MODEL / CADDY_DOMAIN / CADDY_EMAIL come from GitLab CI/CD
+    # variables (masked/protected) — NEVER echoed, NEVER referenced in logs,
+    # NEVER artifacts (§27/§31). A schedule without them FAILS TRUTHFULLY.
+    GENERATION_PROVIDER: "ollama"
+  script:
+    # Fails TRUTHFULLY and typed when Ollama is unavailable; NEVER a fake
+    # fallback. Values come ONLY from GitLab CI/CD variables.
+    # ADV-002: the built-in --out writer produces the report artifact, so the
+    # process exit status IS the job status — a DEF-006 red-matrix exit 1 can
+    # never be masked by a `tee` pipe (a GREEN scheduled job on a broken
+    # Ollama would void §34/§35).
+    - python -m tools.real_ollama_regression --matrix --out real-ollama-report.json
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - when: manual
+  allow_failure: false
+  artifacts:
+    when: always
+    paths:
+      - real-ollama-report.json
+    expire_in: 7 days
+
+# Full §36 release gate (operator-triggered, requires >=10 real generations):
+# run manually on the real-ollama runner with the release evidence.
+# real-ollama-release-gate:
+#   stage: real-ai
+#   tags: [real-ollama]
+#   when: manual
+#   script:
+#     - python -m tools.real_ollama_regression --release-gate --max-generations 10 \
+#         --witness-report ./witness-report.json --browser-report ./browser-report.json \
+#         --out real-ollama-release-gate.json
+#   artifacts:
+#     when: always
+#     paths:
+#       - real-ollama-release-gate.json
+#     expire_in: 7 days

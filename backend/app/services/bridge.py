@@ -320,6 +320,24 @@ class BridgeRegistry:
         None — a LATE detach from a superseded socket must never null the
         newer socket (zombie bridge). With ``epoch=None`` (no identity
         supplied) the current binding is torn down as before.
+
+        The disconnect is ALSO persisted BEST-EFFORT
+        (``set_bridge_session_disconnected``) so the DB ``connection_state``
+        is truthful and — crucially — the reconnect grace
+        (``authenticate_bridge_token``) anchors to the ACTUAL drop moment
+        (``last_seen``) instead of the last in-band frame. Without this, a
+        FRAME-SILENT long local job leaves ``last_seen`` frozen and the
+        documented same-running-process memory-only reconnect is rejected as
+        expired/invalid (Fix B, the definitive lifecycle defect).
+
+        F3 (adversarial): the durable write happens AFTER the registry lock is
+        released. The mutating section above is pure in-memory (short, never
+        awaits/never blocks); the store write is best-effort (mirrors
+        ``expiry_cleanup``'s revoke) and is invoked with the drop timestamp
+        captured at call time — an operator-held SQLite writer lock can still
+        delay the uvicorn loop teardown, but it can NEVER stall while the
+        registry RLock is held. ``detach`` never blocks-on, or re-raises from,
+        the store write.
         """
         with self._lock:
             conn = self._by_id.get(bridge_session_id)
@@ -334,7 +352,11 @@ class BridgeRegistry:
             conn.disconnected_at = float(now)
             conn.last_seen = float(now)
             self._fail_inflight_locked(conn, GenerationFailureCode.BRIDGE_DISCONNECTED.value)
-            return conn
+        # F3 — outside the registry RLock (see docstring): the drop timestamp
+        # and session id are plain values captured at call time, so no further
+        # lock/snapshot is needed. Read-once, write-after-unlock.
+        self._persist_disconnect(bridge_session_id, float(now))
+        return conn
 
     def expiry_cleanup(self, now: float) -> None:
         """Lazily revoke + drop entries whose session expired or whose
@@ -362,6 +384,23 @@ class BridgeRegistry:
                 self._store.revoke_bridge_session(bridge_session_id, float(now))
             except Exception:  # noqa: BLE001 - cleanup never blocks lookups
                 continue
+
+    def _persist_disconnect(self, bridge_session_id: str, now: float) -> None:
+        """BEST-EFFORT persistence of a disconnect (Fix B / F3).
+
+        Writes the DROP timestamp into the durable ``bridge_sessions`` row
+        (``connection_state = DISCONNECTED``, ``last_seen = drop moment``) so
+        the reconnect grace anchors to the ACTUAL transport drop rather than
+        the last in-band frame of a long silent job. The write NEVER blocks or
+        re-raises (``detach`` runs on the uvicorn event loop) — mirroring the
+        best-effort revoke pattern in ``expiry_cleanup``. F3: the caller
+        invokes this only AFTER the registry lock is released, so a
+        blocking/broken SQLite write can never hold the registry RLock.
+        """
+        try:
+            self._store.set_bridge_session_disconnected(bridge_session_id, last_seen=now)
+        except Exception:  # noqa: BLE001 - teardown never blocks or re-raises
+            return
 
     # ------------------------------------------------------------------ #
     # lookups / status

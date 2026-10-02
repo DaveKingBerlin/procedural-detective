@@ -422,18 +422,21 @@ a {
 }
 
 /* ======================================================================
- * Phase 23 — witness interviews.
+ * Phase 23 / Phase 26 (FixUI-A) — witness interviews.
  *
  * Two surfaces:
  *  1. the scene "Witnesses" section — the safe interview/contact control for
  *     REMOTE_STATEMENT witnesses AND the accessibility fallback for ON_SCENE
  *     witness persons (real labelled buttons, keyboard reachable);
- *  2. the interview panel — a modal dialog rendering the six closed question
- *     buttons (real <button>s, human labels) and the deterministic
- *     player-safe statement (summary + observations, timestamps as compact
- *     <time>). Both are plain text only: every untrusted string wraps inside
- *     its box (overflow-wrap) and NO min-width exists anywhere, so 1280/600/
- *     360px layouts never overlap buttons and never overflow horizontally.
+ *  2. the interview panel — a labelled dialog with TWO stable vertical
+ *     regions in ONE flex-column container: the six closed question buttons
+ *     (real <button>s, human labels) ALWAYS visible above a single DERIVED
+ *     answer. The answer lives in the normal panel flow (NEVER absolute/
+ *     fixed/portal/overlay over the questions — Phase 26 §14) and is replaced
+ *     outright when another question is selected (one answer at a time).
+ * Both are plain text only: every untrusted string wraps inside its box
+ * (overflow-wrap) and NO min-width exists anywhere, so 1280/600/360px
+ * layouts never overlap buttons and never overflow horizontally.
  * ==================================================================== */
 
 /* ----------------------- Witnesses section --------------------------- */
@@ -475,8 +478,7 @@ a {
 .witness-contact-button:hover,
 .witness-contact-button:focus-visible,
 .witness-question-button:focus-visible,
-.witness-close:focus-visible,
-.witness-ask-another:focus-visible {
+.witness-close:focus-visible {
   border-color: var(--accent);
   color: var(--accent);
   outline: 2px solid var(--accent);
@@ -491,12 +493,16 @@ a {
   right: 1rem;
   /* Below the evidence panel (z-index 40) so a discovery record opens on top. */
   z-index: 39;
-  /* Viewport-bounded + vertically scrollable at EVERY width (360px included):
-     no fixed column width, no fixed height — a panel can never force
-     horizontal overflow, and long statements scroll inside the panel. */
+  /* Viewport-bounded at EVERY width (360px included): no fixed column width,
+     no fixed height — a panel can never force horizontal overflow. The box
+     is a flex COLUMN holding two stable regions (questions above, answer
+     below); `overflow: hidden` lets the two regions contain their own
+     scrolling instead of an answer ever overlapping the questions. */
   width: min(24rem, calc(100% - 2rem));
   max-height: calc(100% - 2rem);
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -530,17 +536,13 @@ a {
   letter-spacing: 0.06em;
 }
 
-.witness-close,
-.witness-ask-another {
+.witness-close {
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--text);
   border-radius: 6px;
   padding: 0.35rem 0.85rem;
   cursor: pointer;
-}
-
-.witness-close {
   white-space: nowrap;
 }
 
@@ -554,6 +556,18 @@ a {
   color: var(--muted);
   font-size: 0.9rem;
   margin: 0 0 0.6rem;
+}
+
+/* Upper region of the panel — the questions are PERMANENTLY visible and
+   clickable (an answer displayed below never replaces them). A flex child
+   that can shrink and scroll when the panel runs out of height, so the six
+   questions stay reachable on short/narrow screens. */
+.witness-questions {
+  flex-shrink: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  padding-bottom: 0.25rem;
 }
 
 /* One closed question per row, always: flex-column means the buttons can
@@ -591,9 +605,13 @@ a {
   border-color: var(--ok);
 }
 
-.witness-question-button:disabled {
-  opacity: 0.55;
-  cursor: progress;
+/* Phase 26 — the CURRENTLY SELECTED question (the one whose single answer is
+   shown below). Visible alongside the asked state; `aria-current` mirrors it
+   for assistive technology. Placed after --asked so its accent wins when a
+   question is both answered AND selected. */
+.witness-question-button--selected {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .witness-question-asked {
@@ -602,9 +620,47 @@ a {
   white-space: nowrap;
 }
 
+/* Lower region of the panel — the SINGLE derived answer, a flex sibling of
+   the questions region in the panel's normal flow. The divider restates the
+   stable Questions → Answer ordering; `flex: 1` claims the remaining height
+   and `min-height: 0` + `overflow-y: auto` keep long answers readable inside
+   the viewport-bounded panel (Phase 26 §9/§10). NEVER positioned absolutely/
+   fixed — no overlay, no portal, nothing ever covers the questions. */
+.witness-answer-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  margin-top: 0.6rem;
+  padding-top: 0.65rem;
+}
+
+.witness-answer-heading {
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* The one answer — normal flow only. Long/hostile text wraps; it can never
+   force the panel wider than the viewport and never overlaps the questions. */
+.witness-answer {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.witness-answer-hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
 .witness-answer-question {
   margin: 0 0 0.5rem;
   font-size: 1rem;
+  overflow-wrap: anywhere;
 }
 
 /* Statement text wraps inside the panel (Phase23 §36) — an unbroken hostile

@@ -88,7 +88,7 @@ CLOSE_MESSAGE_TOO_BIG = 1009
 CLOSE_SERVER_ERROR = 1011
 
 PAIRING_CODE_RE = re.compile(r"^PD-[A-Z2-7]{4}-[A-Z2-7]{4}$")
-MODEL_LABEL_RE = re.compile(r"[A-Za-z0-9._:\-]+")
+MODEL_LABEL_RE = re.compile(r"[A-Za-z0-9._:\-+/]+")
 MAX_MODEL_LABEL_LENGTH = 80
 MAX_SCHEMA_ID_LENGTH = 64
 MAX_PROMPT_CHARS = 120_000
@@ -103,16 +103,34 @@ MAX_BRIDGE_TOKEN_LENGTH = 256
 
 AUTHORITATIVE_SCHEMA_IDS: frozenset[str] = frozenset(
     {
+        # Mirrors the SERVER copy (``app.generation.bridge_protocol``) EXACTLY:
+        # Phase 19J grew the server's closed set with the ACTIVITY_LOG stage ids
+        # but the client copy was not updated, so a server-dispatched
+        # ``ACTIVITY_LOG_v1`` job frame was rejected here (close 1002) and the
+        # third sequential remote-client job failed BRIDGE_DISCONNECTED. Keep
+        # this set a SUPERSET of (or equal to) the server set — the cross-copy
+        # vocabulary drift guard in ``bridge/tests/test_vocabulary_drift.py``
+        # pins the relationship.
         "CASE_PEOPLE_v1",
         "EVIDENCE_v1",
         "WORLD_REQUIREMENTS_v1",
         "ASSET_SPEC_v1",
         "REPAIR_v1",
         "ASSET_SPEC_REPAIR_v1",
+        "ACTIVITY_LOG_v1",
+        "ACTIVITY_LOG_REPAIR_v1",
     }
 )
 
 BRIDGE_MAX_MESSAGE_BYTES = 262_144
+# F2 — the prompt BYTE bound is a SYMMETRIC protocol bound: the SERVER copy
+# (``app.generation.bridge_protocol``) applies the SAME MAX_PROMPT_BYTES cap to
+# a job frame, so a prompt cannot be accepted by one copy and rejected by the
+# other. The whole-frame bound (``BRIDGE_MAX_MESSAGE_BYTES`` -> close 1009) is
+# checked first and still dominates any frame-size rejection; this is the
+# tighter per-field bound and equals the character bound for ASCII prompts.
+# The cross-copy drift guard (``bridge/tests/test_vocabulary_drift.py``) pins
+# the equality of MAX_PROMPT_BYTES / MAX_PROMPT_CHARS across both copies.
 MAX_PROMPT_BYTES = MAX_PROMPT_CHARS
 MAX_SCHEMA_BYTES = 256
 MAX_RESPONSE_BYTES = BRIDGE_MAX_MESSAGE_BYTES
@@ -277,6 +295,11 @@ def _validate_job_schema(msg: Mapping[str, Any]) -> dict[str, Any]:
         _reject(CLOSE_PROTOCOL_ERROR, "invalid frame")
     if len(prompt) > MAX_PROMPT_CHARS:
         _reject(CLOSE_PROTOCOL_ERROR, "invalid frame")
+    # The prompt BYTE cap is a SYMMETRIC protocol bound — the server copy
+    # (``app.generation.bridge_protocol._validate_job_schema``) enforces the
+    # SAME MAX_PROMPT_BYTES rejection, so a job frame either passes both copies
+    # or is rejected on both with the same close code. The whole-frame bound
+    # (1009) is still checked first by ``decode_frame``.
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
         _reject(CLOSE_PROTOCOL_ERROR, "invalid frame")
     temperature = msg.get("temperature")

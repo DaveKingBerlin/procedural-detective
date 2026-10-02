@@ -1,6 +1,7 @@
 import { ApiError } from "../api/client";
 import type {
   AnonymousSessionResponse,
+  CreateCaseGeneration,
   CreateCaseResponse,
   CreatePlaythroughResponse,
   GenerationModeId,
@@ -43,6 +44,14 @@ export interface DemoFlowServices {
     anonymousSessionToken: string,
     prompt: string,
     difficulty?: string,
+    /**
+     * Phase 25 — the OPTIONAL flat generation-selection block
+     * ({generationProvider, ollamaTransport?, ollamaModel?}) carried into the
+     * POST /cases body ONLY when the caller actually selected a provider (§13
+     * backward compat: every existing no-selection call site stays
+     * byte-identical — three arguments, no selection field).
+     */
+    generation?: CreateCaseGeneration,
   ): Promise<CreateCaseResponse>;
   pollGeneration(
     generationId: string,
@@ -126,6 +135,15 @@ export const DEMO_FAILURE_MESSAGES = Object.freeze({
   localOllamaUnavailable: "Ollama is not reachable on this computer.",
   localModelUnavailable: "The selected local model is not available.",
   localProviderTimeout: "Local AI did not finish within the allowed time.",
+  // Phase 25 — explicit-selection validation rejections. The backend rejects
+  // an unknown provider id (400 INVALID_GENERATION_PROVIDER) and an
+  // explicitly-selected-but-unavailable provider (PROVIDER_UNAVAILABLE); the
+  // client shows this frozen safe copy and NEVER silently switches provider
+  // (§4.2 / §10.8). No raw upstream text or code is ever surfaced.
+  invalidGenerationProvider:
+    "The selected generation provider is not supported. Choose another provider and try again.",
+  providerUnavailableExplicit:
+    "The selected AI provider is unavailable right now. Choose another provider and try again.",
 });
 
 export interface RunDemoOptions {
@@ -149,6 +167,23 @@ export interface RunDemoOptions {
    * it travels as a note in every progress snapshot logged by this flow.
    */
   mode?: GenerationModeId | null;
+  /**
+   * Phase 24 P0 — an OPTIONAL pre-existing anonymous-session bearer (the
+   * in-memory journey token carried from /new after a bridge pairing). When
+   * present, the flow uses it for POST /cases and SKIPS createSession();
+   * when absent it mints a fresh session exactly as before (the demo /
+   * non-bridge paths are byte-identical).
+   */
+  anonymousSessionToken?: string;
+  /**
+   * Phase 25 — the OPTIONAL browser-selected generation block
+   * ({generationProvider, ollamaTransport?, ollamaModel?}). When present the
+   * flow passes it through to createCase -> POST /cases; when absent the
+   * createCase call stays THREE arguments (byte-identical, §13) and the
+   * backend resolves its configured default provider. The flow NEVER
+   * auto-falls-back after an explicit selection fails (§4.2).
+   */
+  generation?: CreateCaseGeneration;
 }
 
 /** Map any thrown value to a typed, safe failure (pure, unit-testable). */
@@ -156,6 +191,19 @@ export function mapDemoError(error: unknown): DemoFlowFailure {
   if (error instanceof ApiError) {
     if (error.status === 429 && error.code === "ADMISSION_DENIED") {
       return { kind: "quota", message: DEMO_FAILURE_MESSAGES.quota };
+    }
+    // Phase 25 — explicit-selection rejections. The backend rejects an
+    // unknown provider id with INVALID_GENERATION_PROVIDER and an explicitly
+    // selected-but-unavailable provider with PROVIDER_UNAVAILABLE; both map
+    // to frozen safe copy (never the raw code/message) and the journey NEVER
+    // silently switches provider — the caller must re-run with a different
+    // explicit choice (§4.2 / §10.8). Exact code equality only: a hostile
+    // prefix/substring variant cannot narrow into these buckets.
+    if (error.code === "INVALID_GENERATION_PROVIDER") {
+      return { kind: "provider", message: DEMO_FAILURE_MESSAGES.invalidGenerationProvider };
+    }
+    if (error.code === "PROVIDER_UNAVAILABLE") {
+      return { kind: "provider", message: DEMO_FAILURE_MESSAGES.providerUnavailableExplicit };
     }
     if (error.status === 0) {
       return { kind: "retryable", message: DEMO_FAILURE_MESSAGES.network };
@@ -195,8 +243,16 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
 
   let sessionToken: string;
   try {
-    const session = await services.createSession();
-    sessionToken = session.anonymousSessionToken;
+    const preexistingToken = options.anonymousSessionToken;
+    if (typeof preexistingToken === "string" && preexistingToken !== "") {
+      // Phase 24 P0 — reuse the anonymous session that paired the bridge:
+      // POST /cases is authorized under that session and createSession() is
+      // SKIPPED (no second anonymous session, no bridge lookup miss).
+      sessionToken = preexistingToken;
+    } else {
+      const session = await services.createSession();
+      sessionToken = session.anonymousSessionToken;
+    }
   } catch (error) {
     return { ok: false, failure: mapDemoError(error) };
   }
@@ -205,7 +261,13 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
 
   let created: CreateCaseResponse;
   try {
-    created = await services.createCase(sessionToken, prompt, options.difficulty);
+    // Phase 25 — the selection is carried ONLY when present: a no-selection
+    // call stays THREE arguments (byte-identical, §13) and the backend
+    // resolves its configured default provider.
+    created =
+      options.generation === undefined
+        ? await services.createCase(sessionToken, prompt, options.difficulty)
+        : await services.createCase(sessionToken, prompt, options.difficulty, options.generation);
   } catch (error) {
     return { ok: false, failure: mapDemoError(error) };
   }

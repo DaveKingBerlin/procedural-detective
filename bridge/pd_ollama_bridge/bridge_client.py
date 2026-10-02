@@ -281,6 +281,11 @@ class BridgeClient:
                     prompt=msg["prompt"],
                     temperature=msg["temperature"],
                     timeout_ms=msg["timeoutMs"],
+                    # Phase 25 — a per-job model selection: the JOB's structured
+                    # ``model`` field wins over the CLI default model; an older
+                    # job without the field (``msg.get("model")`` None) keeps
+                    # the operator-configured default (backward compatible).
+                    model=msg.get("model") or self.config.model,
                 ),
                 timeout=_effective_job_timeout_seconds(msg["timeoutMs"]),
             )
@@ -304,26 +309,74 @@ class BridgeClient:
             if self._inflight is not None and self._inflight.task is my_task:
                 self._inflight = None
         latency_ms = (self._clock() - started) * 1000.0
-        await self._send_success(ws, job_id, output)
-        self.logger.info("bridge: job %s completed in %dms", job_id, int(latency_ms))
+        delivered = await self._send_success(ws, job_id, output)
+        if delivered:
+            self.logger.info(
+                "bridge: job %s completed in %dms; result delivered",
+                job_id,
+                int(latency_ms),
+            )
+        else:
+            # Fix B (§11) + F2: do NOT imply delivery — any send failure (a
+            # torn transport raising ConnectionClosed/OSError/RuntimeError, ...)
+            # means the frame was NOT confirmed on the wire; the reconnect loop
+            # takes over below.
+            self.logger.info(
+                "bridge: job %s completed in %dms; result send ATTEMPTED but NOT "
+                "delivered (connection closed/failed — no delivery confirmed)",
+                job_id,
+                int(latency_ms),
+            )
 
-    async def _send_success(self, ws: Any, job_id: str, output: Any) -> None:
+    async def _send_success(self, ws: Any, job_id: str, output: Any) -> bool:
+        """Send a SUCCESS result; returns True when the frame was accepted by
+        the transport, False when ANY send exception interrupted it (a torn
+        transport surfaces not only as ``websockets.ConnectionClosed`` but also
+        as ``OSError``/``RuntimeError`` — every one of them means "NOT
+        delivered (connection closed/failed)"). ``asyncio.CancelledError`` is
+        NEVER masked: ``Task.cancel()`` must propagate. The caller/log report
+        the honest outcome — never an implied delivery. Only the exception
+        CLASS NAME is logged (never its message/args, which could echo a URL
+        or other operator-owned detail)."""
         try:
             await ws.send(
                 protocol.job_result_success_frame(
                     job_id=job_id, structured_output=dict(output)
                 )
             )
-        except ConnectionClosed:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any send failure = not delivered
+            self.logger.info(
+                "bridge: job %s result NOT delivered (connection closed) [%s]",
+                job_id,
+                type(exc).__name__,
+            )
+            return False
+        self.logger.info("bridge: job %s result delivered", job_id)
+        return True
 
-    async def _send_failed(self, ws: Any, job_id: str, failure_code: str) -> None:
+    async def _send_failed(self, ws: Any, job_id: str, failure_code: str) -> bool:
+        """Send a FAILED result; returns True when the frame was accepted by
+        the transport, False when ANY send exception interrupted it (same
+        base-exception policy as ``_send_success``). ``CancelledError`` is
+        never masked. Only the exception CLASS NAME is logged."""
         try:
             await ws.send(
                 protocol.job_result_failed_frame(job_id=job_id, failure_code=failure_code)
             )
-        except ConnectionClosed:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any send failure = not delivered
+            self.logger.info(
+                "bridge: job %s failure %s NOT delivered (connection closed) [%s]",
+                job_id,
+                failure_code,
+                type(exc).__name__,
+            )
+            return False
+        self.logger.info("bridge: job %s failure %s delivered", job_id, failure_code)
+        return True
 
     @staticmethod
     async def _safe_close(ws: Any, code: int, reason: str) -> None:

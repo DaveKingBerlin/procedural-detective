@@ -46,18 +46,24 @@ from fastapi import APIRouter, Request
 
 from app.api.v1.errors import http_error
 from app.core.ratelimit import resolve_client_ip
-from app.services.generation_capabilities import ollama_available
+from app.services.generation_capabilities import (
+    frontier_configured as _frontier_configured_service,
+    ollama_available,
+    ollama_server_configured as _ollama_server_configured_service,
+)
 
 router = APIRouter(tags=["generation-capabilities"])
 
 _LOCAL_LABEL = "Local AI"
 
 # The CLOSED enum of provider values the DTO may ever advertise. The Settings
-# field is already a Literal of exactly these three (+ the Phase 22
+# field is already a Literal of exactly these (+ the Phase 22
 # "remote_client" bridge mode), so it cannot be malformed; the allowlist is a
 # defensive fail-closed guard so a hostile injected settings object can never
-# turn ``configuredProvider`` into a non-enum string.
-_PROVIDER_ALLOWLIST: tuple[str, ...] = ("fake", "ollama", "live")
+# turn ``configuredProvider`` into a non-enum string. Phase 25: "frontier" was
+# ADDED to the literal — it is a real browser-selectable provider whose
+# configuredProvider value must stay truthful.
+_PROVIDER_ALLOWLIST: tuple[str, ...] = ("fake", "ollama", "live", "frontier")
 
 
 def _configured_provider(settings: object) -> str:
@@ -94,6 +100,43 @@ def _demo_available(configured_provider: str, settings: object) -> bool:
     if getattr(settings, "generation_provider", None) == "remote_client":
         return False
     return configured_provider == "fake"
+
+
+def _default_provider(settings: object) -> str:
+    """Phase 25 — the safe logical DEFAULT provider the frontend preselects.
+
+    Projected onto the browser-selectable logical set {fake, ollama, frontier}:
+    the configured default verbatim when it is one of them; legacy
+    ``live``/``remote_client`` (config-only defaults that are NOT
+    browser-selectable in Phase 25) and every hostile/unknown value resolve to
+    ``"fake"`` — the deterministic demo that is always server-enforced. The
+    authoritative raw setting stays visible in ``configuredProvider``.
+    """
+    value = getattr(settings, "generation_provider", None)
+    if value in ("fake", "ollama", "frontier"):
+        return str(value)
+    return "fake"
+
+
+def _ollama_server_reason(settings: object) -> str | None:
+    """Safe display reason for the ollama/server transport (never a URL/IP)."""
+    if not _ollama_server_configured(settings):
+        return "not_configured"
+    return None
+
+
+def _ollama_server_configured(settings: object) -> bool:
+    """ollama/server availability rule (Phase25 §3.1): endpoint configured.
+
+    Delegates to the service seam (one implementation shared with the
+    per-attempt resolver ``app.generation.selection``).
+    """
+    return _ollama_server_configured_service(settings)
+
+
+def _frontier_configured(settings: object) -> bool:
+    """All required FRONTIER_* members present (Phase25 §3.1 Frontier)."""
+    return _frontier_configured_service(settings)
 
 
 def _current_session_scope(request: Request) -> str | None:
@@ -154,6 +197,89 @@ def _live_configured(settings: object) -> bool:
     )
 
 
+def _ollama_entry(request: Request, settings: object) -> dict:
+    """Phase 25 — the fixed ``ollama`` provider entry of ``providers``.
+
+    ``server.available`` = OLLAMA endpoint configured AND the bounded
+    CapabilityProbeCache probe result (the SAME established probe/cache
+    semantics as the ``local`` mode — a failure degrades to sanitized
+    unavailable, never a URL/IP/detail). ``bridge.available`` = ENABLE_BRIDGE
+    on (config-level); the session-scoped ``connected`` state comes from the
+    bridge registry for the requesting session (exactly the ``remoteLocalAi``
+    scope logic). SAFE reason strings only.
+    """
+    # server / direct transport: config presence is the gate, the bounded probe
+    # (through the existing CapabilityProbeCache) refines availability.
+    server_configured = _ollama_server_configured(settings)
+    server_available = False
+    if server_configured:
+        try:
+            server_available, _detail = ollama_available(settings)
+        except Exception:  # noqa: BLE001 - availability failures degrade
+            server_available = False
+    server_reason = "probe_unavailable" if server_configured and not server_available else "not_configured" if not server_configured else None
+
+    # bridge transport: config-level availability + session-scoped connected.
+    bridge_enabled = bool(
+        getattr(settings, "enable_bridge", False)
+        and getattr(request.app.state, "bridge_registry", None) is not None
+    )
+    bridge_connected = False
+    if bridge_enabled:
+        scope = _current_session_scope(request)
+        registry = getattr(request.app.state, "bridge_registry", None)
+        if scope is not None and registry is not None:
+            try:
+                bridge_connected = bool(
+                    registry.status_for_scope(scope).get("connected", False)
+                )
+            except Exception:  # noqa: BLE001 - sanitized degrade
+                bridge_connected = False
+    entry = {
+        "id": "ollama",
+        "label": "Ollama",
+        "available": bool(server_available or bridge_enabled),
+        "defaultModel": str(getattr(settings, "ollama_model", "") or ""),
+        "manualModelEntry": True,
+        "transports": {
+            "server": {
+                "available": bool(server_available),
+                "reason": server_reason,
+            },
+            "bridge": {
+                "available": bridge_enabled,
+                "connected": bridge_connected,
+                "reason": (
+                    "disabled"
+                    if not bridge_enabled
+                    else None
+                    if bridge_connected
+                    else "not_connected"
+                ),
+            },
+        },
+    }
+    return entry
+
+
+def _frontier_entry(settings: object) -> dict:
+    """Phase 25 — the fixed ``frontier`` provider entry of ``providers``.
+
+    Available only when every FRONTIER_* member is present. The displayed
+    ``model`` is the operator-configured public-safe model name (never the API
+    key, base URL or any credential). Unavailable -> safe ``not_configured``.
+    """
+    configured = _frontier_configured(settings)
+    model = getattr(settings, "frontier_model", None)
+    return {
+        "id": "frontier",
+        "label": "Frontier",
+        "available": configured,
+        "model": str(model) if model else None,
+        "reason": None if configured else "not_configured",
+    }
+
+
 def _enforce_capability_rate_limit(request: Request) -> None:
     """Phase21B Finding 4 — small per-IP sliding window on the PUBLIC endpoint.
 
@@ -186,8 +312,9 @@ def _enforce_capability_rate_limit(request: Request) -> None:
         "backend-authoritative provider enum and the operator-configured model "
         "display name. Never URLs, credentials, prompts, network details or "
         "internal errors. Top-level shape: {\"modes\": [...], "
-        "\"configuredProvider\": \"fake\"|\"ollama\"|\"live\"}. "
-        "demo.available is TRUE only when configuredProvider==\"fake\" (the "
+        "\"configuredProvider\": \"fake\"|\"ollama\"|\"live\"|\"frontier\", "
+        "\"defaultProvider\": \"fake\"|\"ollama\"|\"frontier\", \"providers\": "
+        "[...]}. demo.available is TRUE only when configuredProvider==\"fake\" (the "
         "deterministic demo is server-enforced on that profile alone); an "
         "ollama/live backend reports demo.available:false even while its probe "
         "is down."
@@ -231,7 +358,28 @@ def generation_capabilities(request: Request) -> dict:
                 "available": getattr(settings, "generation_provider", None) == "live",
             }
         )
-    body: dict = {"modes": modes, "configuredProvider": configured_provider}
+    # Phase 25 — ADDITIVE provider-selection surface. ``modes`` /
+    # ``configuredProvider`` / ``remoteLocalAi`` above stay byte-identical;
+    # the fixed ``providers`` list gives the frontend the safe selector data
+    # (fake, ollama with its transports, frontier) and ``defaultProvider`` the
+    # safe logical default to preselect. NEVER URLs/credentials/secrets.
+    providers: list[dict] = [
+        {
+            "id": "fake",
+            "label": "Demo / Fake",
+            "available": True,  # always server-enforced (Phase 25 §3.1)
+            "model": None,
+            "reason": None,
+        },
+        _ollama_entry(request, settings),
+        _frontier_entry(settings),
+    ]
+    body: dict = {
+        "modes": modes,
+        "configuredProvider": configured_provider,
+        "defaultProvider": _default_provider(settings),
+        "providers": providers,
+    }
     remote_local_ai = _remote_local_ai(request, settings)
     if remote_local_ai is not None:
         # Phase 22 — the BYO-Ollama bridge is a NEW top-level concept (never a

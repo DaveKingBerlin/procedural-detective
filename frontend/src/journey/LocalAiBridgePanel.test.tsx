@@ -18,6 +18,12 @@ import LocalAiBridgePanel, {
   type BridgePanelServices,
   type LocalAiBridgePanelProps,
 } from "./LocalAiBridgePanel";
+import {
+  clearJourneyParams,
+  getJourneyParams,
+  setJourneyParams,
+  type JourneyParams,
+} from "./context";
 
 /**
  * Phase 22 — the /new BYO-Ollama pairing panel interaction (jsdom + fake
@@ -128,9 +134,13 @@ const textOf = (element: Element | null): string | null =>
 describe("Phase 22 — /new pairing panel (Not connected -> code -> connected)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    // Phase 24 P0/F-1 — the journey context is module-global; each test starts
+    // with a clean context so token-attachment assertions are self-contained.
+    clearJourneyParams();
   });
 
   afterEach(() => {
+    clearJourneyParams();
     vi.useRealTimers();
   });
 
@@ -266,6 +276,53 @@ describe("Phase 22 — /new pairing panel (Not connected -> code -> connected)",
       "Too many pairing requests right now. Please try again later.",
     );
     expect(textOf(query(mounted, "bridge-action-error"))).not.toContain("429");
+    unmount(mounted);
+  });
+
+  // Phase 24 F-1 — the pairing token is fused into the journey ONLY when the
+  // pairing request SUCCEEDED. A failed/429 pairing must leave the journey
+  // WITHOUT the token (a generation under a never-paired session would burn a
+  // per-session attempt and fail BRIDGE_NOT_CONNECTED); a successful pairing
+  // keeps the P0 attach flow intact so /new -> /generating runs POST /cases
+  // under the SAME session that paired the bridge.
+  it("a SUCCESSFUL pairing attaches the session token to the journey (P0 flow kept intact)", async () => {
+    const services = makeServices();
+    const mounted = mount(makeProps({ services }));
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    expect(services.createBridgePairing).toHaveBeenCalledWith(ANON);
+
+    // Staging a journey AFTER the successful pairing carries the paired
+    // session bearer into JourneyParams (attach -> pending -> staged).
+    setJourneyParams({ prompt: "a crime", difficulty: "easy" });
+    expect(getJourneyParams()).toEqual({
+      prompt: "a crime",
+      difficulty: "easy",
+      anonymousSessionToken: ANON,
+    });
+    unmount(mounted);
+  });
+
+  it("a FAILED pairing leaves the journey WITHOUT the attached token (F-1)", async () => {
+    const services = makeServices({
+      createBridgePairing: vi.fn(async () => {
+        throw new ApiError(429, "TOO_MANY_REQUESTS", "too many pairing codes", null);
+      }),
+    });
+    const mounted = mount(makeProps({ services }));
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    expect(textOf(query(mounted, "bridge-action-error"))).toBe(
+      "Too many pairing requests right now. Please try again later.",
+    );
+
+    // No successful pairing -> a journey staged afterwards is byte-identical:
+    // no anonymousSessionToken key is ever fused into it (and nothing stays
+    // pending for the NEXT staging either).
+    setJourneyParams({ prompt: "a crime", difficulty: "easy" });
+    const staged = getJourneyParams() as JourneyParams;
+    expect(staged).toEqual({ prompt: "a crime", difficulty: "easy" });
+    expect("anonymousSessionToken" in staged).toBe(false);
     unmount(mounted);
   });
 });

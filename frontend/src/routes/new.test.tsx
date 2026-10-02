@@ -150,10 +150,13 @@ describe("Phase 17E PART K — /new UI cleanup regression (static render)", () =
       </MemoryRouter>,
     );
     // Demo-only caps render the "Demo mode active" notice + the deterministic
-    // line (Phase 21 F-03 — no selector, no provider switch).
+    // line (Phase 21 F-03 — no selector, no provider switch). The demo-only
+    // fixture carries NO additive `providers` offer (OLDER-server shape), so
+    // Phase 25 renders no provider selector either — /new stays byte-identical.
     expect(markup).toContain('data-testid="generation-mode-demo-notice"');
     expect(markup).toContain("Demo mode active");
     expect(markup).toContain("Generation mode: Deterministic demo");
+    expect(markup).not.toContain('data-testid="generation-provider-selector"');
   });
 
   it("K11 — the demo link remains present with a truthful per-capability label + note (Phase 21B Finding 3)", () => {
@@ -326,12 +329,15 @@ describe("/new — Phase 21 F-03 read-only generation-mode display", () => {
     });
     // Phase 21 F-03: the container testid stays but holds a single read-only
     // line — no provider <select>, no provider options (the DIFFICULTY select
-    // on this page is a legitimately different, non-provider control).
+    // on this page is a legitimately different, non-provider control). This
+    // fixture also carries NO additive `providers` offer, so the Phase 25
+    // provider selector is absent too (older-server shape).
     expect(markup).toContain('data-testid="generation-mode-selector"');
     expect(markup).toContain("Generation mode: Cloud AI");
     expect(markup).not.toContain('data-testid="generation-mode-select"');
     expect(markup).not.toContain('<option value="local"');
     expect(markup).not.toContain('<option value="live"');
+    expect(markup).not.toContain('data-testid="generation-provider-selector"');
   });
 
   it("local available -> the read-only 'Local AI — <model> — Ready' line", () => {
@@ -368,6 +374,10 @@ describe("/new — Phase 21 F-03 read-only generation-mode display", () => {
     expect(markup).not.toContain('<select id="generation-mode-select"');
     expect(markup).not.toContain('value="local"');
     expect(markup).not.toContain('value="live"');
+    // Phase 25: the NEW provider selector exists ONLY when the additive
+    // `providers` offer is present (this older-server fixture lacks it), and
+    // even then it is a RADIO group — never a provider <select>.
+    expect(markup).not.toContain('data-testid="generation-provider-selector"');
   });
 });
 

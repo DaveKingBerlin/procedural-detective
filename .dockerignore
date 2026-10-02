@@ -30,6 +30,15 @@ opencode.json
 .cursor
 .ollama
 
+# ---- Phase 24: QA/probe scratch dirs never enter the build context -----
+# QA-owned regression/E2E scratch directories and CI probe working trees.
+# They are transient (git-ignored) and must never be copied into a builder,
+# a remote daemon, or a build cache (PD-SEC-07 hardening).
+.qa_*
+.tmp/
+.qa
+.tmp
+
 # -------- Phase 20 PD-SEC-07: operator secrets never reach the builder ------
 .env
 .env.*
@@ -60,6 +69,19 @@ e2e/artifacts
 tests/__pycache__
 screenshots/generated
 
+# ---- Phase 24 §47: test/probe trees never ship in the runtime image -------
+# The runtime image serves the API + SPA from the backend source tree; test
+# trees, Playwright specs/probes and dev scripts are execution-time QA material
+# that must NEVER become image content (no test scratch in final images).
+# Host-side checks (release_check, pytest, frontend) are unaffected — this only
+# trims the Docker build context.
+backend/tests
+e2e
+frontend/e2e
+scripts
+tests
+tools/tests
+
 # Local documents that are not part of the runtime image
 ADVERSARIAL_REVIEW.md
 BENCHMARKS.md
@@ -75,3 +97,14 @@ REQUIREMENTS.md
 *.egg-info
 build
 dist
+
+# ---- Phase 24: pytest/cache artefacts never enter the build context ----
+# Local pytest caches (backend\.pytest_cache — "Zugriff verweigert" with a
+# locked cache during Windows Docker acceptance) and Python bytecode must
+# never reach a builder/daemon/build cache (PD-SEC-07 hardens the same
+# boundary as the .env exclusions above).
+.pytest_cache/
+**/.pytest_cache/
+
+**/__pycache__/
+**/*.pyc

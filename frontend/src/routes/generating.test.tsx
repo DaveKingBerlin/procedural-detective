@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
-import { GenerationJourneyView, resolveJourneyMode, stageFromProgress } from "./generating";
+import {
+  GenerationJourneyView,
+  resolveJourneyMode,
+  stageFromProgress,
+  SESSION_LIMIT_HEADING,
+  SESSION_LIMIT_RELOAD_LABEL,
+} from "./generating";
 import type { DemoProgress } from "../journey/demoFlow";
 import type { GenerationCapabilitiesResponse } from "../api/types";
 
@@ -15,12 +21,21 @@ import type { GenerationCapabilitiesResponse } from "../api/types";
  * Phase 16.2 §21 — stageFromProgress additionally proves the MODE travels
  * inside the flow's progress snapshots (fed from `pd_generation_mode`) and
  * selects the Local-AI labels when local, the generic labels otherwise.
+ *
+ * Phase 24 F-2 — a session-window-DENIED run reaches a dedicated
+ * "session-limit" recovery state (clear holder + reload guidance), NEVER the
+ * generic Try-again error.
  */
 
 function render(view: Parameters<typeof GenerationJourneyView>[0]["view"]): string {
   return renderToStaticMarkup(
     <MemoryRouter initialEntries={["/generating"]}>
-      <GenerationJourneyView view={view} onEnter={() => {}} onRetry={() => {}} />
+      <GenerationJourneyView
+        view={view}
+        onEnter={() => {}}
+        onRetry={() => {}}
+        onReload={() => {}}
+      />
     </MemoryRouter>,
   );
 }
@@ -68,7 +83,6 @@ describe("generation route — published", () => {
 describe("generation route — failure states", () => {
   for (const [kind, message] of [
     ["failed", "This prompt could not be turned into a solvable case."],
-    ["quota", "Too many cases are being generated right now."],
     ["retryable", "Generation is taking longer than expected."],
   ] as const) {
     it(`renders a clear ${kind} message with Try again and Back to start`, () => {
@@ -80,6 +94,24 @@ describe("generation route — failure states", () => {
       expect(html).not.toContain('data-testid="enter-investigation"');
     });
   }
+
+  it("a session-window-denied run renders the explicit session-limit recovery state (F-2): reload guidance, NO Try again", () => {
+    const html = render({ status: "session-limit" });
+    expect(html).toContain('data-testid="generation-session-limit"');
+    expect(html).toContain(SESSION_LIMIT_HEADING);
+    // (renderToStaticMarkup escapes the apostrophe, so the message body is
+    // asserted on its stable, punctuation-free fragments.)
+    expect(html).toContain("generation session has reached its limit");
+    expect(html).toContain("Reload the page to start a fresh session");
+    expect(html).toContain('data-testid="generation-session-limit-reload"');
+    expect(html).toContain(SESSION_LIMIT_RELOAD_LABEL);
+    // Deliberately NO "Try again": re-running would reuse the same exhausted
+    // session; recovery is a page reload (which starts a fresh session server-
+    // side-protected by the unchanged rate limits).
+    expect(html).not.toContain("Try again");
+    expect(html).not.toContain('data-testid="enter-investigation"');
+    expect(html).toContain('data-testid="generation-back-to-start"');
+  });
 
   it("never exposes prompts, diagnostics or provider details in any state", () => {
     const running = render({

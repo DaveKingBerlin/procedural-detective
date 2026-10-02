@@ -6,7 +6,9 @@ import type {
   GenerationCapabilitiesResponse,
   RemoteLocalAiDTO,
 } from "../api/types";
-import { ApiError, createAnonymousSession, createBridgePairing, getBridgeStatus } from "../api/client";
+import { ApiError, createBridgePairing, getBridgeStatus } from "../api/client";
+import { createOrReuseAnonymousSession } from "../api/anonymousSession";
+import { attachJourneySessionToken } from "./context";
 import { isRemoteLocalAiOffered, remoteLocalAiBlock } from "./generationMode";
 import {
   BRIDGE_CODE_LABEL,
@@ -68,7 +70,11 @@ export interface BridgePanelServices {
 }
 
 export const DEFAULT_BRIDGE_SERVICES: BridgePanelServices = {
-  createAnonymousSession,
+  // Phase 24 P0 — the panel's anonymous session goes through the shared
+  // in-memory holder, so /generating's createOrReuseAnonymousSession returns
+  // the SAME session that paired the bridge (the backend's bridge binding is
+  // session-scoped; a second session would see BRIDGE_NOT_CONNECTED).
+  createAnonymousSession: () => createOrReuseAnonymousSession(),
   createBridgePairing,
   getBridgeStatus,
 };
@@ -175,6 +181,17 @@ export default function LocalAiBridgePanel({
         return services.createBridgePairing(session.anonymousSessionToken);
       })
       .then((pairing) => {
+        // Phase 24 P0 + F-1 — carry the pairing session into the journey
+        // context ONLY after the pairing request SUCCEEDED. A failed/429
+        // pairing must never fuse the token into JourneyParams: a generation
+        // under a NEVER-PAIRED session would silently consume a per-session
+        // attempt and fail BRIDGE_NOT_CONNECTED. On success the /new ->
+        // /generating journey runs POST /cases under the SAME anonymous
+        // session that paired the bridge (the bridge binding is session-scoped
+        // server-side; a different session would fail even while /bridge/status
+        // says connected). Token stays in the in-memory context — never
+        // persisted.
+        attachJourneySessionToken(tokenRef.current as string);
         viewRef.current = pairingWaitingView(pairing.pairingCode);
         setView(viewRef.current);
         // Poll every `pollIntervalMs` up to the bounded wait.

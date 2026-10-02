@@ -31,6 +31,13 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
+# ---------------------------------------------------------------------------
+# Passed only in stage 2 — keep ahead of the FROM for readability. This stage
+# is a clean, dependency-isolated SPA compiler: it receives ONLY source files
+# (frontend/ + assets/) and builds the production bundle inside the image, so
+# a clean checkout never depends on local node_modules / frontend/dist.
+# ---------------------------------------------------------------------------
+
 # ---------- Stage 2: runtime ------------------------------------------------
 FROM python:3.12-slim AS runtime
 
@@ -48,17 +55,28 @@ ENV \
     # its own __file__, which only exists in the source layout. The pip install
     # below provides third-party deps; PYTHONPATH makes `app` resolve here so
     # migrations-on-startup and /api/v1/readiness see the same files.
-    PYTHONPATH=/app/backend
+    PYTHONPATH=/app/backend \
+    # Deterministic, cache-less Python behavior for a lean reproducible image.
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Backend + Alembic chain. The dev extras include httpx (the live-provider
-# adapter imports it at module import time) — required at runtime too.
+# Backend + Alembic chain. The RUNTIME extra ships httpx (the live-provider
+# and ollama adapters import it at module import time) — required at runtime
+# too — without dragging the dev/test extras (pytest and friends) into the
+# image (DEF-005). Host development installs "./backend[dev]" instead.
 COPY backend/ ./backend/
 COPY assets/ /app/assets/
-RUN pip install --no-cache-dir "./backend[dev]" \
+RUN pip install --no-cache-dir "./backend[runtime]" \
     && rm -rf /root/.cache/pip
 
 # Built SPA -> the directory the backend serves when STATIC_DIR is set.
+# Phase 24 §47 fail-fast: assert the critical artifact is really present in the
+# BUILT image at build time (never a stale local frontend/dist — stage 1 is
+# the only source), so a broken statics layer fails the build, not production.
 COPY --from=frontend-build /build/frontend/dist ./static
+RUN test -f /app/static/index.html \
+    && test -d /app/static/assets \
+    && echo "SPA build verified: index.html + assets present"
 
 # Non-root runtime user + durable volume ownership.
 RUN useradd --system --uid 1001 --create-home --shell /bin/sh app \

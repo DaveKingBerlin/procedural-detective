@@ -34,7 +34,10 @@ from app.services.generation import (
     EnvironmentHintError,
     GenerationServiceError,
     IdentifierConflict,
+    InvalidGenerationProviderError,
+    InvalidOllamaModelError,
     PromptValidationError,
+    ProviderUnavailableError,
     UnknownCaseError,
 )
 from app.services.investigation import (
@@ -65,6 +68,31 @@ def map_service_error(exc: Exception) -> HTTPException:
         # Never echo the offending environment value back.
         return http_error(
             422, "ENVIRONMENT_ERROR", "Environment hint is invalid or exceeds the limit"
+        )
+    if isinstance(exc, InvalidGenerationProviderError):
+        # Phase 25 — unknown browser-supplied provider/transport id. NEVER echo
+        # the offending value (it may embed hostile/URL material).
+        return http_error(
+            400,
+            "INVALID_GENERATION_PROVIDER",
+            "Unknown or invalid generation provider selection",
+        )
+    if isinstance(exc, ProviderUnavailableError):
+        # Phase 25 — an EXPLICITLY requested but not-configured provider.
+        # Safe canonical PROVIDER_UNAVAILABLE (never a silent fallback, never a
+        # config/URL/secret detail).
+        return http_error(
+            400,
+            "PROVIDER_UNAVAILABLE",
+            "The requested generation provider is not available",
+        )
+    if isinstance(exc, InvalidOllamaModelError):
+        # Phase 25 — a user-supplied Ollama model string failed the central
+        # validator. The offending value is never echoed.
+        return http_error(
+            400,
+            "INVALID_OLLAMA_MODEL",
+            "The Ollama model selection is invalid or unsupported",
         )
     if isinstance(exc, (DuplicatePublication, DuplicateCaseVersion, DuplicateAttempt)):
         return http_error(409, "CASE_VERSION_CONFLICT", "Case version conflict")

@@ -76,8 +76,15 @@ def test_fake_provider_demo_is_truthful_and_modes_byte_identical(database_url):
         _dispose(application)
     assert response.status_code == 200
     body = response.json()
-    assert set(body.keys()) == {"modes", "configuredProvider"}
+    # Phase 21B surface byte-identical + the Phase 25 ADDITIVE selector keys.
+    assert set(body.keys()) == {
+        "modes",
+        "configuredProvider",
+        "defaultProvider",
+        "providers",
+    }
     assert body["configuredProvider"] == "fake"
+    assert body["defaultProvider"] == "fake"
     # EXACT historical modes semantics (byte-identical content + key order):
     # demo available + local unavailable with the public display model name.
     assert body["modes"] == [
@@ -89,6 +96,10 @@ def test_fake_provider_demo_is_truthful_and_modes_byte_identical(database_url):
             "model": "llama3.2:3b",
         },
     ]
+    # Phase 25 selector: fake available with safe reasons everywhere.
+    providers = {p["id"]: p for p in body["providers"]}
+    assert set(providers) == {"fake", "ollama", "frontier"}
+    assert providers["fake"]["available"] is True
 
 
 # --------------------------------------------------------------------------- #

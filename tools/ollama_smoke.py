@@ -367,7 +367,9 @@ def _solver_dim_summary(proof: Any) -> dict[str, object]:
     return out
 
 
-def _full_chain_report(settings, provider) -> dict[str, object]:
+def _full_chain_report(
+    settings, provider, prompt: str | None = None
+) -> dict[str, object]:
     """One REAL full Prompt-to-World run through the stage driver + controller.
 
     Walks the actual controller pipeline (the service path minus persistence):
@@ -378,11 +380,16 @@ def _full_chain_report(settings, provider) -> dict[str, object]:
     (public candidate ids), the proc.* placement (evidenceId + interaction)
     and the evidence-completion audit counts. NEVER the base URL, prompts,
     raw output, credentials, hidden truth or host details.
+
+    ``prompt`` (optional) lets the Phase 24 real-AI regression runner drive
+    PER-ITEM prompts (Easy x1, Medium x1, procedural arbitrary-object x1, ...);
+    the default is the shared ``_FULL_CHAIN_PROMPT``.
     """
     from app.generation.admission import AdmissionController
     from app.generation.clock import RealClock
     from app.generation.controller import GenerationController
     from app.generation.ids import IdSource
+    from app.generation.failure_codes import public_failure_code
     from app.services.ollama_driver import OllamaStageDriver
 
     clock = RealClock()
@@ -416,7 +423,8 @@ def _full_chain_report(settings, provider) -> dict[str, object]:
     )
     started = time.perf_counter()
     handle = controller.start_generation(
-        _FULL_CHAIN_PROMPT, anonymous_quota_session_id=session.session_id
+        prompt or _FULL_CHAIN_PROMPT,
+        anonymous_quota_session_id=session.session_id,
     )
     record = controller.attempt(handle.attempt_id)
     elapsed = round(time.perf_counter() - started, 4)
@@ -426,6 +434,8 @@ def _full_chain_report(settings, provider) -> dict[str, object]:
         "providerCalls": record.budget.calls if record.budget else 0,
         "evidenceCompletionNotes": len(getattr(driver, "last_evidence_injections", ()) or ()),
     }
+    typed_code = public_failure_code(getattr(record, "failure_code", None))
+    out["failureCode"] = typed_code
     if record.last_validation is not None:
         out["validationOutcome"] = record.last_validation.outcome.value
         out["repairDiagnostics"] = list(record.last_validation.repair_diagnostics)

@@ -614,6 +614,85 @@ export interface RemoteLocalAiDTO {
   ready: boolean;
 }
 
+/* ======================================================================
+ * Phase 25 — browser-selectable generation provider contract (implemented in
+ * parallel by the backend agent).
+ *
+ * GET /api/v1/generation-capabilities GAINS two additive keys — `defaultProvider`
+ * and `providers[]` — while every pre-25 key stays byte-identical:
+ *
+ *   {
+ *     "modes": [...], "configuredProvider": "fake", "remoteLocalAi": {...},
+ *     "defaultProvider": "fake",
+ *     "providers": [
+ *       {"id":"fake","label":"Demo / Fake","available":true,"model":null,"reason":null},
+ *       {"id":"ollama","label":"Ollama","available":true,"defaultModel":"qwen2.5:1.5b",
+ *        "manualModelEntry":true,
+ *        "transports":{"server":{"available":true,"reason":null},
+ *                      "bridge":{"available":true,"connected":false,"reason":"not_connected"}}},
+ *       {"id":"frontier","label":"Frontier","available":false,
+ *        "model":"<configured-model or null>","reason":"not_configured"}
+ *     ]
+ *   }
+ *
+ * `providers`/`defaultProvider` are UNTRUSTED server data: the client re-parses
+ * every value through src/journey/generationProvider.ts, sanitizes labels /
+ * models / reasons through the existing safe-display guards and DROPS unknown /
+ * unsafe provider ids. Absence of the additive keys (an OLDER server) keeps the
+ * pre-25 behavior byte-identical — no provider selector is offered.
+ *
+ * POST /api/v1/cases GAINS one flat optional block:
+ *   {"generationProvider": "fake|ollama|frontier",
+ *    "ollamaTransport": "server|bridge",
+ *    "ollamaModel": "qwen2.5:1.5b"}
+ * All optional; omitted => server default. The browser never supplies URLs,
+ * credentials or arbitrary provider configuration (§1.3).
+ * ==================================================================== */
+
+/** The ONLY logical generation-provider ids the browser may select (Phase 25 §1.3). */
+export type GenerationProviderId = "fake" | "ollama" | "frontier";
+
+/** The ONLY Ollama transport ids the browser may select (Phase 25 §1.3). */
+export type OllamaTransportId = "server" | "bridge";
+
+/** Availability/reason block of ONE Ollama transport inside a provider offer. */
+export interface OllamaTransportStatusDTO {
+  available: boolean;
+  /** Bridge-only: session-scoped live binding (never a token/IP/URL). */
+  connected?: boolean;
+  /** Short safe availability reason (e.g. "not_connected"), sanitized client-side. */
+  reason?: string | null;
+}
+
+/** One entry of the additive `providers` list of generation-capabilities. */
+export interface GenerationProviderDTO {
+  /** "fake" | "ollama" | "frontier" — anything else is dropped by the parser. */
+  id: string;
+  /** Public display label ("Demo / Fake", "Ollama", "Frontier") — safe text only. */
+  label?: string;
+  available: boolean;
+  /** Frontier-configured model display name (never a user-selected value). */
+  model?: string | null;
+  /** Short safe availability reason (e.g. "not_configured") when unavailable. */
+  reason?: string | null;
+  /** Ollama-only: the configured DEFAULT model identifier (display/safe). */
+  defaultModel?: string | null;
+  /** Ollama-only: true when the user may type a custom model string. */
+  manualModelEntry?: boolean;
+  /** Ollama-only: per-transport availability (server/bridge). */
+  transports?: {
+    server?: OllamaTransportStatusDTO;
+    bridge?: OllamaTransportStatusDTO;
+  };
+}
+
+/** Phase 25 §4 — the flat optional generation-selection block of POST /api/v1/cases. */
+export interface CreateCaseGeneration {
+  generationProvider?: GenerationProviderId;
+  ollamaTransport?: OllamaTransportId;
+  ollamaModel?: string;
+}
+
 /** 200 body of GET {base}/api/v1/generation-capabilities. */
 export interface GenerationCapabilitiesResponse {
   modes: GenerationModeDTO[];
@@ -634,6 +713,21 @@ export interface GenerationCapabilitiesResponse {
    * parser before any display (strict booleans; model through safeDisplay).
    */
   remoteLocalAi?: RemoteLocalAiDTO | null;
+  /**
+   * Phase 25 — backend-authoritative DEFAULT generation provider (closed enum
+   * "fake" | "ollama" | "frontier"; re-sanitized like `configuredProvider`).
+   * Used by the client when NO valid sessionStorage preference exists. Absent
+   * on OLDER servers (no provider selector is then offered).
+   */
+  defaultProvider?: GenerationProviderId | null;
+  /**
+   * Phase 25 — the additive provider-offer list (fake|ollama|frontier).
+   * UNTRUSTED server data: the client re-parses every entry through
+   * src/journey/generationProvider.ts (labels/models/reasons through the
+   * safe-display guards; unknown/unsafe ids dropped). Absent on OLDER servers
+   * -> the browser offers no selector (pre-25 behavior stays byte-identical).
+   */
+  providers?: GenerationProviderDTO[] | null;
 }
 
 /* ======================================================================

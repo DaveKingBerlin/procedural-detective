@@ -174,3 +174,37 @@ def test_ollama_url_never_affects_live_policy():
             ollama_base_url="http://127.0.0.1:11434",
             live_provider_url="http://api.example.com/v1/chat/completions",
         )
+
+
+def test_frontier_base_url_requires_non_empty_host():
+    """F4 (accepted adversarial finding) — FRONTIER_BASE_URL with an EMPTY host
+    after the ``https://`` prefix must be rejected at Settings; a real host is
+    accepted and the https-only policy is unchanged."""
+    with pytest.raises(ValidationError):
+        Settings(
+            frontier_enabled=True,
+            frontier_base_url="https://",
+            frontier_api_key="k",
+            frontier_model="m",
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            frontier_enabled=True,
+            frontier_base_url="https:///",
+            frontier_api_key="k",
+            frontier_model="m",
+        )
+    ok = Settings(
+        frontier_enabled=True,
+        frontier_base_url="https://api.example.com",
+        frontier_api_key="k",
+        frontier_model="m",
+    )
+    assert ok.frontier_base_url == "https://api.example.com"
+    with pytest.raises(ValidationError):
+        Settings(
+            frontier_enabled=True,
+            frontier_base_url="http://api.example.com/v1/chat/completions",
+            frontier_api_key="k",
+            frontier_model="m",
+        )

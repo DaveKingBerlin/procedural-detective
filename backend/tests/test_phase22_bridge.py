@@ -481,6 +481,11 @@ def test_integration_full_generation_publishes_with_same_solver(stack):
         assert job["jobId"].startswith("JOB-")
         assert job["schemaId"] in AUTHORITATIVE_SCHEMA_IDS
         assert job["jobType"] == "STRUCTURED_INFERENCE"
+        # Phase 25 per-job model: this legacy request carries NO browser
+        # selection, so the job falls back to the bridge's own reported model
+        # (``conn.model``, the documented Phase 25 §20A.13 backward-compatible
+        # default). An explicit per-job model selection is pinned in
+        # test_phase25_provider_selection.py::test_bridge_job_carries_the_selected_model_and_default_stays.
         assert job["model"] == _OLLAMA
         assert 0 < job["timeoutMs"] <= 20_000
     # The SAME deterministic solver produced the same winning combination: the
@@ -605,7 +610,21 @@ def test_capability_omits_remote_local_ai_when_disabled(database_url):
     with TestClient(app_disabled) as client:
         body = client.get("/api/v1/generation-capabilities").json()
     assert "remoteLocalAi" not in body
-    assert set(body.keys()) == {"modes", "configuredProvider"}
+    # Phase 21B surface + the Phase 25 ADDITIVE selector keys (the bridge stays
+    # omitted entirely from the DTO when disabled; ``providers[ollama]`` reports
+    # the bridge transport "disabled").
+    assert set(body.keys()) == {
+        "modes",
+        "configuredProvider",
+        "defaultProvider",
+        "providers",
+    }
+    ollama = {p["id"]: p for p in body["providers"]}["ollama"]
+    assert ollama["transports"]["bridge"] == {
+        "available": False,
+        "connected": False,
+        "reason": "disabled",
+    }
     app_disabled.state.engine.dispose()
     app_disabled.state.store.dispose()
 
@@ -1112,5 +1131,44 @@ def test_http_bridge_routes_404_when_disabled(database_url):
         )
     assert pairing.status_code == 404
     assert status.status_code == 404
+    app_disabled.state.engine.dispose()
+    app_disabled.state.store.dispose()
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    (
+        ("GET", "/api/v1/bridge/pairing"),
+        ("POST", "/api/v1/bridge/pairing"),
+        ("PUT", "/api/v1/bridge/x"),
+        ("PATCH", "/api/v1/bridge/x"),
+        ("DELETE", "/api/v1/bridge/x"),
+        ("GET", "/api/v1/bridge"),
+        ("POST", "/api/v1/bridge"),
+    ),
+)
+def test_http_bridge_routes_404_when_disabled_with_static_dir(
+    database_url, tmp_path, method, path
+):
+    from app.main import create_app as _create_app
+    from fastapi.testclient import TestClient
+
+    upgrade_db(database_url)
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
+    app_disabled = _create_app(
+        Settings(
+            database_url=database_url,
+            enable_bridge=False,
+            static_dir=static_dir,
+        )
+    )
+    with TestClient(app_disabled) as client:
+        response = client.request(method, path)
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {"code": "NOT_FOUND", "message": "Not found", "details": None}
+    }
     app_disabled.state.engine.dispose()
     app_disabled.state.store.dispose()

@@ -253,6 +253,39 @@ The multi-stage image builds the frontend (Node 24) and the backend
 volume, and runs `alembic upgrade head` before the server starts. See
 `docs/DEPLOYMENT.md` for the full production configuration.
 
+## Containerized development & GitLab CI/CD (Phase 24)
+
+A clean checkout builds and runs deterministically — no local `node_modules`,
+virtualenv, stale `frontend/dist`, developer database or home files are used.
+The image is reproducible, serves the SPA + API from ONE origin, and runs as a
+non-root user with SQLite on the `pd-data` volume. See `docs/CI.md` for the
+pipeline and runner.
+
+```bash
+# Profile matrix (compose/profiles/): dev / ci / prod-like / ollama
+docker compose --env-file compose/profiles/dev.env up --build -d          # dev
+docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+  --env-file compose/profiles/ci.env -p "pd-ci-demo" up -d --build        # CI smoke
+python -m tools.ci_wait_ready --base-url http://127.0.0.1:8000
+python -m tools.docker_smoke --base-url http://127.0.0.1:8000             # full journey
+```
+
+- **Hermetic deterministic smoke** (`tools/docker_smoke.py`): generates a
+  case, discovers evidence, reads the published Activity Log (15-20 rows),
+  interviews a witness, accuses, reveals 4/4, and verifies the bridge-disabled
+  contract — all over the public REST API.
+- **Real-Ollama acceptance** (`tools/real_ollama_regression.py`): operator /
+  schedule-triggered; FAILS truthfully when Ollama is unavailable — never a
+  silent fake fallback (§8/§34).
+- **Rendered-compose gates**: Docker and GitLab validate the canonical
+  Phase 19J-RI2 timeout envelope through the backend validator
+  (`release_check`, `prod_preflight`) — no CI-only timeout semantics.
+- Every GitLab Docker job runs in a unique Compose project
+  (`pd-ci-$CI_PIPELINE_ID-$CI_JOB_ID`) and cleans up only its own resources.
+- The release gate rejects committed `.env`, private LAN IPs, Ollama URLs,
+  tokens, private keys and passwords; `.dockerignore` keeps secrets and QA
+  scratch out of the image.
+
 ## Security & privacy
 
 Public production is **HTTPS-only** with a **private uvicorn backend** —
