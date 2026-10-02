@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // ---------------------------------------------------------------------------
 // Phase 24 §46 — built-bundle private-endpoint scanner (hermetic, stdlib only).
 //
