@@ -2975,6 +2975,11 @@ class OllamaStageDriver:
         non_chronological = False
         duplicate_timestamp = False
         parse_error = False
+        # Phase 26 Fix-B (H5/§6): the safe parse-failure SHAPE (class token +
+        # bounded item-count candidate) of the LAST unparsable response — the
+        # exact failure context a contract-guided repair needs. Captured in the
+        # except branch; carried into the repair prompt builder (never raw text).
+        parse_shape: dict[str, Any] | None = None
         repair_attempts = 0
 
         for pass_index in range(MAX_ACTIVITY_LOG_REPAIR_PASSES + 1):
@@ -2986,6 +2991,11 @@ class OllamaStageDriver:
             # ``provider.call.start`` reports ``repairCount=0`` for
             # stage=activity_log_repair BY DESIGN (separate-stage accounting;
             # budgets and ceilings are unchanged).
+            # Per-pass parse context (Phase 26 Fix-B): reset so a stale
+            # parse-error shape from a previous pass can never bleed into the
+            # next repair's contract guidance.
+            parse_error = False
+            parse_shape = None
             _call_started = time.perf_counter()
             content = self._call(
                 provider,
@@ -3022,13 +3032,14 @@ class OllamaStageDriver:
                     codes = (ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,)
                     entries = []
                     parse_error = True
+                    parse_shape = _activity_log_diagnostic_shape(content)
                     # Phase19J-RI — SAFE diagnostic harness (SHAPE only, never
                     # content): capture WHY the parse failed (top-level type /
                     # bounded keys / bounded item-count candidate / stable
                     # class token) so the real Hermes failure class can be
                     # diagnosed without ever logging the generated text,
                     # prompts or CaseTruth (Phase19J §40).
-                    shape = _activity_log_diagnostic_shape(content)
+                    shape = parse_shape
                     emit_event(
                         "activity_log.parse_failed",
                         caseId=case_id,
@@ -3096,6 +3107,10 @@ class OllamaStageDriver:
                 elapsedMs=_elapsed(),
             )
             repair_attempts += 1
+            # Phase 26 Fix-B (§6): the repair receives the EXACT validator
+            # failure code + the safe parse-failure class (when the last
+            # response failed to parse), so the bounded repair is contract-
+            # guided instead of generic. Never raw provider text.
             prompt = prompts.build_activity_log_repair_prompt(
                 canonical,
                 findings,
@@ -3106,6 +3121,14 @@ class OllamaStageDriver:
                 motive_names=motive_names,
                 location_ids=location_ids,
                 location_names=location_names,
+                validator_code=(
+                    validator.value if validator is not None else None
+                ),
+                parse_failure_class=(
+                    parse_shape.get("parseFailureClass")
+                    if parse_error and parse_shape is not None
+                    else None
+                ),
             )
             stage = GenerationStage.ACTIVITY_LOG_REPAIR
             # fall through to the next bounded pass (no other state needed)

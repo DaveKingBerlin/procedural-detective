@@ -2065,7 +2065,11 @@ def test_ri26_grid_clamped_window_sweep_and_prompt_length_guard():
     ADV-C: 30/0 and 0/30 now yield 15 rows at a finer cadence instead of the
     old sub-MIN fallback), the canonical appears exactly once, and both built
     prompts stay comfortably below the ~7000-char budget (inside
-    OLLAMA_NUM_CTX=4096 tokens). Only the truly unsatisfiable 0/0 window
+    OLLAMA_NUM_CTX=4096 tokens). The budget is pinned at the WORST CASE
+    (DEF-013): the full co-occurring multi-finding repair prompt incl. the
+    live ``ENTRY_COUNT_TOO_HIGH (need 15..20, have 27)`` error plus the
+    longest validator code and parse-failure class stays <= 7000 built chars.
+    Only the truly unsatisfiable 0/0 window
     falls back deterministically (count < MIN is expected and documented;
     the operator guard fails fast before any prompt is ever built for it)."""
     from app.generation import prompts
@@ -2107,6 +2111,34 @@ def test_ri26_grid_clamped_window_sweep_and_prompt_length_guard():
     repair = prompts.build_activity_log_repair_prompt(canonical, ("CANONICAL_TIME_MISSING",))
     assert len(initial) <= 7000, len(initial)
     assert len(repair) <= 7000, len(repair)
+    # DEF-013 (adversarial F-1): the budget is a LOCKED regression at the
+    # WORST CASE too. The full co-occurring multi-finding repair prompt —
+    # every ``repair_findings`` token incl. the live ``have 27`` count error
+    # (§2.1) — combined with the LONGEST validator code and parse-failure
+    # class stays <= 7000 built chars, so no reachable repair path (the
+    # single short finding above never exercised the overrun) can exceed the
+    # context-pressure margin.
+    worst_codes = (
+        ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,
+        ActivityLogValidatorCode.ACTIVITY_LOG_ENTRY_COUNT_INVALID,
+        ActivityLogValidatorCode.ACTIVITY_LOG_TIME_ORDER_INVALID,
+        ActivityLogValidatorCode.ACTIVITY_LOG_CANONICAL_TIME_MISSING,
+        ActivityLogValidatorCode.ACTIVITY_LOG_CANONICAL_TIME_DUPLICATED,
+        ActivityLogValidatorCode.ACTIVITY_LOG_TIME_WINDOW_INVALID,
+        ActivityLogValidatorCode.ACTIVITY_LOG_DIRECT_TRUTH_LEAK,
+        ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK,
+    )
+    worst_findings = repair_findings(
+        worst_codes, entry_count=27, non_chronological=True, duplicate_timestamp=True
+    )
+    assert "ENTRY_COUNT_TOO_HIGH (need 15..20, have 27)" in worst_findings
+    worst_repair = prompts.build_activity_log_repair_prompt(
+        canonical,
+        worst_findings,
+        validator_code="ACTIVITY_LOG_CANONICAL_TIME_DUPLICATED",
+        parse_failure_class="schema_invalid_unclassified",
+    )
+    assert len(worst_repair) <= 7000, len(worst_repair)
 
 
 # --------------------------------------------------------------------------- #

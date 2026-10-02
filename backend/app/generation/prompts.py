@@ -1305,6 +1305,65 @@ _ACTIVITY_LOG_REPAIR_GRID_LINE = (
     "unchanged."
 )
 
+# Phase26-Fix-B (H1/H2/H3/H4/H5) — the single canonical MACHINE-VERIFIABLE
+# contract directive shared VERBATIM by the normal and repair templates. It is
+# built ONLY from the authoritative domain constants (MIN/MAX entries, the
+# closed activityType set) so the prompt text, the transport JSON Schema and
+# the strict validator can NEVER drift. It makes the count bound, the closed
+# vocabulary and the canonical-time rule explicit top-of-log instructions that
+# survive even on transport paths that do not carry a JSON Schema (the Bridge
+# job frame carries only ``schemaId`` + prompt; the local Ollama receives
+# ``format: "json"`` free-form, so the prompt is the ONLY structural channel).
+_ACTIVITY_LOG_HARD_CONTRACT = (
+    "MACHINE-VERIFIABLE CONTRACT (the server deterministically re-validates "
+    "the log against EVERY line below; a log that violates ANY of them is "
+    "REJECTED):\n"
+    f"- The \"entries\" array MUST contain between {MIN_ACTIVITY_LOG_ENTRIES} "
+    f"and {MAX_ACTIVITY_LOG_ENTRIES} objects — never fewer, never more.\n"
+    "- Every \"activityType\" MUST be exactly one of the closed tokens:\n"
+    "    " + ", ".join(sorted(ACTIVITY_LOG_ACTIVITY_TYPES)) + "\n"
+    "- The locked canonical evidence time MUST appear verbatim in exactly ONE "
+    "entry.\n"
+    "- Every \"timestamp\" MUST lie inside the deterministic window, strictly "
+    "increasing and unique.\n"
+    "- Do not exceed the entry limit. Do not invent activityType values. Do "
+    "not omit the canonical time. Preserve chronological order.\n"
+)
+
+# Phase26-Fix-B (H5/H4) — the repair stage's EXACT validator-failure-code and
+# parse-failure-class directive block. §6 requires repairs to receive the exact
+# failure code + relevant contract; the driver passes the typed primary code
+# (ACTIVITY_LOG_ENTRY_COUNT_INVALID / ACTIVITY_LOG_SCHEMA_INVALID /
+# ACTIVITY_LOG_CANONICAL_TIME_MISSING) and the parse-failure class
+# (e.g. ``entry_activity_type_invalid``). The per-code directives make the fix
+# contractual: count errors preserve canonical time / enum / order; type errors
+# replace ONLY with the closed enum; canonical-time errors MUST include the
+# locked time. COMPACT on purpose: the repair prompt already restates the full
+# machine-verifiable contract via the same schema/grid/worked-example blocks
+# the initial prompt embeds. PROMPT-LENGTH PROOF (DEF-013): the pre-existing
+# Phase19J-RI prompt-length guard (``test_ri26``, <= 7000 chars) is a locked
+# regression THAT IS ACTUALLY TRUE AT THE WORST CASE: ``test_ri26`` builds the
+# full co-occurring multi-finding repair prompt (every ``repair_findings``
+# token incl. ``ENTRY_COUNT_TOO_HIGH (need 15..20, have 27)``) with the
+# longest validator code + parse-failure class and asserts <= 7000 built
+# chars (measured ~6950 after the DEF-013 compaction below), so the §2.1
+# count-error path and every reachable combination stay inside the
+# context-pressure budget without trimming a single contracted directive.
+_ACTIVITY_LOG_REPAIR_DIRECTIVE_BLOCK = (
+    "\nVALIDATOR FAILURE CODE: __VALIDATOR_CODE__\n"
+    "PARSE FAILURE CLASS: __PARSE_FAILURE_CLASS__\n"
+    "Fix by the deterministic directive for the code above (the EXACT schema "
+    "at the end is authoritative):\n"
+    f"- count: make it EXACTLY {MIN_ACTIVITY_LOG_ENTRIES}.."
+    f"{MAX_ACTIVITY_LOG_ENTRIES} rows; KEEP the canonical-time row, closed "
+    "activityType values, order.\n"
+    "- invalid activityType: replace ONLY with a closed token from the EXACT "
+    "schema.\n"
+    "- canonical time missing: MUST include the locked canonical time verbatim "
+    "exactly once.\n"
+    "- other: preserve ALL simultaneous rules; never trade one for another.\n"
+)
+
 
 def activity_log_timestamp_grid(
     canonical_time: str,
@@ -1606,10 +1665,13 @@ ACTIVITY_LOG_PROMPT_v1 = (
     "second occurrence, never call it the crime/murder/attack time.\n\n"
     "Canonical evidence time: __CANONICAL_TIME__\n\n"
     + _CANONICAL_ROW_ANCHOR_SENTENCE
+    + "\n\n" + _ACTIVITY_LOG_HARD_CONTRACT
     + "\n\nThe generated" + _ACTIVITY_LOG_SIMULTANEOUS_COMMON
     + "\n\nRequirements:\n"
     f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
-    "chronological entries (strictly increasing unique timestamps).\n"
+    "chronological entries (strictly increasing unique timestamps; the entry "
+    f"limit is HARD: never fewer than {MIN_ACTIVITY_LOG_ENTRIES}, never more "
+    f"than {MAX_ACTIVITY_LOG_ENTRIES}).\n"
     f"- Cover approximately the window around the canonical time: from "
     "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes relative to it "
     f"(the whole log spans at most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
@@ -1643,44 +1705,40 @@ ACTIVITY_LOG_PROMPT_v1 = (
 ACTIVITY_LOG_REPAIR_PROMPT_v1 = (
     "You are REPAIRING a computer activity log for a detective game — "
     "GENERATION_PROVIDER=ollama (prompt template version activity_log_repair_v1).\n"
-    "The server OWNS the canonical evidence fact. The time below is LOCKED: it "
-    "must appear VERBATIM in exactly ONE of the "
-    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries; never "
-    "change it, never add a second occurrence, never call it the "
-    "crime/murder/attack time.\n\n"
+    "The server OWNS the canonical evidence fact; the locked time below must "
+    "appear VERBATIM in exactly ONE of the "
+    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries: never "
+    "change it, never add a second occurrence, never call it crime/murder/"
+    "attack time.\n\n"
     "Canonical evidence time: __CANONICAL_TIME__\n\n"
     + _CANONICAL_ROW_ANCHOR_SENTENCE
     + "\n\nThe repaired" + _ACTIVITY_LOG_SIMULTANEOUS_COMMON
-    + "\n\nYour PREVIOUS activity log failed validation. The repaired response is a "
+    + "\n\nYour previous log failed validation. The repaired response MUST be a "
     "COMPLETE replacement ActivityLogDocument with "
-    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries - never "
+    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries — never "
     "a single surrounding entry, never a patched wrapper; the locked canonical "
     "time is ONE of those rows.\n\n"
-    "Fix EXACTLY the machine-readable findings below (deterministic app rules):\n"
+    "Fix EXACTLY the machine-readable findings below:\n"
     "__FINDINGS__\n\n"
-    "Findings-to-fix mapping (deterministic): if a finding says "
-    "CANONICAL_TIME_MISSING, the repair MUST include the locked canonical time "
-    "verbatim as exactly one of the "
-    f"{MIN_ACTIVITY_LOG_ENTRIES}-{MAX_ACTIVITY_LOG_ENTRIES} rows; if "
-    "TIMESTAMP_OUTSIDE_WINDOW, every row MUST be inside the deterministic "
-    "window bounds above.\n"
+    "Findings-to-fix mapping (deterministic): CANONICAL_TIME_MISSING -> "
+    "include the locked canonical time verbatim (exactly once); "
+    "TIMESTAMP_OUTSIDE_WINDOW -> every row inside the deterministic window.\n"
     + _ACTIVITY_LOG_REPAIR_GRID_LINE
     + "\n"
     + _ACTIVITY_LOG_REPAIR_RECHECK_LINE
+    + _ACTIVITY_LOG_REPAIR_DIRECTIVE_BLOCK
     + "\n\nRequirements (deterministic, reapplied after this repair):\n"
     f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
     "chronological entries (strictly increasing unique timestamps).\n"
     f"- Cover approximately the window around the canonical time: from "
-    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes relative to it "
-    f"(the whole log spans at most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
+    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes relative to it.\n"
     f"- Every entry timestamp MUST lie inside the deterministic window "
-    "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__] (the whole log spans at "
-    f"most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
+    "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__].\n"
     + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
     + "- Include the locked canonical evidence time EXACTLY ONCE, in an "
-    "ordinary-looking row (e.g. \"Local user activity detected\", \"Foreground "
-    "application activity recorded\"); NEVER label it as crime, murder, "
-    "attack, death, weapon, evidence, clue, culprit or victim activity.\n"
+    "ordinary-looking row (e.g. \"Local user activity detected\"); NEVER label "
+    "it as crime, murder, attack, death, weapon, evidence, clue, culprit or "
+    "victim activity.\n"
     "- All other entries must be plausible harmless computer/system actions "
     "(no named people, weapons, motives or locations; no crime wording).\n"
     "\n"
@@ -1892,6 +1950,8 @@ def build_activity_log_repair_prompt(
     motive_names: Iterable[str] = (),
     location_ids: Iterable[str] = (),
     location_names: Iterable[str] = (),
+    validator_code: str | None = None,
+    parse_failure_class: str | None = None,
 ) -> str:
     """The Phase 19J repair prompt: machine-readable findings + locked time.
 
@@ -1901,6 +1961,12 @@ def build_activity_log_repair_prompt(
     window is restated from the SAME app-owned configuration the initial
     prompt uses (Phase19J-RI: the repair must blind the model to the complete
     contract - count floor/ceiling, chronology, canonical-once, window).
+
+    Phase 26 Fix-B (H5/§6): the repair ALSO receives the EXACT validator
+    failure code (``validator_code`` — e.g. ``ACTIVITY_LOG_ENTRY_COUNT_INVALID``)
+    and the safe parse-failure class (``parse_failure_class`` — e.g.
+    ``entry_activity_type_invalid``) plus per-code fix directives, so a
+    bounded repair is contract-guided instead of generic.
 
     Phase19J-RI (DEF-104): the exponential repair also receives the concrete
     ISO-8601 window endpoints and the canonical-anchor example row, because a
@@ -1945,6 +2011,8 @@ def build_activity_log_repair_prompt(
             )
         ),
         WORKED_EXAMPLE=worked_example,
+        VALIDATOR_CODE=validator_code or "UNKNOWN",
+        PARSE_FAILURE_CLASS=parse_failure_class or "none",
     )
 
 
