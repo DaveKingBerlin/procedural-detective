@@ -10,13 +10,14 @@ import {
   createOrReuseAnonymousSession,
   resetAnonymousSessionCache,
 } from "../api/anonymousSession";
-import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
+import type { CreateCaseGeneration, GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { setPlaythroughId, setPlaythroughToken } from "../api/playthroughToken";
 import { clearJourneyParams, getJourneyParams, type JourneyParams } from "../journey/context";
 import {
   getGenerationMode,
   validatedJourneyMode,
 } from "../journey/generationMode";
+import { toCreateCaseGeneration } from "../journey/generationProvider";
 import { loadGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import {
   runDemo,
@@ -132,6 +133,7 @@ function runJourney(
   onProgress: (progress: DemoProgress) => void,
   mode: GenerationModeId | null,
   anonymousSessionToken?: string,
+  generation?: CreateCaseGeneration,
 ): Promise<DemoFlowResult> {
   return runDemo(prompt, {
     services: DEMO_SERVICES,
@@ -139,6 +141,7 @@ function runJourney(
     mode,
     onProgress,
     anonymousSessionToken,
+    generation,
   });
 }
 
@@ -154,6 +157,12 @@ export type RunFn = (
    * and skips createSession(); undefined keeps the fresh-mint behavior.
    */
   anonymousSessionToken?: string,
+  /**
+   * Phase 25 — the optional browser-selected generation block carried from
+   * /new into POST /cases (see {@link CreateCaseGeneration}). undefined keeps
+   * the byte-identical no-selection request (§13).
+   */
+  generation?: CreateCaseGeneration,
 ) => Promise<DemoFlowResult>;
 
 /**
@@ -263,13 +272,25 @@ export function GenerationJourney({
     void resolveJourneyMode(loadCapabilities).then((mode) => {
       if (cancelled) return;
       setView({ status: "running", stage: stageInfoFromPhase("session", null, null, null, mode) });
+      // Phase 25 — build the optional generation-selection block from the
+      // journey params ONLY when a provider was actually carried from /new
+      // (transport/model travel only for Ollama). Absent -> undefined -> the
+      // byte-identical no-selection POST /cases request (§13).
+      const generation: CreateCaseGeneration | undefined =
+        params.generationProvider !== undefined
+          ? toCreateCaseGeneration({
+              generationProvider: params.generationProvider,
+              ollamaTransport: params.ollamaTransport ?? null,
+              ollamaModel: params.ollamaModel ?? "",
+            })
+          : undefined;
       void run(params.prompt, params.difficulty, (progress) => {
         if (cancelled) return;
         setView({
           status: "running",
           stage: stageFromProgress(progress),
         });
-      }, mode, params.anonymousSessionToken).then((result) => {
+      }, mode, params.anonymousSessionToken, generation).then((result) => {
         if (cancelled) return;
         if (result.ok) {
           setView({ status: "done", result });

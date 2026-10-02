@@ -9,6 +9,14 @@ class GenerationFailureCode(str, Enum):
     GENERATION_DEADLINE_EXCEEDED = "GENERATION_DEADLINE_EXCEEDED"
     PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    # Phase 25 — request-level provider-selection rejection (400 on the case
+    # creation endpoint before any generation starts). Kept in THIS canonical
+    # vocabulary so the closed failure-code map, the public_failure_code
+    # allowlist and any UI copy all stay aligned with one canonical set. It is
+    # a REQUEST-validation code: it is never used as a durable attempt
+    # failureCode (a generated attempt that fails a provider call uses the
+    # existing PROVIDER_UNAVAILABLE / provider-specific codes instead).
+    INVALID_GENERATION_PROVIDER = "INVALID_GENERATION_PROVIDER"
     PROVIDER_INVALID_RESPONSE = "PROVIDER_INVALID_RESPONSE"
     PROVIDER_CALL_BUDGET_EXHAUSTED = "PROVIDER_CALL_BUDGET_EXHAUSTED"
     REPAIR_BUDGET_EXHAUSTED = "REPAIR_BUDGET_EXHAUSTED"

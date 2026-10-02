@@ -94,3 +94,87 @@ describe("JourneyParams.anonymousSessionToken — Phase 24 P0 §1", () => {
     expect(getJourneyParams()).toBeNull();
   });
 });
+
+describe("JourneyParams.generation selection — Phase 25", () => {
+  it("carries the optional provider selection through the context", () => {
+    setJourneyParams({
+      prompt: "a crime",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "qwen2.5:1.5b",
+    });
+    expect(getJourneyParams()).toEqual({
+      prompt: "a crime",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "qwen2.5:1.5b",
+    });
+  });
+
+  it("staging WITHOUT a selection is byte-identical (no provider keys at all)", () => {
+    const params: JourneyParams = { prompt: "a crime", difficulty: "easy" };
+    setJourneyParams(params);
+    const read = getJourneyParams() as JourneyParams;
+    expect(read).toEqual({ prompt: "a crime", difficulty: "easy" });
+    expect("generationProvider" in read).toBe(false);
+    expect("ollamaTransport" in read).toBe(false);
+    expect("ollamaModel" in read).toBe(false);
+    expect(read).toBe(params);
+  });
+
+  it("an Ollama selection carries transport + model; fake carries only the provider id", () => {
+    setJourneyParams({
+      prompt: "p",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+    expect(getJourneyParams()).toEqual({
+      prompt: "p",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+    setJourneyParams({ prompt: "p2", difficulty: "hard", generationProvider: "fake" });
+    const read = getJourneyParams() as JourneyParams;
+    expect(read.generationProvider).toBe("fake");
+    expect("ollamaTransport" in read).toBe(false);
+    expect("ollamaModel" in read).toBe(false);
+  });
+
+  it("the selection survives an attached bridge session merge and a re-stage", () => {
+    setJourneyParams({ prompt: "p", difficulty: "easy", generationProvider: "frontier" });
+    attachJourneySessionToken("tok-paired");
+    expect(getJourneyParams()).toEqual({
+      prompt: "p",
+      difficulty: "easy",
+      generationProvider: "frontier",
+      anonymousSessionToken: "tok-paired",
+    });
+    // A later re-stage (prompt edited, Generate pressed again) keeps the token
+    // alongside the new provider selection.
+    setJourneyParams({ prompt: "p2", difficulty: "hard", generationProvider: "ollama" });
+    expect(getJourneyParams()).toEqual({
+      prompt: "p2",
+      difficulty: "hard",
+      generationProvider: "ollama",
+      anonymousSessionToken: "tok-paired",
+    });
+  });
+
+  it("clearJourneyParams discards the provider selection too", () => {
+    setJourneyParams({
+      prompt: "p",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "qwen2.5:1.5b",
+    });
+    clearJourneyParams();
+    expect(getJourneyParams()).toBeNull();
+  });
+});

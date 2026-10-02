@@ -146,13 +146,13 @@ describe("runDemo — Phase 16 Track B generation-mode note", () => {
     expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined);
   });
 
-  it("Phase 21B Finding 3 — the POST /cases request is BYTE-IDENTICAL for every capability story (no provider/mode field ever)", async () => {
-    // The demo/example CTA copy changes with the capability DTO (the label /
-    // note are truthful per state), but the ACTION never changes: whatever the
-    // label claims, runDemo sends the exact same (token, prompt, difficulty)
-    // POST /cases request — no provider selection, no mode field, no fake
-    // mode switching. The backend's process-global GENERATION_PROVIDER decides
-    // the actual provider; the frontend never claims to control it here.
+  it("Phase 21B/25 — WITHOUT a selection the POST /cases request is BYTE-IDENTICAL; WITH one it carries the flat block", async () => {
+    // Phase 21B Finding 3 baseline: whatever the mode label, a run WITHOUT a
+    // generation selection calls createCase with exactly (token, prompt,
+    // difficulty) — three arguments, no provider/module field ever. Phase 25
+    // supersedes this ONLY for the explicit selection-carrying path: with a
+    // `generation` option runDemo passes it as the 4th argument and never
+    // invents one on its own.
     for (const mode of [null, "demo", "local", "live"] as const) {
       const services = makeServices();
       const result = await runDemo("Some mystery prompt", {
@@ -165,6 +165,36 @@ describe("runDemo — Phase 16 Track B generation-mode note", () => {
       expect(services.createCase).toHaveBeenCalledTimes(1);
       expect(services.createCase).toHaveBeenCalledWith(ANON, "Some mystery prompt", "medium");
     }
+    const selectionServices = makeServices();
+    await runDemo("Some mystery prompt", {
+      services: selectionServices,
+      difficulty: "medium",
+      wait: NO_WAIT,
+      generation: {
+        generationProvider: "ollama",
+        ollamaTransport: "server",
+        ollamaModel: "qwen2.5:1.5b",
+      },
+    });
+    expect(selectionServices.createCase).toHaveBeenCalledWith(
+      ANON,
+      "Some mystery prompt",
+      "medium",
+      { generationProvider: "ollama", ollamaTransport: "server", ollamaModel: "qwen2.5:1.5b" },
+    );
+    const fakeSelectionServices = makeServices();
+    await runDemo("Some mystery prompt", {
+      services: fakeSelectionServices,
+      wait: NO_WAIT,
+      generation: { generationProvider: "fake" },
+    });
+    // A single-field selection (fake/frontier) travels WITHOUT transport/model.
+    expect(fakeSelectionServices.createCase).toHaveBeenCalledWith(
+      ANON,
+      "Some mystery prompt",
+      undefined,
+      { generationProvider: "fake" },
+    );
   });
 
   it("propagates the mode into every phase, including the polling loop", async () => {
@@ -280,6 +310,116 @@ describe("runDemo — Phase 24 P0 reuse of a pre-existing anonymous session toke
     await runDemo("prompt", { services, wait: NO_WAIT });
     expect(services.createSession).toHaveBeenCalledTimes(1);
     expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined);
+  });
+});
+
+describe("runDemo — Phase 25 provider selection", () => {
+  it("changing the provider changes the subsequent POST /cases request", async () => {
+    const services = makeServices();
+    await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: { generationProvider: "fake" },
+    });
+    await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: {
+        generationProvider: "ollama",
+        ollamaTransport: "server",
+        ollamaModel: "llama3.2:3b",
+      },
+    });
+    expect(services.createCase).toHaveBeenNthCalledWith(1, ANON, "prompt", undefined, {
+      generationProvider: "fake",
+    });
+    expect(services.createCase).toHaveBeenNthCalledWith(2, ANON, "prompt", undefined, {
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "llama3.2:3b",
+    });
+  });
+
+  it("explicit provider failure does NOT silently switch provider (createCase called ONCE with the same selection)", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => {
+        throw new ApiError(400, "PROVIDER_UNAVAILABLE", "frontier is not configured", null);
+      }),
+    });
+    const result = await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: { generationProvider: "frontier" },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.failure.kind).toBe("provider");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailableExplicit);
+    expect(result.failure.message).not.toContain("PROVIDER_UNAVAILABLE");
+    expect(result.failure.message).not.toContain("frontier");
+    // Exactly one attempt under the EXPLICIT selection — no silent fallback.
+    expect(services.createCase).toHaveBeenCalledTimes(1);
+    expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined, {
+      generationProvider: "frontier",
+    });
+  });
+
+  it("INVALID_GENERATION_PROVIDER maps to the frozen safe copy, never the raw upstream text", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => {
+        throw new ApiError(400, "INVALID_GENERATION_PROVIDER", "provider 'weird' unknown", null);
+      }),
+    });
+    const result = await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: { generationProvider: "weird" as never },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.failure.kind).toBe("provider");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.invalidGenerationProvider);
+    expect(result.failure.message).not.toContain("weird");
+    expect(result.failure.message).not.toContain("INVALID_GENERATION_PROVIDER");
+    expect(services.createCase).toHaveBeenCalledTimes(1);
+  });
+
+  it("a 4xx PROVIDER_UNAVAILABLE still surfaces as a retryable-safe provider failure for a 3xx-style envelope", async () => {
+    // The code match is exact and status-independent: a 409 PROVIDER_UNAVAILABLE
+    // (for example) maps to the frozen explicit copy too — never the raw body.
+    const services = makeServices({
+      createCase: vi.fn(async () => {
+        throw new ApiError(409, "PROVIDER_UNAVAILABLE", "connection refused", null);
+      }),
+    });
+    const result = await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.failure.kind).toBe("provider");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailableExplicit);
+    expect(result.failure.message).not.toContain("connection refused");
+  });
+
+  it("a prefix/substring variant of the provider codes NEVER narrows into the explicit buckets", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => {
+        throw new ApiError(400, "INVALID_GENERATION_PROVIDER_2", "hostile", null);
+      }),
+    });
+    const result = await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: { generationProvider: "fake" },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    // Falls through to the generic retryable copy, NOT the explicit provider copy.
+    expect(result.failure.kind).toBe("retryable");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.generic);
   });
 });
 

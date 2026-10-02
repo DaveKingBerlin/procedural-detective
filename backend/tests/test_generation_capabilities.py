@@ -40,12 +40,19 @@ def test_capability_shape_with_default_fake_provider(database_url):
         response = c.get("/api/v1/generation-capabilities")
     assert response.status_code == 200
     body = response.json()
-    # EXACT top-level shape: "modes" + the backend-authoritative
-    # "configuredProvider" enum (Phase21B Finding 3 / DEF-096).
-    assert set(body.keys()) == {"modes", "configuredProvider"}
+    # EXACT top-level shape: the Phase21B surface ("modes" + the backend-
+    # authoritative "configuredProvider" enum) plus the Phase 25 ADDITIVE
+    # provider-selection surface ("defaultProvider" + the fixed "providers").
+    assert set(body.keys()) == {
+        "modes",
+        "configuredProvider",
+        "defaultProvider",
+        "providers",
+    }
     # A fake-config backend reports the closed enum verbatim — never a URL,
     # host/IP, model token or credential.
     assert body["configuredProvider"] == "fake"
+    assert body["defaultProvider"] == "fake"
     modes = body["modes"]
     ids = [m["id"] for m in modes]
     assert ids == ["demo", "local"]  # live is NOT configured -> hidden
@@ -55,6 +62,12 @@ def test_capability_shape_with_default_fake_provider(database_url):
     assert local["available"] is False  # fake selected -> local unavailable
     assert local["label"] == "Local AI"
     assert local["model"] == "llama3.2:3b"  # operator-configured display name
+    # Phase 25 providers: the fixed three-entry selector list with SAFE reasons.
+    providers = {p["id"]: p for p in body["providers"]}
+    assert set(providers) == {"fake", "ollama", "frontier"}
+    assert providers["fake"]["available"] is True
+    assert providers["ollama"]["transports"]["server"]["reason"] == "not_configured"
+    assert providers["frontier"]["reason"] == "not_configured"
 
 
 def test_capability_never_leaks_base_url_or_credentials(database_url):
@@ -129,16 +142,23 @@ def test_local_unavailable_when_selected_but_probe_fails(database_url, monkeypat
 
 
 def test_local_not_probed_when_provider_unselected(database_url, monkeypatch):
-    """provider=fake -> local available:false WITHOUT any probe call."""
+    """The ``modes`` local entry keeps its historical semantics: with
+    provider=fake it reports available:false WITHOUT a probe of its own.
+
+    Phase 25 change: the ADDITIVE ``providers`` surface probes EVERY configured
+    provider (bounded/single-flight via the existing CapabilityProbeCache) —
+    so a configured-but-unselected OLLAMA endpoint IS probed exactly once (the
+    contract extension; see Phase25 §3.1 "probe every configured provider").
+    """
     from app.api.v1 import generation_capabilities as cap_module
 
     called = {"count": 0}
 
-    def _unexpected_probe(settings):  # pragma: no cover - must never run
+    def _count_probe(settings):
         called["count"] += 1
         return (True, "")
 
-    monkeypatch.setattr(cap_module, "ollama_available", _unexpected_probe)
+    monkeypatch.setattr(cap_module, "ollama_available", _count_probe)
     application = _app(
         Settings(
             database_url=database_url,
@@ -150,7 +170,10 @@ def test_local_not_probed_when_provider_unselected(database_url, monkeypatch):
         response = c.get("/api/v1/generation-capabilities")
     assert response.status_code == 200
     assert response.json()["modes"][1]["available"] is False
-    assert called["count"] == 0  # zero probes for an unselected provider
+    # Exactly ONE probe for the ONE configured provider (the modes entry itself
+    # never probes an unselected provider; fakely defaulted apps with no
+    # OLLAMA_URL at all never probe either, see the phase18a matrix).
+    assert called["count"] == 1
 
 
 def test_live_mode_revealed_only_when_configured(database_url):

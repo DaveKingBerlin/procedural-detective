@@ -21,6 +21,7 @@ import {
   validatedJourneyMode,
   type GenerationModeStorage,
 } from "./generationMode";
+import { isUnsafeDisplayString, safeDisplay } from "./generationMode";
 import { effectiveProviderMode } from "./providerMode";
 
 /**
@@ -211,6 +212,24 @@ describe("parseGenerationCapabilities — trust-boundary allowlist", () => {
       modes: [{ id: "demo", available: false }, { id: "live", available: false, label: "Cloud AI" }],
     });
     expect(live.configuredProvider).toBe("live");
+  });
+
+  it("Phase 25 — the configuredProvider close-enum parse is unchanged when the additive provider-selection keys ride along", () => {
+    const parsed = parseGenerationCapabilities({
+      configuredProvider: "ollama",
+      defaultProvider: "ollama",
+      modes: [{ id: "demo", available: false }],
+      providers: [{ id: "ollama", available: true, label: "Local Ollama" }],
+    });
+    expect(parsed.configuredProvider).toBe("ollama");
+    expect(parsed.defaultProvider).toBe("ollama");
+    expect(parsed.providers).toEqual([{ id: "ollama", available: true, label: "Local Ollama" }]);
+    // The exported safe-display guards stay reusable by the Phase 25 provider
+    // parser (src/journey/generationProvider.ts shares them).
+    expect(isUnsafeDisplayString("http://127.0.0.1:11434")).toBe(true);
+    expect(isUnsafeDisplayString("qwen2.5:1.5b")).toBe(false);
+    expect(safeDisplay("llama3.2:3b", null)).toBe("llama3.2:3b");
+    expect(safeDisplay("http://127.0.0.1:11434", "Local Ollama")).toBe("Local Ollama");
   });
 
   it("Phase 21B (DEF-096) — missing/unknown/malformed `configuredProvider` is DROPPED (consumers read UNKNOWN, never 'fake')", () => {

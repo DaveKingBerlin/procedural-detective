@@ -119,11 +119,15 @@ class OllamaClient:
         return tags
 
     async def run_structured_inference(
-        self, *, prompt: str, temperature: float, timeout_ms: int
+        self, *, prompt: str, temperature: float, timeout_ms: int, model: Optional[str] = None
     ) -> Mapping[str, Any]:
+        # Phase 25 — the model travels with the JOB (the server may have
+        # selected a different model per generation request). ``model=None``
+        # keeps the CLI-operators' configured default model (``self.model``).
+        effective_model = model if isinstance(model, str) and model else self.model
         effective = _effective_timeout_ms(timeout_ms)
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": effective_model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
             "format": "json",

@@ -4,6 +4,7 @@ import type {
   AnonymousSessionResponse,
   BridgePairingResponse,
   BridgeStatusResponse,
+  CreateCaseGeneration,
   CreateCaseResponse,
   CreatePlaythroughResponse,
   ErrorEnvelope,
@@ -22,10 +23,18 @@ import type {
 /**
  * Minimal request body for POST /api/v1/cases. The difficulty label is
  * optional (the pipeline is deterministic and stores it).
+ *
+ * Phase 25 — the OPTIONAL flat generation-selection block (see
+ * {@link CreateCaseGeneration}): the three fields are included in the POST
+ * body ONLY when the caller actually passes a selection; every pre-25 call
+ * site keeps a byte-identical `{prompt[, difficulty]}` body (§13).
  */
 interface CreateCaseRequest {
   prompt: string;
   difficulty?: string;
+  generationProvider?: CreateCaseGeneration["generationProvider"];
+  ollamaTransport?: CreateCaseGeneration["ollamaTransport"];
+  ollamaModel?: string;
 }
 
 /**
@@ -450,17 +459,38 @@ export function createAnonymousSession(): Promise<AnonymousSessionResponse> {
 
 /**
  * POST {base}/api/v1/cases (Bearer anonymousSessionToken)
- * body {"prompt","difficulty"?} -> 201 CreateCaseResponse.
+ * body {"prompt","difficulty"?[, "generationProvider"?,"ollamaTransport"?,
+ *       "ollamaModel"?]} -> 201 CreateCaseResponse.
  * 429 {"error":{"code":"ADMISSION_DENIED",..}} surfaces quota exhaustion.
+ *
+ * Phase 25 — an OPTIONAL `generation` selection object is included in the
+ * POST body ONLY when present; a call without it produces the byte-identical
+ * `{prompt[, difficulty]}` body every pre-25 caller expects (§13). The
+ * backend owns all validation (unknown provider/transport -> 400
+ * INVALID_GENERATION_PROVIDER, unavailable explicit provider ->
+ * PROVIDER_UNAVAILABLE, invalid model string -> 400) — the client never
+ * auto-falls-back after an explicit selection.
  */
 export function createCase(
   anonymousSessionToken: string,
   prompt: string,
   difficulty?: string,
+  generation?: CreateCaseGeneration,
 ): Promise<CreateCaseResponse> {
   const body: CreateCaseRequest = { prompt };
   if (typeof difficulty === "string" && difficulty !== "") {
     body.difficulty = difficulty;
+  }
+  if (generation !== undefined) {
+    if (generation.generationProvider !== undefined) {
+      body.generationProvider = generation.generationProvider;
+    }
+    if (generation.ollamaTransport !== undefined) {
+      body.ollamaTransport = generation.ollamaTransport;
+    }
+    if (typeof generation.ollamaModel === "string" && generation.ollamaModel !== "") {
+      body.ollamaModel = generation.ollamaModel;
+    }
   }
   return authedRequest<CreateCaseResponse>("/api/v1/cases", anonymousSessionToken, {
     method: "POST",

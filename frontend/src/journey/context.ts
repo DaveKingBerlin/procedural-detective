@@ -9,6 +9,8 @@
  * failure mode (no credential material survives in the address bar).
  */
 
+import type { GenerationProviderId, OllamaTransportId } from "../api/types";
+
 export type JourneyDifficulty = "easy" | "medium" | "hard";
 
 export interface JourneyParams {
@@ -25,6 +27,24 @@ export interface JourneyParams {
    * demo/non-bridge paths (they mint a fresh session exactly as before).
    */
   anonymousSessionToken?: string;
+  /**
+   * Phase 25 — the OPTIONAL browser-selected generation provider (closed
+   * "fake" | "ollama" | "frontier"), carried in-memory from /new to
+   * /generating. Absent for pre-25/NEW-server-without-providers journeys: the
+   * POST /cases request then carries NO selection field (byte-identical).
+   */
+  generationProvider?: GenerationProviderId;
+  /**
+   * Phase 25 — the OPTIONAL Ollama transport ("server" | "bridge") that
+   * travels ONLY when `generationProvider === "ollama"`.
+   */
+  ollamaTransport?: OllamaTransportId;
+  /**
+   * Phase 25 — the OPTIONAL user-supplied Ollama model identifier that
+   * travels ONLY when `generationProvider === "ollama"`. Never a URL,
+   * credential or configuration value (§1.3).
+   */
+  ollamaModel?: string;
 }
 
 let current: JourneyParams | null = null;

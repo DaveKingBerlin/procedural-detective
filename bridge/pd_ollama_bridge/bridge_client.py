@@ -281,6 +281,11 @@ class BridgeClient:
                     prompt=msg["prompt"],
                     temperature=msg["temperature"],
                     timeout_ms=msg["timeoutMs"],
+                    # Phase 25 — a per-job model selection: the JOB's structured
+                    # ``model`` field wins over the CLI default model; an older
+                    # job without the field (``msg.get("model")`` None) keeps
+                    # the operator-configured default (backward compatible).
+                    model=msg.get("model") or self.config.model,
                 ),
                 timeout=_effective_job_timeout_seconds(msg["timeoutMs"]),
             )

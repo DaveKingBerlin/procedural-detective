@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
-import { setJourneyParams, type JourneyDifficulty } from "../journey/context";
+import { setJourneyParams, type JourneyDifficulty, type JourneyParams } from "../journey/context";
 import { PROMPT_MAX_CHARS } from "../journey/demoPrompt";
 import {
   EXAMPLE_PROMPTS,
@@ -14,6 +14,13 @@ import {
 } from "../journey/examplePrompts";
 import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, demoCtaLabel, demoCtaNote } from "../journey/generationMode";
 import { GenerationModeDisplay } from "../journey/generationModeSelector";
+import { GenerationProviderSelector } from "../journey/GenerationProviderSelector";
+import {
+  hasGenerationProviderOffer,
+  persistGenerationSelection,
+  resolveProviderSelection,
+  type GenerationProviderSelection,
+} from "../journey/generationProvider";
 import LocalAiBridgePanel from "../journey/LocalAiBridgePanel";
 import {
   providerPathNoteFromCapabilities,
@@ -100,6 +107,35 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
   const [activeExampleId, setActiveExampleId] = useState<ExamplePromptId | null>(null);
 
   /**
+   * Phase 25 — the browser-selected generation provider. Resolved from the
+   * PARSED capability DTO + sessionStorage when the additive provider offer
+   * exists (null while capabilities are unknown / absent on an OLDER server —
+   * the page then offers no selector and POST /cases carries no selection,
+   * byte-identical). Persisted to sessionStorage on every change (only the
+   * three non-secret preference keys, §10.1).
+   */
+  const [providerSelection, setProviderSelection] = useState<GenerationProviderSelection | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (capabilities === null) return;
+    if (!hasGenerationProviderOffer(capabilities)) {
+      setProviderSelection(null);
+      return;
+    }
+    // Resolve once the DTO arrives: a valid sessionStorage choice, else the
+    // server default, else the first still-available provider. A later
+    // capabilities refresh must never overwrite a user's explicit choice.
+    setProviderSelection((current) => current ?? resolveProviderSelection(capabilities, undefined));
+  }, [capabilities]);
+
+  const onProviderSelectionChange = (next: GenerationProviderSelection) => {
+    setProviderSelection(next);
+    persistGenerationSelection(next, undefined);
+  };
+
+  /**
    * Phase 16.2 §20/§36 — mode-honesty flags. The UI only ever claims Local-AI
    * behavior when the backend allowlist reports local available (the display
    * never shows an unavailable mode). Phase 21 F-03: no user action selects a
@@ -148,7 +184,23 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
       return false;
     }
     setError(null);
-    setJourneyParams({ prompt: validation.trimmed, difficulty: level });
+    const params: JourneyParams = { prompt: validation.trimmed, difficulty: level };
+    // Phase 25 — carry the browser-selected generation provider into the
+    // journey ONLY when the additive provider offer exists AND a selection was
+    // resolved (transport/model travel only for the Ollama provider). The
+    // pre-25 / older-server journey stays byte-identical (no selection keys).
+    if (hasGenerationProviderOffer(capabilities) && providerSelection !== null) {
+      params.generationProvider = providerSelection.generationProvider;
+      if (providerSelection.generationProvider === "ollama") {
+        if (providerSelection.ollamaTransport !== null) {
+          params.ollamaTransport = providerSelection.ollamaTransport;
+        }
+        if (providerSelection.ollamaModel !== "") {
+          params.ollamaModel = providerSelection.ollamaModel;
+        }
+      }
+    }
+    setJourneyParams(params);
     return true;
   };
 
@@ -255,6 +307,22 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
           <option value="medium">Medium</option>
           <option value="hard">Hard</option>
         </select>
+
+        {/* Phase 25 — the browser-selectable AI Provider selector (see
+            src/journey/GenerationProviderSelector.tsx). Rendered ONLY when
+            the capability DTO carries the additive `providers[]`/`defaultProvider`
+            offer (an OLDER server keeps the pre-25 form byte-identical). The
+            resolved selection is carried into JourneyParams -> POST /cases and
+            persisted to sessionStorage (the three non-secret preference keys,
+            §10.1); unavailable providers stay visible but disabled with their
+            safe reason (§2). No secret, URL, credential or raw exception text
+            is ever rendered. */}
+        <GenerationProviderSelector
+          capabilities={capabilities}
+          selection={providerSelection}
+          disabled={false}
+          onChange={onProviderSelectionChange}
+        />
 
         {/* Phase 21 F-03 — generation-mode READ-ONLY display (the interactive
             selector was removed: the selected mode was never sent to the

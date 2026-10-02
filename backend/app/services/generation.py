@@ -40,17 +40,27 @@ from app.auth.tokens import (
 )
 from app.generation.admission import AdmissionDenied
 from app.generation.controller import GenerationController
-from app.generation.fake_provider import FakeProvider
 from app.generation.failure_codes import (
     GenerationFailureCode,
     infer_failure_code,
     public_failure_code,
 )
 from app.generation.ids import IdSource
-from app.generation.live_provider import LiveHttpProvider
 from app.generation.pipeline import STAGE_ORDER, normalize_prompt
 from app.generation.prompt import PromptError
 from app.generation.provider import GenerationStage, Provider
+from app.generation.selection import (
+    BROWSER_SELECTABLE_PROVIDERS,
+    GenerationSelection,
+    InvalidOllamaModelError as SelectionInvalidOllamaModelError,
+    InvalidProviderError as SelectionInvalidProviderError,
+    OLLAMA_TRANSPORTS,
+    ProviderUnavailableError as SelectionProviderUnavailableError,
+    ResolvedGeneration,
+    SelectionConfigError as SelectionConfigErrorBase,
+    resolve as resolve_selection,
+    validate_ollama_model_string,
+)
 from app.generation.state_machine import GenerationState
 from app.models.cases import Case, CaseVersion
 from app.models.credentials import CreatorCredential
@@ -140,6 +150,21 @@ class PromptValidationError(GenerationServiceError):
 class EnvironmentHintError(GenerationServiceError):
     """The optional Phase 11 environment hint violates the input-safety bounds
     (-> 422 ENVIRONMENT_ERROR; an UNSAFE hint is rejected, never resolved)."""
+
+
+class InvalidGenerationProviderError(GenerationServiceError):
+    """Phase 25 — an unknown browser-supplied provider/transport id (-> 400
+    INVALID_GENERATION_PROVIDER; the offending value is never echoed)."""
+
+
+class ProviderUnavailableError(GenerationServiceError):
+    """Phase 25 — an EXPLICITLY requested but not-configured provider (-> 400
+    PROVIDER_UNAVAILABLE; never a silent fallback to another provider)."""
+
+
+class InvalidOllamaModelError(GenerationServiceError):
+    """Phase 25 — a user-supplied Ollama model string failed the central
+    validator (-> 400 INVALID_OLLAMA_MODEL; never echoes the offending value)."""
 
 
 class UnknownCaseError(GenerationServiceError):
@@ -588,8 +613,34 @@ class GenerationService:
                 global_window_seconds=settings.global_generation_window_seconds,
             )
         self._admission = admission
+        # Phase 25 — per-process flags shared by every per-attempt resolution
+        # (initialized BEFORE the default factory build, which may resolve the
+        # same flags for the configured-default provider). The Phase17B
+        # structured-output capability probe is resolved AT MOST ONCE per
+        # process (never per attempt / per request) so per-attempt provider
+        # selection never performs an unfettered network probe. The legacy
+        # default factory path (GENERATION_PROVIDER=ollama) triggers the same
+        # lazy resolve during construction exactly as before; browser selected
+        # Ollama under another default resolves the flag on first use.
+        self._ollama_structured_output: bool | None = None
+        self._structured_output_lock = threading.Lock()
+        # Lazy cached fake-provider script (shared by every fake resolution;
+        # immutable — safe for concurrent attempts).
+        self._lazy_fake_script: Any = None
+        # A CALLER-INJECTED provider factory (Phase 4/5 tests and custom
+        # callers) remains authoritative for the CONFIG-DEFAULT path: the
+        # Phase 25 per-attempt resolver applies only to browser selections and
+        # to services built WITHOUT a custom factory.
+        self._provider_factory_injected = provider_factory is not None
+        # Baseline identity of the constructor-built default factory, used to
+        # detect a post-construction REPLACEMENT of ``_provider_factory`` (the
+        # Phase 5 test suites swap it to force failures) so the config-default
+        # path keeps honoring the current factory even after that swap.
         self._provider_factory = (
             provider_factory if provider_factory is not None else self._build_default_provider_factory()
+        )
+        self._default_provider_factory_builtin = (
+            None if self._provider_factory_injected else self._provider_factory
         )
         self._publication = (
             publication if publication is not None else PublicationService(store)
@@ -675,6 +726,9 @@ class GenerationService:
         difficulty: str | None = None,
         environment: str | None = None,
         unknown_asset_requests: "tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]] | None" = None,
+        generation_provider: str | None = None,
+        ollama_transport: str | None = None,
+        ollama_model: str | None = None,
     ) -> CaseStarted:
         """Run one private case generation durably (version 1).
 
@@ -697,9 +751,29 @@ class GenerationService:
           resolved kit, and embedded in the published payload (the bootstrap
           world object then carries ``generated``). Any failure or invalid
           request degrades: the payload keeps the golden composition.
+        - ``generation_provider`` / ``ollama_transport`` / ``ollama_model``
+          (Phase 25): the OPTIONAL browser-supplied selection. All three
+          absent -> resolve the server-configured DEFAULT provider exactly as
+          before (backward compatibility). The selection is validated and
+          FROZEN at attempt start (immutable for every stage). Unknown provider
+          / unknown transport -> ``InvalidGenerationProviderError`` (400);
+          explicit-but-unavailable -> ``ProviderUnavailableError`` (400, never
+          a silent fallback); a bad Ollama model string ->
+          ``InvalidOllamaModelError`` (400).
         """
         settings = self._settings
         from app.world.environment import canonicalize_environment_hint
+
+        # Phase 25 — freezes the per-attempt provider selection (validation +
+        # availability, zero provider calls, zero settings mutation). The
+        # immutable selection and resolved bundle are consumed by EVERY stage
+        # of this attempt (driver, controller events, publication model).
+        selection, explicit = self._build_requested_selection(
+            generation_provider=generation_provider,
+            ollama_transport=ollama_transport,
+            ollama_model=ollama_model,
+        )
+        resolved = self._resolve_selection(selection, strict_unavailable=explicit)
 
         # Local input validation: zero reservations, zero provider calls.
         # Phase 19 Fix A: an explicit ``environment`` body field is
@@ -768,6 +842,7 @@ class GenerationService:
             prompt_text,
             anonymous_quota_session_id=anonymous_quota_session_id,
             creator_token=creator_token,
+            resolved=resolved,
         )
         case_id = handle.case_id
         attempt_id = handle.attempt_id
@@ -802,12 +877,14 @@ class GenerationService:
                 % (case_id, generation_id, attempt_id, pre_state)
             )
         if record.state is GenerationState.PUBLISHED:
-            # Phase 16_2/Phase 22: in ollama / remote_client driver mode the
-            # stage driver OWNS the composed world (LLM world-requirements ->
-            # environment -> oracle -> placer) inside the controller run; the
-            # deterministic re-composition below MUST NOT overwrite it. It
-            # still applies for fake/live unchanged.
-            if settings.generation_provider in ("ollama", "remote_client"):
+            # Phase 16_2/Phase 22/Phase 25: in the driver modes (ollama server,
+            # ollama bridge / remote_client) the stage driver OWNS the composed
+            # world (LLM world-requirements -> environment -> oracle -> placer)
+            # inside the controller run; the deterministic re-composition below
+            # MUST NOT overwrite it. It still applies for fake/live/frontier
+            # unchanged. The decision uses the FROZEN per-attempt resolution —
+            # never the mutable global setting.
+            if resolved.needs_driver:
                 pass
             elif self._last_environment_resolution is not None:
                 self._last_environment_resolution["compositionFailed"] = not (
@@ -821,7 +898,7 @@ class GenerationService:
             # into the SAME kit). In the driver modes the unknown objects go
             # through the driver's ASSET_SPEC path instead.
             if (
-                settings.generation_provider not in ("ollama", "remote_client")
+                not resolved.needs_driver
                 and self._generate_unknown_assets
                 and self._spec_provider is not None
                 and unknown_asset_requests
@@ -831,7 +908,9 @@ class GenerationService:
                         record, environment_id, list(unknown_asset_requests)
                     )
                 )
-        status = self._publish_if_ready(record, title, settings, now, case_id, version) or record.state.value
+        status = self._publish_if_ready(
+            record, title, settings, now, case_id, version, model=resolved.model
+        ) or record.state.value
         if _PD_DEV_TRACE:
             _dev_trace(
                 "service.publication.atompted status=%s recordState=%s "
@@ -1209,6 +1288,9 @@ class GenerationService:
         anonymous_quota_session_id: str,
         creator_token: str | None = None,
         difficulty: str | None = None,
+        generation_provider: str | None = None,
+        ollama_transport: str | None = None,
+        ollama_model: str | None = None,
     ) -> CaseStarted:
         """Generate the NEXT CaseVersion of an existing case (Phase5 B).
 
@@ -1217,8 +1299,22 @@ class GenerationService:
         public label (GEN-2, GEN-3, ...). An existing PUBLISHED version is
         never touched: the new version is a NEW case_version + NEW published
         row (Phase5 G — publishing v2 never alters v1 playthroughs).
+
+        ``generation_provider`` / ``ollama_transport`` / ``ollama_model``
+(Phase 25) are the OPTIONAL per-attempt selection (identical semantics
+        to ``start_case_generation``).
         """
         settings = self._settings
+        selection, explicit = self._build_requested_selection(
+            generation_provider=generation_provider,
+            ollama_transport=ollama_transport,
+            ollama_model=ollama_model,
+        )
+        resolved = self._resolve_selection(
+            selection,
+            strict_unavailable=explicit,
+            session=anonymous_quota_session_id,
+        )
         try:
             locked, _prompt_note = normalize_prompt(
                 prompt_text, max_chars=settings.max_prompt_chars
@@ -1257,6 +1353,7 @@ class GenerationService:
             anonymous_quota_session_id=anonymous_quota_session_id,
             creator_token=creator_token,
             ids=_CasePinnedIdSource(self._ids, case_id),
+            resolved=resolved,
         )
         attempt_id = handle.attempt_id
         creator_token_value = issue_creator_access_token()
@@ -1267,9 +1364,9 @@ class GenerationService:
         if record.state is GenerationState.PUBLISHED:
             # Phase 16_2/Phase 22: skip the deterministic re-composition in
             # the driver modes (the stage driver owns the composed world for
-            # the new version).
+            # the new version). Phase 25: based on the FROZEN resolution.
             if (
-                settings.generation_provider not in ("ollama", "remote_client")
+                not resolved.needs_driver
                 and self._last_environment_resolution is not None
             ):
                 self._last_environment_resolution["compositionFailed"] = not (
@@ -1293,7 +1390,9 @@ class GenerationService:
             created_at=now,
             create_case_row=False,
         )
-        status = self._publish_if_ready(record, title, settings, now, case_id, version) or record.state.value
+        status = self._publish_if_ready(
+            record, title, settings, now, case_id, version, model=resolved.model
+        ) or record.state.value
         self._sync_generations(anonymous_quota_session_id)
         return CaseStarted(
             case_id=case_id,
@@ -1317,15 +1416,25 @@ class GenerationService:
         anonymous_quota_session_id: str,
         creator_token: str | None,
         ids: Any | None = None,
+        resolved: ResolvedGeneration | None = None,
     ) -> tuple[Any, Any, float]:
-        """Fresh per-request controller; admission inside; synchronous run."""
+        """Fresh per-request controller; admission inside; synchronous run.
+
+        ``resolved`` (Phase 25) is the FROZEN per-attempt provider bundle: the
+        driver selection, the concrete provider factory, the controller's
+        provider-name/model/timeout metadata and the publication model ALL come
+        from it — never from a mutable global re-read between stages. When
+        None (the caller chose the configured default), it is resolved here.
+        """
         settings = self._settings
         # Phase19J-RI2: capabilities, health checks and app construction do not
         # execute a real model and must remain available under a local/default
         # profile. Enforce the supported Ollama latency envelope at the actual
-        # generation boundary, before driver construction, admission mutation
-        # or any provider call. Production preflight independently validates
-        # the rendered profile before deployment.
+        # generation boundary, BEFORE driver construction, admission mutation
+        # or any provider call (and before the configured-default selection is
+        # even resolved, so a Partial/operator service can never touch
+        # provider machinery on an unsupported profile). Production preflight
+        # independently validates the rendered profile before deployment.
         try:
             enforce_runtime_timeout_envelope(settings)
         except RuntimeError:
@@ -1334,17 +1443,25 @@ class GenerationService:
             raise ProviderConfigError(
                 "unsupported generation deadline configuration"
             ) from None
+        if resolved is None:
+            resolved = self._configured_default_resolved()
         # Phase 16_2/Phase 22: a selected local-Llama provider (ollama) or the
         # BYO-Ollama bridge (remote_client) runs through the stage driver
         # (structured per-stage calls producing a full draft), classified
-        # through the SAME controller lifecycle.
+        # through the SAME controller lifecycle. The driver consumes the
+        # ATTEMPT's frozen provider factory (FreshProvider per call).
         driver = (
-            self._build_stage_driver(anonymous_quota_session_id)
-            if settings.generation_provider in ("ollama", "remote_client")
+            self._build_stage_driver(
+                anonymous_quota_session_id,
+                provider_factory=resolved.provider_factory,
+                provider_label=resolved.provider_id,
+                provider_model=resolved.model,
+            )
+            if resolved.needs_driver
             else None
         )
         controller = GenerationController(
-            provider=self._provider_factory(),
+            provider=resolved.provider_factory(),
             admission=self._admission,
             clock=self._clock,
             ids=ids if ids is not None else self._ids,
@@ -1366,21 +1483,11 @@ class GenerationService:
             ),
             seed=None,  # per-controller auto seed (deterministic per controller)
             stage_driver=driver,
-            provider_timeout_seconds=(
-                settings.ollama_timeout_seconds
-                if settings.generation_provider == "ollama"
-                else settings.bridge_job_deadline_seconds
-                if settings.generation_provider == "remote_client"
-                else 30.0
-                if settings.generation_provider == "live"
-                else None
-            ),
-            provider_name=settings.generation_provider,
-            provider_model=(
-                settings.ollama_model
-                if settings.generation_provider == "ollama"
-                else settings.llm_model
-            ),
+            # Phase 25 — every controller metadata value comes from the FROZEN
+            # per-attempt resolution (never a mutable global re-read).
+            provider_timeout_seconds=resolved.timeout_seconds,
+            provider_name=resolved.provider_id,
+            provider_model=resolved.model,
         )
         _t0 = time.perf_counter()
         try:
@@ -1423,8 +1530,13 @@ class GenerationService:
         now: float,
         case_id: str,
         version: int,
+        model: str | None = None,
     ) -> str | None:
         """Atomic publication when the run reached PUBLISHED.
+
+        ``model`` (Phase 25) is the FROZEN per-attempt model recorded in the
+        publication (never re-read from the mutable global settings between
+        stages).
 
         Returns the final status when published (PUBLISHED); None otherwise.
         """
@@ -1462,13 +1574,7 @@ class GenerationService:
                 published,
                 seed=record.seed,
                 prompt=record.prompt,
-                model=(
-                    settings.llm_model
-                    if settings.generation_provider == "live"
-                    else settings.ollama_model
-                    if settings.generation_provider == "ollama"
-                    else None
-                ),
+                model=model,
                 title=title,
             )
         except DuplicatePublication:
@@ -1681,108 +1787,318 @@ class GenerationService:
         count = self._admission.session_generations(session_id)
         self._store.update_session_generations(session_id, count)
 
-    # ------------------------------------------------------------------ #
-    # provider factory
-    # ------------------------------------------------------------------ #
+    # -- provider factory / selection ------------------------------------- #
 
-    def _build_default_provider_factory(self) -> Callable[[], Provider]:
+    def _build_default_provider_factory(
+        self, *, selection: GenerationSelection | None = None
+    ) -> Callable[[], Provider]:
+        """Backward-compatible provider factory for a selection.
+
+        Phase 25: the factory is implemented through the resolver. ``selection``
+        None (the historical no-arg call) resolves the CONFIGURED DEFAULT
+        provider exactly as before (fake/live/ollama/remote_client/frontier);
+        an explicit ``selection`` resolves that immutable selection. The
+        returned callable produces a FRESH provider instance per call.
+        Configuration mistakes FAIL CLOSED here (``ProviderConfigError``).
+        """
+        current = selection if selection is not None else self._default_selection()
+        strict = selection is not None
+        resolved = self._resolve_selection(current, strict_unavailable=strict)
+        return resolved.provider_factory
+
+    def _default_selection(self) -> GenerationSelection:
+        """The configured-DEFAULT immutable selection (backward compat)."""
         settings = self._settings
-        if settings.generation_provider == "live":
-            url = settings.live_provider_url
-            key = settings.llm_api_key
-            model = settings.llm_model
-            if not (url and key and model):
-                raise ProviderConfigError(
-                    "generation_provider=live requires LIVE_PROVIDER_URL, "
-                    "LLM_API_KEY and LLM_MODEL"
-                )
-
-            def _live() -> Provider:
-                return LiveHttpProvider(endpoint_url=url, api_key=key, model=model)
-
-            return _live
-        if settings.generation_provider == "ollama":
-            from app.core.config import DEFAULT_OLLAMA_BASE_URL
-            from app.generation.ollama_provider import (
-                OllamaProvider,
-                ollama_structured_output_supported,
+        provider = getattr(settings, "generation_provider", "fake")
+        if provider == "ollama":
+            return GenerationSelection(
+                provider="ollama",
+                ollama_transport="server",
+                ollama_model=str(settings.ollama_model or ""),
             )
+        if provider == "remote_client":
+            return GenerationSelection(
+                provider="remote_client", ollama_transport="bridge", ollama_model=None
+            )
+        if provider == "frontier":
+            return GenerationSelection(provider="frontier")
+        if provider == "live":
+            return GenerationSelection(provider="live")
+        return GenerationSelection(provider="fake")
 
-            base_url = settings.ollama_base_url or DEFAULT_OLLAMA_BASE_URL
+    def _build_requested_selection(
+        self,
+        *,
+        generation_provider: str | None,
+        ollama_transport: str | None,
+        ollama_model: str | None,
+    ) -> tuple[GenerationSelection, bool]:
+        """Validate + freeze the browser-supplied (or default) selection.
 
-            # Phase17B §2: resolve the structured-output capability ONCE at
-            # factory build (a single documented /api/version probe; never per
-            # call, never raises). True => every request carries the
-            # AUTHORITATIVE per-stage JSON Schema in format; False => the
-            # documented "json" fallback.
-            structured_output = False
-            try:
-                structured_output = ollama_structured_output_supported(settings)
-            except Exception:  # noqa: BLE001 - capability probe never blocks
-                structured_output = False
-
-            def _ollama() -> Provider:
-                return OllamaProvider(
-                    base_url=base_url,
-                    model=settings.ollama_model,
-                    timeout_seconds=settings.ollama_timeout_seconds,
-                    temperature=settings.ollama_temperature,
-                    num_ctx=settings.ollama_num_ctx,
-                    structured_output=structured_output,
+        All three fields absent -> the configured default selection (backward
+        compatibility; ``explicit=False`` so a not-configured DEFAULT fails
+        closed as a configuration error, never as a request rejection).
+        Returns ``(selection, explicit)``. Validation never touches settings,
+        never calls the network and never leaks the offending value.
+        """
+        if (
+            generation_provider is None
+            and ollama_transport is None
+            and ollama_model is None
+        ):
+            return self._default_selection(), False
+        if generation_provider is None:
+            # A lone transport/model has no meaning without a provider: ignore
+            # it and resolve the configured default (defined, non-guessing).
+            return self._default_selection(), False
+        provider = str(generation_provider).strip()
+        if provider not in BROWSER_SELECTABLE_PROVIDERS:
+            raise InvalidGenerationProviderError(
+                "unknown or invalid generation provider"
+            )
+        transport: str | None = None
+        model: str | None = None
+        if ollama_transport is not None:
+            transport = str(ollama_transport).strip()
+            if transport not in OLLAMA_TRANSPORTS:
+                raise InvalidGenerationProviderError(
+                    "unknown or invalid ollama transport"
                 )
-
-            return _ollama
-        if settings.generation_provider == "remote_client":
-            # Phase 22 — BYO-Ollama bridge back-end. FAIL CLOSED at factory
-            # build (startup/config time): the bridge feature flag must be on
-            # AND a bridge registry wired. A provider==remote_client deployment
-            # without ENABLE_BRIDGE is a misconfiguration, never a silent
-            # fallback to fake/demo.
-            if not getattr(settings, "enable_bridge", False):
-                raise ProviderConfigError(
-                    "generation_provider=remote_client requires ENABLE_BRIDGE=true"
+        if provider == "ollama":
+            if transport is None:
+                # The server must NEVER guess a transport for an explicit
+                # provider=ollama request (Phase25 §4 rules — fail closed).
+                raise InvalidGenerationProviderError(
+                    "ollama transport is required when provider=ollama"
                 )
-            if self._bridge_registry is None:
-                raise ProviderConfigError(
-                    "generation_provider=remote_client requires a configured "
-                    "bridge registry"
-                )
-            from app.generation.remote_client_provider import RemoteClientProvider
+            model = self._validated_ollama_model(ollama_model)
+            if model is None:
+                raise InvalidOllamaModelError("a model is required for provider=ollama")
+        else:
+            # provider != ollama: an explicit transport/model are IGNORED
+            # (sanitized, never echoed, never travel in the immutable
+            # selection) — they are meaningful only for an Ollama selection.
+            transport = None
+        return (
+            GenerationSelection(
+                provider=provider, ollama_transport=transport, ollama_model=model
+            ),
+            True,
+        )
 
-            def _remote() -> Provider:
-                return RemoteClientProvider(
-                    registry=self._bridge_registry,
-                    settings=settings,
-                )
+    def _validated_ollama_model(self, value: object) -> str | None:
+        """Central user-input Ollama model validation (Phase25 §1.3 generator
+        feeding both the direct and bridge paths). Never leaks the value."""
+        try:
+            return validate_ollama_model_string(value)
+        except SelectionInvalidOllamaModelError:
+            raise InvalidOllamaModelError(
+                "the Ollama model string is invalid or unsupported"
+            ) from None
 
-            return _remote
-        script = self._load_fake_script()
-        if not script:
-            raise ProviderConfigError("fake provider script is empty")
+    def _resolve_selection(
+        self,
+        selection: GenerationSelection,
+        *,
+        strict_unavailable: bool,
+        session: str | None = None,
+    ) -> ResolvedGeneration:
+        """The per-attempt resolver (Phase 25 §5) + error translation.
 
-        def _fake() -> Provider:
-            return FakeProvider(script=script)
+        - never mutates settings or global state (safe for concurrent attempts);
+        - the Phase17B structured-output flag is resolved AT MOST ONCE per
+          process (single-flight, bounded — never per attempt) and ONLY when an
+          Ollama selection needs it (a fake/live/frontier/bridge default never
+          triggers a capability probe);
+        - selection/config errors are translated to the service boundary types
+          (the API layer never imports app.generation). Configuration errors
+          keep their sanitized operator-facing message (never a secret).
+        - a CALLER-INJECTED provider factory (Legacy Phase 4/5 usage) stays
+          authoritative for the configured-DEFAULT selection.
+        """
+        if (
+            getattr(self, "_provider_factory_injected", False)
+            and not strict_unavailable
+            and selection == self._default_selection()
+        ):
+            return self._legacy_injected_resolved(selection)
+        if (
+            not strict_unavailable
+            and selection == self._default_selection()
+            and self._provider_factory_replaced()
+        ):
+            return self._legacy_injected_resolved(selection)
+        structured_flag = (
+            self._structured_output_flag() if selection.provider == "ollama" else False
+        )
+        try:
+            return resolve_selection(
+                selection,
+                self._settings,
+                session=session,
+                bridge_registry=self._bridge_registry,
+                ollama_structured_output=structured_flag,
+                fake_script=self._get_fake_script(),
+                strict_unavailable=strict_unavailable,
+            )
+        except SelectionInvalidProviderError:
+            raise InvalidGenerationProviderError(
+                "unknown or invalid generation provider"
+            ) from None
+        except SelectionProviderUnavailableError:
+            raise ProviderUnavailableError(
+                "the requested generation provider is not available"
+            ) from None
+        except SelectionInvalidOllamaModelError:
+            raise InvalidOllamaModelError(
+                "the Ollama model string is invalid or unsupported"
+            ) from None
+        except SelectionConfigErrorBase as exc:
+            raise ProviderConfigError(str(exc)) from None
 
-        return _fake
+    def _configured_default_resolved(self) -> ResolvedGeneration:
+        """The FROZEN configured-DEFAULT resolution for one generation run.
 
-    def _build_stage_driver(self, session_scope: str | None = None) -> Any:
+        Backward compatible: a caller-injected provider factory (Phase 4/5
+        tests and custom callers) — or a post-construction REPLACEMENT of it —
+        remains the authoritative DEFAULT provider (``_legacy_injected_resolved``);
+        otherwise the Phase 25 resolver picks the configured default
+        (fake/live/ollama/remote_client/frontier).
+        """
+        selection = self._default_selection()
+        if (
+            getattr(self, "_provider_factory_injected", False)
+            or self._provider_factory_replaced()
+        ):
+            return self._legacy_injected_resolved(selection)
+        return self._resolve_selection(selection, strict_unavailable=False)
+
+    def _provider_factory_replaced(self) -> bool:
+        """True when ``_provider_factory`` is no longer the constructor-built
+        default (a test or caller swapped it after construction)."""
+        baseline = getattr(self, "_default_provider_factory_builtin", None)
+        return baseline is not None and self._provider_factory is not baseline
+
+    def _legacy_injected_resolved(
+        self, selection: GenerationSelection
+    ) -> ResolvedGeneration:
+        """A ``ResolvedGeneration`` over the CALLER-INJECTED provider factory.
+
+        Reconstructs the EXACT pre-Phase25 default semantics so existing
+        service callers that inject a custom provider factory (the Phase 4/5
+        test suites, custom deployments) observe byte-identical behavior:
+        the injected factory is called fresh per run/driver call, and the
+        controller metadata (provider id, model, timeout) comes from the
+        configured default profile exactly as the legacy hard-coded branches
+        did. Phase 25 browser selections NEVER take this path (they go through
+        the resolver).
+        """
+        settings = self._settings
+        provider = getattr(settings, "generation_provider", "fake")
+        if provider == "ollama":
+            model = str(getattr(settings, "ollama_model", "") or "")
+            timeout = float(
+                getattr(settings, "ollama_timeout_seconds", 60.0) or 60.0
+            )
+            driver = True
+        elif provider == "remote_client":
+            model = None
+            timeout = float(
+                getattr(settings, "bridge_job_deadline_seconds", 120.0) or 120.0
+            )
+            driver = True
+        elif provider == "live":
+            model = getattr(settings, "llm_model", None)
+            timeout = 30.0
+            driver = False
+        else:  # fake / frontier-with-no-factory
+            model = None
+            timeout = None
+            driver = False
+
+        def _injected() -> Provider:
+            return self._provider_factory()
+
+        return ResolvedGeneration(
+            provider_factory=_injected,
+            provider_id=str(provider),
+            model=model,
+            timeout_seconds=timeout,
+            needs_driver=driver,
+            selection=selection,
+        )
+
+    def _structured_output_flag(self) -> bool:
+        """The Phase17B structured-output capability, resolved once per process.
+
+        Guarded by a lock so concurrent per-attempt resolutions (and the
+        construction-time default factory) share ONE probe at most (a single
+        documented ``/api/version`` probe, exactly like Phase 17B §2 — never a
+        per-attempt network call).
+        """
+        if self._ollama_structured_output is not None:
+            return self._ollama_structured_output
+        from app.generation.ollama_provider import (
+            ollama_structured_output_supported,
+        )
+
+        with self._structured_output_lock:
+            if self._ollama_structured_output is None:
+                try:
+                    self._ollama_structured_output = bool(
+                        ollama_structured_output_supported(self._settings)
+                    )
+                except Exception:  # noqa: BLE001 - capability probe never blocks
+                    self._ollama_structured_output = False
+        return self._ollama_structured_output
+
+    def _get_fake_script(self) -> dict[GenerationStage, list[str]] | None:
+        """The immutable fake-provider script, loaded once per process."""
+        if self._lazy_fake_script is None:
+            script = self._load_fake_script()
+            if not script:
+                raise ProviderConfigError("fake provider script is empty")
+            self._lazy_fake_script = script
+        return self._lazy_fake_script
+
+    def _build_stage_driver(
+        self,
+        session_scope: str | None = None,
+        *,
+        provider_factory: Callable[[], Provider] | None = None,
+        provider_label: str | None = None,
+        provider_model: str | None = None,
+    ) -> Any:
         """Phase 16_2 + Phase 22: a stage driver for a selected local-Llama
         provider (ollama) or the BYO-Ollama bridge (remote_client).
 
-        Fake/live return None (their deterministic composition is UNCHANGED).
-        The driver shares the cached generated-asset store; unknown REQUIRED
-        objects route through its ASSET_SPEC adapter (bound). The creator
-        session scope is passed through so a remote-client provider selects the
-        bridge bound to the generation attempt's session."""
+        Fake/live/frontier return None (their deterministic composition is
+        UNCHANGED). The driver shares the cached generated-asset store; unknown
+        REQUIRED objects route through its ASSET_SPEC adapter (bound). The
+        creator session scope is passed through so a remote-client provider
+        selects the bridge bound to the generation attempt's session.
+
+        Phase 25: ``provider_factory`` is the FROZEN per-attempt provider
+        factory (defaults to the configured-default factory for backward
+        compatibility); ``provider_label`` is the frozen canonical id and
+        ``provider_model`` the frozen model recorded in driver lifecycle
+        events (never re-read from the mutable global settings).
+        """
         from app.services.ollama_driver import OllamaStageDriver
 
+        if provider_factory is None:
+            provider_factory = self._provider_factory
+        label = (
+            provider_label if provider_label is not None else str(self._settings.generation_provider)
+        )
         return OllamaStageDriver(
             settings=self._settings,
-            provider_factory=self._provider_factory,
+            provider_factory=provider_factory,
             generated_cache=self._generated_cache,
             catalog=None,
             session_scope=session_scope,
-            provider_label=str(self._settings.generation_provider),
+            provider_label=label,
+            provider_model=provider_model,
         )
 
     def _load_fake_script(self) -> dict[GenerationStage, list[str]]:
@@ -1842,9 +2158,12 @@ __all__ = [
     "GenerationService",
     "GenerationServiceError",
     "IdentifierConflict",
+    "InvalidGenerationProviderError",
+    "InvalidOllamaModelError",
     "MAX_GENERATED_REQUESTS",
     "PromptError",
     "PromptValidationError",
     "ProviderConfigError",
+    "ProviderUnavailableError",
     "UnknownCaseError",
 ]

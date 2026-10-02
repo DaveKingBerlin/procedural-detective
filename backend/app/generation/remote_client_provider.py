@@ -39,6 +39,12 @@ Design rules (Phase22 §2/§10/§16/§17 — the server stays authoritative):
   LOCAL_MODEL_UNAVAILABLE; protocol violation -> BRIDGE_PROTOCOL_ERROR.
   A failure is raised as ``StageDriverProviderFailure`` (the driver/controller
   classify the attempt with the typed code; nothing is published).
+- Phase 25 per-job model: ``model`` (constructor) is the SELECTED frozen model
+  of the generation attempt; the dispatched job frame carries it as the
+  structured ``model`` field. A legacy ``remote_client`` default request (no
+  selection) leaves it None and the job falls back to the bridge's own reported
+  ``conn.model`` (Phase 25 §20A.13 — no bridge restart/re-pair needed for a
+  model change; the bridge client now honors the per-job model).
 """
 
 from __future__ import annotations
@@ -79,10 +85,15 @@ class RemoteClientProvider:
         registry: Any,
         settings: Any,
         session_scope: str | None = None,
+        model: str | None = None,
     ) -> None:
         self._registry = registry
         self._settings = settings
         self._session_scope = session_scope
+        # Phase 25 — the SELECTED per-attempt model (frozen at attempt start;
+        # None for legacy ``remote_client`` default requests, in which case the
+        # bridge's own reported model is used as the documented fallback).
+        self._model = model
         # Truthful internal trace of the last dispatch (never serialized).
         self.last_job_id: str | None = None
         self.last_latency_ms: int | None = None
@@ -114,7 +125,11 @@ class RemoteClientProvider:
                 "bridge not connected for this generation session",
                 GenerationFailureCode.BRIDGE_NOT_CONNECTED,
             )
-        if not self._model_allowed(conn.model):
+        # Phase 25 — per-job model: the SELECTED frozen model wins; an older/legacy
+        # job without one (a ``remote_client`` default request) falls back to the
+        # bridge's reported model (Phase25 §20A.13 backward compatibility).
+        effective_model = self._model or conn.model
+        if not self._model_allowed(effective_model):
             raise self._typed(
                 "selected local model is not available",
                 GenerationFailureCode.LOCAL_MODEL_UNAVAILABLE,
@@ -133,7 +148,7 @@ class RemoteClientProvider:
             "jobId": job_id,
             "jobType": "STRUCTURED_INFERENCE",
             "schemaId": schema_id,
-            "model": conn.model,
+            "model": effective_model,
             "prompt": request.prompt_context,
             "temperature": 0.1,
             "timeoutMs": int(timeout_s * 1000),
@@ -151,7 +166,7 @@ class RemoteClientProvider:
             stage=request.stage.value,
             jobId=job_id,
             schemaId=schema_id,
-            model=conn.model,
+            model=effective_model,
             timeoutMs=int(timeout_s * 1000),
             providerCallCount=None,
         )

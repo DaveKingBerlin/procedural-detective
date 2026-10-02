@@ -82,10 +82,10 @@ interface Mounted {
   releaseRun: () => Promise<void>;
 }
 
-function mountJourney(loadCapabilities: CapabilityLoader): Mounted {
+function mountJourney(loadCapabilities: CapabilityLoader, params: JourneyParams = PARAMS): Mounted {
   let release: ((result: DemoFlowResult) => void) | null = null;
   const run = vi.fn<(...args: readonly unknown[]) => Promise<DemoFlowResult>>(
-    (_prompt, _difficulty, _onProgress, _mode) => {
+    (_prompt, _difficulty, _onProgress, _mode, _anonymousToken, _generation) => {
       const gate = new Promise<DemoFlowResult>((resolve) => {
         release = resolve;
       });
@@ -97,7 +97,7 @@ function mountJourney(loadCapabilities: CapabilityLoader): Mounted {
     root.render(
       <MemoryRouter initialEntries={["/generating"]}>
         <GenerationJourney
-          params={PARAMS}
+          params={params}
           run={run}
           onSuccess={() => {
             throw new Error("must never auto-enter in these scenarios");
@@ -363,5 +363,48 @@ describe("Phase 24 F-2 — a session-window-DENIED run recovers by reload, never
     // holder session and fail forever (or auto-mint, which would defeat the
     // limit) — reload is the only recovery beyond Back to start.
     expect(container.querySelector('button[data-testid="generation-failed"]')).toBeNull();
+  });
+});
+
+describe("Phase 25 — the generation-selection carried from /new reaches the journey", () => {
+  it("passes the selection as the RunFn 6th argument (transport/model only for ollama)", async () => {
+    const params: JourneyParams = {
+      prompt: "A crime",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "qwen2.5:1.5b",
+    };
+    const { run, releaseRun } = mountJourney(demoOnly, params);
+    await settleEffects();
+    expect(run).toHaveBeenCalledTimes(1);
+    // Existing arg positions are stable: index 3 = validated mode, index
+    // 4 = anonymous token (none here), index 5 = the Phase 25 selection.
+    expect(run.mock.calls[0][3]).toBeNull();
+    expect(run.mock.calls[0][5]).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "qwen2.5:1.5b",
+    });
+    await releaseRun();
+  });
+
+  it("a first/second case without a selection keeps the RunFn generation argument undefined", async () => {
+    const { run, releaseRun } = mountJourney(demoOnly, PARAMS);
+    await settleEffects();
+    expect(run.mock.calls[0][5]).toBeUndefined();
+    await releaseRun();
+  });
+
+  it("a fake-only selection travels WITHOUT transport/model fields", async () => {
+    const params: JourneyParams = {
+      prompt: "A crime",
+      difficulty: "medium",
+      generationProvider: "fake",
+    };
+    const { run, releaseRun } = mountJourney(demoOnly, params);
+    await settleEffects();
+    expect(run.mock.calls[0][5]).toEqual({ generationProvider: "fake" });
+    await releaseRun();
   });
 });

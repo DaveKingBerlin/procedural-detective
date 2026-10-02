@@ -123,8 +123,11 @@ CLOSE_SERVER_ERROR = 1011
 # -- safe alphabets / bounds -----------------------------------------------------
 # Code format ``PD-XXXX-XXXX`` over the base32 alphabet (upper-case A-Z0-9).
 PAIRING_CODE_RE = re.compile(r"^PD-[A-Z2-7]{4}-[A-Z2-7]{4}$")
-# Model label: the same safe operator token set as OLLAMA_MODEL.
-MODEL_LABEL_RE = re.compile(r"[A-Za-z0-9._:\-]+")
+# Model label: the same safe operator token set as OLLAMA_MODEL, EXTENDED with
+# ``/`` and ``+`` (Phase 25 — user-supplied Ollama identifiers such as
+# namespaced ``library/model:tag`` and quantized ``model+q8_0`` must dispatch
+# as structured job data; both copies stay in sync via the drift guard).
+MODEL_LABEL_RE = re.compile(r"[A-Za-z0-9._:\-+/]+")
 MAX_MODEL_LABEL_LENGTH = 80
 MAX_SCHEMA_ID_LENGTH = 64
 MAX_PROMPT_CHARS = 120_000  # mirrors MAX_OLLAMA_PROMPT_CHARS

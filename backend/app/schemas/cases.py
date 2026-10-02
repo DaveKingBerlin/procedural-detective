@@ -39,6 +39,34 @@ class CaseCreateRequest(BaseModel):
         "form; unknown values fall back to 'apartment'; the service enforces "
         "the same input-safety bounds as the prompt).",
     )
+    # Phase 25 — optional browser-supplied provider selection. Omitted/null =>
+    # the server-configured DEFAULT provider (backward compatibility). The
+    # browser may NEVER supply URLs/credentials/endpoints — only these safe
+    # logical ids; the service validates every value centrally (unknown values
+    # are rejected with the canonical envelope, never silently ignored/echoed).
+    generationProvider: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Phase 25 optional logical generation provider "
+        "(fake | ollama | frontier | null). The service validates the fixed "
+        "server-side allowlist and rejects unknown values (400 "
+        "INVALID_GENERATION_PROVIDER).",
+    )
+    ollamaTransport: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Phase 25 optional Ollama transport (server | bridge | "
+        "null). Required when generationProvider=ollama (400 otherwise).",
+    )
+    ollamaModel: str | None = Field(
+        default=None,
+        description="Phase 25 optional Ollama model identifier (e.g. "
+        "qwen2.5:1.5b). Required when generationProvider=ollama; validated by "
+        "the central Phase 25 model-string validator (400 INVALID_OLLAMA_MODEL "
+        "on malformed/URL-like/overlong values). Ignored for fake/frontier. "
+        "No schema-level length cap: the central validator is the single "
+        "authoritative gate (max 256 chars, canonical 400 envelope).",
+    )
 
 
 class CaseStartedDTO(BaseModel):

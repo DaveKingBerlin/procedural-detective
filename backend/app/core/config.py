@@ -348,13 +348,19 @@ class Settings(BaseSettings):
     playthrough_token_ttl_seconds: int = Field(
         default=14400, gt=0, description="PLAYTHROUGH_TOKEN_TTL_SECONDS."
     )
-    generation_provider: Literal["fake", "live", "ollama", "remote_client"] = Field(
+    generation_provider: Literal[
+        "fake", "live", "ollama", "remote_client", "frontier"
+    ] = Field(
         default="fake",
         description=(
-            "GENERATION_PROVIDER (fake|live|ollama|remote_client). "
+            "GENERATION_PROVIDER (fake|live|ollama|remote_client|frontier). "
+            "Phase 25: this is the DEFAULT provider, not an exclusive startup "
+            "mode — every OTHER configured provider stays browser-selectable "
+            "through the per-request selection (see app.generation.selection). "
             "remote_client is the Phase 22 'Bring Your Own Ollama' bridge mode: "
             "it requires ENABLE_BRIDGE=true and FAILS CLOSED at startup/config "
-            "time otherwise (ProviderConfigError)."
+            "time otherwise (ProviderConfigError). frontier requires every "
+            "FRONTIER_* setting and FAILS CLOSED at startup otherwise."
         ),
     )
     llm_api_key: str | None = Field(
@@ -374,6 +380,52 @@ class Settings(BaseSettings):
             "FAKE_PROVIDER_SCRIPT: optional JSON file path "
             "(generation-stage -> list of directives/strings)."
         ),
+    )
+    # -- Phase 25 — Frontier hosted OpenAI-compatible provider ----------------
+    # OPERATOR-ONLY configuration (mirror of the live trio). FRONTIER_API_KEY
+    # is a SERVER-ONLY secret: never logged, never embedded in exceptions and
+    # never emitted in any API DTO / capability response. Frontier is a NEW
+    # provider distinct from the legacy 'live' trio (LIVE_PROVIDER_URL /
+    # LLM_API_KEY / LLM_MODEL): both may be configured simultaneously and the
+    # browser may select frontier per case-generation request. DEFAULT is off:
+    # no FRONTIER_* setting is read unless frontier_enabled is true AND every
+    # required member is present (fail closed at selection time).
+    frontier_enabled: bool = Field(
+        default=False,
+        description=(
+            "FRONTIER_ENABLED: master switch for the Frontier hosted provider. "
+            "False (default) -> frontier is never browser-selectable."
+        ),
+    )
+    frontier_base_url: str | None = Field(
+        default=None,
+        description=(
+            "FRONTIER_BASE_URL: operator-only full endpoint URL (OpenAI- "
+            "compatible, e.g. https://api.example.com/v1/chat/completions). "
+            "Must start with https:// when set (same https-only policy as "
+            "LIVE_PROVIDER_URL)."
+        ),
+    )
+    frontier_api_key: str | None = Field(
+        default=None,
+        description=(
+            "FRONTIER_API_KEY: server-only secret (never logged / never in "
+            "exceptions / never in responses; the adapter sends it only as the "
+            "Bearer Authorization header)."
+        ),
+    )
+    frontier_model: str | None = Field(
+        default=None,
+        description=(
+            "FRONTIER_MODEL: the configured hosted model name (public-safe "
+            "display metadata; the browser can never change it)."
+        ),
+    )
+    frontier_timeout_seconds: float = Field(
+        default=60.0,
+        ge=5,
+        le=300,
+        description="FRONTIER_TIMEOUT_SECONDS (bounded 5..300).",
     )
     # -- Phase 16 local Ollama provider (configurable local generation) -------
     # OPERATOR-ONLY configuration: OLLAMA_BASE_URL can never come from a prompt
@@ -736,6 +788,37 @@ class Settings(BaseSettings):
             raise ValueError("LIVE_PROVIDER_URL must not contain NUL characters")
         if not text.startswith("https://"):
             raise ValueError("LIVE_PROVIDER_URL must start with https:// when set")
+        return text
+
+    @field_validator("frontier_base_url")
+    @classmethod
+    def _validate_frontier_base_url(cls, value: str | None) -> str | None:
+        """FRONTIER_BASE_URL must be a non-empty https:// URL with a HOST when set.
+
+        Phase 25 mirror of the live https-only policy: a non-https Frontier
+        endpoint (private-only http localhost, plain-text carrier, ...) is
+        rejected at configuration time — the hosted provider's target may be a
+        public third party, so only transport encryption is acceptable.
+        F4: ``https://`` with an EMPTY host is also rejected — the operator
+        config is only meaningful with a concrete endpoint host (the runtime
+        POST would fail sanitized anyway; fail fast at configuration instead).
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("FRONTIER_BASE_URL must be a non-empty string when set")
+        text = value.strip()
+        if "\x00" in text:
+            raise ValueError("FRONTIER_BASE_URL must not contain NUL characters")
+        if not text.startswith("https://"):
+            raise ValueError("FRONTIER_BASE_URL must start with https:// when set")
+        # F4 — require a non-empty host after the scheme (parse scheme://host).
+        try:
+            parsed = urlparse(text)
+        except (TypeError, ValueError):
+            raise ValueError("FRONTIER_BASE_URL is not a valid URL") from None
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("FRONTIER_BASE_URL must include a host")
         return text
 
     @field_validator("ollama_base_url")

@@ -816,6 +816,8 @@ def test_17_config_does_not_appear_in_logs_or_responses(caplog):
 
 def test_18_fake_provider_remains_unchanged(generation_service):
     assert generation_service._settings.generation_provider == "fake"
+    # Phase 25: the no-arg default factory still resolves the CONFIGURED default
+    # provider (here fake) — unchanged lifecycle for all existing callers.
     provider = generation_service._build_default_provider_factory()()
     assert isinstance(provider, FakeProvider)
     # The fake provider itself stays deterministic and network-free.

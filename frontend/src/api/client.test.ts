@@ -472,6 +472,41 @@ describe("Phase 8 journey endpoints", () => {
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ prompt: "A mystery" });
   });
 
+  it("createCase includes the Phase 25 generation selection ONLY when passed (no-selection stays byte-identical)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery", "medium", {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      prompt: "A mystery",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+    // §13 backward compat: a call WITHOUT the selection keeps the pre-25 body.
+    // (A fresh Response mock is required — the first Response body was consumed.)
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery");
+    const [, init2] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init2 as RequestInit).body as string)).toEqual({ prompt: "A mystery" });
+  });
+
+  it("createCase sends ONLY the defined generation fields (a fake selection has no transport/model)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery", "easy", { generationProvider: "fake" });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      prompt: "A mystery",
+      difficulty: "easy",
+      generationProvider: "fake",
+    });
+  });
+
   it("getGenerationProgress GETs /generations/{id} with the creator bearer", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ caseId: "C1", generationId: "G1", status: "RUNNING", progress: 45, stage: "world" }, 200),
