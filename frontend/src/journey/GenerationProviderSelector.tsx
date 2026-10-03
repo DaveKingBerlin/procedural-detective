@@ -11,9 +11,10 @@ import {
   OLLAMA_TRANSPORT_SERVER_LABEL,
   PROVIDER_UNAVAILABLE_LABEL,
   buildProviderOffers,
+  defaultOllamaTransport,
+  getOllamaTransport,
   hasGenerationProviderOffer,
   providerReasonLabel,
-  type GenerationProviderOffer,
   type GenerationProviderSelection,
 } from "./generationProvider";
 
@@ -59,10 +60,6 @@ export interface GenerationProviderSelectorProps {
   onChange: (selection: GenerationProviderSelection) => void;
 }
 
-function transportAvailable(offer: GenerationProviderOffer | undefined, transport: OllamaTransportId): boolean {
-  return offer?.transports[transport].available === true;
-}
-
 export function GenerationProviderSelector({
   capabilities,
   selection,
@@ -89,14 +86,13 @@ export function GenerationProviderSelector({
   const selectProvider = (id: GenerationProviderId) => {
     if (disabled || selection === null) return;
     if (id === "ollama") {
-      let transport: OllamaTransportId | null = selection.ollamaTransport;
-      if (transport === null || !transportAvailable(ollamaOffer, transport)) {
-        transport = transportAvailable(ollamaOffer, "server")
-          ? "server"
-          : transportAvailable(ollamaOffer, "bridge")
-            ? "bridge"
-            : null;
-      }
+      // Phase 26C1 §2/§7/§8 — the transport is NEVER recomputed from
+      // availability once a choice exists: keep the current selection's
+      // transport, else restore the persisted preference (Fake -> Ollama
+      // restores the intended transport), else the deterministic no-
+      // preference default. Availability is display-only.
+      const transport =
+        selection.ollamaTransport ?? getOllamaTransport() ?? defaultOllamaTransport(ollamaOffer);
       onChange({
         generationProvider: "ollama",
         ollamaTransport: transport,
@@ -118,13 +114,11 @@ export function GenerationProviderSelector({
     onChange({ ...selection, ollamaModel: model });
   };
 
-  const currentTransport: OllamaTransportId | null =
-    selection?.ollamaTransport ??
-    (transportAvailable(ollamaOffer, "server")
-      ? "server"
-      : transportAvailable(ollamaOffer, "bridge")
-        ? "bridge"
-        : null);
+  // Phase 26C1 §5/§7 — the visible transport IS the selection's transport and
+  // nothing else: a null selection means NO transport radio is checked (the
+  // serialized payload omits the transport on that documented path), so the
+  // visible control can never diverge from what will be posted.
+  const currentTransport: OllamaTransportId | null = selection?.ollamaTransport ?? null;
 
   const ollamaActive = currentId === "ollama" && ollamaOffer !== undefined;
   const serverTransport = ollamaOffer?.transports.server;
@@ -182,11 +176,16 @@ export function GenerationProviderSelector({
                 onChange={() => selectTransport("server")}
               />
               <span className="provider-option-label">{OLLAMA_TRANSPORT_SERVER_LABEL}</span>
-              {!serverTransport.available && (
-                <span className="provider-option-reason">
-                  {providerReasonLabel(serverTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL}
-                </span>
-              )}
+              {/* Phase 26C1 §5 — availability is DISPLAY-ONLY, shown independently
+                  of the (authoritative) selected transport. */}
+              <span
+                className="provider-option-availability"
+                data-testid="generation-ollama-transport-server-availability"
+              >
+                {serverTransport.available
+                  ? "Available"
+                  : (providerReasonLabel(serverTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
+              </span>
             </label>
           )}
           {bridgeTransport !== undefined && (
@@ -203,11 +202,18 @@ export function GenerationProviderSelector({
                 onChange={() => selectTransport("bridge")}
               />
               <span className="provider-option-label">{OLLAMA_TRANSPORT_BRIDGE_LABEL}</span>
-              {!bridgeTransport.available && (
-                <span className="provider-option-reason">
-                  {providerReasonLabel(bridgeTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL}
-                </span>
-              )}
+              {/* Phase 26C1 §5 — availability is DISPLAY-ONLY, shown independently
+                  of the (authoritative) selected transport. */}
+              <span
+                className="provider-option-availability"
+                data-testid="generation-ollama-transport-bridge-availability"
+              >
+                {bridgeTransport.connected === true
+                  ? "Connected"
+                  : bridgeTransport.available
+                    ? "Not connected"
+                    : (providerReasonLabel(bridgeTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
+              </span>
             </label>
           )}
           {showBridgeControls && (

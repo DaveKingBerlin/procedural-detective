@@ -421,6 +421,43 @@ describe("runDemo — Phase 25 provider selection", () => {
     expect(result.failure.kind).toBe("retryable");
     expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.generic);
   });
+
+  it("Phase 26C1 §17/§18 — each run POSTs EXACTLY ITS OWN transport once (no stale transport, no shared state)", async () => {
+    const services = makeServices();
+    // First run under an explicit Server selection.
+    await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: {
+        generationProvider: "ollama",
+        ollamaTransport: "server",
+        ollamaModel: "hermes3:8b",
+      },
+    });
+    // Second run under an explicit Bridge selection — the first run's
+    // transport must not leak into it (no client-global state mutation).
+    await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: {
+        generationProvider: "ollama",
+        ollamaTransport: "bridge",
+        ollamaModel: "hermes3:8b",
+      },
+    });
+    // EXACTLY two POSTs — one per run, each with its OWN current transport.
+    expect(services.createCase).toHaveBeenCalledTimes(2);
+    expect(services.createCase).toHaveBeenNthCalledWith(1, ANON, "prompt", undefined, {
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "hermes3:8b",
+    });
+    expect(services.createCase).toHaveBeenNthCalledWith(2, ANON, "prompt", undefined, {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+  });
 });
 
 describe("runDemo — generation FAILED", () => {

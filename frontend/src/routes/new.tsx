@@ -16,6 +16,7 @@ import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, demoCt
 import { GenerationModeDisplay } from "../journey/generationModeSelector";
 import { GenerationProviderSelector } from "../journey/GenerationProviderSelector";
 import {
+  bridgePairedSelection,
   hasGenerationProviderOffer,
   persistGenerationSelection,
   resolveProviderSelection,
@@ -133,6 +134,20 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
   const onProviderSelectionChange = (next: GenerationProviderSelection) => {
     setProviderSelection(next);
     persistGenerationSelection(next, undefined);
+  };
+
+  /**
+   * Phase 26C1 §3 — a successful Bridge pairing is strong Bridge intent: the
+   * Ollama provider with the Bridge transport becomes selected + persisted
+   * (`bridge`). A user's LATER explicit radio choice always wins over the
+   * pairing selection; capability refreshes never revert it.
+   */
+  const handleBridgePaired = () => {
+    // The transport-selection surface must actually exist for the pairing
+    // intent to be expressed (an OLDER server without `providers` has no
+    // selector and no selection keys are ever posted).
+    if (!hasGenerationProviderOffer(capabilities)) return;
+    onProviderSelectionChange(bridgePairedSelection(capabilities, providerSelection));
   };
 
   /**
@@ -346,7 +361,10 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
             (the bridge CLI owns that WS). Player routes (/scene, /accuse,
             /reveal) never render this component and never call the bridge
             endpoints — the backend enforces the same session scoping. */}
-        <LocalAiBridgePanel capabilities={capabilities} />
+        <LocalAiBridgePanel
+          capabilities={capabilities}
+          onBridgePaired={handleBridgePaired}
+        />
 
         {/* Phase 16.2 §20 — honest unavailability (Phase 21 F-03: storage is
             legacy-only now — no user action writes `pd_generation_mode`, but

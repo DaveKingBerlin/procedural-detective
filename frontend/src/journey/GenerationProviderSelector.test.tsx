@@ -235,3 +235,149 @@ describe("GenerationProviderSelector — hostile/reason safety", () => {
     expect(markup).not.toContain("connection refused");
   });
 });
+
+describe("GenerationProviderSelector — Phase 26C1 the VISIBLE transport is the SELECTED transport (§2/§5/§7)", () => {
+  const TRANSPORT_CHECKED_SERVER = 'name="generation-ollama-transport" checked="" value="server"';
+  const TRANSPORT_CHECKED_BRIDGE = 'name="generation-ollama-transport" checked="" value="bridge"';
+  const NO_TRANSPORT_CHECKED = 'name="generation-ollama-transport" checked=""';
+
+  it("both transports available + Server selected -> the Server radio is the ONLY checked one (§8.1)", () => {
+    const markup = render(CAPS, OLLAMA_SELECTION);
+    expect(markup).toContain(TRANSPORT_CHECKED_SERVER);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
+    // The same state that drives the visual control drives serialization: the
+    // selection object's transport is server (nothing here can diverge).
+    expect(OLLAMA_SELECTION.ollamaTransport).toBe("server");
+  });
+
+  it("both transports available + Bridge selected -> the Bridge radio is the ONLY checked one (§8.2)", () => {
+    const selection: GenerationProviderSelection = { ...OLLAMA_SELECTION, ollamaTransport: "bridge" };
+    const markup = render(CAPS, selection);
+    expect(markup).toContain(TRANSPORT_CHECKED_BRIDGE);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_SERVER);
+    expect(selection.ollamaTransport).toBe("bridge");
+  });
+
+  it("Bridge connected does NOT override an explicit Server radio (§8.3)", () => {
+    const caps: GenerationCapabilitiesResponse = {
+      ...CAPS,
+      providers: [
+        ...CAPS.providers!.slice(0, 1),
+        {
+          ...CAPS.providers![1],
+          transports: {
+            server: { available: true, reason: null },
+            bridge: { available: true, connected: true },
+          },
+        },
+        ...CAPS.providers!.slice(2),
+      ],
+    };
+    const markup = render(caps, OLLAMA_SELECTION); // selection carries server
+    expect(markup).toContain(TRANSPORT_CHECKED_SERVER);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
+  });
+
+  it("Server available does NOT override an explicit Bridge radio (§8.4)", () => {
+    const selection: GenerationProviderSelection = { ...OLLAMA_SELECTION, ollamaTransport: "bridge" };
+    const markup = render(CAPS, selection);
+    expect(markup).toContain(TRANSPORT_CHECKED_BRIDGE);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_SERVER);
+  });
+
+  it("an Ollama selection WITHOUT a transport checks NO transport radio (visible == what will be posted) (§8.16)", () => {
+    const markup = render(CAPS, { generationProvider: "ollama", ollamaTransport: null, ollamaModel: "" });
+    expect(markup).not.toContain(NO_TRANSPORT_CHECKED);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_SERVER);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
+  });
+
+  it("an unavailable SELECTED Bridge stays checked + disabled and shows its unavailable state (§8.12)", () => {
+    const caps: GenerationCapabilitiesResponse = {
+      modes: [],
+      defaultProvider: "ollama",
+      providers: [
+        {
+          id: "ollama",
+          label: "Ollama",
+          available: true,
+          transports: {
+            server: { available: true },
+            bridge: { available: false, reason: "not_connected" },
+          },
+        },
+      ],
+    };
+    const markup = render(caps, { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "" });
+    expect(markup).toContain(TRANSPORT_CHECKED_BRIDGE);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_SERVER);
+    const bridgeBlock = markup.match(/data-testid="generation-ollama-transport-bridge"[\s\S]*?<\/label>/)?.[0] ?? "";
+    expect(bridgeBlock).toContain('checked=""');
+    expect(bridgeBlock).toContain('disabled=""');
+    expect(markup).toContain("not connected");
+  });
+
+  it("an unavailable SELECTED Server stays checked + disabled and shows its unavailable state (§8.13)", () => {
+    const caps: GenerationCapabilitiesResponse = {
+      modes: [],
+      defaultProvider: "ollama",
+      providers: [
+        {
+          id: "ollama",
+          label: "Ollama",
+          available: true,
+          transports: {
+            server: { available: false, reason: "not_configured" },
+            bridge: { available: true },
+          },
+        },
+      ],
+    };
+    const markup = render(caps, { generationProvider: "ollama", ollamaTransport: "server", ollamaModel: "" });
+    expect(markup).toContain(TRANSPORT_CHECKED_SERVER);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
+    const serverBlock = markup.match(/data-testid="generation-ollama-transport-server"[\s\S]*?<\/label>/)?.[0] ?? "";
+    expect(serverBlock).toContain('checked=""');
+    expect(serverBlock).toContain('disabled=""');
+    // The frozen reason copy (never a raw diagnostic) is shown next to the
+    // selected-but-unavailable transport.
+    expect(markup).toContain("not configured");
+  });
+
+  it("availability is displayed independently of the selection (§5)", () => {
+    const markup = render(CAPS, OLLAMA_SELECTION); // server selected, bridge available/not-connected
+    expect(markup).toContain('data-testid="generation-ollama-transport-server-availability"');
+    expect(markup).toContain('data-testid="generation-ollama-transport-bridge-availability"');
+    // Both transports are available here -> both tags state that; the bridge
+    // adds its honest session-scoped "Not connected" while still selectable.
+    expect(markup).toMatch(
+      /data-testid="generation-ollama-transport-server-availability"[\s\S]*?>Available<\/span>/,
+    );
+    expect(markup).toMatch(
+      /data-testid="generation-ollama-transport-bridge-availability"[\s\S]*?>Not connected<\/span>/,
+    );
+    // A connected bridge renders "Connected".
+    const connectedCaps: GenerationCapabilitiesResponse = {
+      modes: [],
+      providers: [
+        { id: "fake", available: true },
+        {
+          id: "ollama",
+          available: true,
+          transports: {
+            server: { available: true },
+            bridge: { available: true, connected: true },
+          },
+        },
+      ],
+    };
+    const connectedMarkup = render(connectedCaps, {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "",
+    });
+    expect(connectedMarkup).toMatch(
+      /data-testid="generation-ollama-transport-bridge-availability"[\s\S]*?>Connected<\/span>/,
+    );
+  });
+});

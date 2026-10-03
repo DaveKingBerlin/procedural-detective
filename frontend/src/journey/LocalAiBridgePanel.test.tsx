@@ -325,4 +325,63 @@ describe("Phase 22 — /new pairing panel (Not connected -> code -> connected)",
     expect("anonymousSessionToken" in staged).toBe(false);
     unmount(mounted);
   });
+
+  // Phase 26C1 §3 — a pairing the user actually completed (waiting -> connected
+  // poll transition) is strong Bridge intent: the panel notifies the /new page
+  // (onBridgePaired) so it selects + persists the Bridge transport. A
+  // capabilities-refresh connected block is NOT a pairing action and must not
+  // fire the callback.
+  it("a COMPLETED pairing (waiting -> connected) notifies onBridgePaired (§3)", async () => {
+    const onBridgePaired = vi.fn();
+    const services = makeServices();
+    const getBridgeStatus = vi.mocked(services.getBridgeStatus);
+    getBridgeStatus
+      .mockResolvedValueOnce({
+        remoteLocalAi: { available: true, connected: false, model: null, ready: false },
+      })
+      .mockResolvedValueOnce({
+        remoteLocalAi: { available: true, connected: true, model: "hermes3:8b", ready: true },
+      });
+    const mounted = mount(makeProps({ services, onBridgePaired }));
+
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    // Still waiting for the bridge CLI: no Bridge-intent notification yet.
+    expect(onBridgePaired).not.toHaveBeenCalled();
+
+    await advance(2000);
+    await settle();
+    // First poll still reports not-connected -> still waiting, no notification.
+    expect(onBridgePaired).not.toHaveBeenCalled();
+
+    await advance(2000);
+    await settle();
+    expect(textOf(query(mounted, "bridge-connected"))).toBe(BRIDGE_CONNECTED_LINE);
+    // The completed pairing fired EXACTLY once.
+    expect(onBridgePaired).toHaveBeenCalledTimes(1);
+
+    // A later connected poll (connection stays up) must NOT fire it again.
+    await advance(2000);
+    await settle();
+    expect(onBridgePaired).toHaveBeenCalledTimes(1);
+    unmount(mounted);
+  });
+
+  it("a connected capability block (no pairing action) does NOT call onBridgePaired", () => {
+    const onBridgePaired = vi.fn();
+    const connectedCaps: GenerationCapabilitiesResponse = parseGenerationCapabilities({
+      modes: [{ id: "demo", available: true }],
+      configuredProvider: "fake",
+      remoteLocalAi: {
+        available: true,
+        connected: true,
+        model: "hermes3:8b",
+        ready: true,
+      },
+    });
+    const mounted = mount(makeProps({ capabilities: connectedCaps, onBridgePaired }));
+    expect(textOf(query(mounted, "bridge-connected"))).toBe(BRIDGE_CONNECTED_LINE);
+    expect(onBridgePaired).not.toHaveBeenCalled();
+    unmount(mounted);
+  });
 });

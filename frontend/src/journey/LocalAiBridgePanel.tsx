@@ -88,6 +88,12 @@ export interface LocalAiBridgePanelProps {
   pollIntervalMs?: number;
   /** Test/QA seam: bounded connect-wait (default 2 minutes). */
   waitMaxMs?: number;
+  /**
+   * Phase 26C1 §3 — invoked when a pairing the user actually started COMPLETES
+   * (the poll transitions waiting -> connected). A completed pairing is strong
+   * Bridge intent: the /new page then selects + persists the Bridge transport.
+   */
+  onBridgePaired?: () => void;
 }
 
 /** Safe, player-facing copy for a failed pairing request (never raw codes). */
@@ -103,6 +109,7 @@ export default function LocalAiBridgePanel({
   services = DEFAULT_BRIDGE_SERVICES,
   pollIntervalMs = BRIDGE_POLL_INTERVAL_MS,
   waitMaxMs = BRIDGE_WAIT_MAX_MS,
+  onBridgePaired,
 }: LocalAiBridgePanelProps) {
   // §36 gate: NOTHING renders unless the PARSED capability DTO offers the
   // bridge (ENABLE_BRIDGE=true and available:) — an absent block keeps every
@@ -117,6 +124,12 @@ export default function LocalAiBridgePanel({
 
   const viewRef = useRef(view);
   viewRef.current = view;
+  // Phase 26C1 §3 — the pairing-completion callback is ref'd so a poll tick
+  // (scheduled from an older render) always notifies with the LATEST route
+  // selection context. A completed pairing is still authoritative Bridge
+  // intent, but it must never act on a stale provider/model snapshot.
+  const onBridgePairedRef = useRef(onBridgePaired);
+  onBridgePairedRef.current = onBridgePaired;
   const tokenRef = useRef<string | null>(null);
   const timerRef = useRef<number | null>(null);
   /** Poll ticks since the current pairing started (elapsed = ticks * interval). */
@@ -156,6 +169,13 @@ export default function LocalAiBridgePanel({
       );
       viewRef.current = next;
       setView(next);
+      // Phase 26C1 §3 — a pairing the user STARTED that COMPLETED (waiting ->
+      // connected) is strong Bridge intent: notify the /new page so it
+      // selects + persists the Bridge transport. A capabilities-refresh
+      // connected block (no user pairing action) never fires this.
+      if (prev.state === "waiting" && next.state === "connected") {
+        onBridgePairedRef.current?.();
+      }
       // Keep polling while waiting (bounded by waitMaxMs inside the reducer)
       // and while connected (to detect a later drop truthfully).
       if (next.state === "waiting" || next.state === "connected") {
