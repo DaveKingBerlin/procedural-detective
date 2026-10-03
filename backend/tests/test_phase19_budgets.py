@@ -628,7 +628,10 @@ def test_ri09_activity_log_roundtrip_core_budget_unchanged():
     (``derive_core_call_budget_default()``) and MAX_ACTIVITY_LOG_REPAIR_PASSES
     stays 2 — zero asset calls are spent."""
     from app.core.config import Settings
-    from app.generation.budgets import derive_core_call_budget_default
+    from app.generation.budgets import (
+        derive_core_call_budget_default,
+        derive_global_call_budget_default,
+    )
     from app.services.ollama_driver import MAX_ACTIVITY_LOG_REPAIR_PASSES
     from test_ollama_driver import (
         ICEPICK_SPEC,
@@ -638,7 +641,13 @@ def test_ri09_activity_log_roundtrip_core_budget_unchanged():
         _world,
     )
 
-    assert Settings().max_llm_calls_per_generation == 128
+    # Phase 26C4: the GLOBAL default is the DERIVED legal envelope (Core legal
+    # maximum 620 + legal asset envelope 20×5 = 100) = 720 — never a literal
+    # 128 (the old literal sat BELOW the Core derivation and contradicted the
+    # bounded stage graph at the enclosing guard).
+    assert Settings().max_llm_calls_per_generation == (
+        derive_global_call_budget_default()
+    )
     # Phase 26C3: the core default is now DERIVED from the canonical legal
     # stage graph — both evidence paths × every controller pass
     # (4 × (5 + max(9, 50) × 3) = 620), never a magic literal.

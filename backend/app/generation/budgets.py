@@ -41,6 +41,25 @@ controller pass (initial ``run_into`` plus the bounded repair and regeneration
 re-runs), see ``derive_core_call_budget_default`` below. The cap stays a hard
 FINITE bound: ``derived + 1`` calls still fail closed with
 ``CORE_PROVIDER_CALL_BUDGET_EXHAUSTED``.
+
+Phase 26C4 — the GLOBAL DEFAULT (``MAX_LLM_CALLS_PER_GENERATION``) is DERIVED
+from the SAME canonical graph (Option A, exact legal envelope) instead of a
+literal ceiling: the global counter is a strict SUPERSET of the Core and asset
+counters — every real provider call increments ``calls`` exactly once and is
+attributed to the CORE bucket or ONE procedural-asset bucket
+(``calls == core_calls + asset_calls``), so the global envelope must contain
+the FULL legal bounded graph or the superset guard would contradict the
+lower-level policies it contains. The legal global envelope is therefore
+
+    Core legal maximum + legal asset envelope
+    = derive_core_call_budget_default()
+      + MAX_PROCEDURAL_ASSETS_PER_GENERATION × MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+    = 620 + 100 = 720
+
+see ``derive_global_call_budget_default``. The cap stays a hard FINITE bound:
+``envelope + 1`` calls still fail closed with
+``PROVIDER_CALL_BUDGET_EXHAUSTED`` — the global guard is NOT removed, it just
+can no longer be smaller than the envelope it wraps.
 """
 
 from __future__ import annotations
@@ -135,10 +154,12 @@ CORE_BUCKET = _CoreBucket()
 #     total_passes  = 1 + 2 + 1 = 4
 #     derived       = 155 × 4 = 620
 #
-# NOTE: the derived value may EXCEED ``MAX_LLM_CALLS_PER_GENERATION`` (default
-# 128); then the GLOBAL ceiling — a SEPARATE documented hard safety ceiling —
-# is the operative stop and the CORE budget is guaranteed never to contradict a
-# path the lower-level guards permit BEFORE the global one binds. The budget
+# NOTE: the derived Core value may EXCEED a smaller OVERRIDDEN global ceiling
+# (``MAX_LLM_CALLS_PER_GENERATION``); the GLOBAL ceiling — a SEPARATE documented
+# hard safety ceiling — is the operative stop on any legal path the global
+# guard permits BEFORE the bound it contains (Phase 26C4: the derived DEFAULT
+# global envelope ``720`` can never do this — the configuration layer rejects a
+# global override below the legal Core + asset envelope at startup). The budget
 # stays a hard FINITE bound: ``derived + 1`` calls still fail closed with
 # ``CORE_PROVIDER_CALL_BUDGET_EXHAUSTED``.
 # --------------------------------------------------------------------------- #
@@ -216,6 +237,125 @@ def derive_core_call_budget_default(
     )
     total_passes = 1 + max_repair_passes + max_full_regenerations
     return per_pass * total_passes
+
+
+# --------------------------------------------------------------------------- #
+# Phase 26C4 — derived/aligned GLOBAL provider-call envelope.
+#
+# The global ceiling (``MAX_LLM_CALLS_PER_GENERATION``) is the SUPERSET of the
+# Core and asset counters: ``BudgetTracker.consume_call`` increments ``calls``
+# exactly once per real provider call and attributes it to the CORE bucket or
+# ONE procedural-asset bucket, so ``calls == core_calls + asset_calls``. A
+# global ceiling SMALLER than the legal envelope of the bounded lower-level
+# policies it contains would re-introduce the C3 contradiction at the
+# enclosing level (e.g. the proven global=128 / Core=620 damage), so the
+# DEFAULT is DERIVED as the exact legal envelope:
+#
+#     global default = derived Core legal maximum
+#                      + MAX_PROCEDURAL_ASSETS_PER_GENERATION
+#                        × MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+#                    = 620 + 20 × 5 = 720
+#
+# The value is an OUTPUT of the canonical constants — never a magic number and
+# never a second source of truth. The cap stays a hard FINITE bound: the
+# ``envelope + 1``-th call still fails closed with
+# ``PROVIDER_CALL_BUDGET_EXHAUSTED`` (the global guard is not removed).
+# --------------------------------------------------------------------------- #
+
+# Canonical procedural-asset allowances (REQUIREMENTS 32.6/32.7; the same
+# default values as the §45 operator settings MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+# / MAX_PROCEDURAL_ASSETS_PER_GENERATION).
+DEFAULT_MAX_LLM_CALLS_PER_PROCEDURAL_ASSET = 5
+DEFAULT_MAX_PROCEDURAL_ASSETS_PER_GENERATION = 20
+
+
+def derive_asset_call_budget_default(
+    *,
+    max_procedural_assets: int | None = None,
+    max_llm_calls_per_procedural_asset: int | None = None,
+) -> int:
+    """The aligned LEGAL procedural-asset call envelope for one attempt.
+
+    Each DISTINCT procedural asset may burn at most
+    ``MAX_LLM_CALLS_PER_PROCEDURAL_ASSET`` provider calls (the per-asset
+    bucket ceiling) and at most ``MAX_PROCEDURAL_ASSETS_PER_GENERATION``
+    distinct assets may enter the asset path, so the legal asset-wide call
+    envelope is the product:
+
+        max_procedural_assets × max_llm_calls_per_procedural_asset
+        = 20 × 5 = 100
+
+    ``None`` (the default) reads the CANONICAL module-level defaults
+    ``DEFAULT_MAX_PROCEDURAL_ASSETS_PER_GENERATION`` /
+    ``DEFAULT_MAX_LLM_CALLS_PER_PROCEDURAL_ASSET`` AT CALL TIME, so the legal
+    envelope follows a canonical constant change automatically (the same
+    C3 pattern as ``derive_core_call_budget_default``).
+
+    No asset call ever increments ``core_calls``; every asset call DOES
+    increment the global ``calls`` counter, so this envelope is part of the
+    minimum legal GLOBAL envelope (see ``derive_global_call_budget_default``).
+    """
+    if max_procedural_assets is None:
+        max_procedural_assets = DEFAULT_MAX_PROCEDURAL_ASSETS_PER_GENERATION
+    if max_llm_calls_per_procedural_asset is None:
+        max_llm_calls_per_procedural_asset = (
+            DEFAULT_MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+        )
+    if isinstance(max_procedural_assets, bool) or not isinstance(
+        max_procedural_assets, int
+    ):
+        raise TypeError("max_procedural_assets must be an int or None")
+    if max_procedural_assets <= 0:
+        raise ValueError("max_procedural_assets must be > 0")
+    if isinstance(max_llm_calls_per_procedural_asset, bool) or not isinstance(
+        max_llm_calls_per_procedural_asset, int
+    ):
+        raise TypeError("max_llm_calls_per_procedural_asset must be an int or None")
+    if max_llm_calls_per_procedural_asset <= 0:
+        raise ValueError("max_llm_calls_per_procedural_asset must be > 0")
+    return max_procedural_assets * max_llm_calls_per_procedural_asset
+
+
+def derive_global_call_budget_default(
+    *,
+    max_repair_passes: int | None = None,
+    max_full_regenerations: int | None = None,
+    max_procedural_assets: int | None = None,
+    max_llm_calls_per_procedural_asset: int | None = None,
+) -> int:
+    """The aligned DEFAULT ``MAX_LLM_CALLS_PER_GENERATION`` value.
+
+    The GLOBAL counter is the strict superset of the Core and asset buckets
+    (``calls == core_calls + asset_calls``), so the default global ceiling is
+    the WHOLE legal bounded generation graph: the derived Core legal maximum
+    (every evidence path × every per-fact activity-log call × every controller
+    pass — ``derive_core_call_budget_default``) PLUS the legal procedural-asset
+    envelope (``derive_asset_call_budget_default``).
+
+        Core legal maximum   = 620
+        Asset legal maximum  = 100
+        Global legal envelope = 620 + 100 = 720
+
+    ``None`` (the default) reads the CANONICAL module-level defaults at CALL
+    TIME (repair/regeneration allowances and the asset bounds), so the value
+    is an output of the canonical constants — never a duplicated literal:
+    tune a subordinate canonical constant and the global envelope follows
+    automatically.
+    """
+    if max_repair_passes is None:
+        max_repair_passes = DEFAULT_MAX_REPAIR_PASSES
+    if max_full_regenerations is None:
+        max_full_regenerations = DEFAULT_MAX_FULL_REGENERATIONS
+    return (
+        derive_core_call_budget_default(
+            max_repair_passes=max_repair_passes,
+            max_full_regenerations=max_full_regenerations,
+        )
+        + derive_asset_call_budget_default(
+            max_procedural_assets=max_procedural_assets,
+            max_llm_calls_per_procedural_asset=max_llm_calls_per_procedural_asset,
+        )
+    )
 
 
 def _non_negative_int(value: Any, name: str) -> int | None:
@@ -333,6 +473,11 @@ class BudgetTracker:
     @property
     def max_asset_calls(self) -> int | None:
         return self._max_asset_calls
+
+    @property
+    def max_calls(self) -> int:
+        """The GLOBAL ceiling (``MAX_LLM_CALLS_PER_GENERATION``)."""
+        return self._max_calls
 
     @property
     def max_core_calls(self) -> int | None:

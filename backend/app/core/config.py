@@ -45,7 +45,12 @@ from app.core.timeout_envelope import (  # noqa: E402  (no circular import)
 from app.domain.activity_log import (  # noqa: E402  (pure domain, no config dep)
     activity_log_window_satisfiable,
 )
-from app.generation.budgets import derive_core_call_budget_default  # noqa: E402
+from app.generation.budgets import (  # noqa: E402
+    DEFAULT_MAX_LLM_CALLS_PER_PROCEDURAL_ASSET,
+    DEFAULT_MAX_PROCEDURAL_ASSETS_PER_GENERATION,
+    derive_core_call_budget_default,
+    derive_global_call_budget_default,
+)
 
 SERVICE_NAME = "procedural-detective"
 SERVICE_VERSION = "0.1.0"
@@ -159,11 +164,17 @@ class Settings(BaseSettings):
         validation_alias="CASE_GENERATION_DEADLINE_SECONDS",
         description="CASE_GENERATION_DEADLINE_SECONDS.",
     )
-    max_llm_calls_per_generation: int = Field(
-        default=128, gt=0, description="MAX_LLM_CALLS_PER_GENERATION."
+    max_llm_calls_per_generation: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "MAX_LLM_CALLS_PER_GENERATION (optional override; None = the "
+            "DERIVED legal global provider-call envelope = the resolved Core "
+            "legal maximum + the legal asset envelope)."
+        ),
     )
     # Phase 19 Fix C — scalable hierarchical provider budgeting. The GLOBAL
-    # ceiling (MAX_LLM_CALLS_PER_GENERATION=128) is a SAFETY CEILING for local
+    # ceiling (MAX_LLM_CALLS_PER_GENERATION) is a SAFETY CEILING for local
     # Ollama (no per-call charge), never a target. Core stages (case_truth /
     # evidence / world_requirements + global repair/regeneration calls) get
     # their own hard ceiling; each procedural ASSET_SPEC object gets an
@@ -192,6 +203,26 @@ class Settings(BaseSettings):
     # configuration error (fail-fast, ``_align_core_call_budget``): it would
     # re-introduce the C3 provider-call-budget contradiction. Raising it is
     # always allowed.
+    #
+    # Phase 26C4 — the GLOBAL default is also DERIVED so the enclosing guard
+    # can never be SMALLER than the complete legal envelope it contains. The
+    # global counter is the strict superset of the Core and asset counters
+    # (``calls == core_calls + asset_calls``), so the legal global envelope is
+    #
+    #     resolved Core legal maximum
+    #     + MAX_PROCEDURAL_ASSETS_PER_GENERATION
+    #       × MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+    #     = 620 + 20 × 5 = 720
+    #
+    # ``derive_global_call_budget_default`` computes the canonical default; the
+    # env override MAX_LLM_CALLS_PER_GENERATION stays authoritative (init > env
+    # > dotenv > derived default; the field default is None and
+    # ``_align_global_call_budget`` fills it when unset). A configured value
+    # BELOW (resolved core + legal asset envelope) is REJECTED as an
+    # operator/startup configuration error (fail-fast,
+    # ``_align_global_call_budget``) — NEVER silently clamped upward. The old
+    # literal-128 default is gone: the derived envelope is the source of truth
+    # and auto-updates with the canonical constants.
     max_core_llm_calls_per_generation: int | None = Field(
         default=None,
         gt=0,
@@ -201,12 +232,12 @@ class Settings(BaseSettings):
         ),
     )
     max_llm_calls_per_procedural_asset: int = Field(
-        default=5,
+        default=DEFAULT_MAX_LLM_CALLS_PER_PROCEDURAL_ASSET,
         gt=0,
         description="MAX_LLM_CALLS_PER_PROCEDURAL_ASSET.",
     )
     max_procedural_assets_per_generation: int = Field(
-        default=20,
+        default=DEFAULT_MAX_PROCEDURAL_ASSETS_PER_GENERATION,
         gt=0,
         description="MAX_PROCEDURAL_ASSETS_PER_GENERATION.",
     )
@@ -1067,6 +1098,64 @@ class Settings(BaseSettings):
                 "lower-level bounded guard would be blocked by the CORE budget "
                 "before the global ceiling). Remove the override to use the "
                 "auto-derived default, or raise the value."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _align_global_call_budget(self) -> "Settings":
+        """Phase 26C4 — the GLOBAL ceiling may never sit BELOW the complete
+        legal envelope of the bounded policies it contains.
+
+        The global provider-call counter is the strict superset of the Core and
+        procedural-asset counters (``calls == core_calls + asset_calls``): every
+        real provider call charges the global counter exactly once and is
+        attributed to the CORE bucket or ONE procedural-asset bucket. A global
+        ceiling smaller than (resolved Core legal maximum + legal asset
+        envelope) therefore lets the SUPERSET guard terminate a generation path
+        that every subordinate bounded policy (per-stage parse retries, per-item
+        repairs <= 2, evidence <= MAX_EVIDENCE_ITEMS, per-asset <= 5, assets <=
+        20, repair/regeneration passes) explicitly allows — the exact C3
+        contradiction re-introduced one level up (the previous literal global
+        default 128 sat BELOW the derived Core maximum 620). It is REJECTED
+        here: fail-fast operator/startup configuration error before ANY provider
+        call. When the operator does not override the setting (None), the
+        derived legal envelope IS the global default (auto-updates with the
+        canonical constants AND with the resolved Core value).
+
+        Raising the Core ceiling (or the asset bounds) raises the required
+        minimum accordingly: ``global >= resolved_core + asset_envelope`` is
+        enforced, never silently clamped upward.
+        """
+        derived_core = derive_core_call_budget_default(
+            max_repair_passes=self.max_repair_passes,
+            max_full_regenerations=self.max_full_regenerations,
+        )
+        # _align_core_call_budget has already resolved the Core setting
+        # (None -> derived value, below-minimum overrides already rejected).
+        resolved_core = self.max_core_llm_calls_per_generation
+        if resolved_core is None:
+            resolved_core = derived_core
+        # The legal asset envelope from the CONFIGURED canonical asset bounds
+        # (distinct assets x per-asset calls); the global minimum must contain
+        # it no matter WHEN in the attempt the asset calls occur.
+        asset_envelope = (
+            self.max_procedural_assets_per_generation
+            * self.max_llm_calls_per_procedural_asset
+        )
+        minimum_global = resolved_core + asset_envelope
+        if self.max_llm_calls_per_generation is None:
+            self.max_llm_calls_per_generation = minimum_global
+            return self
+        if self.max_llm_calls_per_generation < minimum_global:
+            raise ValueError(
+                "MAX_LLM_CALLS_PER_GENERATION must be >= the minimum required "
+                f"by the configured legal Core + asset bounds "
+                f"({resolved_core} + {asset_envelope} = {minimum_global}): a "
+                "configured global provider-call budget below the complete "
+                "legal envelope would let the global superset guard terminate "
+                "a generation path every lower-level bounded policy permits. "
+                "Remove the override to use the auto-derived legal envelope, "
+                "or raise the value to at least the minimum."
             )
         return self
 

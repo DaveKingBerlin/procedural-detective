@@ -53,6 +53,7 @@ from app.generation.budgets import (  # noqa: E402
     CORE_BUCKET,
     BudgetTracker,
     derive_core_call_budget_default,
+    derive_global_call_budget_default,
 )
 from app.generation.failure_codes import (  # noqa: E402
     GenerationFailureCode,
@@ -156,8 +157,10 @@ def _run_live(max_core_llm_calls: int, *, posts=None, max_repair_passes=2,
               max_full_regenerations=1):
     """Driver-harness run over the live queue with an explicit CORE cap.
 
-    Global ceiling is raised to 128 so ONLY the CORE cap can bind (the live
-    production ceiling is 128) — the test isolates the CORE-budget behavior.
+    Global ceiling is the DERIVED legal envelope (``derive_global_call_budget_default``
+    = 720) so ONLY the CORE cap can bind — the tests isolate the CORE-budget
+    behavior (Phase 26C4: the legacy literal-128 global is gone; the derived
+    envelope is the canonical default).
     """
     from app.generation.clock import ManualClock
     from app.generation.ids import IdSource
@@ -174,7 +177,7 @@ def _run_live(max_core_llm_calls: int, *, posts=None, max_repair_passes=2,
         admission,
         clock,
         ids,
-        max_llm_calls_per_generation=128,
+        max_llm_calls_per_generation=derive_global_call_budget_default(),
         max_core_llm_calls=max_core_llm_calls,
         max_llm_calls_per_procedural_asset=5,
         max_procedural_assets_per_generation=20,
@@ -765,7 +768,7 @@ def test_failed_calls_count_against_budget():
     driver = _make_driver(transport)
     controller = _controller(
         driver, transport, admission, clock, ids,
-        max_llm_calls_per_generation=128, max_core_llm_calls=derive_core_call_budget_default(),
+        max_llm_calls_per_generation=derive_global_call_budget_default(), max_core_llm_calls=derive_core_call_budget_default(),
     )
     handle = controller.start_generation(KNIFE_PROMPT, anonymous_quota_session_id=session.session_id)
     record = controller.attempt(handle.attempt_id)
@@ -808,7 +811,7 @@ def test_parse_failed_calls_count_against_budget():
     driver = _make_driver(transport)
     controller = _controller(
         driver, transport, admission, clock, ids,
-        max_llm_calls_per_generation=128, max_core_llm_calls=derive_core_call_budget_default(),
+        max_llm_calls_per_generation=derive_global_call_budget_default(), max_core_llm_calls=derive_core_call_budget_default(),
         max_repair_passes=2,
     )
     handle = controller.start_generation(KNIFE_PROMPT, anonymous_quota_session_id=session.session_id)
@@ -849,7 +852,7 @@ def test_activity_log_repairs_remain_bounded_independently():
     driver = _make_driver(transport)
     controller = _controller(
         driver, transport, admission, clock, ids,
-        max_llm_calls_per_generation=128, max_core_llm_calls=derive_core_call_budget_default(),
+        max_llm_calls_per_generation=derive_global_call_budget_default(), max_core_llm_calls=derive_core_call_budget_default(),
         max_repair_passes=2, max_full_regenerations=1,
     )
     handle = controller.start_generation(KNIFE_PROMPT, anonymous_quota_session_id=session.session_id)
@@ -900,7 +903,7 @@ def test_budget_resets_per_generation_attempt():
     driver = _make_driver(transport)
     controller = _controller(
         driver, transport, admission, clock, ids,
-        max_llm_calls_per_generation=128, max_core_llm_calls=derive_core_call_budget_default(),
+        max_llm_calls_per_generation=derive_global_call_budget_default(), max_core_llm_calls=derive_core_call_budget_default(),
     )
     handle1 = controller.start_generation(KNIFE_PROMPT, anonymous_quota_session_id=session.session_id)
     record1 = controller.attempt(handle1.attempt_id)
@@ -911,7 +914,7 @@ def test_budget_resets_per_generation_attempt():
     driver2 = _make_driver(transport2)
     controller2 = _controller(
         driver2, transport2, admission, clock, ids,
-        max_llm_calls_per_generation=128, max_core_llm_calls=derive_core_call_budget_default(),
+        max_llm_calls_per_generation=derive_global_call_budget_default(), max_core_llm_calls=derive_core_call_budget_default(),
     )
     handle2 = controller2.start_generation(KNIFE_PROMPT, anonymous_quota_session_id=session.session_id)
     record2 = controller2.attempt(handle2.attempt_id)
@@ -970,7 +973,9 @@ def test_bridge_and_direct_use_identical_global_accounting(database_url):
     settings = make_bridge_settings(
         bridge_url,
         max_core_llm_calls_per_generation=derive_core_call_budget_default(),
-        max_llm_calls_per_generation=128,
+        # Phase 26C4 — the GLOBAL ceiling must be the DERIVED legal envelope;
+        # the legacy literal 128 would now be a REJECTED configuration error.
+        max_llm_calls_per_generation=derive_global_call_budget_default(),
     )
     store = _Store(bridge_url)
     from app.services.bridge import BridgeRegistry
@@ -1060,7 +1065,7 @@ def test_fake_provider_behavior_unchanged():
     session = admission.create_anonymous_quota_session()
     controller = GenerationController(
         provider=fake, admission=admission, clock=clock, ids=ids,
-        deadline_seconds=60, max_llm_calls_per_generation=128,
+        deadline_seconds=60, max_llm_calls_per_generation=derive_global_call_budget_default(),
         max_core_llm_calls=derive_core_call_budget_default(),
         max_repair_passes=2, max_full_regenerations=1, max_prompt_chars=4000,
         seed=11,

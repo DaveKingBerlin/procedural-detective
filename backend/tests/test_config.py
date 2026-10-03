@@ -137,7 +137,13 @@ def test_exactly_one_canonical_name_per_setting(monkeypatch):
 def test_unknown_environment_variables_are_ignored(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("LLM_API_KEY", "sekret-value")
-    monkeypatch.setenv("MAX_LLM_CALLS_PER_GENERATION", "8")
+    # A MUST be an env name the Settings model does NOT declare at all: every
+    # canonical §45 name (including MAX_LLM_CALLS_PER_GENERATION, which IS
+    # validated at startup) legitimately changes behavior. Phase 26C4: pinning
+    # MAX_LLM_CALLS_PER_GENERATION=8 (below the derived 720 legal envelope) is
+    # now a REJECTED configuration error — the unknown-var probe demonstrates
+    # only genuinely undeclared variables are ignored.
+    monkeypatch.setenv("PD_UNKNOWN_PROBE_VAR", "x")
     s = Settings()
     assert s.database_url == EXPECTED_DEFAULT_URL
 
