@@ -387,6 +387,45 @@ def test_c2_c9_activity_log_and_repair_job_accepted_and_routed():
     asyncio.run(_harness(scenario, mock=mock))
 
 
+def test_c2_activity_log_job_sends_trusted_schema_to_local_ollama():
+    """Phase 26C2 (R1) — the real client maps an ACTIVITY_LOG_v1 job's
+    authoritative schemaId to the TRUSTED LOCAL JSON Schema and forwards it as
+    Ollama ``format`` (grammar-level minItems/maxItems/enum enforcement on the
+    Bridge), while a non-activity-log job keeps free-form ``format: "json"``."""
+    from pd_ollama_bridge import trusted_schemas
+
+    activity_schema = trusted_schemas.schema_for("ACTIVITY_LOG_v1")
+    assert activity_schema is not None
+    mock = MockOllama(version="0.35.0")
+
+    async def scenario(conn, server):
+        await conn.recv_json()
+        await conn.send(pairing_accepted_with_token(token=TEST_TOKEN))
+        await conn.send(
+            job_frame(job_id="JOB-alog-trust", schema_id="ACTIVITY_LOG_v1")
+        )
+        r1 = await conn.recv_json()
+        assert r1["status"] == "SUCCESS"
+        await conn.send(
+            job_frame(job_id="JOB-spec", schema_id="ASSET_SPEC_v1")
+        )
+        r2 = await conn.recv_json()
+        assert r2["status"] == "SUCCESS"
+
+    async def post(server, mock, events):
+        # wait for BOTH local inference calls (the harness otherwise races)
+        ok = await server.wait_until(
+            lambda: getattr(mock, "requests", []) and len(mock.requests) >= 2,
+            timeout=6.0,
+        )
+        assert ok, {"requests": len(getattr(mock, "requests", []))}
+        assert mock.requests[0]["format"] == activity_schema
+        assert mock.requests[0]["format"]["properties"]["entries"]["minItems"] == 15
+        assert mock.requests[1]["format"] == "json"
+
+    asyncio.run(_harness(scenario, mock=mock, post=post))
+
+
 def test_c4_heartbeat_result_job_interleavings_no_1002():
     """C4: heartbeat/result/job interleavings — both ``result -> heartbeat ->
     next job`` and ``heartbeat -> result -> next job`` stay healthy: the real

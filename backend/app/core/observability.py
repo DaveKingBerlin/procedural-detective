@@ -65,6 +65,9 @@ _SAFE_FIELDS = frozenset(
         # public witness id are player-safe metadata: NEVER the statement
         # text, observations, CaseTruth, hidden evidence or provider output.
         "questionType", "newDiscoveryCount", "witnessId",
+        # Phase 26C2 — safe canonical-row observability (boolean only — never
+        # the row content, timestamps or activity text).
+        "canonicalRowPresent", "canonicalRowRestored",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

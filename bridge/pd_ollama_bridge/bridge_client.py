@@ -276,6 +276,16 @@ class BridgeClient:
         my_task = asyncio.current_task()
         started = self._clock()
         try:
+            # Phase 26C2 (R1) — the job carries an authoritative ``schemaId``
+            # (already allowlisted by the strict protocol frame validation).
+            # When that id maps to a TRUSTED LOCAL schema, the local Ollama
+            # call receives it as ``format``; otherwise the transport keeps
+            # free-form ``format: "json"`` (documented fallback). A schema is
+            # NEVER accepted from the wire — ``trusted_schemas`` is a fixed
+            # local constant, so no arbitrary schema injection is possible.
+            from . import trusted_schemas
+
+            format_schema = trusted_schemas.schema_for(msg["schemaId"])
             output = await asyncio.wait_for(
                 self.ollama.run_structured_inference(
                     prompt=msg["prompt"],
@@ -286,6 +296,7 @@ class BridgeClient:
                     # job without the field (``msg.get("model")`` None) keeps
                     # the operator-configured default (backward compatible).
                     model=msg.get("model") or self.config.model,
+                    format_schema=format_schema,
                 ),
                 timeout=_effective_job_timeout_seconds(msg["timeoutMs"]),
             )
