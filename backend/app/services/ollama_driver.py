@@ -994,6 +994,178 @@ def _log_order_flags(entries: Any) -> tuple[bool, bool]:
     return non_chronological, duplicate_timestamp
 
 
+def _canonical_row_from_entries(
+    entries: Any,
+    canonical_tick: int,
+) -> Any | None:
+    """The FIRST parsed row whose instant equals the canonical tick (or None).
+
+    Used by Phase 26C2 Option B: when a count-invalid ORIGINAL (or an earlier
+    valid-shaped attempt) already emitted the app-owned canonical instant, that
+    exact MODEL-AUTHORED row is the only candidate ever re-inserted later. We
+    never synthesize text — only reuse a row the model itself produced whose
+    instant equals the locked canonical time.
+    """
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    for entry in entries:
+        try:
+            tick = parse_iso8601_to_epoch(getattr(entry, "timestamp", ""))
+        except (TypeError, ValueError):
+            continue
+        if tick == canonical_tick:
+            return entry
+    return None
+
+
+def _canonical_row_player_safe(
+    entry: Any,
+    *,
+    person_names: tuple[str, ...],
+    weapon_names: tuple[str, ...],
+    motive_names: tuple[str, ...],
+    location_ids: tuple[str, ...],
+    location_names: tuple[str, ...],
+) -> bool:
+    """Whether a candidate canonical row is player-safe (NEVER reinsertable
+    otherwise). The row must pass the EXACT same lexical scans the strict
+    validator runs on every row (unsafe/truth/entity), so a re-inserted row can
+    never leak CaseTruth, hidden names, weapons/motives or locations that the
+    model's own original row already violated."""
+    from app.domain.activity_log import (
+        activity_text_unsafe_tokens,
+        entity_leak_tokens,
+        truth_leak_tokens,
+    )
+
+    activity = getattr(entry, "activity", "") or ""
+    if activity_text_unsafe_tokens(activity):
+        return False
+    if truth_leak_tokens(activity):
+        return False
+    if entity_leak_tokens(
+        activity,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    ):
+        return False
+    return True
+
+
+def _reinsert_canonical_row(
+    entries: list[Any],
+    known_row: Any,
+    canonical_tick: int,
+) -> list[Any] | None:
+    """Deterministically reinsert a known canonical row at its chronological
+    position and re-sort by tick so the restored list is strictly increasing.
+
+    Returns ``None`` (FAIL-CLOSED — restore not attempted) when the known row
+    does not actually carry the canonical instant, when the current log already
+    contains that instant (a duplicate is NEVER created), or when any current
+    timestamp is unparseable (the whole candidate would be rejected by the
+    strict validator anyway). No blind reordering is invented: the full
+    validator reruns on the restored candidate and remains the final authority.
+    """
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    if known_row is None:
+        return None
+    try:
+        known_tick = parse_iso8601_to_epoch(getattr(known_row, "timestamp", ""))
+    except (TypeError, ValueError):
+        return None
+    if known_tick != canonical_tick:
+        return None
+    ticks: list[int] = []
+    for entry in entries:
+        try:
+            ticks.append(parse_iso8601_to_epoch(getattr(entry, "timestamp", "")))
+        except (TypeError, ValueError):
+            return None
+    if canonical_tick in ticks:
+        # the canonical instant is ALREADY present -> never a second occurrence
+        return None
+    if len(set(ticks)) != len(ticks):
+        # duplicate instants elsewhere -> the full validator rejects anyway;
+        # restore must not mask them (fail-closed, chronology stays valid).
+        return None
+    restored = list(entries) + [known_row]
+    restored.sort(key=lambda e: parse_iso8601_to_epoch(getattr(e, "timestamp", "")))
+    return restored
+
+
+def _restore_canonical_row_candidate(
+    entries: list[Any],
+    known_row: Any,
+    canonical_time: str,
+    *,
+    person_names: tuple[str, ...],
+    weapon_names: tuple[str, ...],
+    motive_names: tuple[str, ...],
+    location_ids: tuple[str, ...],
+    location_names: tuple[str, ...],
+    before_minutes: int,
+    after_minutes: int,
+) -> list[Any] | None:
+    """Phase 26C2 Option B — server-side safe canonical-row restoration.
+
+    Accepts a repaired count-valid log that fails ONLY on canonical-time-missing
+    and deterministically re-inserts the model's OWN previously-validated
+    canonical row (the row the strict validator already approved in an earlier
+    attempt of the same fact). Returns the restored list ONLY when the FULL
+    existing validator re-accepts it (no rows outside 15..20, no duplication,
+    chronology valid, canonical exactly once, no leaks); returns ``None`` on any
+    remaining violation so the bounded repair loop continues unchanged
+    (fail-closed — the validator is ALWAYS the final authority).
+    """
+    from app.domain.activity_log import (
+        ActivityLogValidatorCode,
+        MAX_ACTIVITY_LOG_ENTRIES,
+        MIN_ACTIVITY_LOG_ENTRIES,
+        validate_activity_log,
+    )
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    if known_row is None:
+        return None
+    if not (MIN_ACTIVITY_LOG_ENTRIES <= len(entries) <= MAX_ACTIVITY_LOG_ENTRIES):
+        # Option B targets the count-valid canonical-missing failure ONLY;
+        # a count-invalid log must first be repaired by the model.
+        return None
+    try:
+        canonical_tick = parse_iso8601_to_epoch(canonical_time)
+    except (TypeError, ValueError):
+        return None
+    restored = _reinsert_canonical_row(entries, known_row, canonical_tick)
+    if restored is None:
+        return None
+    restored_count = len(restored)
+    if not (
+        MIN_ACTIVITY_LOG_ENTRIES
+        <= restored_count
+        <= MAX_ACTIVITY_LOG_ENTRIES
+    ):
+        return None
+    final_codes = validate_activity_log(
+        restored,
+        canonical_time=canonical_time,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+        before_minutes=before_minutes,
+        after_minutes=after_minutes,
+    )
+    if final_codes:
+        return None
+    return restored
+
+
 def _bounded_item_count_candidate(count: int) -> int | str:
     """A bounded item-count candidate: the int up to the parse bound, else a
     token (``>=65``) above it — never an unbounded length on the wire."""
@@ -2933,6 +3105,12 @@ class OllamaStageDriver:
         case_id = getattr(attempt, "case_id", None)
         evidence_id_safe = _sanitize_object_id_for_message(evidence_id) or "<unknown>"
         attempt_clock = time.perf_counter()
+        from app.domain.time_interval import parse_iso8601_to_epoch
+
+        try:
+            canonical_tick_epoch = parse_iso8601_to_epoch(canonical)
+        except (TypeError, ValueError):
+            canonical_tick_epoch = None
 
         def _elapsed() -> int:
             return int((time.perf_counter() - attempt_clock) * 1000)
@@ -2981,6 +3159,14 @@ class OllamaStageDriver:
         # except branch; carried into the repair prompt builder (never raw text).
         parse_shape: dict[str, Any] | None = None
         repair_attempts = 0
+        # Phase 26C2 (Option B) — the player-safe canonical row captured from
+        # the ORIGINAL count-invalid log (the R2 defect: the count repair DROPS
+        # the canonical-time row). A row is ONLY ever reused when the ORIGINAL
+        # attempt's ONLY failure was the entry-count bound (the strict validator
+        # therefore already accepted the row's text, order, window and canonical
+        # multiplicity), the row text itself passes the SAME player-safety
+        # scans, and the FULL validator re-accepts the restored candidate.
+        known_canonical_row: Any | None = None
 
         for pass_index in range(MAX_ACTIVITY_LOG_REPAIR_PASSES + 1):
             # Phase19J-RI accounting note: this driver-local repair loop is
@@ -3027,11 +3213,50 @@ class OllamaStageDriver:
                     non_chronological, duplicate_timestamp = _log_order_flags(
                         entries
                     )
+                    # Phase 26C2 (H6) — capture the model's OWN canonical row
+                    # from the ORIGINAL (first) log whose ONLY failure is the
+                    # 15..20 count bound (the R2 source evidence: the strict
+                    # validator therefore already approved the row's text,
+                    # order, window and canonical multiplicity). Only the
+                    # ORIGINAL attempt participates — a later repair that is
+                    # itself count-invalid does NOT re-arm the restoration
+                    # (the Fix-B pinned chains keep their terminal outcome). The
+                    # row text must be player-safe and is NEVER synthesized.
+                    if (
+                        pass_index == 0
+                        and known_canonical_row is None
+                        and set(codes)
+                        == {
+                            ActivityLogValidatorCode.ACTIVITY_LOG_ENTRY_COUNT_INVALID
+                        }
+                        and entries
+                    ):
+                        captured = _canonical_row_from_entries(
+                            entries, canonical_tick_epoch
+                        )
+                        if captured is not None and _canonical_row_player_safe(
+                            captured,
+                            person_names=person_names,
+                            weapon_names=weapon_names,
+                            motive_names=motive_names,
+                            location_ids=location_ids,
+                            location_names=location_names,
+                        ):
+                            known_canonical_row = captured
                 except (TypeError, ValueError):
                     # structural parse failure -> schema-invalid category
                     codes = (ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,)
                     entries = []
                     parse_error = True
+                    # Phase 26C2 (Option B safety) — a structurally unparsable
+                    # response BREAKS the canonical-row evidence chain: the
+                    # model has demonstrated unreliable shape adherence, so the
+                    # previously captured canonical row is NOT carried across
+                    # the break (fail-closed; the bounded repair continues
+                    # exactly as before and the Fix-B terminal chains stay
+                    # terminal). Only a later parsed count-invalid log may
+                    # recapture it.
+                    known_canonical_row = None
                     parse_shape = _activity_log_diagnostic_shape(content)
                     # Phase19J-RI — SAFE diagnostic harness (SHAPE only, never
                     # content): capture WHY the parse failed (top-level type /
@@ -3053,6 +3278,9 @@ class OllamaStageDriver:
                         parseFailureClass=shape.get("parseFailureClass"),
                     )
             entry_count = len(entries) if entries else 0
+            canonical_present = _canonical_row_from_entries(
+                entries, canonical_tick_epoch
+            ) is not None
             emit_event(
                 "activity_log.generation.complete",
                 caseId=case_id,
@@ -3062,6 +3290,7 @@ class OllamaStageDriver:
                 providerCallCount=getattr(attempt.budget, "calls", None),
                 elapsedMs=int((time.perf_counter() - _call_started) * 1000),
                 success=not codes,
+                canonicalRowPresent=canonical_present,
             )
             if not codes:
                 if repair_attempts:
@@ -3076,6 +3305,55 @@ class OllamaStageDriver:
                         success=True,
                     )
                 return tuple(entries)
+
+            # Phase 26C2 (Option B) — deterministic server-side canonical-row
+            # restoration (safety contract in ``_restore_canonical_row_candidate``):
+            # a count-valid log that fails ONLY on CANONICAL_TIME_MISSING gets
+            # the model's OWN previously-validated canonical row re-inserted at
+            # its chronological position, then the FULL existing validator is
+            # rerun and MUST re-accept the candidate. This consumes NO provider
+            # call, NO repair budget and NEVER invents semantics; when the
+            # candidate still violates any rule (or no known row exists) the
+            # bounded repair loop continues UNCHANGED (fail-closed).
+            if set(codes) == {
+                ActivityLogValidatorCode.ACTIVITY_LOG_CANONICAL_TIME_MISSING
+            }:
+                restored = _restore_canonical_row_candidate(
+                    entries,
+                    known_canonical_row,
+                    canonical,
+                    person_names=person_names,
+                    weapon_names=weapon_names,
+                    motive_names=motive_names,
+                    location_ids=location_ids,
+                    location_names=location_names,
+                    before_minutes=before_minutes,
+                    after_minutes=after_minutes,
+                )
+                if restored is not None:
+                    emit_event(
+                        "activity_log.canonical_row_restored",
+                        caseId=case_id,
+                        generationAttemptId=generation_attempt_id,
+                        evidenceIdSafe=evidence_id_safe,
+                        entryCount=len(restored),
+                        canonicalRowPresent=True,
+                        canonicalRowRestored=True,
+                        providerCallCount=getattr(attempt.budget, "calls", None),
+                        elapsedMs=_elapsed(),
+                    )
+                    if repair_attempts:
+                        emit_event(
+                            "activity_log.repair.complete",
+                            caseId=case_id,
+                            generationAttemptId=generation_attempt_id,
+                            evidenceIdSafe=evidence_id_safe,
+                            entryCount=len(restored),
+                            providerCallCount=getattr(attempt.budget, "calls", None),
+                            elapsedMs=_elapsed(),
+                            success=True,
+                        )
+                    return tuple(restored)
 
             validator = primary_validator_code(codes)
             emit_event(
