@@ -325,4 +325,130 @@ describe("Phase 22 — /new pairing panel (Not connected -> code -> connected)",
     expect("anonymousSessionToken" in staged).toBe(false);
     unmount(mounted);
   });
+
+  // Phase 26C1 §3 — a pairing the user actually completed (waiting -> connected
+  // poll transition) is strong Bridge intent: the panel notifies the /new page
+  // (onBridgePaired) so it selects + persists the Bridge transport. A
+  // capabilities-refresh connected block is NOT a pairing action and must not
+  // fire the callback.
+  it("a COMPLETED pairing (waiting -> connected) notifies onBridgePaired (§3)", async () => {
+    const onBridgePaired = vi.fn();
+    const services = makeServices();
+    const getBridgeStatus = vi.mocked(services.getBridgeStatus);
+    getBridgeStatus
+      .mockResolvedValueOnce({
+        remoteLocalAi: { available: true, connected: false, model: null, ready: false },
+      })
+      .mockResolvedValueOnce({
+        remoteLocalAi: { available: true, connected: true, model: "hermes3:8b", ready: true },
+      });
+    const mounted = mount(makeProps({ services, onBridgePaired }));
+
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    // Still waiting for the bridge CLI: no Bridge-intent notification yet.
+    expect(onBridgePaired).not.toHaveBeenCalled();
+
+    await advance(2000);
+    await settle();
+    // First poll still reports not-connected -> still waiting, no notification.
+    expect(onBridgePaired).not.toHaveBeenCalled();
+
+    await advance(2000);
+    await settle();
+    expect(textOf(query(mounted, "bridge-connected"))).toBe(BRIDGE_CONNECTED_LINE);
+    // The completed pairing fired EXACTLY once.
+    expect(onBridgePaired).toHaveBeenCalledTimes(1);
+
+    // A later connected poll (connection stays up) must NOT fire it again.
+    await advance(2000);
+    await settle();
+    expect(onBridgePaired).toHaveBeenCalledTimes(1);
+    unmount(mounted);
+  });
+
+  it("a connected capability block (no pairing action) does NOT call onBridgePaired", () => {
+    const onBridgePaired = vi.fn();
+    const connectedCaps: GenerationCapabilitiesResponse = parseGenerationCapabilities({
+      modes: [{ id: "demo", available: true }],
+      configuredProvider: "fake",
+      remoteLocalAi: {
+        available: true,
+        connected: true,
+        model: "hermes3:8b",
+        ready: true,
+      },
+    });
+    const mounted = mount(makeProps({ capabilities: connectedCaps, onBridgePaired }));
+    expect(textOf(query(mounted, "bridge-connected"))).toBe(BRIDGE_CONNECTED_LINE);
+    expect(onBridgePaired).not.toHaveBeenCalled();
+    unmount(mounted);
+  });
+
+  // Phase 26C1 (LOW fix) — a fresh pairing window opens when the user clicks
+  // [Connect local Ollama]; the /new page re-arms its explicit-choice ordering
+  // guard at that exact point. The START signal must fire synchronously with
+  // the user action (never only after the completion poll) and NOT for a
+  // capability-refresh connected block (which is not a pairing action).
+  it("starting a pairing notifies onBridgePairingStarted exactly once — and only for a FRESH window", async () => {
+    const onBridgePairingStarted = vi.fn();
+    const onBridgePaired = vi.fn();
+    const services = makeServices();
+    const mounted = mount(makeProps({ services, onBridgePaired, onBridgePairingStarted }));
+    // No pairing in progress yet: no start notification.
+    expect(onBridgePairingStarted).not.toHaveBeenCalled();
+
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    expect(onBridgePairingStarted).toHaveBeenCalledTimes(1);
+
+    // A re-click while the window is still waiting must NOT open a second
+    // window (the panel's waiting guard is authoritative).
+    expect(query(mounted, "bridge-connect")).toBeNull(); // waiting view has no CTA
+    await advance(2000);
+    await settle();
+    expect(onBridgePairingStarted).toHaveBeenCalledTimes(1);
+    unmount(mounted);
+  });
+
+  it("[Request a new code] opens a SECOND fresh pairing window and re-fires onBridgePairingStarted", async () => {
+    const onBridgePairingStarted = vi.fn();
+    const services = makeServices(); // status always reports not-connected
+    const mounted = mount(makeProps({ services, onBridgePairingStarted }));
+
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    expect(onBridgePairingStarted).toHaveBeenCalledTimes(1);
+
+    // The bounded wait expires -> [Request a new code] restarts pairing.
+    await advance(BRIDGE_WAIT_MAX_MS);
+    await settle();
+    expect(query(mounted, "bridge-wait-expired")).not.toBeNull();
+
+    click(query(mounted, "bridge-request-new-code"));
+    await settle();
+    expect(onBridgePairingStarted).toHaveBeenCalledTimes(2);
+    unmount(mounted);
+  });
+
+  it("a FAILED pairing request (429) still opened a window once — but the route's guard stays harmless (no completion can ever fire)", async () => {
+    const onBridgePairingStarted = vi.fn();
+    const onBridgePaired = vi.fn();
+    const services = makeServices({
+      createBridgePairing: vi.fn(async () => {
+        throw new ApiError(429, "TOO_MANY_REQUESTS", "too many pairing codes", null);
+      }),
+    });
+    const mounted = mount(makeProps({ services, onBridgePaired, onBridgePairingStarted }));
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    expect(textOf(query(mounted, "bridge-action-error"))).toBe(
+      "Too many pairing requests right now. Please try again later.",
+    );
+    // The start signal re-armed the route guard once; with no successful
+    // pairing there is no completion, so onBridgePaired must stay silent.
+    expect(onBridgePairingStarted).toHaveBeenCalledTimes(1);
+    expect(onBridgePaired).not.toHaveBeenCalled();
+    unmount(mounted);
+  });
 });
