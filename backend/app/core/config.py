@@ -45,6 +45,7 @@ from app.core.timeout_envelope import (  # noqa: E402  (no circular import)
 from app.domain.activity_log import (  # noqa: E402  (pure domain, no config dep)
     activity_log_window_satisfiable,
 )
+from app.generation.budgets import derive_core_call_budget_default  # noqa: E402
 
 SERVICE_NAME = "procedural-detective"
 SERVICE_VERSION = "0.1.0"
@@ -168,10 +169,36 @@ class Settings(BaseSettings):
     # their own hard ceiling; each procedural ASSET_SPEC object gets an
     # independent per-asset allowance; the number of procedural assets and the
     # number of failed assets per generation are separately bounded.
-    max_core_llm_calls_per_generation: int = Field(
-        default=12,
+    #
+    # Phase 26C3 — the CORE default is DERIVED (Option A exact derivation) so
+    # the global guard can never contradict the bounded stage graph (the live
+    # Hard failure reached 12 calls and was blocked before world_graph at call
+    # 13). ``derive_core_call_budget_default`` computes the exact legal maximum
+    # of a WHOLE attempt — the worst of the parsed-case canonical algebra
+    # ((MAX_CHARACTERS+1) activity-log facts) and the raw-model-evidence
+    # fallback (MAX_EVIDENCE_ITEMS facts), each × (1 +
+    # MAX_ACTIVITY_LOG_REPAIR_PASSES) per fact, plus the fixed case/evidence/
+    # world calls with their bounded parse retries, times every controller
+    # pass (1 + MAX_REPAIR_PASSES + MAX_FULL_REGENERATIONS):
+    #
+    #     max facts = max(9, 50) = 50;  per fact = 1 + 2 = 3
+    #     per pass  = 5 + 50×3 = 155;   passes = 1 + 2 + 1 = 4
+    #     derived   = 155 × 4 = 620
+    #
+    # The env override MAX_CORE_LLM_CALLS_PER_GENERATION stays authoritative
+    # (init > env > dotenv > derived default; the field default is None and
+    # ``_align_core_call_budget`` fills it with the derived value when unset).
+    # A configured value BELOW the derived legal maximum is REJECTED as a
+    # configuration error (fail-fast, ``_align_core_call_budget``): it would
+    # re-introduce the C3 provider-call-budget contradiction. Raising it is
+    # always allowed.
+    max_core_llm_calls_per_generation: int | None = Field(
+        default=None,
         gt=0,
-        description="MAX_CORE_LLM_CALLS_PER_GENERATION.",
+        description=(
+            "MAX_CORE_LLM_CALLS_PER_GENERATION (overrides only at/above the "
+            "derived legal maximum; None = the derived default)."
+        ),
     )
     max_llm_calls_per_procedural_asset: int = Field(
         default=5,
@@ -1003,6 +1030,43 @@ class Settings(BaseSettings):
                 "timestamps the activity-log validator requires — no generated "
                 "log could ever pass. Configure at least 1 minute of total "
                 "span (the default before=60 after=60 is fine)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _align_core_call_budget(self) -> "Settings":
+        """Phase 26C3 (adversarial F3) — the CORE ceiling may never sit BELOW
+        the derived legal maximum.
+
+        ``derive_core_call_budget_default`` is the exact legal maximum of ONE
+        WHOLE attempt: both evidence paths (the parsed-case canonical algebra
+        and the raw-model-evidence fallback) × every per-fact activity-log
+        call × every controller pass (initial + repair + regeneration re-runs).
+        A configured value below it re-introduces the live C3 contradiction
+        (a path permitted by every lower-level bounded guard — per-stage parse
+        retries, per-item repairs ≤ 2, per-item regeneration policy, evidence
+        ≤ MAX_EVIDENCE_ITEMS, activity-log loops — would be blocked by the
+        global CORE budget), so it is REJECTED here: fail-fast configuration
+        error before ANY provider call. When the operator does not override the
+        setting (None), the derived value IS the default (auto-updates with the
+        canonical constants and with MAX_REPAIR_PASSES /
+        MAX_FULL_REGENERATIONS).
+        """
+        derived = derive_core_call_budget_default(
+            max_repair_passes=self.max_repair_passes,
+            max_full_regenerations=self.max_full_regenerations,
+        )
+        if self.max_core_llm_calls_per_generation is None:
+            self.max_core_llm_calls_per_generation = derived
+            return self
+        if self.max_core_llm_calls_per_generation < derived:
+            raise ValueError(
+                "MAX_CORE_LLM_CALLS_PER_GENERATION must be >= the derived legal "
+                f"maximum ({derived}): a lower ceiling re-introduces the "
+                "provider-call-budget contradiction (a path permitted by every "
+                "lower-level bounded guard would be blocked by the CORE budget "
+                "before the global ceiling). Remove the override to use the "
+                "auto-derived default, or raise the value."
             )
         return self
 

@@ -271,6 +271,9 @@ class GenerationController:
             providerCallCount=0,
             repairCount=0,
             regenerationCount=0,
+            # Phase 26C3 §14 — safe observability: the configured CORE-bucket
+            # provider-call ceiling (the integer cap, never pipeline topology).
+            providerCallBudget=budget.max_core_calls,
             deadlineRemainingMs=int(budget.remaining_seconds() * 1000),
         )
         self._advance(attempt)
@@ -380,6 +383,9 @@ class GenerationController:
             providerCallCount=attempt.budget.calls if attempt.budget is not None else None,
             repairCount=attempt.budget.repair_passes if attempt.budget is not None else None,
             regenerationCount=attempt.budget.regenerations if attempt.budget is not None else None,
+            providerCallBudget=(
+                attempt.budget.max_core_calls if attempt.budget is not None else None
+            ),
             stageTimingSummary=self._driver_stage_timing_summary(attempt),
         )
         return PublishResult(True, published=payload)
@@ -880,6 +886,9 @@ class GenerationController:
             providerCallCount=attempt.budget.calls if attempt.budget is not None else None,
             repairCount=attempt.budget.repair_passes if attempt.budget is not None else None,
             regenerationCount=attempt.budget.regenerations if attempt.budget is not None else None,
+            providerCallBudget=(
+                attempt.budget.max_core_calls if attempt.budget is not None else None
+            ),
             deadlineRemainingMs=_remaining_ms(attempt),
             totalElapsedMs=self._elapsed_ms(attempt),
             stageTimingSummary=self._driver_stage_timing_summary(attempt),

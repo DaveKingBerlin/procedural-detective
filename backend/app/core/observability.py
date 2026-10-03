@@ -68,6 +68,9 @@ _SAFE_FIELDS = frozenset(
         # Phase 26C2 — safe canonical-row observability (boolean only — never
         # the row content, timestamps or activity text).
         "canonicalRowPresent", "canonicalRowRestored",
+        # Phase 26C3 §14 — safe configured provider-call budget field (the
+        # integer cap only; never the pipeline topology beyond the number).
+        "providerCallBudget",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

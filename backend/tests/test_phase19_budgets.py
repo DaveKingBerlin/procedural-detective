@@ -3,8 +3,10 @@
 Fix C: the single global 8-call ceiling becomes a hierarchical model:
 
 - GLOBAL (MAX_LLM_CALLS_PER_GENERATION=128, hard);
-- CORE (MAX_CORE_LLM_CALLS_PER_GENERATION=12 — case/evidence/world +
-  repair/regeneration, hard);
+- CORE (the Phase 26C3 DERIVED legal maximum
+  ``derive_core_call_budget_default()`` — case/evidence/world +
+  activity-log stage + repair/regeneration, hard; a configured override below
+  it is REJECTED at configuration time);
 - per-asset (MAX_LLM_CALLS_PER_PROCEDURAL_ASSET=5, independent per semantic
   object);
 - procedural-asset COUNT (20) and failed-asset THRESHOLD (3).
@@ -621,10 +623,12 @@ def test_ri09_activity_log_roundtrip_core_budget_unchanged():
     """A full-bounded activity-log round trip (initial + the two bounded
     repairs = EXACTLY 3 CORE-call provider calls for the ONE log) publishes
     through the SAME hierarchical budget: every log call is a normal CORE
-    call (never a hidden/free pass), the global/core ceilings are untouched
-    (Settings defaults stay 128/12, MAX_ACTIVITY_LOG_REPAIR_PASSES stays 2)
-    and zero asset calls are spent."""
+    call (never a hidden/free pass), the global ceiling stays 128, the CORE
+    DEFAULT is the Phase 26C3 DERIVED legal-max value
+    (``derive_core_call_budget_default()``) and MAX_ACTIVITY_LOG_REPAIR_PASSES
+    stays 2 — zero asset calls are spent."""
     from app.core.config import Settings
+    from app.generation.budgets import derive_core_call_budget_default
     from app.services.ollama_driver import MAX_ACTIVITY_LOG_REPAIR_PASSES
     from test_ollama_driver import (
         ICEPICK_SPEC,
@@ -635,7 +639,12 @@ def test_ri09_activity_log_roundtrip_core_budget_unchanged():
     )
 
     assert Settings().max_llm_calls_per_generation == 128
-    assert Settings().max_core_llm_calls_per_generation == 12
+    # Phase 26C3: the core default is now DERIVED from the canonical legal
+    # stage graph — both evidence paths × every controller pass
+    # (4 × (5 + max(9, 50) × 3) = 620), never a magic literal.
+    assert Settings().max_core_llm_calls_per_generation == (
+        derive_core_call_budget_default()
+    )
     assert MAX_ACTIVITY_LOG_REPAIR_PASSES == 2
 
     crime_canonical = "2026-09-11T23:42:00+02:00"

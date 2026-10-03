@@ -31,6 +31,16 @@ tracker). Deterministic LOCAL repairs (environmentHint canonicalization,
 semantic-id normalization, evidence projection, catalog alias resolution,
 safe deterministic fallback selection) never touch these counters — only
 actual model calls do.
+
+Phase 26C3 — the CORE ceiling DEFAULT (``MAX_CORE_LLM_CALLS_PER_GENERATION``)
+is DERIVED (Option A, exact legal maximum) so the global guard can never
+contradict the bounded stage graph. The derivation covers a WHOLE generation
+attempt — BOTH evidence paths (the parsed-case canonical algebra AND the
+raw-model-evidence fallback), every activity-log per-item call, and every
+controller pass (initial ``run_into`` plus the bounded repair and regeneration
+re-runs), see ``derive_core_call_budget_default`` below. The cap stays a hard
+FINITE bound: ``derived + 1`` calls still fail closed with
+``CORE_PROVIDER_CALL_BUDGET_EXHAUSTED``.
 """
 
 from __future__ import annotations
@@ -65,6 +75,147 @@ class _CoreBucket:
 
 
 CORE_BUCKET = _CoreBucket()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 26C3 — derived/aligned CORE-bucket call budget (Option A derivation).
+#
+# The live Hard failure (CASE-HYXAukyLJ0SB) proved the fixed default 12 was
+# LOWER than the legal bounded driver stage graph, so the DEFAULT
+# ``MAX_CORE_LLM_CALLS_PER_GENERATION`` is DERIVED as the exact legal maximum
+# of ONE WHOLE ATTEMPT — never a magic number, and never a value the
+# lower-level bounded guards can contradict (adversarial F1a/F1b).
+#
+# Evidence paths (F1a). ``_activity_log_stage`` walks every published evidence
+# fact whose kind renders as ACTIVITY_LOG AND whose ``observed_at`` is
+# time-bearing, charging ``1 + MAX_ACTIVITY_LOG_REPAIR_PASSES`` bounded
+# CORE-bucket round-trips per fact (``ollama_driver.py`` 2963-2990). The
+# number of such facts depends on which evidence set is published:
+#
+#   (a) PARSED-CASE canonical algebra — ``_evidence_gap_facts`` rebuilds the
+#       published evidence deterministically from the model's case skeleton:
+#       one ``d_ev_when_obs`` + one ``d_ev_opp_*`` per OTHER eligible suspect
+#       + one ``d_ev_presence`` = ``eligible + 1`` time-bearing cctv facts;
+#       ``eligible <= persons`` is capped by the strict person-list parser
+#       ``MAX_CHARACTERS`` (``app/generation/schemas.py``), so at most
+#       ``MAX_CHARACTERS + 1`` activity-log facts.
+#   (b) RAW-MODEL-EVIDENCE fallback — when the CASE stage fails to strictly
+#       parse, ``_evidence_gap_facts`` returns ``(None, (), ())``
+#       (``ollama_driver.py`` 636-649) and the driver keeps the RAW MODEL
+#       evidence set (``ollama_driver.py`` 2657-2700); ``_activity_log_stage``
+#       then walks EVERY raw fact of an ACTIVITY_LOG-rendering kind with a
+#       parseable ``observed_at``. The strict evidence parser bounds the raw
+#       set at ``MAX_EVIDENCE_ITEMS`` and does NOT restrict ``kind`` to a
+#       closed set (``parser.py`` 742-844), so up to ``MAX_EVIDENCE_ITEMS``
+#       activity-log facts.
+#
+#   The legal maximum is ``max(parsed_log_facts, model_evidence_log_facts)``,
+#   each path × ``(1 + MAX_ACTIVITY_LOG_REPAIR_PASSES)`` per fact.
+#
+# Passes (F1b). ONE ``run_into`` pass burns case_truth + evidence +
+# activity-log stage + world_graph against the SAME monotonic per-attempt CORE
+# counter (``BudgetTracker.consume_call``). The controller re-invokes
+# ``run_into`` on a RECOVERABLE_REPAIR (``controller.py`` 470-524) and on a
+# RECOVERABLE_REGENERATE (``controller.py`` 525-547 — ``_reset_for_regeneration``
+# discards ``stage_outputs``/``draft``, so the SAME stages re-burn); each pass
+# therefore re-burns evidence + activity logs + world_graph (plus case_truth
+# when the cached case never parsed — the derivation accounts that worst case).
+# With ``max_repair_passes`` repair and ``max_full_regenerations`` regeneration
+# allowances, the whole-attempt maximum is exactly
+#
+#     total_passes × per_pass_max
+#     total_passes = 1 + max_repair_passes + max_full_regenerations
+#     per_pass_max = fixed(3) + parse-retry headroom(2) + max_log_facts
+#
+# Worst-case arithmetic (the DEFAULTS: MAX_CHARACTERS=8, MAX_EVIDENCE_ITEMS=50,
+# MAX_ACTIVITY_LOG_REPAIR_PASSES=2, MAX_REPAIR_PASSES=2, MAX_FULL_REGENERATIONS=1):
+#
+#     max_log_facts = max(9, 50) × (1 + 2) = 150
+#     per_pass      = 5 + 150 = 155
+#     total_passes  = 1 + 2 + 1 = 4
+#     derived       = 155 × 4 = 620
+#
+# NOTE: the derived value may EXCEED ``MAX_LLM_CALLS_PER_GENERATION`` (default
+# 128); then the GLOBAL ceiling — a SEPARATE documented hard safety ceiling —
+# is the operative stop and the CORE budget is guaranteed never to contradict a
+# path the lower-level guards permit BEFORE the global one binds. The budget
+# stays a hard FINITE bound: ``derived + 1`` calls still fail closed with
+# ``CORE_PROVIDER_CALL_BUDGET_EXHAUSTED``.
+# --------------------------------------------------------------------------- #
+
+# Canonical recovery-pass allowances (REQUIREMENTS 32.5; the same default
+# values as the §45 operator settings MAX_REPAIR_PASSES / MAX_FULL_REGENERATIONS).
+DEFAULT_MAX_REPAIR_PASSES = 2
+DEFAULT_MAX_FULL_REGENERATIONS = 1
+
+
+def derive_core_call_budget_default(
+    *,
+    max_repair_passes: int = DEFAULT_MAX_REPAIR_PASSES,
+    max_full_regenerations: int = DEFAULT_MAX_FULL_REGENERATIONS,
+) -> int:
+    """The aligned DEFAULT ``MAX_CORE_LLM_CALLS_PER_GENERATION`` value.
+
+    Exact derivation (no magic numbers; each term is a canonical bounded stage
+    bound):
+
+    - ``base_fixed_calls = 3`` — ``case_truth`` (1) + ``evidence`` (1) +
+      ``world_graph`` (1) in one driver pass. The driver ``_stage_parse``
+      path may additionally retry the ``case_truth`` and ``world_graph``
+      stages once on a strict-parse failure: +2 bounded parse-retry calls
+      (``app/services/ollama_driver.py:_stage_parse``).
+    - ``parsed_log_facts = MAX_CHARACTERS + 1`` — the legal maximum number of
+      time-bearing ACTIVITY_LOG-rendered facts on the PARSED-CASE path
+      (canonical algebra proof: ``app/services/ollama_driver.py``
+      ``_evidence_gap_facts`` emits one ``d_ev_when_obs`` + one ``d_ev_opp_*``
+      per other eligible suspect + one ``d_ev_presence`` = ``eligible + 1``;
+      ``eligible <= persons`` is capped by the strict parser ``MAX_CHARACTERS``
+      in ``app/generation/schemas.py``).
+    - ``model_evidence_log_facts = MAX_EVIDENCE_ITEMS`` — the legal maximum on
+      the RAW-MODEL-EVIDENCE fallback path (case stage unparsed): the strict
+      evidence parser bounds the raw set at ``MAX_EVIDENCE_ITEMS`` and never
+      restricts ``kind`` to a closed set, so the driver may log that many
+      ACTIVITY_LOG-rendered facts (``parser.py`` 742-844,
+      ``ollama_driver.py`` 636-649/2657-2700/2963-2990).
+    - each activity-log fact consumes 1 initial call + up to
+      ``MAX_ACTIVITY_LOG_REPAIR_PASSES`` repair calls.
+    - ``total_passes = 1 + max_repair_passes + max_full_regenerations`` — the
+      initial ``run_into`` plus every controller repair/regeneration re-run
+      (they re-burn evidence + activity logs + world against the SAME
+      per-attempt CORE counter; ``controller.py`` 470-547).
+
+    Therefore:
+
+        max_log_facts = max(parsed_log_facts, model_evidence_log_facts)
+        per_pass      = fixed(3) + retry(2) + max_log_facts × (1 + MAX_ACTIVITY_LOG_REPAIR_PASSES)
+        default       = total_passes × per_pass
+                      = (1 + 2 + 1) × (5 + 50 × 3)
+                      = 4 × 155
+                      = 620
+    """
+    from app.generation.schemas import (  # noqa: PLC0415
+        MAX_CHARACTERS,
+        MAX_EVIDENCE_ITEMS,
+    )
+    from app.services.ollama_driver import (  # noqa: PLC0415
+        MAX_ACTIVITY_LOG_REPAIR_PASSES,
+    )
+
+    base_fixed_calls = 3  # case_truth + evidence + world_graph
+    bounded_parse_retry_headroom = 2  # case_truth + world_graph each retry once
+    per_item_log_calls = 1 + MAX_ACTIVITY_LOG_REPAIR_PASSES
+    # (a) parsed-case canonical algebra: 1 when_obs + eligible-1 opp + 1 presence
+    parsed_log_facts = MAX_CHARACTERS + 1
+    # (b) raw-model-evidence fallback (case unparsed), kind not closed-bounded
+    model_evidence_log_facts = MAX_EVIDENCE_ITEMS
+    max_log_facts = max(parsed_log_facts, model_evidence_log_facts)
+    per_pass = (
+        base_fixed_calls
+        + bounded_parse_retry_headroom
+        + max_log_facts * per_item_log_calls
+    )
+    total_passes = 1 + max_repair_passes + max_full_regenerations
+    return per_pass * total_passes
 
 
 def _non_negative_int(value: Any, name: str) -> int | None:
