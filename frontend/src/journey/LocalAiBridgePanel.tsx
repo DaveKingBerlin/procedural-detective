@@ -94,6 +94,15 @@ export interface LocalAiBridgePanelProps {
    * Bridge intent: the /new page then selects + persists the Bridge transport.
    */
   onBridgePaired?: () => void;
+  /**
+   * Phase 26C1 (LOW fix) — invoked synchronously when the user STARTS a fresh
+   * pairing window (the [Connect local Ollama] click, after the enter/restart
+   * guards). The /new page uses it to re-arm its "explicit radio choice after
+   * the pairing began" ordering guard: a provider/transport choice made BEFORE
+   * this point is OLDER intent and may be overridden by the completed pairing,
+   * while a choice made after this point is the NEWER intent and wins.
+   */
+  onBridgePairingStarted?: () => void;
 }
 
 /** Safe, player-facing copy for a failed pairing request (never raw codes). */
@@ -110,6 +119,7 @@ export default function LocalAiBridgePanel({
   pollIntervalMs = BRIDGE_POLL_INTERVAL_MS,
   waitMaxMs = BRIDGE_WAIT_MAX_MS,
   onBridgePaired,
+  onBridgePairingStarted,
 }: LocalAiBridgePanelProps) {
   // §36 gate: NOTHING renders unless the PARSED capability DTO offers the
   // bridge (ENABLE_BRIDGE=true and available:) — an absent block keeps every
@@ -130,6 +140,11 @@ export default function LocalAiBridgePanel({
   // intent, but it must never act on a stale provider/model snapshot.
   const onBridgePairedRef = useRef(onBridgePaired);
   onBridgePairedRef.current = onBridgePaired;
+  // Phase 26C1 (LOW fix) — the pairing-START notification is ref'd too: a
+  // render the callback is installed on may be slightly older than the panel's
+  // latest view, but the START signal only ever resets a boolean guard.
+  const onBridgePairingStartedRef = useRef(onBridgePairingStarted);
+  onBridgePairingStartedRef.current = onBridgePairingStarted;
   const tokenRef = useRef<string | null>(null);
   const timerRef = useRef<number | null>(null);
   /** Poll ticks since the current pairing started (elapsed = ticks * interval). */
@@ -191,6 +206,11 @@ export default function LocalAiBridgePanel({
     setBusy(true);
     setActionError(null);
     ticksRef.current = 0;
+    // Phase 26C1 (LOW fix) — a fresh pairing window opens HERE (synchronously,
+    // before any async work): any provider/transport choice the user made up
+    // to this point is OLDER intent. If the pairing request then fails (429)
+    // no completion can ever fire, so re-arming the guard is always harmless.
+    onBridgePairingStartedRef.current?.();
     const haveSession =
       tokenRef.current !== null
         ? Promise.resolve({ anonymousSessionToken: tokenRef.current as string })

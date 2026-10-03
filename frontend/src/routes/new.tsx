@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
@@ -131,22 +131,64 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     setProviderSelection((current) => current ?? resolveProviderSelection(capabilities, undefined));
   }, [capabilities]);
 
+  /**
+   * Phase 26C1 (LOW fix) — ordering guard for the pairing-completion
+   * override. True once the user makes an explicit provider/transport radio
+   * choice AFTER the current pairing began (see onProviderSelectionChange);
+   * reset by {@link handleBridgePairingStarted} when a fresh pairing opens.
+   */
+  const explicitChoiceSincePairingStartedRef = useRef(false);
+
   const onProviderSelectionChange = (next: GenerationProviderSelection) => {
+    // Phase 26C1 (LOW fix) — an explicit user interaction is the source of
+    // every selector `onChange`: re-arm the pairing-completion ordering guard
+    // whenever the user's provider or TRANSPORT radio choice changes (exactly
+    // the `selectProvider` / `selectTransport` paths — model-only edits do NOT
+    // re-arm it: the pairing selection preserves the current model). A choice
+    // made AFTER this pairing began is the newer intent and wins over the
+    // eventual completion (see handleBridgePaired).
+    const prev = providerSelection;
+    if (
+      prev === null ||
+      prev.generationProvider !== next.generationProvider ||
+      prev.ollamaTransport !== next.ollamaTransport
+    ) {
+      explicitChoiceSincePairingStartedRef.current = true;
+    }
     setProviderSelection(next);
     persistGenerationSelection(next, undefined);
+  };
+
+  /**
+   * Phase 26C1 (LOW fix) — a fresh pairing window just opened. Any explicit
+   * provider/transport choice that came BEFORE this point is OLDER intent:
+   * the guard is re-armed so the completed pairing may (still) override it.
+   */
+  const handleBridgePairingStarted = () => {
+    explicitChoiceSincePairingStartedRef.current = false;
   };
 
   /**
    * Phase 26C1 §3 — a successful Bridge pairing is strong Bridge intent: the
    * Ollama provider with the Bridge transport becomes selected + persisted
    * (`bridge`). A user's LATER explicit radio choice always wins over the
-   * pairing selection; capability refreshes never revert it.
+   * pairing selection; capability refreshes never revert it. The low-gap
+   * interleaved rule follows the same line: an explicit provider/transport
+   * choice made AFTER the pairing started (deterministic re-arm guard, no
+   * timestamps) wins over the completion; only a choice made BEFORE the
+   * pairing began is the older intent and may be overridden.
    */
   const handleBridgePaired = () => {
     // The transport-selection surface must actually exist for the pairing
     // intent to be expressed (an OLDER server without `providers` has no
     // selector and no selection keys are ever posted).
     if (!hasGenerationProviderOffer(capabilities)) return;
+    // Ordered-intent rule: the pairing applies ONLY when the user has not made
+    // an explicit provider/transport radio choice since this pairing began
+    // (that choice is the newer intent and is preserved verbatim). A choice
+    // made BEFORE handleBridgePairingStarted re-armed the guard is old intent
+    // and the pairing still overrides it.
+    if (explicitChoiceSincePairingStartedRef.current) return;
     onProviderSelectionChange(bridgePairedSelection(capabilities, providerSelection));
   };
 
@@ -364,6 +406,7 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
         <LocalAiBridgePanel
           capabilities={capabilities}
           onBridgePaired={handleBridgePaired}
+          onBridgePairingStarted={handleBridgePairingStarted}
         />
 
         {/* Phase 16.2 §20 — honest unavailability (Phase 21 F-03: storage is

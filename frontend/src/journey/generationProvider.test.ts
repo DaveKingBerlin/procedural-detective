@@ -404,6 +404,29 @@ describe("toCreateCaseGeneration — the flat POST /cases block", () => {
     ).toEqual({ generationProvider: "ollama" });
   });
 
+  it("INFONote A1a — ollama with NO usable transport omits ONLY the transport (fail-closed, no silent fallback) and even a known model keeps the payload transport-free", () => {
+    // The documented no-usable-transport path: `selectProvider("ollama")`
+    // under both-unavailable transports yields `ollamaTransport: null` (see
+    // GenerationProviderSelector.test.tsx). Serializing that selection posts
+    // {generationProvider:"ollama"} WITHOUT the transport key — the backend
+    // answers 400 INVALID_GENERATION_PROVIDER, which the journey maps to the
+    // frozen safe `invalidGenerationProvider` copy on submit (src/journey/
+    // demoFlow.ts). This is the intended fail-closed path — the client NEVER
+    // silently fabricates a fallback transport (no bridge/server rewrite).
+    const noTransportButModel: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: null,
+      ollamaModel: "hermes3:8b",
+    };
+    expect(toCreateCaseGeneration(noTransportButModel)).toEqual({
+      generationProvider: "ollama",
+      ollamaModel: "hermes3:8b",
+    });
+    expect(
+      toCreateCaseGeneration({ ...noTransportButModel, ollamaModel: "" }),
+    ).toEqual({ generationProvider: "ollama" });
+  });
+
   it("null (no provider offer) -> undefined (byte-identical no-selection call)", () => {
     expect(toCreateCaseGeneration(null)).toBeUndefined();
   });
@@ -578,8 +601,16 @@ describe("Phase 26C1 — the SELECTED transport is authoritative (§1-§8)", () 
     persistGenerationSelection(none, storage);
     expect(storage.entries.get(GENERATION_PROVIDER_STORAGE_KEY)).toBe("ollama");
     expect(storage.entries.get(OLLAMA_TRANSPORT_STORAGE_KEY)).toBe("bridge");
-    // A pairing completes even over an earlier explicit Server (the pairing
-    // action is the newer intent); a LATER explicit radio choice still wins.
+  });
+
+  it("ORDERED INTENT (older ordering): a Server choice made BEFORE the pairing began is overridden by the completed pairing (§8.9)", () => {
+    // The pure `bridgePairedSelection` models the pairing's implied selection
+    // and is only invoked by the route when the ordering guard is clear — a
+    // provider/transport choice made BEFORE the pairing window opened is OLDER
+    // intent, so the pairing (this function's output) still wins over it
+    // (§3: "If the user later explicitly chooses Server, Server remains
+    // selected" — for choices AFTER the pairing began; the pre-pairing
+    // ordering is the reverse).
     const afterServer = bridgePairedSelection(CAPS_WITH_PROVIDERS, {
       generationProvider: "ollama",
       ollamaTransport: "server",
@@ -590,6 +621,10 @@ describe("Phase 26C1 — the SELECTED transport is authoritative (§1-§8)", () 
       ollamaTransport: "bridge",
       ollamaModel: "hermes3:8b",
     });
+    // The interleaved ordering (explicit choice made DURING the pairing
+    // window wins over the completion) is a ROUTE-level guard in
+    // src/routes/new.tsx (explicitChoiceSincePairingStartedRef) — pinned
+    // end-to-end in src/routes/new.providerSelector.test.tsx.
   });
 
   it("reload restores the persisted Bridge transport (§8.10)", () => {

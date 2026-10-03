@@ -1,8 +1,17 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { GenerationCapabilitiesResponse } from "../api/types";
 import { GenerationProviderSelector } from "./GenerationProviderSelector";
 import type { GenerationProviderSelection } from "./generationProvider";
+
+declare global {
+  /** Enabled by test harnesses to activate React's act() support. */
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
+}
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 /**
  * Phase 25 §16 — the browser provider selector:
@@ -379,5 +388,77 @@ describe("GenerationProviderSelector — Phase 26C1 the VISIBLE transport is the
     expect(connectedMarkup).toMatch(
       /data-testid="generation-ollama-transport-bridge-availability"[\s\S]*?>Connected<\/span>/,
     );
+  });
+});
+
+describe("GenerationProviderSelector — interactive selectProvider (INFONote A1a: no-usable-transport fail-closed path)", () => {
+  /** Ollama offered but BOTH transports unavailable; default provider fake. */
+  const NO_USABLE_TRANSPORT: GenerationCapabilitiesResponse = {
+    modes: [],
+    defaultProvider: "fake",
+    providers: [
+      { id: "fake", label: "Demo / Fake", available: true, model: null, reason: null },
+      {
+        id: "ollama",
+        label: "Ollama",
+        available: true,
+        defaultModel: "qwen2.5:1.5b",
+        manualModelEntry: true,
+        transports: {
+          server: { available: false, reason: "not_configured" },
+          bridge: { available: false, reason: "not_connected" },
+        },
+      },
+    ],
+  };
+
+  const FAKE_SELECTION: GenerationProviderSelection = {
+    generationProvider: "fake",
+    ollamaTransport: null,
+    ollamaModel: "",
+  };
+
+  afterEach(() => {
+    sessionStorage.clear();
+  });
+
+  it("selectProvider('ollama') with both transports unavailable emits ollamaTransport: null (documented fail-closed — never a fabricated fallback)", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const changes: GenerationProviderSelection[] = [];
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <GenerationProviderSelector
+          capabilities={NO_USABLE_TRANSPORT}
+          selection={FAKE_SELECTION}
+          onChange={(next) => void changes.push(next)}
+        />,
+      );
+    });
+    const ollamaRadio = container.querySelector<HTMLInputElement>(
+      '[data-testid="generation-provider-ollama"] input[type="radio"]',
+    );
+    if (!ollamaRadio) throw new Error("ollama provider radio not found");
+    act(() => {
+      ollamaRadio.click();
+    });
+    expect(changes.length).toBe(1);
+    expect(changes[0]).toEqual({
+      generationProvider: "ollama",
+      // Both transports unavailable + no stored choice -> the deterministic
+      // no-preference default resolves to NULL (no usable transport). The
+      // user then sees the unavailable state; serializing this selection
+      // omits the transport and the backend rejects it fail-closed with
+      // INVALID_GENERATION_PROVIDER -> the safe `invalidGenerationProvider`
+      // copy on submit (pinned unit-side in generationProvider.test.ts and
+      // demoFlow.test.ts). Never a silent server/bridge fallback.
+      ollamaTransport: null,
+      ollamaModel: "qwen2.5:1.5b",
+    });
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
   });
 });

@@ -91,6 +91,14 @@ export function GenerationProviderSelector({
       // transport, else restore the persisted preference (Fake -> Ollama
       // restores the intended transport), else the deterministic no-
       // preference default. Availability is display-only.
+      //
+      // INFONOTE A1a (documented fail-closed path): with BOTH transports
+      // unavailable and no stored choice the deterministic default resolves
+      // to `ollamaTransport: null` — the selector then provisions Ollama
+      // WITHOUT a transport. This is NOT a silent fallback: the serialized
+      // POST omits the transport, the backend answers 400
+      // INVALID_GENERATION_PROVIDER, and the user sees the frozen safe
+      // `invalidGenerationProvider` copy on submit (src/journey/demoFlow.ts).
       const transport =
         selection.ollamaTransport ?? getOllamaTransport() ?? defaultOllamaTransport(ollamaOffer);
       onChange({

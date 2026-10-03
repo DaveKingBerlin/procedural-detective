@@ -589,9 +589,20 @@ export function defaultOllamaTransport(
  *
  * A completed pairing is strong Bridge intent. The model keeps the current
  * Ollama model when one exists, else the server-configured `defaultModel`
- * (never a hard-coded name). Any LATER explicit radio choice — including
- * Server / Direct — wins over this pairing selection; capability refreshes
- * never revert it.
+ * (never a hard-coded name).
+ *
+ * ORDERED-INTENT CONTRACT (LOW fix): this PURE function models the pairing's
+ * implied selection and knows NOTHING about ordering. The /new route owns the
+ * ordering guard (src/routes/new.tsx `explicitChoiceSincePairingStartedRef`):
+ *   - a provider/transport choice made BEFORE the pairing began is OLDER
+ *     intent — the completed pairing (this function's output) still overrides
+ *     it (§3 "even over an earlier explicit Server");
+ *   - a provider/transport choice made AFTER the pairing began is the NEWER
+ *     intent — the route SKIPS this function and keeps the explicit choice;
+ *   - a LATER explicit radio choice after the pairing completed also wins (the
+ *     selection that this function produced is simply replaced by the next
+ *     `onChange`).
+ * Capability refreshes never call this function (they never re-fire a pairing).
  */
 export function bridgePairedSelection(
   capabilities: GenerationCapabilitiesResponse | null,
@@ -691,6 +702,15 @@ export function resolveProviderSelection(
  * Ollama provider (and only when actually present); every other selection —
  * and null (no provider offer) — resolves to `undefined`, so the old
  * no-selection call sites stay byte-identical (§13).
+ *
+ * DOCUMENTED NO-USABLE-TRANSPORT PATH (fail-closed, INFONote A1a): an Ollama
+ * selection with NO usable transport (`ollamaTransport: null` — both
+ * transports unavailable and no stored choice) posts `{generationProvider:
+ * "ollama"}` WITHOUT the transport key. The backend rejects it with
+ * INVALID_GENERATION_PROVIDER, which the journey maps to the frozen safe
+ * `invalidGenerationProvider` copy on submit — this is an INTENDED fail-closed
+ * rejection (the client never silently fabricates a fallback transport), not a
+ * silent fallback.
  */
 export function toCreateCaseGeneration(
   selection: GenerationProviderSelection | null,
