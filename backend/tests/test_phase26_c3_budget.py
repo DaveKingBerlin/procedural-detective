@@ -400,11 +400,11 @@ def test_derived_budget_covers_both_evidence_paths_and_all_passes():
     per_pass = 5 + model_evidence_log_facts * per_item
     assert per_pass == 155
     assert derived == total_passes * per_pass == 620
-    # The derived CORE maximum is NOT required to stay below the GLOBAL
-    # safety ceiling (MAX_LLM_CALLS_PER_GENERATION=128): when the raw
-    # fallback makes it larger than the global 128, the global ceiling is the
-    # operative hard stop (a separate documented bound) — the CORE budget
-    # never fails a path BEFORE the global one. The cap stays finite and hard.
+    # Phase 26C4 derives the GLOBAL envelope separately so it contains this
+    # complete 620-call CORE maximum plus the legal procedural-asset envelope
+    # (20 assets x 5 calls = 100): MAX_LLM_CALLS_PER_GENERATION resolves to
+    # 720. The global guard therefore remains finite and hard without stopping
+    # a path permitted by the bounded CORE and asset policies.
     assert isinstance(derived, int) and derived > 0
 
 
