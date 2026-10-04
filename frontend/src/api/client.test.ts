@@ -507,6 +507,39 @@ describe("Phase 8 journey endpoints", () => {
     });
   });
 
+  it("Phase 28 — createCase serializes the demo-case id ONLY when passed (the demo path); generated-case bodies stay byte-identical", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery", "medium", { demoCaseId: "demo-gallery" });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      prompt: "A mystery",
+      difficulty: "medium",
+      demoCaseId: "demo-gallery",
+    });
+    // A no-selection call (generated case / pre-28 client) keeps the
+    // byte-identical body — no demoCaseId key is ever invented.
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery");
+    const [, init2] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init2 as RequestInit).body as string)).toEqual({ prompt: "A mystery" });
+  });
+
+  it("Phase 28 — the demo-case id travels alongside a Phase 25 provider selection (demo path on a provider backend)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery", "easy", {
+      generationProvider: "fake",
+      demoCaseId: "demo-apartment",
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      prompt: "A mystery",
+      difficulty: "easy",
+      generationProvider: "fake",
+      demoCaseId: "demo-apartment",
+    });
+  });
+
   it("getGenerationProgress GETs /generations/{id} with the creator bearer", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ caseId: "C1", generationId: "G1", status: "RUNNING", progress: 45, stage: "world" }, 200),

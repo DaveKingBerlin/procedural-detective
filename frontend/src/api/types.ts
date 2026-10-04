@@ -691,6 +691,14 @@ export interface CreateCaseGeneration {
   generationProvider?: GenerationProviderId;
   ollamaTransport?: OllamaTransportId;
   ollamaModel?: string;
+  /**
+   * Phase 28 — the OPTIONAL closed Demo-fixture id selected by the frontend's
+   * "Try Demo Case" action ("demo-apartment" | "demo-gallery" |
+   * "demo-laboratory"). Sent ONLY on the demo/fake path; the backend validates
+   * it against a closed allowlist. Absent for generated cases (the POST /cases
+   * body stays byte-identical, §13).
+   */
+  demoCaseId?: string;
 }
 
 /** 200 body of GET {base}/api/v1/generation-capabilities. */

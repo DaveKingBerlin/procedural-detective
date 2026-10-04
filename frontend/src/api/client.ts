@@ -28,6 +28,10 @@ import type {
  * {@link CreateCaseGeneration}): the three fields are included in the POST
  * body ONLY when the caller actually passes a selection; every pre-25 call
  * site keeps a byte-identical `{prompt[, difficulty]}` body (§13).
+ *
+ * Phase 28 — `demoCaseId` is the OPTIONAL selected closed Demo fixture id
+ * (another key of the same selection object); it is serialized ONLY when the
+ * caller passes it (the demo path) — generated-case bodies stay untouched.
  */
 interface CreateCaseRequest {
   prompt: string;
@@ -35,6 +39,7 @@ interface CreateCaseRequest {
   generationProvider?: CreateCaseGeneration["generationProvider"];
   ollamaTransport?: CreateCaseGeneration["ollamaTransport"];
   ollamaModel?: string;
+  demoCaseId?: CreateCaseGeneration["demoCaseId"];
 }
 
 /**
@@ -490,6 +495,12 @@ export function createCase(
     }
     if (typeof generation.ollamaModel === "string" && generation.ollamaModel !== "") {
       body.ollamaModel = generation.ollamaModel;
+    }
+    // Phase 28 — the demo-case id is carried ONLY when the caller actually
+    // selected a Demo fixture (the demo path); every other call site keeps a
+    // body without the key (§13 backward compat, generated-case behavior).
+    if (typeof generation.demoCaseId === "string" && generation.demoCaseId !== "") {
+      body.demoCaseId = generation.demoCaseId;
     }
   }
   return authedRequest<CreateCaseResponse>("/api/v1/cases", anonymousSessionToken, {

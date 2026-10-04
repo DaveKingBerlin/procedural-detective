@@ -67,6 +67,24 @@ class CaseCreateRequest(BaseModel):
         "No schema-level length cap: the central validator is the single "
         "authoritative gate (max 256 chars, canonical 400 envelope).",
     )
+    # Phase 28 — optional demo-fixture selection. Omitted/null/blank => the
+    # current single-fixture demo behavior (backward compatible with the
+    # Demo-#1-only journey). The service validates the id against the FIXED
+    # server-side registry (demo-apartment | demo-gallery |
+    # demo-laboratory); an unknown id is rejected with the canonical 400
+    # INVALID_DEMO_CASE envelope (never echoed) and a demoCaseId with a
+    # non-fake provider is rejected the same way (fail-closed: a browser value
+    # can never select fixtures on a real LLM path). The field is
+    # top-level (beside generationProvider/ollamaTransport/ollamaModel)
+    # because it is a sibling of the Phase 25 per-attempt selection, not a
+    # property of the prompt or the case-storage model.
+    demoCaseId: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Phase 28 optional built-in demo case id (demo-apartment "
+        "| demo-gallery | demo-laboratory). Only meaningful on the fake/demo "
+        "provider path; unknown values are rejected (400 INVALID_DEMO_CASE).",
+    )
 
 
 class CaseStartedDTO(BaseModel):

@@ -13,6 +13,7 @@ import {
 import type { CreateCaseGeneration, GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { setPlaythroughId, setPlaythroughToken } from "../api/playthroughToken";
 import { clearJourneyParams, getJourneyParams, type JourneyParams } from "../journey/context";
+import { clearSessionDemoCaseId } from "../journey/demoCaseSelection";
 import {
   getGenerationMode,
   validatedJourneyMode,
@@ -230,6 +231,13 @@ export interface GenerationJourneyProps {
    * ever auto-minting).
    */
   onReload?: () => void;
+  /**
+   * Phase 28 §17 — the "Back to start" action: leaves/ends the current demo
+   * journey and resets the per-session demo-case holder (the NEXT "Try Demo
+   * Case" may then roll a fresh fixture; a refresh of an ACTIVE demo never
+   * goes through this path, so its fixture is never re-rolled).
+   */
+  onBackToStart?: () => void;
 }
 
 type JourneyView =
@@ -250,6 +258,7 @@ export function GenerationJourney({
   onSuccess,
   loadCapabilities = DEFAULT_CAPABILITY_LOADER,
   onReload = reloadPage,
+  onBackToStart = clearSessionDemoCaseId,
 }: GenerationJourneyProps) {
   const [view, setView] = useState<JourneyView>(() =>
     params === null
@@ -274,9 +283,12 @@ export function GenerationJourney({
       setView({ status: "running", stage: stageInfoFromPhase("session", null, null, null, mode) });
       // Phase 25 — build the optional generation-selection block from the
       // journey params ONLY when a provider was actually carried from /new
-      // (transport/model travel only for Ollama). Absent -> undefined -> the
-      // byte-identical no-selection POST /cases request (§13).
-      const generation: CreateCaseGeneration | undefined =
+      // (transport/model travel only for Ollama). Phase 28 — a demo-path
+      // `demoCaseId` travels inside the SAME selection object (demo-only; the
+      // blank generated-case journey omits both -> undefined -> the
+      // byte-identical no-selection POST /cases request, §13).
+      let generation: CreateCaseGeneration | undefined;
+      const providerGeneration: CreateCaseGeneration | undefined =
         params.generationProvider !== undefined
           ? toCreateCaseGeneration({
               generationProvider: params.generationProvider,
@@ -284,6 +296,12 @@ export function GenerationJourney({
               ollamaModel: params.ollamaModel ?? "",
             })
           : undefined;
+      if (providerGeneration !== undefined || params.demoCaseId !== undefined) {
+        generation = {
+          ...(providerGeneration ?? {}),
+          ...(params.demoCaseId !== undefined ? { demoCaseId: params.demoCaseId } : {}),
+        };
+      }
       void run(params.prompt, params.difficulty, (progress) => {
         if (cancelled) return;
         setView({
@@ -332,7 +350,7 @@ export function GenerationJourney({
     if (view.status === "done") onSuccess(view.result);
   };
 
-  return <GenerationJourneyView view={view} onEnter={enter} onRetry={retry} onReload={onReload} />;
+  return <GenerationJourneyView view={view} onEnter={enter} onRetry={retry} onReload={onReload} onBackToStart={onBackToStart} />;
 }
 
 export interface GenerationJourneyViewProps {
@@ -344,13 +362,25 @@ export interface GenerationJourneyViewProps {
    * reload by default; the parent injects it so the renderer stays pure).
    */
   onReload: () => void;
+  /**
+   * Phase 28 §17 — the "Back to start" action (also resets the per-session
+   * demo-case holder when the real route leaves the current demo). The pure
+   * renderer keeps a no-op default; the real route wires the reset.
+   */
+  onBackToStart?: () => void;
 }
 
 /**
  * Pure renderer for the generation route states — exported separately so the
  * states are unit-testable with react-dom/server (no effects, no network).
  */
-export function GenerationJourneyView({ view, onEnter, onRetry, onReload }: GenerationJourneyViewProps) {
+export function GenerationJourneyView({
+  view,
+  onEnter,
+  onRetry,
+  onReload,
+  onBackToStart = () => {},
+}: GenerationJourneyViewProps) {
   if (view.status === "no-session") {
     return (
       <section className="page generating">
@@ -358,7 +388,9 @@ export function GenerationJourneyView({ view, onEnter, onRetry, onReload }: Gene
         <div className="generation-state" data-testid="generation-no-session" role="status">
           <p>No generation is in progress on this page.</p>
           <p>
-            <Link to="/new" data-testid="generation-back-to-start">
+            {/* Phase 28 — wrap so the synthetic event never leaks into
+                clearSessionDemoCaseId (it would be read as its storage arg). */}
+            <Link to="/new" data-testid="generation-back-to-start" onClick={() => onBackToStart()}>
               Back to start
             </Link>
           </p>
@@ -389,7 +421,9 @@ export function GenerationJourneyView({ view, onEnter, onRetry, onReload }: Gene
             >
               {SESSION_LIMIT_RELOAD_LABEL}
             </button>
-            <Link to="/new" data-testid="generation-back-to-start">
+            {/* Phase 28 — wrap so the synthetic event never reaches the
+                demo-holder reset (its storage parameter). */}
+            <Link to="/new" data-testid="generation-back-to-start" onClick={() => onBackToStart()}>
               Back to start
             </Link>
           </div>
@@ -408,7 +442,9 @@ export function GenerationJourneyView({ view, onEnter, onRetry, onReload }: Gene
             <button type="button" data-testid="generation-failed" onClick={onRetry}>
               Try again
             </button>
-            <Link to="/new" data-testid="generation-back-to-start">
+            {/* Phase 28 — wrap so the synthetic event never reaches the
+                demo-holder reset (its storage parameter). */}
+            <Link to="/new" data-testid="generation-back-to-start" onClick={() => onBackToStart()}>
               Back to start
             </Link>
           </div>

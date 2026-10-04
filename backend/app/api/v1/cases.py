@@ -89,6 +89,11 @@ def create_case(
             generation_provider=body.generationProvider,
             ollama_transport=body.ollamaTransport,
             ollama_model=body.ollamaModel,
+            # Phase 28 — the optional demo-fixture selection (validated by the
+            # service against the fixed three-id registry on the fake/demo path
+            # only; unknown ids and non-fake providers are rejected with the
+            # canonical 400 INVALID_DEMO_CASE envelope).
+            demo_case_id=body.demoCaseId,
         )
     except HTTPException:
         raise

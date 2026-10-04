@@ -78,6 +78,10 @@ _SAFE_FIELDS = frozenset(
         # above. Never CaseTruth, tokens, prompts or provider URLs.
         "configuredGlobalProviderCallBudget",
         "configuredCoreProviderCallBudget",
+        # Phase 28 — safe demo-case selection metadata (a VALIDATED registry id
+        # only: demo-apartment | demo-gallery | demo-laboratory; never truth,
+        # never prompt material, never internal fixture fields).
+        "demoCaseId",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})
