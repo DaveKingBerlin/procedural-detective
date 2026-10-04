@@ -281,6 +281,35 @@ Rules (Level-0 contract):
   server; plain `ws://` is rejected unless the host is loopback
   (`bridge/pd_ollama_bridge/urls.py`). Certificate verification is NEVER disabled.
 
+Operator workflow for a permanent server (Phase 27, see `bridge/README.md`):
+configure the server origin once with `pd-ollama-bridge configure --server wss://…`,
+pair once with `pd-ollama-bridge connect PD-XXXX-XXXX`, and reconnect afterwards
+with a plain `pd-ollama-bridge connect`. Stable non-secret settings live in
+`bridge.toml` (Windows `%LOCALAPPDATA%\ProceduralDetective\bridge.toml`; Linux
+`$XDG_CONFIG_HOME/procedural-detective/bridge.toml`); the Bridge token stays in
+its own secure file **bound to the server origin** and is never stored in the
+TOML. After a `server` change the old token is never replayed — pairing is
+required again.
+
+Bridge configuration is fail-closed (F1/F2 hardening, `bridge/pd_ollama_bridge/urls.py`
++ `bridge_config.py`):
+
+- **Strict URL/port shape.** Both validators (server AND Ollama) reject any
+  control characters, quotes, whitespace or a malformed port (non-digit,
+  out-of-range 1..65535, port `0`, trailing junk) with a clear CLI error —
+  exit 1, never a traceback. The loopback-only Ollama policy and the remote
+  plain-`ws://`/`http://` rejection are unchanged; junk netlocs cannot reach
+  the HTTP/WS transport (`httpx.InvalidURL`/`InvalidURI` are additionally
+  caught defensively in `main()`).
+- **Timeout must be a positive finite number.** `nan`/`inf` (CLI, env, or a
+  persisted TOML) would silently disable the connect timeout; they are rejected
+  at every surface (configure/connect/list-models/config) with a clear error.
+  Positive finite values, including floats (`--timeout 0.5`), are accepted.
+- **Expired/revoked tokens fail safely.** When the server terminates a
+  reconnect with a policy close (1008) — an expired (`§16.14`) or revoked
+  (`§16.15`) session token — the CLI exits 1 with a clean message, never
+  auto-repairs the stored token and never echoes it.
+
 ### LAN / single-label acceptance host (`Enshrouded-Server`)
 
 A LAN acceptance hostname such as `Enshrouded-Server` has no dot, so Caddy's

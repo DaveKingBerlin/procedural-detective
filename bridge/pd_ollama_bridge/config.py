@@ -9,10 +9,13 @@ remote server never contributes a configuration value.
 from __future__ import annotations
 
 import getpass
+import json
+import math
 import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -63,8 +66,10 @@ class Config:
             raise UrlValidationError(
                 "model label may contain only [A-Za-z0-9._:-] characters"
             )
-        if self.connect_timeout_seconds <= 0:
-            raise UrlValidationError("connect timeout must be positive")
+        # F2 — a ``nan``/``inf`` timeout would silently disable the connect
+        # timeout; require a positive FINITE number on every path.
+        if not math.isfinite(self.connect_timeout_seconds) or self.connect_timeout_seconds <= 0:
+            raise UrlValidationError("connect timeout must be a positive finite number")
         if self.max_reconnect_attempts < 0:
             raise UrlValidationError("max reconnect attempts must be >= 0")
         allowed = set(self.capabilities)
@@ -119,48 +124,144 @@ def _apply_restrictive_permissions(path: Path) -> None:
         _token_permission_warning(path, str(exc))
 
 
+TOKEN_RECORD_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class TokenRecord:
+    """A persisted Bridge session token WITH its server binding metadata.
+
+    Phase 27 §9 — a token must never be sent to a server it was not issued
+    for. Every persisted token carries the ``server_origin`` (the ws(s) origin
+    of the Procedural Detective server it was paired against), the protocol
+    version and a creation timestamp so the CLI can refuse to reuse it after
+    ``server`` changes. The record is stored ONLY in the secure token file,
+    never in ``bridge.toml``.
+    """
+
+    token: str
+    server_origin: str
+    protocol_version: int = protocol.PROTOCOL_VERSION
+    created_at: str = ""
+
+
 class TokenStore:
-    """Memory-only bridge session token persistence with an optional file.
+    """Secure bridge session token persistence, bound to a server origin.
 
     By default the token is kept in memory for the process lifetime only; no
-    file is written. When ``path`` is given (the CLI ``--token-file`` opt-in)
-    it is also persisted with the strongest practical permissions: ``0600`` on
+    file is written. When ``path`` is given (the CLI ``--token-file`` opt-in or
+    a Phase 27 configured token path) it is persisted as a JSON record with
+    binding metadata using the strongest practical permissions: ``0600`` on
     POSIX, best-effort owner-only ACL on Windows (with a warning if the ACL
     cannot be applied).
+
+    A token is loaded into memory ONLY when its bound ``server_origin`` matches
+    the origin the operator is connecting to. A mismatched binding, a legacy
+    unbound bare-token file or an unreadable file is FAIL-CLOSED: ``load()``
+    returns ``None`` and re-pairing is required before any token can be sent.
     """
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self._path = Path(path) if path is not None else None
         self._token: Optional[str] = None
+        self._bound_server_origin: Optional[str] = None
 
     @property
     def path(self) -> Optional[Path]:
         return self._path
 
+    @property
+    def bound_server_origin(self) -> Optional[str]:
+        """The origin the currently-loaded (in-memory) token is bound to."""
+        return self._bound_server_origin
+
     def get(self) -> Optional[str]:
         return self._token
 
-    def load(self) -> Optional[str]:
+    def has_file(self) -> bool:
+        return self._path is not None and self._path.exists()
+
+    def peek_record(self) -> Optional[TokenRecord]:
+        """Read the persisted record WITHOUT binding/using it (diagnostics).
+
+        Returns ``None`` when there is no file, the file is empty, unreadable,
+        invalid, or holds a legacy unbound bare token (which is deliberately
+        unusable — see class docstring)."""
         if self._path is None or not self._path.exists():
             return None
+        return self._read_record()
+
+    def _read_record(self) -> Optional[TokenRecord]:
         try:
             raw = self._path.read_text(encoding="utf-8").strip()
         except OSError:
             return None
         if not raw:
             return None
-        self._token = raw
-        return self._token
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            return None  # legacy unbound bare-token file: not usable
+        if not isinstance(obj, dict):
+            return None
+        token = obj.get("token")
+        server = obj.get("server")
+        if not isinstance(token, str) or not token or not isinstance(server, str) or not server:
+            return None
+        if not (protocol.MIN_BRIDGE_TOKEN_LENGTH <= len(token) <= protocol.MAX_BRIDGE_TOKEN_LENGTH):
+            return None
+        version = obj.get("protocolVersion")
+        if not isinstance(version, int):
+            version = protocol.PROTOCOL_VERSION
+        created_at = obj.get("createdAt")
+        if not isinstance(created_at, str):
+            created_at = ""
+        return TokenRecord(
+            token=token,
+            server_origin=server,
+            protocol_version=version,
+            created_at=created_at,
+        )
 
-    def save(self, token: str) -> None:
+    def load(self, *, server_origin: Optional[str] = None) -> Optional[str]:
+        """Load the persisted token into memory ONLY when its bound server
+        origin matches ``server_origin``.
+
+        A mismatched binding (or an unbound/legacy record) is NEVER loaded:
+        the caller must re-pair. Returns the token string when loaded,
+        ``None`` otherwise. When ``server_origin`` is omitted the record is
+        loaded as-is (callers outside the CLI/bridge should not do this); the
+        bridge singleton guard still prevents cross-server reuse.
+        """
+        record = self.peek_record()
+        if record is None:
+            return None
+        if server_origin is not None and record.server_origin != server_origin:
+            return None
+        self._token = record.token
+        self._bound_server_origin = record.server_origin
+        return record.token
+
+    def save(self, token: str, *, server_origin: str) -> None:
+        """Persist the token bound to ``server_origin`` (never call with the
+        pairing code). Memory-only when no path is configured."""
         self._token = token
+        self._bound_server_origin = server_origin
         if self._path is None:
             return
+        record = {
+            "version": TOKEN_RECORD_VERSION,
+            "server": server_origin,
+            "token": token,
+            "protocolVersion": protocol.PROTOCOL_VERSION,
+            "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        text = json.dumps(record, sort_keys=True, separators=(",", ":"))
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
-                os.write(fd, token.encode("utf-8"))
+                os.write(fd, text.encode("utf-8"))
             finally:
                 os.close(fd)
         except OSError:
@@ -169,6 +270,7 @@ class TokenStore:
 
     def clear(self) -> None:
         self._token = None
+        self._bound_server_origin = None
         if self._path is not None:
             try:
                 self._path.unlink(missing_ok=True)
@@ -176,4 +278,4 @@ class TokenStore:
                 pass
 
 
-__all__ = ["Config", "TokenStore"]
+__all__ = ["Config", "TokenRecord", "TokenStore"]
