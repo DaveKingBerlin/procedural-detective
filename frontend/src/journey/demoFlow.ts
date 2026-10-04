@@ -83,7 +83,8 @@ export type DemoFailureKind =
   | "deadline"
   | "provider"
   | "quota"
-  | "retryable";
+  | "retryable"
+  | "safetyLimit";
 
 export interface DemoFlowFailure {
   kind: DemoFailureKind;
@@ -144,6 +145,15 @@ export const DEMO_FAILURE_MESSAGES = Object.freeze({
     "The selected generation provider is not supported. Choose another provider and try again.",
   providerUnavailableExplicit:
     "The selected AI provider is unavailable right now. Choose another provider and try again.",
+  // Phase 26C3 §12 — the internal bounded-generation safety-limit family
+  // (PROVIDER_CALL_BUDGET_EXHAUSTED / CORE_PROVIDER_CALL_BUDGET_EXHAUSTED /
+  // ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED). The provider was AVAILABLE and
+  // successfully returning results; the failure is an internal bounded-
+  // generation safety limit, NOT a provider outage — so the provider-
+  // unavailable copy is never borrowed. Neutral, truthful, friendly; no
+  // internal budget number or pipeline topology is ever revealed.
+  safetyLimit:
+    "This case could not be completed within the generation safety limits. Please try again.",
 });
 
 export interface RunDemoOptions {
@@ -348,12 +358,17 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
  * to the generic failed message. Raw failureCode text is never surfaced.
  *
  * Phase 19 notes (backend failure_codes.py, READ ONLY from the frontend):
- *  - CORE_PROVIDER_CALL_BUDGET_EXHAUSTED / ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED
- *    map to the SAME safe provider message class as PROVIDER_CALL_BUDGET_EXHAUSTED:
- *    provider-neutral, no core/asset/internal budget wording.
  *  - MAX_PROCEDURAL_ASSETS_EXCEEDED / MAX_FAILED_ASSETS_EXCEEDED map to the
  *    SAME safe "could not be turned into a playable case" message class as the
  *    generic failed fallback. No internal limits are ever shown.
+ *
+ * Phase 26C3 §12 — the hierarchical PROVIDER-CALL-budget exhaustion family
+ * (PROVIDER_CALL_BUDGET_EXHAUSTED / CORE_PROVIDER_CALL_BUDGET_EXHAUSTED /
+ * ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED) maps to a DISTINCT truthful
+ * "generation safety-limit" bucket with a retry affordance. The provider was
+ * available and successfully returning results — this is NOT a provider
+ * outage/connectivity failure — so the provider-unavailable copy is never
+ * borrowed. No budget number or pipeline topology is ever revealed.
  *
  * Phase 22 notes (bridge typed failures, §21): BRIDGE_NOT_CONNECTED /
  * BRIDGE_DISCONNECTED / LOCAL_OLLAMA_UNAVAILABLE / LOCAL_MODEL_UNAVAILABLE /
@@ -371,15 +386,26 @@ export function generationFailed(failureCode?: string | null): DemoFlowFailure {
     return { kind: "provider", message: DEMO_FAILURE_MESSAGES.providerTimeout };
   }
   if (
+    // Phase 26C3 §12 — ONLY actual provider availability/connectivity failures
+    // (and a repeatedly misbehaving provider) may use the provider-unavailable
+    // copy. Exact-string equality only: a hostile/legacy prefix or substring
+    // variant can never narrow into this bucket.
     failureCode === "PROVIDER_UNAVAILABLE" ||
-    failureCode === "PROVIDER_INVALID_RESPONSE" ||
-    // Phase 19 — hierarchical provider-budget exhaustion: same safe provider
-    // message class as PROVIDER_CALL_BUDGET_EXHAUSTED (exact match only).
+    failureCode === "PROVIDER_INVALID_RESPONSE"
+  ) {
+    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.providerUnavailable };
+  }
+  if (
+    // Phase 26C3 §12 — the internal bounded-generation safety-limit family
+    // (hierarchical provider-CALL-budget exhaustion). The provider was
+    // available and returning results; the generation could not be completed
+    // within its internal safety limits. NEVER shown as provider unavailability.
+    // Exact-string equality only (the project's established rule).
     failureCode === "PROVIDER_CALL_BUDGET_EXHAUSTED" ||
     failureCode === "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED" ||
     failureCode === "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED"
   ) {
-    return { kind: "provider", message: DEMO_FAILURE_MESSAGES.providerUnavailable };
+    return { kind: "safetyLimit", message: DEMO_FAILURE_MESSAGES.safetyLimit };
   }
   if (
     // Phase 19 — asset-count limits: same safe "not playable" message class as

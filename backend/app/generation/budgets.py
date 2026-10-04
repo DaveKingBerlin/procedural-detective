@@ -31,6 +31,35 @@ tracker). Deterministic LOCAL repairs (environmentHint canonicalization,
 semantic-id normalization, evidence projection, catalog alias resolution,
 safe deterministic fallback selection) never touch these counters — only
 actual model calls do.
+
+Phase 26C3 — the CORE ceiling DEFAULT (``MAX_CORE_LLM_CALLS_PER_GENERATION``)
+is DERIVED (Option A, exact legal maximum) so the global guard can never
+contradict the bounded stage graph. The derivation covers a WHOLE generation
+attempt — BOTH evidence paths (the parsed-case canonical algebra AND the
+raw-model-evidence fallback), every activity-log per-item call, and every
+controller pass (initial ``run_into`` plus the bounded repair and regeneration
+re-runs), see ``derive_core_call_budget_default`` below. The cap stays a hard
+FINITE bound: ``derived + 1`` calls still fail closed with
+``CORE_PROVIDER_CALL_BUDGET_EXHAUSTED``.
+
+Phase 26C4 — the GLOBAL DEFAULT (``MAX_LLM_CALLS_PER_GENERATION``) is DERIVED
+from the SAME canonical graph (Option A, exact legal envelope) instead of a
+literal ceiling: the global counter is a strict SUPERSET of the Core and asset
+counters — every real provider call increments ``calls`` exactly once and is
+attributed to the CORE bucket or ONE procedural-asset bucket
+(``calls == core_calls + asset_calls``), so the global envelope must contain
+the FULL legal bounded graph or the superset guard would contradict the
+lower-level policies it contains. The legal global envelope is therefore
+
+    Core legal maximum + legal asset envelope
+    = derive_core_call_budget_default()
+      + MAX_PROCEDURAL_ASSETS_PER_GENERATION × MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+    = 620 + 100 = 720
+
+see ``derive_global_call_budget_default``. The cap stays a hard FINITE bound:
+``envelope + 1`` calls still fail closed with
+``PROVIDER_CALL_BUDGET_EXHAUSTED`` — the global guard is NOT removed, it just
+can no longer be smaller than the envelope it wraps.
 """
 
 from __future__ import annotations
@@ -65,6 +94,268 @@ class _CoreBucket:
 
 
 CORE_BUCKET = _CoreBucket()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 26C3 — derived/aligned CORE-bucket call budget (Option A derivation).
+#
+# The live Hard failure (CASE-HYXAukyLJ0SB) proved the fixed default 12 was
+# LOWER than the legal bounded driver stage graph, so the DEFAULT
+# ``MAX_CORE_LLM_CALLS_PER_GENERATION`` is DERIVED as the exact legal maximum
+# of ONE WHOLE ATTEMPT — never a magic number, and never a value the
+# lower-level bounded guards can contradict (adversarial F1a/F1b).
+#
+# Evidence paths (F1a). ``_activity_log_stage`` walks every published evidence
+# fact whose kind renders as ACTIVITY_LOG AND whose ``observed_at`` is
+# time-bearing, charging ``1 + MAX_ACTIVITY_LOG_REPAIR_PASSES`` bounded
+# CORE-bucket round-trips per fact (``ollama_driver.py`` 2963-2990). The
+# number of such facts depends on which evidence set is published:
+#
+#   (a) PARSED-CASE canonical algebra — ``_evidence_gap_facts`` rebuilds the
+#       published evidence deterministically from the model's case skeleton:
+#       one ``d_ev_when_obs`` + one ``d_ev_opp_*`` per OTHER eligible suspect
+#       + one ``d_ev_presence`` = ``eligible + 1`` time-bearing cctv facts;
+#       ``eligible <= persons`` is capped by the strict person-list parser
+#       ``MAX_CHARACTERS`` (``app/generation/schemas.py``), so at most
+#       ``MAX_CHARACTERS + 1`` activity-log facts.
+#   (b) RAW-MODEL-EVIDENCE fallback — when the CASE stage fails to strictly
+#       parse, ``_evidence_gap_facts`` returns ``(None, (), ())``
+#       (``ollama_driver.py`` 636-649) and the driver keeps the RAW MODEL
+#       evidence set (``ollama_driver.py`` 2657-2700); ``_activity_log_stage``
+#       then walks EVERY raw fact of an ACTIVITY_LOG-rendering kind with a
+#       parseable ``observed_at``. The strict evidence parser bounds the raw
+#       set at ``MAX_EVIDENCE_ITEMS`` and does NOT restrict ``kind`` to a
+#       closed set (``parser.py`` 742-844), so up to ``MAX_EVIDENCE_ITEMS``
+#       activity-log facts.
+#
+#   The legal maximum is ``max(parsed_log_facts, model_evidence_log_facts)``,
+#   each path × ``(1 + MAX_ACTIVITY_LOG_REPAIR_PASSES)`` per fact.
+#
+# Passes (F1b). ONE ``run_into`` pass burns case_truth + evidence +
+# activity-log stage + world_graph against the SAME monotonic per-attempt CORE
+# counter (``BudgetTracker.consume_call``). The controller re-invokes
+# ``run_into`` on a RECOVERABLE_REPAIR (``controller.py`` 470-524) and on a
+# RECOVERABLE_REGENERATE (``controller.py`` 525-547 — ``_reset_for_regeneration``
+# discards ``stage_outputs``/``draft``, so the SAME stages re-burn); each pass
+# therefore re-burns evidence + activity logs + world_graph (plus case_truth
+# when the cached case never parsed — the derivation accounts that worst case).
+# With ``max_repair_passes`` repair and ``max_full_regenerations`` regeneration
+# allowances, the whole-attempt maximum is exactly
+#
+#     total_passes × per_pass_max
+#     total_passes = 1 + max_repair_passes + max_full_regenerations
+#     per_pass_max = fixed(3) + parse-retry headroom(2) + max_log_facts
+#
+# Worst-case arithmetic (the DEFAULTS: MAX_CHARACTERS=8, MAX_EVIDENCE_ITEMS=50,
+# MAX_ACTIVITY_LOG_REPAIR_PASSES=2, MAX_REPAIR_PASSES=2, MAX_FULL_REGENERATIONS=1):
+#
+#     max_log_facts = max(9, 50) × (1 + 2) = 150
+#     per_pass      = 5 + 150 = 155
+#     total_passes  = 1 + 2 + 1 = 4
+#     derived       = 155 × 4 = 620
+#
+# NOTE: the derived Core value may EXCEED a smaller OVERRIDDEN global ceiling
+# (``MAX_LLM_CALLS_PER_GENERATION``); the GLOBAL ceiling — a SEPARATE documented
+# hard safety ceiling — is the operative stop on any legal path the global
+# guard permits BEFORE the bound it contains (Phase 26C4: the derived DEFAULT
+# global envelope ``720`` can never do this — the configuration layer rejects a
+# global override below the legal Core + asset envelope at startup). The budget
+# stays a hard FINITE bound: ``derived + 1`` calls still fail closed with
+# ``CORE_PROVIDER_CALL_BUDGET_EXHAUSTED``.
+# --------------------------------------------------------------------------- #
+
+# Canonical recovery-pass allowances (REQUIREMENTS 32.5; the same default
+# values as the §45 operator settings MAX_REPAIR_PASSES / MAX_FULL_REGENERATIONS).
+DEFAULT_MAX_REPAIR_PASSES = 2
+DEFAULT_MAX_FULL_REGENERATIONS = 1
+
+
+def derive_core_call_budget_default(
+    *,
+    max_repair_passes: int = DEFAULT_MAX_REPAIR_PASSES,
+    max_full_regenerations: int = DEFAULT_MAX_FULL_REGENERATIONS,
+) -> int:
+    """The aligned DEFAULT ``MAX_CORE_LLM_CALLS_PER_GENERATION`` value.
+
+    Exact derivation (no magic numbers; each term is a canonical bounded stage
+    bound):
+
+    - ``base_fixed_calls = 3`` — ``case_truth`` (1) + ``evidence`` (1) +
+      ``world_graph`` (1) in one driver pass. The driver ``_stage_parse``
+      path may additionally retry the ``case_truth`` and ``world_graph``
+      stages once on a strict-parse failure: +2 bounded parse-retry calls
+      (``app/services/ollama_driver.py:_stage_parse``).
+    - ``parsed_log_facts = MAX_CHARACTERS + 1`` — the legal maximum number of
+      time-bearing ACTIVITY_LOG-rendered facts on the PARSED-CASE path
+      (canonical algebra proof: ``app/services/ollama_driver.py``
+      ``_evidence_gap_facts`` emits one ``d_ev_when_obs`` + one ``d_ev_opp_*``
+      per other eligible suspect + one ``d_ev_presence`` = ``eligible + 1``;
+      ``eligible <= persons`` is capped by the strict parser ``MAX_CHARACTERS``
+      in ``app/generation/schemas.py``).
+    - ``model_evidence_log_facts = MAX_EVIDENCE_ITEMS`` — the legal maximum on
+      the RAW-MODEL-EVIDENCE fallback path (case stage unparsed): the strict
+      evidence parser bounds the raw set at ``MAX_EVIDENCE_ITEMS`` and never
+      restricts ``kind`` to a closed set, so the driver may log that many
+      ACTIVITY_LOG-rendered facts (``parser.py`` 742-844,
+      ``ollama_driver.py`` 636-649/2657-2700/2963-2990).
+    - each activity-log fact consumes 1 initial call + up to
+      ``MAX_ACTIVITY_LOG_REPAIR_PASSES`` repair calls.
+    - ``total_passes = 1 + max_repair_passes + max_full_regenerations`` — the
+      initial ``run_into`` plus every controller repair/regeneration re-run
+      (they re-burn evidence + activity logs + world against the SAME
+      per-attempt CORE counter; ``controller.py`` 470-547).
+
+    Therefore:
+
+        max_log_facts = max(parsed_log_facts, model_evidence_log_facts)
+        per_pass      = fixed(3) + retry(2) + max_log_facts × (1 + MAX_ACTIVITY_LOG_REPAIR_PASSES)
+        default       = total_passes × per_pass
+                      = (1 + 2 + 1) × (5 + 50 × 3)
+                      = 4 × 155
+                      = 620
+    """
+    from app.generation.schemas import (  # noqa: PLC0415
+        MAX_CHARACTERS,
+        MAX_EVIDENCE_ITEMS,
+    )
+    from app.services.ollama_driver import (  # noqa: PLC0415
+        MAX_ACTIVITY_LOG_REPAIR_PASSES,
+    )
+
+    base_fixed_calls = 3  # case_truth + evidence + world_graph
+    bounded_parse_retry_headroom = 2  # case_truth + world_graph each retry once
+    per_item_log_calls = 1 + MAX_ACTIVITY_LOG_REPAIR_PASSES
+    # (a) parsed-case canonical algebra: 1 when_obs + eligible-1 opp + 1 presence
+    parsed_log_facts = MAX_CHARACTERS + 1
+    # (b) raw-model-evidence fallback (case unparsed), kind not closed-bounded
+    model_evidence_log_facts = MAX_EVIDENCE_ITEMS
+    max_log_facts = max(parsed_log_facts, model_evidence_log_facts)
+    per_pass = (
+        base_fixed_calls
+        + bounded_parse_retry_headroom
+        + max_log_facts * per_item_log_calls
+    )
+    total_passes = 1 + max_repair_passes + max_full_regenerations
+    return per_pass * total_passes
+
+
+# --------------------------------------------------------------------------- #
+# Phase 26C4 — derived/aligned GLOBAL provider-call envelope.
+#
+# The global ceiling (``MAX_LLM_CALLS_PER_GENERATION``) is the SUPERSET of the
+# Core and asset counters: ``BudgetTracker.consume_call`` increments ``calls``
+# exactly once per real provider call and attributes it to the CORE bucket or
+# ONE procedural-asset bucket, so ``calls == core_calls + asset_calls``. A
+# global ceiling SMALLER than the legal envelope of the bounded lower-level
+# policies it contains would re-introduce the C3 contradiction at the
+# enclosing level (e.g. the proven global=128 / Core=620 damage), so the
+# DEFAULT is DERIVED as the exact legal envelope:
+#
+#     global default = derived Core legal maximum
+#                      + MAX_PROCEDURAL_ASSETS_PER_GENERATION
+#                        × MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+#                    = 620 + 20 × 5 = 720
+#
+# The value is an OUTPUT of the canonical constants — never a magic number and
+# never a second source of truth. The cap stays a hard FINITE bound: the
+# ``envelope + 1``-th call still fails closed with
+# ``PROVIDER_CALL_BUDGET_EXHAUSTED`` (the global guard is not removed).
+# --------------------------------------------------------------------------- #
+
+# Canonical procedural-asset allowances (REQUIREMENTS 32.6/32.7; the same
+# default values as the §45 operator settings MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+# / MAX_PROCEDURAL_ASSETS_PER_GENERATION).
+DEFAULT_MAX_LLM_CALLS_PER_PROCEDURAL_ASSET = 5
+DEFAULT_MAX_PROCEDURAL_ASSETS_PER_GENERATION = 20
+
+
+def derive_asset_call_budget_default(
+    *,
+    max_procedural_assets: int | None = None,
+    max_llm_calls_per_procedural_asset: int | None = None,
+) -> int:
+    """The aligned LEGAL procedural-asset call envelope for one attempt.
+
+    Each DISTINCT procedural asset may burn at most
+    ``MAX_LLM_CALLS_PER_PROCEDURAL_ASSET`` provider calls (the per-asset
+    bucket ceiling) and at most ``MAX_PROCEDURAL_ASSETS_PER_GENERATION``
+    distinct assets may enter the asset path, so the legal asset-wide call
+    envelope is the product:
+
+        max_procedural_assets × max_llm_calls_per_procedural_asset
+        = 20 × 5 = 100
+
+    ``None`` (the default) reads the CANONICAL module-level defaults
+    ``DEFAULT_MAX_PROCEDURAL_ASSETS_PER_GENERATION`` /
+    ``DEFAULT_MAX_LLM_CALLS_PER_PROCEDURAL_ASSET`` AT CALL TIME, so the legal
+    envelope follows a canonical constant change automatically (the same
+    C3 pattern as ``derive_core_call_budget_default``).
+
+    No asset call ever increments ``core_calls``; every asset call DOES
+    increment the global ``calls`` counter, so this envelope is part of the
+    minimum legal GLOBAL envelope (see ``derive_global_call_budget_default``).
+    """
+    if max_procedural_assets is None:
+        max_procedural_assets = DEFAULT_MAX_PROCEDURAL_ASSETS_PER_GENERATION
+    if max_llm_calls_per_procedural_asset is None:
+        max_llm_calls_per_procedural_asset = (
+            DEFAULT_MAX_LLM_CALLS_PER_PROCEDURAL_ASSET
+        )
+    if isinstance(max_procedural_assets, bool) or not isinstance(
+        max_procedural_assets, int
+    ):
+        raise TypeError("max_procedural_assets must be an int or None")
+    if max_procedural_assets <= 0:
+        raise ValueError("max_procedural_assets must be > 0")
+    if isinstance(max_llm_calls_per_procedural_asset, bool) or not isinstance(
+        max_llm_calls_per_procedural_asset, int
+    ):
+        raise TypeError("max_llm_calls_per_procedural_asset must be an int or None")
+    if max_llm_calls_per_procedural_asset <= 0:
+        raise ValueError("max_llm_calls_per_procedural_asset must be > 0")
+    return max_procedural_assets * max_llm_calls_per_procedural_asset
+
+
+def derive_global_call_budget_default(
+    *,
+    max_repair_passes: int | None = None,
+    max_full_regenerations: int | None = None,
+    max_procedural_assets: int | None = None,
+    max_llm_calls_per_procedural_asset: int | None = None,
+) -> int:
+    """The aligned DEFAULT ``MAX_LLM_CALLS_PER_GENERATION`` value.
+
+    The GLOBAL counter is the strict superset of the Core and asset buckets
+    (``calls == core_calls + asset_calls``), so the default global ceiling is
+    the WHOLE legal bounded generation graph: the derived Core legal maximum
+    (every evidence path × every per-fact activity-log call × every controller
+    pass — ``derive_core_call_budget_default``) PLUS the legal procedural-asset
+    envelope (``derive_asset_call_budget_default``).
+
+        Core legal maximum   = 620
+        Asset legal maximum  = 100
+        Global legal envelope = 620 + 100 = 720
+
+    ``None`` (the default) reads the CANONICAL module-level defaults at CALL
+    TIME (repair/regeneration allowances and the asset bounds), so the value
+    is an output of the canonical constants — never a duplicated literal:
+    tune a subordinate canonical constant and the global envelope follows
+    automatically.
+    """
+    if max_repair_passes is None:
+        max_repair_passes = DEFAULT_MAX_REPAIR_PASSES
+    if max_full_regenerations is None:
+        max_full_regenerations = DEFAULT_MAX_FULL_REGENERATIONS
+    return (
+        derive_core_call_budget_default(
+            max_repair_passes=max_repair_passes,
+            max_full_regenerations=max_full_regenerations,
+        )
+        + derive_asset_call_budget_default(
+            max_procedural_assets=max_procedural_assets,
+            max_llm_calls_per_procedural_asset=max_llm_calls_per_procedural_asset,
+        )
+    )
 
 
 def _non_negative_int(value: Any, name: str) -> int | None:
@@ -182,6 +473,11 @@ class BudgetTracker:
     @property
     def max_asset_calls(self) -> int | None:
         return self._max_asset_calls
+
+    @property
+    def max_calls(self) -> int:
+        """The GLOBAL ceiling (``MAX_LLM_CALLS_PER_GENERATION``)."""
+        return self._max_calls
 
     @property
     def max_core_calls(self) -> int | None:

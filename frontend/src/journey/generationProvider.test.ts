@@ -5,9 +5,11 @@ import {
   GENERATION_PROVIDER_STORAGE_KEY,
   GENERATION_MODEL_STORAGE_KEY,
   OLLAMA_TRANSPORT_STORAGE_KEY,
+  bridgePairedSelection,
   buildProviderOffers,
   clearGenerationSelection,
   clearGenerationProvider,
+  defaultOllamaTransport,
   getGenerationProvider,
   getOllamaModel,
   getOllamaTransport,
@@ -221,7 +223,9 @@ describe("resolveProviderSelection — §10 selection resolution", () => {
     setGenerationProvider("ollama", storage);
     const selection = resolveProviderSelection(CAPS_WITH_PROVIDERS, storage);
     expect(selection?.generationProvider).toBe("ollama");
-    expect(selection?.ollamaTransport).toBe("server"); // stored transport absent -> server first
+    // No stored transport -> the no-preference default (server when both
+    // sides are available and no intent signal exists, Phase 26C1 §5).
+    expect(selection?.ollamaTransport).toBe("server");
     expect(selection?.ollamaModel).toBe("qwen2.5:1.5b"); // configured default, never hard-coded
   });
 
@@ -232,13 +236,15 @@ describe("resolveProviderSelection — §10 selection resolution", () => {
     expect(selection?.generationProvider).toBe("fake");
   });
 
-  it("DISCARD-IF-STALE: a stored ollama transport that is no longer available falls back to the valid side", () => {
+  it("Phase 26C1 — an unavailable STORED transport stays SELECTED (no silent fallback to the valid side)", () => {
     const storage = fakeStorage();
     setGenerationProvider("ollama", storage);
     setOllamaTransport("bridge", storage);
     const selection = resolveProviderSelection(CAPS_WITH_PROVIDERS, storage);
     expect(selection?.ollamaTransport).toBe("bridge"); // bridge still available
-    // Now make the bridge unavailable -> stored bridge is discarded -> server side.
+    // Now make the bridge unavailable: the stored bridge transport is
+    // AUTHORITATIVE and is preserved verbatim (tests 12 — never rewritten to
+    // the available server side, never silently switched).
     const bridgeDown: GenerationCapabilitiesResponse = {
       modes: [],
       defaultProvider: "ollama",
@@ -246,6 +252,7 @@ describe("resolveProviderSelection — §10 selection resolution", () => {
         {
           id: "ollama",
           available: true,
+          defaultModel: "",
           transports: {
             server: { available: true },
             bridge: { available: false, reason: "not_connected" },
@@ -254,7 +261,7 @@ describe("resolveProviderSelection — §10 selection resolution", () => {
       ],
     };
     const selection2 = resolveProviderSelection(bridgeDown, storage);
-    expect(selection2?.ollamaTransport).toBe("server");
+    expect(selection2?.ollamaTransport).toBe("bridge");
   });
 
   it("uses the first still-available provider when neither default nor stored fit", () => {
@@ -333,7 +340,7 @@ describe("sessionStorage persistence — the three non-secret keys only", () => 
     expect(storage.entries.size).toBe(0);
   });
 
-  it("persisting a NON-ollama selection clears the transport/model keys", () => {
+  it("a fresh NON-ollama selection leaves the (absent) transport/model keys absent", () => {
     const storage = fakeStorage();
     persistGenerationSelection(
       { generationProvider: "frontier", ollamaTransport: null, ollamaModel: "" },
@@ -342,6 +349,24 @@ describe("sessionStorage persistence — the three non-secret keys only", () => 
     expect(storage.entries.get(GENERATION_PROVIDER_STORAGE_KEY)).toBe("frontier");
     expect(storage.entries.has(OLLAMA_TRANSPORT_STORAGE_KEY)).toBe(false);
     expect(storage.entries.has(GENERATION_MODEL_STORAGE_KEY)).toBe(false);
+  });
+
+  it("Phase 26C1 §8 — a NON-ollama selection PRESERVES the transport/model preference keys (Fake -> Ollama restore)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    // The user switches the provider to Fake: provider persists, and the
+    // Ollama transport/model preferences are left as-is (inert while the
+    // provider is non-ollama), so the intended transport survives.
+    persistGenerationSelection(
+      { generationProvider: "fake", ollamaTransport: null, ollamaModel: "" },
+      storage,
+    );
+    expect(storage.entries.get(GENERATION_PROVIDER_STORAGE_KEY)).toBe("fake");
+    expect(storage.entries.get(OLLAMA_TRANSPORT_STORAGE_KEY)).toBe("bridge");
+    expect(storage.entries.get(GENERATION_MODEL_STORAGE_KEY)).toBe("hermes3:8b");
   });
 });
 
@@ -379,7 +404,302 @@ describe("toCreateCaseGeneration — the flat POST /cases block", () => {
     ).toEqual({ generationProvider: "ollama" });
   });
 
+  it("INFONote A1a — ollama with NO usable transport omits ONLY the transport (fail-closed, no silent fallback) and even a known model keeps the payload transport-free", () => {
+    // The documented no-usable-transport path: `selectProvider("ollama")`
+    // under both-unavailable transports yields `ollamaTransport: null` (see
+    // GenerationProviderSelector.test.tsx). Serializing that selection posts
+    // {generationProvider:"ollama"} WITHOUT the transport key — the backend
+    // answers 400 INVALID_GENERATION_PROVIDER, which the journey maps to the
+    // frozen safe `invalidGenerationProvider` copy on submit (src/journey/
+    // demoFlow.ts). This is the intended fail-closed path — the client NEVER
+    // silently fabricates a fallback transport (no bridge/server rewrite).
+    const noTransportButModel: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: null,
+      ollamaModel: "hermes3:8b",
+    };
+    expect(toCreateCaseGeneration(noTransportButModel)).toEqual({
+      generationProvider: "ollama",
+      ollamaModel: "hermes3:8b",
+    });
+    expect(
+      toCreateCaseGeneration({ ...noTransportButModel, ollamaModel: "" }),
+    ).toEqual({ generationProvider: "ollama" });
+  });
+
   it("null (no provider offer) -> undefined (byte-identical no-selection call)", () => {
     expect(toCreateCaseGeneration(null)).toBeUndefined();
+  });
+});
+
+describe("Phase 26C1 — the SELECTED transport is authoritative (§1-§8)", () => {
+  /** Ollama capabilities with the fake/frontier offer and chosen transports. */
+  function ollamaCaps(transports: {
+    server: { available: boolean; connected?: boolean; reason?: string | null };
+    bridge: { available: boolean; connected?: boolean; reason?: string | null };
+  }): GenerationCapabilitiesResponse {
+    return {
+      modes: [],
+      defaultProvider: "ollama",
+      providers: [
+        { id: "fake", label: "Demo / Fake", available: true },
+        {
+          id: "ollama",
+          label: "Ollama",
+          available: true,
+          defaultModel: "qwen2.5:1.5b",
+          manualModelEntry: true,
+          transports,
+        },
+        { id: "frontier", label: "Frontier", available: false, reason: "not_configured" },
+      ],
+    };
+  }
+
+  const BOTH_AVAILABLE = ollamaCaps({
+    server: { available: true },
+    bridge: { available: true, connected: false, reason: "not_connected" },
+  });
+  const BRIDGE_CONNECTED = ollamaCaps({
+    server: { available: true },
+    bridge: { available: true, connected: true },
+  });
+  const BRIDGE_UNAVAILABLE = ollamaCaps({
+    server: { available: true },
+    bridge: { available: false, reason: "not_connected" },
+  });
+  const SERVER_UNAVAILABLE = ollamaCaps({
+    server: { available: false, reason: "not_configured" },
+    bridge: { available: true, connected: false, reason: "not_connected" },
+  });
+
+  it("both transports available + Server selected -> resolve + serialize POST server (§8.1)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "server", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    const selection = resolveProviderSelection(BOTH_AVAILABLE, storage);
+    expect(selection).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "hermes3:8b",
+    });
+    expect(toCreateCaseGeneration(selection)).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "hermes3:8b",
+    });
+  });
+
+  it("both transports available + Bridge selected -> resolve + serialize POST bridge (§8.2)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    const selection = resolveProviderSelection(BOTH_AVAILABLE, storage);
+    expect(selection).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+    expect(toCreateCaseGeneration(selection)).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+  });
+
+  it("Bridge connected does NOT override an explicit Server (§8.3)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "server", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    const selection = resolveProviderSelection(BRIDGE_CONNECTED, storage);
+    expect(selection?.ollamaTransport).toBe("server");
+    expect(toCreateCaseGeneration(selection)?.ollamaTransport).toBe("server");
+  });
+
+  it("Server available does NOT override an explicit Bridge (§8.4)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    const selection = resolveProviderSelection(BOTH_AVAILABLE, storage);
+    expect(selection?.ollamaTransport).toBe("bridge");
+  });
+
+  it("capability refresh preserves Server (even when Bridge comes connected) (§8.5)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "server", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    expect(resolveProviderSelection(BOTH_AVAILABLE, storage)?.ollamaTransport).toBe("server");
+    // A refreshed DTO now reports the bridge connected — the explicit Server
+    // selection is NOT overwritten.
+    expect(resolveProviderSelection(BRIDGE_CONNECTED, storage)?.ollamaTransport).toBe("server");
+  });
+
+  it("capability refresh preserves Bridge (even when Server comes back online) (§8.6)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    expect(resolveProviderSelection(SERVER_UNAVAILABLE, storage)?.ollamaTransport).toBe("bridge");
+    expect(resolveProviderSelection(BOTH_AVAILABLE, storage)?.ollamaTransport).toBe("bridge");
+  });
+
+  it("model changes do NOT reset the transport (§8.7)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    expect(resolveProviderSelection(BOTH_AVAILABLE, storage)?.ollamaTransport).toBe("bridge");
+    setOllamaModel("qwen2.5:1.5b", storage);
+    const selection = resolveProviderSelection(BOTH_AVAILABLE, storage);
+    expect(selection?.ollamaTransport).toBe("bridge");
+    expect(selection?.ollamaModel).toBe("qwen2.5:1.5b");
+  });
+
+  it("Fake -> Ollama restores the intended persisted transport (§8.8)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    // Switch the provider to Fake: the transport preference key is preserved
+    // (inert while the provider is non-ollama).
+    persistGenerationSelection(
+      { generationProvider: "fake", ollamaTransport: null, ollamaModel: "" },
+      storage,
+    );
+    expect(getOllamaTransport(storage)).toBe("bridge");
+    // Returning to Ollama (an explicit user switch back) restores bridge.
+    setGenerationProvider("ollama", storage);
+    const selection = resolveProviderSelection(BOTH_AVAILABLE, storage);
+    expect(selection).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+  });
+
+  it("a successful Bridge pairing selects + persists the Bridge transport (§8.9)", () => {
+    const none = bridgePairedSelection(CAPS_WITH_PROVIDERS, null);
+    expect(none).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "qwen2.5:1.5b",
+    });
+    const storage = fakeStorage();
+    persistGenerationSelection(none, storage);
+    expect(storage.entries.get(GENERATION_PROVIDER_STORAGE_KEY)).toBe("ollama");
+    expect(storage.entries.get(OLLAMA_TRANSPORT_STORAGE_KEY)).toBe("bridge");
+  });
+
+  it("ORDERED INTENT (older ordering): a Server choice made BEFORE the pairing began is overridden by the completed pairing (§8.9)", () => {
+    // The pure `bridgePairedSelection` models the pairing's implied selection
+    // and is only invoked by the route when the ordering guard is clear — a
+    // provider/transport choice made BEFORE the pairing window opened is OLDER
+    // intent, so the pairing (this function's output) still wins over it
+    // (§3: "If the user later explicitly chooses Server, Server remains
+    // selected" — for choices AFTER the pairing began; the pre-pairing
+    // ordering is the reverse).
+    const afterServer = bridgePairedSelection(CAPS_WITH_PROVIDERS, {
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "hermes3:8b",
+    });
+    expect(afterServer).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+    // The interleaved ordering (explicit choice made DURING the pairing
+    // window wins over the completion) is a ROUTE-level guard in
+    // src/routes/new.tsx (explicitChoiceSincePairingStartedRef) — pinned
+    // end-to-end in src/routes/new.providerSelector.test.tsx.
+  });
+
+  it("reload restores the persisted Bridge transport (§8.10)", () => {
+    const storage = fakeStorage();
+    setGenerationProvider("ollama", storage);
+    setOllamaTransport("bridge", storage);
+    setOllamaModel("hermes3:8b", storage);
+    // A fresh resolve from the same storage === a page reload restore.
+    expect(resolveProviderSelection(BOTH_AVAILABLE, storage)).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+  });
+
+  it("reload restores the persisted Server transport (§8.11)", () => {
+    const storage = fakeStorage();
+    setGenerationProvider("ollama", storage);
+    setOllamaTransport("server", storage);
+    setOllamaModel("hermes3:8b", storage);
+    expect(resolveProviderSelection(BOTH_AVAILABLE, storage)?.ollamaTransport).toBe("server");
+  });
+
+  it("unavailable Bridge stays selected, NO Server fallback (§8.12)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    const selection = resolveProviderSelection(BRIDGE_UNAVAILABLE, storage);
+    expect(selection?.ollamaTransport).toBe("bridge");
+    // The serialized payload still carries the SELECTED transport — no silent
+    // rewrite, no fallback.
+    expect(toCreateCaseGeneration(selection)).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+  });
+
+  it("unavailable Server stays selected, NO Bridge fallback (§8.13)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(
+      { generationProvider: "ollama", ollamaTransport: "server", ollamaModel: "hermes3:8b" },
+      storage,
+    );
+    const selection = resolveProviderSelection(SERVER_UNAVAILABLE, storage);
+    expect(selection?.ollamaTransport).toBe("server");
+    expect(toCreateCaseGeneration(selection)).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "hermes3:8b",
+    });
+  });
+
+  it("NO stored choice: the documented deterministic default applies (§5)", () => {
+    const ollama = buildProviderOffers(BOTH_AVAILABLE).find((offer) => offer.id === "ollama");
+    // both sides available, no connection -> server (documented tie-break).
+    expect(defaultOllamaTransport(ollama)).toBe("server");
+    expect(resolveProviderSelection(BOTH_AVAILABLE, undefined)?.ollamaTransport).toBe("server");
+    // bridge connected -> bridge (intent signal).
+    const connected = buildProviderOffers(BRIDGE_CONNECTED).find((offer) => offer.id === "ollama");
+    expect(defaultOllamaTransport(connected)).toBe("bridge");
+    expect(resolveProviderSelection(BRIDGE_CONNECTED, undefined)?.ollamaTransport).toBe("bridge");
+    // unambiguous single-side availability.
+    expect(
+      defaultOllamaTransport(
+        buildProviderOffers(SERVER_UNAVAILABLE).find((offer) => offer.id === "ollama"),
+      ),
+    ).toBe("bridge");
+    expect(
+      defaultOllamaTransport(
+        buildProviderOffers(BRIDGE_UNAVAILABLE).find((offer) => offer.id === "ollama"),
+      ),
+    ).toBe("server");
+    expect(defaultOllamaTransport(undefined)).toBeNull();
   });
 });

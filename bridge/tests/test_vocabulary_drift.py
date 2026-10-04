@@ -327,3 +327,61 @@ def test_frame_size_bound_still_dominates_both_copies():
         with pytest.raises(module.BridgeProtocolError) as excinfo:
             module.decode_frame(oversized, max_bytes=256 * 1024)
         assert excinfo.value.close_code == module.CLOSE_MESSAGE_TOO_BIG
+
+
+# --------------------------------------------------------------------------- #
+# Phase 26C2 (R1) — the bridge client's TRUSTED LOCAL schema mapping must
+# mirror the server's authoritative transport JSON Schema for the two
+# activity-log ids, so the Bridge never falls out of sync with the contract
+# the server validates against (never a wire schema — a trusted local constant
+# that structurally equals the server-derived schema).
+# --------------------------------------------------------------------------- #
+
+
+def _server_activity_log_schema() -> dict:
+    from app.generation import prompts
+
+    schema = prompts.schema_contract_as_json_schema("activity_log")
+    # the server derives this from the ONE _stage_contract mapping; assert the
+    # minItems/maxItems/enum preconditions so the comparison is meaningful
+    assert schema["properties"]["entries"]["minItems"] == 15
+    assert schema["properties"]["entries"]["maxItems"] == 20
+    return schema
+
+
+def test_trusted_local_schema_matches_server_authoritative_schema():
+    """Phase 26C2 R1 — the bridge client's TRUSTED local ACTIVITY_LOG schemas
+    structurally EQUAL the server's authoritative ``schema_contract_as_json_schema
+    ("activity_log")`` for BOTH ids (ACTIVITY_LOG_v1 and ACTIVITY_LOG_REPAIR_v1),
+    and the trusted mapping never accepts a schema from the wire (fixed local
+    constants only)."""
+    from pd_ollama_bridge import trusted_schemas
+
+    server = _server_activity_log_schema()
+    for schema_id in ("ACTIVITY_LOG_v1", "ACTIVITY_LOG_REPAIR_v1"):
+        assert schema_id in trusted_schemas.TRUSTED_SCHEMA_IDS
+        client_schema = trusted_schemas.schema_for(schema_id)
+        assert client_schema is not None
+        assert client_schema == server, schema_id
+    # an unknown id fails closed (never an invented/local schema guess)
+    assert trusted_schemas.schema_for("DRIFT_BROWSER_v1") is None
+    assert trusted_schemas.schema_for(None) is None
+    # the trusted local schema carries the EXACT closed enum the server guards
+    enum = set(server["properties"]["entries"]["items"]["properties"]["activityType"]["enum"])
+    from app.domain.activity_log import ACTIVITY_LOG_ACTIVITY_TYPES as SERVER_TYPES
+
+    assert enum == set(SERVER_TYPES)
+
+
+def test_trusted_schema_ids_are_authoritative_activity_log_only():
+    """R1 scoping: ONLY the two authoritative activity-log ids receive a trusted
+    schema; every other schema-id falls back to free-form ``format: "json"``
+    (documented gap stays for the rest of the protocol surface)."""
+    from pd_ollama_bridge import trusted_schemas
+
+    assert trusted_schemas.TRUSTED_SCHEMA_IDS == frozenset(
+        {"ACTIVITY_LOG_v1", "ACTIVITY_LOG_REPAIR_v1"}
+    )
+    for schema_id in ("CASE_PEOPLE_v1", "EVIDENCE_v1", "WORLD_REQUIREMENTS_v1",
+                      "ASSET_SPEC_v1", "REPAIR_v1", "ASSET_SPEC_REPAIR_v1"):
+        assert schema_id not in trusted_schemas.TRUSTED_SCHEMA_IDS

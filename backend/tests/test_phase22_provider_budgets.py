@@ -40,6 +40,10 @@ from bridge_harness import (  # noqa: E402
     new_anonymous_session,
     create_pairing,
 )
+from app.generation.budgets import (  # noqa: E402
+    derive_core_call_budget_default,
+    derive_global_call_budget_default,
+)
 
 _PROMPT = (
     "Victim: Dr. Anna Weiss\nMurderer: Paul Becker\nMotive: stolen research data\n"
@@ -188,8 +192,12 @@ def test_budget_snapshot_bridge_matches_ollama_driver(database_url):
 
     ollama_record, _transport = _run(
         _staged(),
-        max_llm_calls_per_generation=16,
-        max_core_llm_calls=12,
+        # Phase 26C4 — the same DERIVED GLOBAL legal envelope on BOTH sides (a
+        # fixed literal below it is now a rejected configuration anyway).
+        max_llm_calls_per_generation=derive_global_call_budget_default(),
+        # Phase 26C3: the SAME derived CORE legal-maximum cap on BOTH sides
+        # (a fixed literal below it is now a rejected configuration anyway).
+        max_core_llm_calls=derive_core_call_budget_default(),
         max_llm_calls_per_procedural_asset=5,
         max_procedural_assets_per_generation=20,
         max_failed_assets_per_generation=3,

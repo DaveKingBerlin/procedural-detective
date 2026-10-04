@@ -5,6 +5,8 @@ external service is ever touched.
 Behavior knobs (all optional, set by the test):
 
 - ``tags``: model tags returned by GET /api/tags.
+- ``version`` / ``version_status``: the /api/version probe answer (used by the
+  Phase 26C2 trusted-schema structured-output capability check).
 - ``outputs``: mapping schemaId -> structured output dict used by /api/chat.
 - ``hang``: when True, /api/chat waits forever (the bridge must time it out or
   cancel it). Cancellation is recorded in ``cancelled``.
@@ -25,6 +27,8 @@ class MockOllama:
         *,
         tags: tuple[str, ...] = ("hermes3:8b", "hermes3:8b-q4_K_M"),
         tags_status: int = 200,
+        version: str = "0.35.0",
+        version_status: int = 200,
         outputs: Optional[Dict[str, Mapping[str, Any]]] = None,
         hang: bool = False,
         status: int = 200,
@@ -34,6 +38,8 @@ class MockOllama:
     ) -> None:
         self.tags = list(tags)
         self.tags_status = tags_status
+        self.version = version
+        self.version_status = version_status
         self.outputs: Dict[str, Mapping[str, Any]] = outputs or {
             "ASSET_SPEC_v1": {"victim": "Sarah Miller", "murderer": "Thomas Reed"}
         }
@@ -70,6 +76,17 @@ class MockOllama:
                 {
                     "type": "http.response.start",
                     "status": self.tags_status,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": body, "more_body": False})
+            return
+        if method == "GET" and path == "/api/version":
+            body = json.dumps({"version": self.version}).encode("utf-8")
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.version_status,
                     "headers": [(b"content-type", b"application/json")],
                 }
             )

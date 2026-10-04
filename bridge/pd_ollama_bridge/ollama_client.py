@@ -56,6 +56,15 @@ def _effective_timeout_ms(timeout_ms: int) -> int:
     return max(300, int(timeout_ms) - margin)
 
 
+# The documented minimum Ollama version whose ``/api/chat`` ``format`` field
+# accepts a JSON Schema object (structured output). Mirrors the backend
+# ``app.generation.ollama_provider.OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION`` so
+# the bridge client uses the SAME capability floor as the direct path; servers
+# at or above this version receive the Trusted schema (Phase 26C2), older or
+# unknown servers keep the free-form ``"json"`` fallback (never a regression).
+OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION: tuple[int, int, int] = (0, 8, 0)
+
+
 class OllamaClient:
     """Thin, bounded client for a single local Ollama endpoint + model."""
 
@@ -84,6 +93,9 @@ class OllamaClient:
             ),
             follow_redirects=False,
         )
+        # Cached structured-output capability: ``None`` = not yet probed,
+        # ``False`` = not supported / unknown (fail-closed to free-form json).
+        self._structured_supported: Optional[bool] = None
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -118,14 +130,57 @@ class OllamaClient:
         _, tags = await self.check_available()
         return tags
 
+    async def structured_output_supported(self) -> bool:
+        """Whether the local Ollama accepts a JSON Schema ``format`` object.
+
+        Probes ``/api/version`` once (cached) and compares against
+        ``OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION`` — the SAME capability floor
+        the backend direct path uses. A failed /
+        unknown probe FAILS CLOSED to ``False``: the call then keeps
+        ``format: "json"`` and the normal per-job ``model``/timeout handling is
+        untouched (older Ollama installs never regress)."""
+        if self._structured_supported is not None:
+            return self._structured_supported
+        supported = False
+        try:
+            response = await asyncio.wait_for(
+                self._http.get(f"{self.base_url}/api/version"),
+                timeout=self.connect_timeout_seconds,
+            )
+            if response.status_code == 200:
+                payload = bounded_json_loads(response.content)
+                raw = str(payload.get("version") or "") if isinstance(payload, Mapping) else ""
+                parts = [int(p) for p in raw.split(".") if p.isdigit()][:3]
+                if len(parts) == 3 and parts[:3] >= list(OLLAMA_STRUCTURED_OUTPUT_MIN_VERSION):
+                    supported = True
+        except (asyncio.TimeoutError, httpx.HTTPError, BoundedJsonError, ValueError):
+            supported = False
+        self._structured_supported = supported
+        return supported
+
     async def run_structured_inference(
-        self, *, prompt: str, temperature: float, timeout_ms: int, model: Optional[str] = None
+        self,
+        *,
+        prompt: str,
+        temperature: float,
+        timeout_ms: int,
+        model: Optional[str] = None,
+        format_schema: Optional[Mapping[str, Any]] = None,
     ) -> Mapping[str, Any]:
         # Phase 25 — the model travels with the JOB (the server may have
         # selected a different model per generation request). ``model=None``
         # keeps the CLI-operators' configured default model (``self.model``).
         effective_model = model if isinstance(model, str) and model else self.model
         effective = _effective_timeout_ms(timeout_ms)
+        # Phase 26C2 (R1) — the trusted local JSON Schema (mapped from the job's
+        # authoritative ``schemaId`` by ``bridge_client``) is sent ONLY when the
+        # local Ollama provably supports structured output; ANY non-dict or a
+        # not-yet-supported server keeps the free-form ``"json"`` fallback.
+        use_schema = isinstance(format_schema, Mapping) and bool(format_schema)
+        if use_schema:
+            requested_schema = dict(format_schema)
+        else:
+            requested_schema = None
         payload: dict[str, Any] = {
             "model": effective_model,
             "messages": [{"role": "user", "content": prompt}],
@@ -133,6 +188,8 @@ class OllamaClient:
             "format": "json",
             "options": {"temperature": float(temperature)},
         }
+        if requested_schema is not None and await self.structured_output_supported():
+            payload["format"] = requested_schema
         try:
             coro = self._http.stream(
                 "POST",

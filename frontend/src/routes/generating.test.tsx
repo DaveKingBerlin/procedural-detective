@@ -84,6 +84,10 @@ describe("generation route — failure states", () => {
   for (const [kind, message] of [
     ["failed", "This prompt could not be turned into a solvable case."],
     ["retryable", "Generation is taking longer than expected."],
+    // Phase 26C3 §12 — the internal bounded-generation safety-limit bucket
+    // renders through the generic error state with a Retry action (the budget
+    // resets per generation attempt, so "Try again" is a truthful affordance).
+    ["safetyLimit", "This case could not be completed within the generation safety limits."],
   ] as const) {
     it(`renders a clear ${kind} message with Try again and Back to start`, () => {
       const html = render({ status: "error", kind, message });

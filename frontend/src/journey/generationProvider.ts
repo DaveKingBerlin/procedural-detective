@@ -28,12 +28,18 @@ import { isUnsafeDisplayString, safeDisplay } from "./generationMode";
  *     URL/IP/host hint into the selector) — reusing the SAME safe-display
  *     guards as src/journey/generationMode.ts (`isUnsafeDisplayString` /
  *     `safeDisplay`);
- *   - resolves the effective browser selection (sessionStorage preference,
+*   - resolves the effective browser selection (sessionStorage preference,
  *     otherwise the server `defaultProvider`, otherwise the FIRST still-
- *     available provider in server order) with DISCARD-IF-STALE semantics: a
- *     stored provider/transport that is no longer available is IGNORED and
- *     the server default (or first valid available provider) is chosen
- *     instead — a stale value is never submitted (§10.1);
+ *     available provider in server order) WITH the Phase 26C1 authoritative-
+ *     selection rule: the PROVIDER follows DISCARD-IF-STALE semantics (a
+ *     stored provider that is no longer available is IGNORED and the server
+ *     default / first valid available provider is chosen instead — a stale
+ *     value is never submitted, §10.1), while the SELECTED TRANSPORT is
+ *     AUTHORITATIVE and is preserved verbatim even when its transport is
+ *     currently unavailable (no silent rewrite to the other transport; the UI
+ *     shows the unavailable state, §2/§4/§7). Only when NO stored transport
+ *     exists does the deterministic no-preference default apply
+ *     (`defaultOllamaTransport`);
  *   - persists ONLY the three NON-SECRET preference keys in sessionStorage
  *     (generationProvider / ollamaTransport / ollamaModel). NEVER a
  *     credential, token, URL or configuration value (§1.4 / §10.1).
@@ -432,8 +438,10 @@ export function setOllamaTransport(
   return writeTransport(transport, storage);
 }
 
-/** Read the stored Ollama transport. ONLY the closed ids are returned (a
- *  stale value reads null — DISCARD-IF-STALE). */
+/** Read the stored Ollama transport. ONLY the closed ids are returned
+ *  (a tampered/invalid value reads null). Phase 26C1: the value is
+ *  AUTHORITATIVE once present — it is never discarded because the transport
+ *  is currently unavailable (§2/§4/§7). */
 export function getOllamaTransport(
   storage?: GenerationProviderStorage | null,
 ): OllamaTransportId | null {
@@ -500,7 +508,13 @@ export function clearOllamaModel(storage?: GenerationProviderStorage | null): vo
   }
 }
 
-/** Persist the full resolved selection — only the three non-secret keys. */
+/** Persist the full resolved selection — only the three non-secret keys.
+ *  Phase 26C1 §4 — for a NON-ollama selection the transport/model preference
+ *  keys are PRESERVED (not cleared): they are the user's Ollama preference
+ *  for the next time they choose the Ollama provider (Fake -> Ollama restores
+ *  the intended transport, §8). While the provider is non-ollama those keys
+ *  are INERT — never rendered, never serialized. `clearGenerationSelection`
+ *  remains the full reset for reset flows. */
 export function persistGenerationSelection(
   selection: GenerationProviderSelection,
   storage?: GenerationProviderStorage | null,
@@ -517,10 +531,8 @@ export function persistGenerationSelection(
     } else {
       clearOllamaModel(storage);
     }
-  } else {
-    clearOllamaTransport(storage);
-    clearOllamaModel(storage);
   }
+  // Non-ollama: the transport/model keys are deliberately left untouched.
 }
 
 /** Clear all three stored preference keys (reset flows; never credentials). */
@@ -531,18 +543,96 @@ export function clearGenerationSelection(storage?: GenerationProviderStorage | n
 }
 
 /* ======================================================================
+ * Phase 26C1 — selection-availability separation (§5/§7).
+ *
+ * `selectedTransport` (explicit user choice / persisted preference /
+ * successful pairing) and `serverAvailable`/`bridgeAvailable`/
+ * `bridgeConnected` (capability state) are SEPARATE concerns. A chosen
+ * transport is NEVER recomputed from availability; availability is only
+ * ever DISPLAYED next to the (authoritative) selection.
+ * ==================================================================== */
+
+/**
+ * Phase 26C1 §5 — the DETERMINISTIC no-preference default Ollama transport.
+ *
+ * Applies ONLY when no explicit/persisted transport choice exists:
+ *   1. an available transport that is ALSO connected for this session
+ *      (`bridge` bound to this anonymous session) — a live session binding
+ *      is the strongest intent signal (§5: "bridge when connected");
+ *   2. else the ONE available transport when availability is unambiguous
+ *      (exactly one side reports available);
+ *   3. else `server` when BOTH sides are available (documented deterministic
+ *      tie-break — the operator's canonical Direct-Ollama path);
+ *   4. else null (no usable transport; the model entry stays manual).
+ *
+ * This rule NEVER re-runs once an explicit or persisted choice exists, and it
+ * is the ONLY place "server" survives as a default — "server-first whenever
+ * the probe is up" (the Phase 26C1 defect) is gone (§2/§5/§7).
+ */
+export function defaultOllamaTransport(
+  offer: GenerationProviderOffer | undefined,
+): OllamaTransportId | null {
+  if (offer === undefined) return null;
+  const serverAvailable = offer.transports.server.available === true;
+  const bridgeAvailable = offer.transports.bridge.available === true;
+  const bridgeConnected = offer.transports.bridge.connected === true;
+  if (bridgeAvailable && bridgeConnected) return "bridge";
+  if (serverAvailable && !bridgeAvailable) return "server";
+  if (bridgeAvailable && !serverAvailable) return "bridge";
+  if (serverAvailable && bridgeAvailable) return "server";
+  return null;
+}
+
+/**
+ * Phase 26C1 §3 — the selection a SUCCESSFUL Bridge pairing implies: the
+ * Ollama provider with the Bridge transport (selected + persisted `bridge`).
+ *
+ * A completed pairing is strong Bridge intent. The model keeps the current
+ * Ollama model when one exists, else the server-configured `defaultModel`
+ * (never a hard-coded name).
+ *
+ * ORDERED-INTENT CONTRACT (LOW fix): this PURE function models the pairing's
+ * implied selection and knows NOTHING about ordering. The /new route owns the
+ * ordering guard (src/routes/new.tsx `explicitChoiceSincePairingStartedRef`):
+ *   - a provider/transport choice made BEFORE the pairing began is OLDER
+ *     intent — the completed pairing (this function's output) still overrides
+ *     it (§3 "even over an earlier explicit Server");
+ *   - a provider/transport choice made AFTER the pairing began is the NEWER
+ *     intent — the route SKIPS this function and keeps the explicit choice;
+ *   - a LATER explicit radio choice after the pairing completed also wins (the
+ *     selection that this function produced is simply replaced by the next
+ *     `onChange`).
+ * Capability refreshes never call this function (they never re-fire a pairing).
+ */
+export function bridgePairedSelection(
+  capabilities: GenerationCapabilitiesResponse | null,
+  current: GenerationProviderSelection | null,
+): GenerationProviderSelection {
+  let model = "";
+  if (current?.generationProvider === "ollama" && current.ollamaModel !== "") {
+    model = current.ollamaModel;
+  } else {
+    const ollama = buildProviderOffers(capabilities).find((offer) => offer.id === "ollama");
+    model = ollama?.defaultModel ?? "";
+  }
+  return { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: model };
+}
+
+/* ======================================================================
  * Resolution — the effective browser selection (§10).
  *
  * Order:
  *   1. a VALID sessionStorage choice (known id AND still available) — the
- *      DISCARD-IF-STALE rule: a stored provider/transport that is no longer
- *      available is IGNORED and never submitted;
+ *      DISCARD-IF-STALE rule APPLIES TO THE PROVIDER ONLY: a stored provider
+ *      that is no longer available is IGNORED and never submitted;
  *   2. otherwise the server `defaultProvider` (when it is still available);
  *   3. otherwise the FIRST still-available provider in the server's own
  *      order;
  *   4. otherwise the deterministic `fake` offer (the historical default).
- * For Ollama the transport defaults to the first still-available side
- * (Server / Direct first), and the model defaults to the configured
+ * For Ollama the TRANSPORT is authoritative (Phase 26C1): the stored
+ * preference — `server` or `bridge` — is preserved verbatim even when that
+ * transport is currently unavailable (§2/§4); only with NO stored transport
+ * does `defaultOllamaTransport` apply. The model defaults to the configured
  * `defaultModel` when no (valid) stored model exists — model names are NEVER
  * hard-coded here (§2).
  * ==================================================================== */
@@ -584,15 +674,14 @@ export function resolveProviderSelection(
   if (provider === "ollama") {
     const ollama = offers.find((offer) => offer.id === "ollama");
     if (ollama !== undefined) {
-      const serverOk = ollama.transports.server.available;
-      const bridgeOk = ollama.transports.bridge.available;
+      // Phase 26C1 §2/§4/§7 — the SELECTED transport is authoritative and is
+      // preserved VERBATIM, including when its transport is currently
+      // unavailable (no silent rewrite to the other side; the UI shows the
+      // unavailable state instead). Only when NO stored preference exists
+      // does the deterministic no-preference default apply.
       const storedTransport = getOllamaTransport(storage);
-      // DISCARD-IF-STALE transport: stored value honored ONLY when available.
-      if (storedTransport === "server" && serverOk) ollamaTransport = "server";
-      else if (storedTransport === "bridge" && bridgeOk) ollamaTransport = "bridge";
-      if (ollamaTransport === null) {
-        ollamaTransport = serverOk ? "server" : bridgeOk ? "bridge" : null;
-      }
+      ollamaTransport =
+        storedTransport !== null ? storedTransport : defaultOllamaTransport(ollama);
       // Model: stored (non-empty) preference first, else the CONFIGURED
       // default model from the capabilities API — never a hard-coded name.
       const storedModel = getOllamaModel(storage);
@@ -613,6 +702,15 @@ export function resolveProviderSelection(
  * Ollama provider (and only when actually present); every other selection —
  * and null (no provider offer) — resolves to `undefined`, so the old
  * no-selection call sites stay byte-identical (§13).
+ *
+ * DOCUMENTED NO-USABLE-TRANSPORT PATH (fail-closed, INFONote A1a): an Ollama
+ * selection with NO usable transport (`ollamaTransport: null` — both
+ * transports unavailable and no stored choice) posts `{generationProvider:
+ * "ollama"}` WITHOUT the transport key. The backend rejects it with
+ * INVALID_GENERATION_PROVIDER, which the journey maps to the frozen safe
+ * `invalidGenerationProvider` copy on submit — this is an INTENDED fail-closed
+ * rejection (the client never silently fabricates a fallback transport), not a
+ * silent fallback.
  */
 export function toCreateCaseGeneration(
   selection: GenerationProviderSelection | null,

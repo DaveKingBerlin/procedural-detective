@@ -421,6 +421,43 @@ describe("runDemo — Phase 25 provider selection", () => {
     expect(result.failure.kind).toBe("retryable");
     expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.generic);
   });
+
+  it("Phase 26C1 §17/§18 — each run POSTs EXACTLY ITS OWN transport once (no stale transport, no shared state)", async () => {
+    const services = makeServices();
+    // First run under an explicit Server selection.
+    await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: {
+        generationProvider: "ollama",
+        ollamaTransport: "server",
+        ollamaModel: "hermes3:8b",
+      },
+    });
+    // Second run under an explicit Bridge selection — the first run's
+    // transport must not leak into it (no client-global state mutation).
+    await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: {
+        generationProvider: "ollama",
+        ollamaTransport: "bridge",
+        ollamaModel: "hermes3:8b",
+      },
+    });
+    // EXACTLY two POSTs — one per run, each with its OWN current transport.
+    expect(services.createCase).toHaveBeenCalledTimes(2);
+    expect(services.createCase).toHaveBeenNthCalledWith(1, ANON, "prompt", undefined, {
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "hermes3:8b",
+    });
+    expect(services.createCase).toHaveBeenNthCalledWith(2, ANON, "prompt", undefined, {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+  });
 });
 
 describe("runDemo — generation FAILED", () => {
@@ -511,15 +548,20 @@ describe("runDemo — generation FAILED", () => {
     });
     expect(providerBudget.ok).toBe(false);
     if (providerBudget.ok) throw new Error("expected provider budget failure");
-    expect(providerBudget.failure.kind).toBe("provider");
-    expect(providerBudget.failure.message).toBe(
-      DEMO_FAILURE_MESSAGES.providerUnavailable,
-    );
+    // Phase 26C3 §12 — call-budget exhaustion is an internal bounded-
+    // generation safety limit, NEVER provider unavailability.
+    expect(providerBudget.failure.kind).toBe("safetyLimit");
+    expect(providerBudget.failure.message).toBe(DEMO_FAILURE_MESSAGES.safetyLimit);
+    expect(providerBudget.failure.message).not.toContain("unavailable");
   });
 });
 
-describe("runDemo — Phase 19 failure codes (budget / asset limits)", () => {
-  const PHASE_19_PROVIDER_BUDGET_CODES = [
+describe("runDemo — Phase 19/26C3 failure codes (call-budget safety limits / asset limits)", () => {
+  // Phase 26C3 §12 — the FULL hierarchical provider-call-budget exhaustion
+  // family maps as ONE internal bounded-generation safety-limit bucket (the
+  // provider was available and returning results; this is NOT an outage).
+  const PROVIDER_CALL_BUDGET_CODES = [
+    "PROVIDER_CALL_BUDGET_EXHAUSTED",
     "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED",
     "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
   ];
@@ -528,8 +570,8 @@ describe("runDemo — Phase 19 failure codes (budget / asset limits)", () => {
     "MAX_FAILED_ASSETS_EXCEEDED",
   ];
 
-  it.each(PHASE_19_PROVIDER_BUDGET_CODES)(
-    "maps %s (server-side FAILED on createCase) to the safe provider message, never the raw code",
+  it.each(PROVIDER_CALL_BUDGET_CODES)(
+    "maps %s (server-side FAILED on createCase) to the safety-limit message, never provider-unavailable and never the raw code",
     async (failureCode) => {
       const result = await runDemo("prompt", {
         services: makeServices({
@@ -545,11 +587,14 @@ describe("runDemo — Phase 19 failure codes (budget / asset limits)", () => {
         wait: NO_WAIT,
       });
       expect(result.ok).toBe(false);
-      if (result.ok) throw new Error("expected provider-budget failure");
-      expect(result.failure.kind).toBe("provider");
-      expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
-      // The raw code must never reach a player-facing surface.
+      if (result.ok) throw new Error("expected call-budget failure");
+      expect(result.failure.kind).toBe("safetyLimit");
+      expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.safetyLimit);
+      // The internal code must never reach a player-facing surface.
       expect(result.failure.message).not.toContain(failureCode);
+      // Must never masquerade as provider unavailability (§12).
+      expect(result.failure.message).not.toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+      expect(result.failure.message).not.toContain("unavailable");
     },
   );
 
@@ -577,8 +622,8 @@ describe("runDemo — Phase 19 failure codes (budget / asset limits)", () => {
     },
   );
 
-  it.each(PHASE_19_PROVIDER_BUDGET_CODES)(
-    "maps %s from a polled FAILED status to the safe provider message",
+  it.each(PROVIDER_CALL_BUDGET_CODES)(
+    "maps %s from a polled FAILED status to the safety-limit message",
     async (failureCode) => {
       const services = makeServices({
         createCase: vi.fn(() => runningCase()),
@@ -593,9 +638,9 @@ describe("runDemo — Phase 19 failure codes (budget / asset limits)", () => {
       });
       const result = await runDemo("prompt", { services, wait: NO_WAIT });
       expect(result.ok).toBe(false);
-      if (result.ok) throw new Error("expected provider-budget failure");
-      expect(result.failure.kind).toBe("provider");
-      expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+      if (result.ok) throw new Error("expected call-budget failure");
+      expect(result.failure.kind).toBe("safetyLimit");
+      expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.safetyLimit);
     },
   );
 
@@ -621,38 +666,49 @@ describe("runDemo — Phase 19 failure codes (budget / asset limits)", () => {
     expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
   });
 
-  it("falls back to the generic failed message for an unknown/hostile code, never the raw code", async () => {
-    const hostile = "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED_AND_MORE";
-    const result = await runDemo("prompt", {
-      services: makeServices({
-        createCase: vi.fn(async () => ({
-          caseId: "CASE-demo-01",
-          generationId: "GEN-demo-01",
-          generationAttemptId: "ATT-demo-01",
-          creatorAccessToken: CREATOR,
-          status: "FAILED",
-          failureCode: hostile,
-        })),
-      }),
-      wait: NO_WAIT,
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected unknown-code failure");
-    expect(result.failure.kind).toBe("failed");
-    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
-    expect(result.failure.message).not.toContain(hostile);
-  });
+  it.each([
+    "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED_AND_MORE",
+    "X_PROVIDER_CALL_BUDGET_EXHAUSTED",
+    "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED_TWICE",
+  ])(
+    "a hostile/legacy %s variant falls to the generic failed message, never narrowing into the safety-limit bucket",
+    async (hostile) => {
+      const result = await runDemo("prompt", {
+        services: makeServices({
+          createCase: vi.fn(async () => ({
+            caseId: "CASE-demo-01",
+            generationId: "GEN-demo-01",
+            generationAttemptId: "ATT-demo-01",
+            creatorAccessToken: CREATOR,
+            status: "FAILED",
+            failureCode: hostile,
+          })),
+        }),
+        wait: NO_WAIT,
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected unknown-code failure");
+      expect(result.failure.kind).toBe("failed");
+      expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+      expect(result.failure.message).not.toContain(hostile);
+      // Never narrowed into the new safety-limit bucket by prefix/substring.
+      expect(result.failure.kind).not.toBe("safetyLimit");
+    },
+  );
 });
 
-describe("generationFailed — direct mapping (Phase 19 codes)", () => {
-  it("maps each new provider-budget code to the safe provider message class", () => {
+describe("generationFailed — direct mapping (Phase 19/26C3 codes)", () => {
+  it("maps the full call-budget exhaustion family to the safety-limit message, never provider-unavailable", () => {
     for (const failureCode of [
+      "PROVIDER_CALL_BUDGET_EXHAUSTED",
       "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED",
       "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
     ]) {
       const failure = generationFailed(failureCode);
-      expect(failure.kind).toBe("provider");
-      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+      expect(failure.kind).toBe("safetyLimit");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.safetyLimit);
+      expect(failure.kind).not.toBe("provider");
+      expect(failure.message).not.toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
     }
   });
 
@@ -671,6 +727,8 @@ describe("generationFailed — direct mapping (Phase 19 codes)", () => {
     for (const hostile of [
       "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED_EXTRA",
       "X_ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
+      "PROVIDER_CALL_BUDGET_EXHAUSTED_AGAIN",
+      "PREFIX_PROVIDER_CALL_BUDGET_EXHAUSTED",
       "MAX_PROCEDURAL_ASSETS_EXCEEDED_NOW",
       "TOO_MANY_MAX_FAILED_ASSETS_EXCEEDED",
     ]) {
@@ -678,6 +736,8 @@ describe("generationFailed — direct mapping (Phase 19 codes)", () => {
       expect(failure.kind).toBe("failed");
       expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
       expect(failure.message).not.toContain(hostile);
+      // The hostile prefix must never narrow into the safety-limit bucket.
+      expect(failure.kind).not.toBe("safetyLimit");
     }
     // Same for the pre-existing buckets: no prefix narrowing regressions.
     expect(generationFailed("PROVIDER_TIMEOUT_x").kind).toBe("failed");
@@ -689,7 +749,7 @@ describe("generationFailed — direct mapping (Phase 19 codes)", () => {
     expect(generationFailed("PROVIDER_TIMEOUT").kind).toBe("provider");
     expect(generationFailed("PROVIDER_UNAVAILABLE").kind).toBe("provider");
     expect(generationFailed("PROVIDER_INVALID_RESPONSE").kind).toBe("provider");
-    expect(generationFailed("PROVIDER_CALL_BUDGET_EXHAUSTED").kind).toBe("provider");
+    expect(generationFailed("PROVIDER_CALL_BUDGET_EXHAUSTED").kind).toBe("safetyLimit");
   });
 
   it("keeps the DEFAULT fallback unchanged (null/undefined/unknown)", () => {
@@ -698,6 +758,70 @@ describe("generationFailed — direct mapping (Phase 19 codes)", () => {
       expect(failure.kind).toBe("failed");
       expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
     }
+  });
+});
+
+describe("Phase 26C3 §12/§13 — provider QOS vs internal safety-limit mapping", () => {
+  it("PROVIDER_TIMEOUT keeps its distinct provider-timeout copy (never the provider-outage copy)", () => {
+    const failure = generationFailed("PROVIDER_TIMEOUT");
+    expect(failure.kind).toBe("provider");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.providerTimeout);
+    expect(failure.message).not.toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+  });
+
+  it("BRIDGE_NOT_CONNECTED keeps its distinct bridge-pairing copy", () => {
+    const failure = generationFailed("BRIDGE_NOT_CONNECTED");
+    expect(failure.kind).toBe("provider");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.bridgeNotConnected);
+  });
+
+  it("a genuine provider outage (PROVIDER_UNAVAILABLE) keeps the provider-unavailable copy", () => {
+    const failure = generationFailed("PROVIDER_UNAVAILABLE");
+    expect(failure.kind).toBe("provider");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+  });
+
+  it("CORE_PROVIDER_CALL_BUDGET_EXHAUSTED maps to the generation safety-limit message, NOT provider unavailability", () => {
+    const failure = generationFailed("CORE_PROVIDER_CALL_BUDGET_EXHAUSTED");
+    expect(failure.kind).toBe("safetyLimit");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.safetyLimit);
+    expect(failure.kind).not.toBe("provider");
+    expect(failure.message).not.toBe(DEMO_FAILURE_MESSAGES.providerUnavailable);
+    // No internal budget number or pipeline topology is ever exposed.
+    expect(failure.message).not.toMatch(/\d{2,}/);
+    expect(failure.message).not.toContain("core");
+  });
+
+  it("a validation failure (VALIDATION_FAILED) keeps the generic failed copy", () => {
+    const failure = generationFailed("VALIDATION_FAILED");
+    expect(failure.kind).toBe("failed");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+  });
+
+  it("generation deadline exhausted keeps its distinct deadline copy", () => {
+    const failure = generationFailed("GENERATION_DEADLINE_EXCEEDED");
+    expect(failure.kind).toBe("deadline");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.deadline);
+  });
+
+  it("the full budget family also maps through a real run (createCase FAILED)", async () => {
+    const result = await runDemo("prompt", {
+      services: makeServices({
+        createCase: vi.fn(async () => ({
+          caseId: "CASE-demo-01",
+          generationId: "GEN-demo-01",
+          generationAttemptId: "ATT-demo-01",
+          creatorAccessToken: CREATOR,
+          status: "FAILED",
+          failureCode: "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED",
+        })),
+      }),
+      wait: NO_WAIT,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected call-budget failure");
+    expect(result.failure.kind).toBe("safetyLimit");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.safetyLimit);
   });
 });
 

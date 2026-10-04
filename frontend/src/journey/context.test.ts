@@ -177,4 +177,24 @@ describe("JourneyParams.generation selection — Phase 25", () => {
     clearJourneyParams();
     expect(getJourneyParams()).toBeNull();
   });
+
+  it("the LATEST staged transport wins — a re-stage never leaks a stale transport (§8.14/§8.15/§8.17)", () => {
+    setJourneyParams({
+      prompt: "p",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "qwen2.5:1.5b",
+    });
+    // The /new route stages the CURRENT selection — a Server -> Bridge switch
+    // immediately before Generate replaces the previous transport entirely.
+    setJourneyParams({
+      prompt: "p",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "qwen2.5:1.5b",
+    });
+    expect(getJourneyParams()?.ollamaTransport).toBe("bridge");
+  });
 });

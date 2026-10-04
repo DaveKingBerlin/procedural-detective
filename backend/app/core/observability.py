@@ -65,6 +65,19 @@ _SAFE_FIELDS = frozenset(
         # public witness id are player-safe metadata: NEVER the statement
         # text, observations, CaseTruth, hidden evidence or provider output.
         "questionType", "newDiscoveryCount", "witnessId",
+        # Phase 26C2 — safe canonical-row observability (boolean only — never
+        # the row content, timestamps or activity text).
+        "canonicalRowPresent", "canonicalRowRestored",
+        # Phase 26C3 §14 — safe configured provider-call budget field (the
+        # integer cap only; never the pipeline topology beyond the number).
+        "providerCallBudget",
+        # Phase 26C4 §16 — safe CONFIGURED global / core provider-call budget
+        # fields (the integer caps only; never pipeline topology). The runtime
+        # counters (providerCallCount / coreCallCount / assetCallCount /
+        # remainingGlobalCalls / remainingCoreCalls) are already allowlisted
+        # above. Never CaseTruth, tokens, prompts or provider URLs.
+        "configuredGlobalProviderCallBudget",
+        "configuredCoreProviderCallBudget",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

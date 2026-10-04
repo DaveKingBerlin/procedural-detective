@@ -396,6 +396,25 @@ describe("Phase 25 — the generation-selection carried from /new reaches the jo
     await releaseRun();
   });
 
+  it("an ollama+bridge selection carried from /new reaches the RunFn unchanged (byte-exact transport)", async () => {
+    const params: JourneyParams = {
+      prompt: "A crime",
+      difficulty: "medium",
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    };
+    const { run, releaseRun } = mountJourney(demoOnly, params);
+    await settleEffects();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0][5]).toEqual({
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    });
+    await releaseRun();
+  });
+
   it("a fake-only selection travels WITHOUT transport/model fields", async () => {
     const params: JourneyParams = {
       prompt: "A crime",

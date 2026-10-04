@@ -466,6 +466,10 @@ def make_bridge_settings(database_url: str, **overrides) -> Any:
     """The standard Phase 22 server settings (generous admission, bounded
     bridge timings). Each test file may override the moments it exercises."""
     from app.core.config import Settings
+    from app.generation.budgets import (
+        derive_core_call_budget_default,
+        derive_global_call_budget_default,
+    )
 
     kwargs = dict(
         database_url=database_url,
@@ -473,8 +477,18 @@ def make_bridge_settings(database_url: str, **overrides) -> Any:
         enable_bridge=True,
         generation_provider="remote_client",
         generation_deadline_seconds=60,
-        max_llm_calls_per_generation=16,
-        max_core_llm_calls_per_generation=12,
+        # Phase 26C4 — the GLOBAL default is the DERIVED LEGAL ENVELOPE (the
+        # resolved Core legal maximum + the legal asset envelope); a fixed
+        # literal (the legacy 16/128) below it is now a REJECTED configuration
+        # error (config.py ``_align_global_call_budget``), so the harness uses
+        # the derived values (bridge runs consume 7..8 calls — far below
+        # either ceiling; the ceiling is a runaway guard, not a target).
+        max_llm_calls_per_generation=derive_global_call_budget_default(),
+        # Phase 26C3 — the CORE default is the DERIVED legal maximum; a fixed
+        # literal below it (the legacy 12) is now a rejected configuration
+        # error (config.py ``_align_core_call_budget``), so the harness uses
+        # the derived value (the tests never approach this ceiling anyway).
+        max_core_llm_calls_per_generation=derive_core_call_budget_default(),
         max_llm_calls_per_procedural_asset=5,
         max_concurrent_generations=2,
         max_concurrent_generations_global=4,
