@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router";
 import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/types";
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import { setJourneyParams, type JourneyDifficulty, type JourneyParams } from "../journey/context";
+import { rollDemoCaseId } from "../journey/demoCaseSelection";
 import { PROMPT_MAX_CHARS } from "../journey/demoPrompt";
 import {
   EXAMPLE_PROMPTS,
@@ -12,7 +13,7 @@ import {
   selectExamplePrompt,
   type ExamplePromptId,
 } from "../journey/examplePrompts";
-import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, demoCtaLabel, demoCtaNote } from "../journey/generationMode";
+import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, demoCtaLabel, demoCtaNote, demoCtaState } from "../journey/generationMode";
 import { GenerationModeDisplay } from "../journey/generationModeSelector";
 import { GenerationProviderSelector } from "../journey/GenerationProviderSelector";
 import {
@@ -234,7 +235,7 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
   };
 
   /** Validate the prompt and stage the journey; false keeps the user on page. */
-  const stageJourney = (text: string, level: JourneyDifficulty): boolean => {
+  const stageJourney = (text: string, level: JourneyDifficulty, demoCaseId?: string): boolean => {
     const validation = validatePrompt(text);
     if (!validation.ok || validation.trimmed === null) {
       setError(validation.error ?? "Describe a crime first — a sentence or two is enough.");
@@ -257,6 +258,11 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
         }
       }
     }
+    // Phase 28 — the closed Demo fixture id travels ONLY on the demo path
+    // (a fresh "Try Demo Case" roll); a generated-case submit passes no id.
+    if (typeof demoCaseId === "string" && demoCaseId !== "") {
+      params.demoCaseId = demoCaseId;
+    }
     setJourneyParams(params);
     return true;
   };
@@ -268,7 +274,16 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     }
   };
 
-  const startDemo = (): boolean => stageJourney(examplePromptText(), difficulty);
+  const startDemo = (): boolean => {
+    // Phase 28 — the random three-fixture Demo pool applies ONLY when the
+    // backend reports the demo-only allowlist (`demoCtaState === "demo"` —
+    // the exact "Try Demo Case" state). rollDemoCaseId also pins the
+    // selection for the whole session. On a local/live/unknown backend the
+    // renamed example-case action keeps its byte-identical request (the
+    // backend rejects demoCaseId for any non-fake provider).
+    const demoCaseId = demoCtaState(capabilities) === "demo" ? rollDemoCaseId() : undefined;
+    return stageJourney(examplePromptText(), difficulty, demoCaseId);
+  };
 
   const handleDemoLink = (event: { preventDefault: () => void }) => {
     if (!startDemo()) {

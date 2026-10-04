@@ -45,6 +45,14 @@ export interface JourneyParams {
    * credential or configuration value (§1.3).
    */
   ollamaModel?: string;
+  /**
+   * Phase 28 — the OPTIONAL selected Demo fixture id ("demo-apartment" /
+   * "demo-gallery" / "demo-laboratory"), carried in-memory ONLY on the demo
+   * path (a fresh "Try Demo Case": the value always comes from
+   * rollDemoCaseId — never free text). Absent for generated-case journeys:
+   * POST /cases then omits demoCaseId (generated-case behavior unchanged).
+   */
+  demoCaseId?: string;
 }
 
 let current: JourneyParams | null = null;

@@ -34,6 +34,7 @@ from app.services.generation import (
     EnvironmentHintError,
     GenerationServiceError,
     IdentifierConflict,
+    InvalidDemoCaseError,
     InvalidGenerationProviderError,
     InvalidOllamaModelError,
     PromptValidationError,
@@ -93,6 +94,15 @@ def map_service_error(exc: Exception) -> HTTPException:
             400,
             "INVALID_OLLAMA_MODEL",
             "The Ollama model selection is invalid or unsupported",
+        )
+    if isinstance(exc, InvalidDemoCaseError):
+        # Phase 28 — an unknown demoCaseId, or a demoCaseId on a non-fake
+        # provider. The offending value is NEVER echoed (it may embed hostile
+        # material) and no internal registry detail is exposed.
+        return http_error(
+            400,
+            "INVALID_DEMO_CASE",
+            "Unknown or invalid demo case selection",
         )
     if isinstance(exc, (DuplicatePublication, DuplicateCaseVersion, DuplicateAttempt)):
         return http_error(409, "CASE_VERSION_CONFLICT", "Case version conflict")

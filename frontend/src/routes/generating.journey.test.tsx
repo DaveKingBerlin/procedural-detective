@@ -14,6 +14,7 @@ import {
   resetAnonymousSessionCache,
 } from "../api/anonymousSession";
 import type { JourneyParams } from "../journey/context";
+import { DEMO_CASE_ID_STORAGE_KEY } from "../journey/demoCaseSelection";
 
 // React's test utilities need the act() environment flag (same as the other
 // jsdom suites in this repo).
@@ -66,6 +67,7 @@ afterEach(() => {
   });
   container.remove();
   localStorage.clear();
+  sessionStorage.clear();
   resetAnonymousSessionCache();
 });
 
@@ -425,5 +427,49 @@ describe("Phase 25 — the generation-selection carried from /new reaches the jo
     await settleEffects();
     expect(run.mock.calls[0][5]).toEqual({ generationProvider: "fake" });
     await releaseRun();
+  });
+
+  it("Phase 28 — a demo-case id carried from the demo path reaches the RunFn generation block", async () => {
+    const params: JourneyParams = {
+      prompt: "A crime",
+      difficulty: "medium",
+      demoCaseId: "demo-gallery",
+    };
+    const { run, releaseRun } = mountJourney(demoOnly, params);
+    await settleEffects();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0][3]).toBeNull(); // validated mode unchanged
+    expect(run.mock.calls[0][5]).toEqual({ demoCaseId: "demo-gallery" });
+    await releaseRun();
+  });
+
+  it("Phase 28 — a journey WITHOUT a demo id carries NO demoCaseId (generated cases unchanged)", async () => {
+    const { run, releaseRun } = mountJourney(demoOnly, PARAMS);
+    await settleEffects();
+    expect(run.mock.calls[0][5]).toBeUndefined();
+    await releaseRun();
+  });
+});
+
+describe("Phase 28 §17 — Back to start resets the per-session demo holder", () => {
+  it("clicking Back to start from a failed demo clears pd_demo_case_id so the NEXT Try Demo Case may roll fresh", async () => {
+    sessionStorage.setItem(DEMO_CASE_ID_STORAGE_KEY, "demo-apartment");
+    const { run, releaseRun } = mountJourney(demoOnly);
+    await settleEffects();
+    await releaseRun(); // the run fails -> the error view (with Back to start)
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem(DEMO_CASE_ID_STORAGE_KEY)).toBe("demo-apartment");
+
+    const link = container.querySelector<HTMLAnchorElement>(
+      'a[data-testid="generation-back-to-start"]',
+    );
+    if (!link) throw new Error("expected the Back to start link");
+    act(() => {
+      link.click();
+    });
+
+    // A deliberate reset: the holder is cleared (a refresh of an ACTIVE demo
+    // never goes through this path, so its fixture is never re-rolled).
+    expect(sessionStorage.getItem(DEMO_CASE_ID_STORAGE_KEY)).toBeNull();
   });
 });

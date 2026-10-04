@@ -216,8 +216,16 @@ export default function ScenePage() {
   /**
    * Phase 23 — the interview ask chain: session.askWitness (idempotent;
    * cached re-ask -> no POST) -> statement back to the panel + knowledge /
-   * discovery side effects here. A newly discovered record opens the existing
-   * evidence panel and the whole discovery machinery flows into the notebook.
+   * discovery side effects here.
+   *
+   * Phase 28 §1/§2 — a witness-sourced discovery does NOT re-open the
+   * evidence panel: the exact statement (summary + observations) is already
+   * rendered inside the WitnessPanel, so a floating overlay would duplicate
+   * it. The discovery side effects are UNCHANGED — the session caches the
+   * record and merges the knowledge/scene flags, the notebook and
+   * discovered-entry-* strip re-derive, and the discovery toast still fires.
+   * Evidence inspection from an OBJECT interaction still opens the panel
+   * (applyFeedback above).
    */
   const handleWitnessAsk = async (
     witnessId: string,
@@ -244,23 +252,25 @@ export default function ScenePage() {
         // not change knowledge/model state and hasInteracted was already true.
         setWitnessRevision((revision) => revision + 1);
       }
-      if (outcome.record !== null) {
-        // Reuse the existing record/panel mechanics: the discovery record
-        // opens the evidence panel (no object context — the witness is the
-        // source, and REMOTE witnesses have no scene object to highlight).
-        setRecordPanel(outcome.record);
-        setPanelContext(null);
-        setSelectedObjectId(null);
-        setInteractionError(null);
-        if (outcome.discovery !== null && outcome.discovery.newlyDiscovered) {
-          setToast({
-            id: `toast-witness-${Date.now()}`,
-            text: `Discovered: ${outcome.record.title}`,
-            evidenceId: outcome.record.evidenceId,
-          });
-        }
-      } else {
-        setInteractionError(null);
+      // Phase 28 §1/§2 — a witness answer NEVER opens the evidence panel:
+      // the SAME statement (summary + observations) is already rendered in
+      // the WitnessPanel, and the old auto-open duplicated it over the scene
+      // with an extra Close/Dismiss. Every discovery side effect is preserved
+      // exactly: the session cached the record + merged the knowledge/scene
+      // flags (notebook and discovered-entry-* strip re-derive), and the
+      // toast below confirms the read once. Evidence inspection from an
+      // OBJECT interaction still opens the panel (applyFeedback).
+      setInteractionError(null);
+      if (
+        outcome.record !== null &&
+        outcome.discovery !== null &&
+        outcome.discovery.newlyDiscovered
+      ) {
+        setToast({
+          id: `toast-witness-${Date.now()}`,
+          text: `Discovered: ${outcome.record.title}`,
+          evidenceId: outcome.record.evidenceId,
+        });
       }
       // The interview may have grown the server-derived knowledge (discovered/
       // read ids) — re-sync the scene model by reference stability (cheap
@@ -917,7 +927,9 @@ export default function ScenePage() {
 
       {/* Phase 23 — the witness interview panel. Idempotent re-ask: the
           session serves answered questions from its in-memory store (no
-          POST, no duplicate); discovered evidence already opened above. */}
+          POST, no duplicate). Phase 28: a witness-sourced discovery updates
+          the toast + discovered/read state + notebook WITHOUT opening the
+          floating evidence panel (the statement is already in this panel). */}
       {witnessPanel !== null && sessionRef.current !== null && (
         <WitnessPanel
           witness={witnessPanel}

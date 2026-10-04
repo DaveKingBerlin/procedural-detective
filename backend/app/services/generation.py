@@ -68,6 +68,7 @@ from app.models.generation import GenerationAttempt
 from app.persistence.store import DuplicatePublication, Store
 from app.persistence.timebase import EpochClock
 from app.services.admission import DurableAdmissionController
+from app.services import demo_cases
 from app.services.publication import (
     PublicationService,
     derive_title_from_prompt,
@@ -111,6 +112,29 @@ def _bounded_provider_script_load(path: Path) -> Any:
 
 # Generation-service bound for the Phase 13 unknown-object request list.
 MAX_GENERATED_REQUESTS = 8
+
+
+def _canonical_demo_case_id(demo_case_id: str | None) -> str | None:
+    """Phase 28 F1 — normalize a browser-supplied demo id ONCE at the service
+    boundary (the single funnel every transport passes through).
+
+    Contract: only ASCII ``' '`` padding around a KNOWN registry id is
+    tolerated — ``" demo-gallery "`` unambiguously means ``demo-gallery`` and
+    must behave EXACTLY like it EVERYWHERE downstream (selector, fixture
+    milestone, ``fake_script``, ``demo.started`` observability, generation).
+    Everything else is left UNTOUCHED so it fails the closed registry
+    allowlist and answers the same sanitized 400 INVALID_DEMO_CASE envelope
+    (never echoed): tab/newline-padded values (``"\\t demo-gallery\\n"``),
+    non-ASCII lookalike dashes (``"demo\u2013gallery"``) and any other
+    non-canonical string all hit the reject path. ``None`` stays ``None``
+    (absent == the byte-identical default path); a non-str value passes
+    through unchanged so the selector's type guard raises the typed 400.
+    """
+    if demo_case_id is None:
+        return None
+    if not isinstance(demo_case_id, str):
+        return demo_case_id
+    return demo_case_id.strip(" ")
 
 
 _PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
@@ -165,6 +189,12 @@ class ProviderUnavailableError(GenerationServiceError):
 class InvalidOllamaModelError(GenerationServiceError):
     """Phase 25 — a user-supplied Ollama model string failed the central
     validator (-> 400 INVALID_OLLAMA_MODEL; never echoes the offending value)."""
+
+
+class InvalidDemoCaseError(GenerationServiceError):
+    """Phase 28 — an unknown/invalid demoCaseId, or a demoCaseId supplied for
+    a non-fake provider (-> 400 INVALID_DEMO_CASE; the offending value is
+    never echoed and no fixture is ever selected on a real LLM path)."""
 
 
 class UnknownCaseError(GenerationServiceError):
@@ -729,6 +759,7 @@ class GenerationService:
         generation_provider: str | None = None,
         ollama_transport: str | None = None,
         ollama_model: str | None = None,
+        demo_case_id: str | None = None,
     ) -> CaseStarted:
         """Run one private case generation durably (version 1).
 
@@ -760,9 +791,36 @@ class GenerationService:
           explicit-but-unavailable -> ``ProviderUnavailableError`` (400, never
           a silent fallback); a bad Ollama model string ->
           ``InvalidOllamaModelError`` (400).
+        - ``demo_case_id`` (Phase 28): the OPTIONAL demo-fixture selection
+          (``demo-apartment`` | ``demo-gallery`` | ``demo-laboratory``).
+          It is ONLY meaningful on the fake/demo provider path: absent ->
+          the existing single-fixture behavior (the builtin ``dev_mode_case``
+          / configured ``FAKE_PROVIDER_SCRIPT`` default, byte-identical);
+          a known id on the fake provider -> that fixture's script is resolved
+          ONCE at attempt start (per-generation-attempt isolation; the server
+          never re-rolls and never mutates global state); an unknown id ->
+          ``InvalidDemoCaseError`` (400 INVALID_DEMO_CASE); a ``demo_case_id``
+          with any non-fake provider -> ``InvalidDemoCaseError`` (400 — a
+          browser value can never select fixtures on a real LLM path).
+
+        Phase 28 F1 (adversarial fix): the id is CANONICALIZED here, once, at
+        the service boundary. Only ASCII ``' '`` padding around a known
+        registry id is tolerated (``" demo-gallery "`` behaves EXACTLY like
+        ``demo-gallery`` in the selector, the fixture milestone, the
+        ``fake_script`` selection, the ``demo.started`` observability and
+        this generation) — every other non-canonical string (tab/newline
+        padding, non-ASCII lookalike dashes, unknown ids) is rejected with the
+        sanitized 400 INVALID_DEMO_CASE envelope and never echoed.
         """
         settings = self._settings
         from app.world.environment import canonicalize_environment_hint
+
+        # Phase 28 F1 — normalize the demo id ONCE at the service boundary so
+        # the same canonical value is threaded through EVERY consumer below
+        # (``_resolve_demo_selection``, the fixture milestone lookup, the
+        # controller ``demo.started`` observability and generation). The
+        # selector and milestone can never disagree again.
+        demo_case_id = _canonical_demo_case_id(demo_case_id)
 
         # Phase 25 — freezes the per-attempt provider selection (validation +
         # availability, zero provider calls, zero settings mutation). The
@@ -773,7 +831,26 @@ class GenerationService:
             ollama_transport=ollama_transport,
             ollama_model=ollama_model,
         )
-        resolved = self._resolve_selection(selection, strict_unavailable=explicit)
+        # Phase 28 — resolve the demo fixture script BEFORE the provider
+        # bundle is frozen (per-attempt isolation, fail-closed validation).
+        demo_script = self._resolve_demo_selection(demo_case_id, selection)
+        resolved = self._resolve_selection(
+            selection, strict_unavailable=explicit, fake_script=demo_script
+        )
+        # Phase 28 — on the demo path the selected FIXTURE is authoritative:
+        # the deterministic locked constraints + world requirements are derived
+        # from the fixture's own canonical demo prompt (a server-side constant
+        # that matches the fixture truth by construction), NOT from the
+        # client-supplied prompt. The browser prompt still travels in the
+        # request body (and its length/structure are still validated below) but
+        # it can never contradict the fixture or select different content —
+        # the fixture is fully server-controlled (§16: no re-roll, no prompt
+        # influence). Without a demoCaseId nothing changes (backward compat).
+        milestone = demo_cases.get_demo_case(demo_case_id)
+        if milestone is not None:
+            effective_prompt = milestone.prompt
+        else:
+            effective_prompt = prompt_text
 
         # Local input validation: zero reservations, zero provider calls.
         # Phase 19 Fix A: an explicit ``environment`` body field is
@@ -789,34 +866,55 @@ class GenerationService:
                 raise EnvironmentHintError(
                     "environment hint is invalid or exceeds the configured limit"
                 )
-            canonical_environment, _canonical_issues = canonicalize_environment_hint(
-                environment
-            )
-            if canonical_environment is None:
-                # Safe-but-unknown hint (e.g. "greenhouse by the lake"): the
-                # documented safe-unknown behavior is the FALLBACK kit — keep
-                # the original value for the resolver (never a provider call).
-                canonical_environment = environment
-            elif canonical_environment != environment:
-                emit_event(
-                    "environment.canonicalized",
-                    environmentId=canonical_environment,
-                    reasonCode="ENVIRONMENT_HINT_CANONICALIZED",
+            if milestone is None:
+                # Non-demo path: the (safe) hint is canonicalized and honored.
+                canonical_environment, _canonical_issues = (
+                    canonicalize_environment_hint(environment)
                 )
+                if canonical_environment is None:
+                    # Safe-but-unknown hint (e.g. "greenhouse by the lake"): the
+                    # documented safe-unknown behavior is the FALLBACK kit —
+                    # keep the original value for the resolver (never a
+                    # provider call).
+                    canonical_environment = environment
+                elif canonical_environment != environment:
+                    emit_event(
+                        "environment.canonicalized",
+                        environmentId=canonical_environment,
+                        reasonCode="ENVIRONMENT_HINT_CANONICALIZED",
+                    )
+            # Demo path: the fixture is authoritative for the world too — a
+            # safe browser hint is validated (same 422 boundary for hostile
+            # values) but never used to re-compose the fixture's own scene /
+            # world graph (the fixture's canonical prompt + default kit apply).
         # Phase 14 — deterministic prompt -> WorldRequirements. The explicit
         # Phase 11 ``environment`` body field takes precedence over the prompt
         # derived hint; unknown values fall back to the documented default kit.
+        # The CLIENT prompt is still length/structure validated even on the
+        # demo path (the same prompt-bound invariant every generation request
+        # honors); the demo path then continues with the fixture's canonical
+        # prompt so the derived locks/world requirements always match it.
         try:
-            locked, _prompt_note = normalize_prompt(
+            _raw_locked, _raw_note = normalize_prompt(
                 prompt_text, max_chars=settings.max_prompt_chars
             )
+            if effective_prompt is prompt_text:
+                # Non-demo path (and blank/absent demoCaseId): byte-identical
+                # single-parse behavior — the raw locked constraints ARE used.
+                locked, _prompt_note = _raw_locked, _raw_note
+            else:
+                # Demo path: derive the locks from the fixture's canonical
+                # prompt (server-side constant), never from the browser text.
+                locked, _prompt_note = normalize_prompt(
+                    effective_prompt, max_chars=settings.max_prompt_chars
+                )
         except PromptError:
             raise PromptValidationError(
                 "prompt is invalid or exceeds the configured limit"
             ) from None
         from app.world.extract import extract_world_requirements
 
-        world_reqs = extract_world_requirements(prompt_text, locked)
+        world_reqs = extract_world_requirements(effective_prompt, locked)
         prompt_hint = world_reqs.environment_hint
         prompt_canonical, _prompt_canonical_issues = canonicalize_environment_hint(
             prompt_hint
@@ -839,10 +937,11 @@ class GenerationService:
         self._ensure_admission_ready(session_row)
 
         handle, record, now = self._run_generation(
-            prompt_text,
+            effective_prompt,
             anonymous_quota_session_id=anonymous_quota_session_id,
             creator_token=creator_token,
             resolved=resolved,
+            demo_case_id=demo_case_id,
         )
         case_id = handle.case_id
         attempt_id = handle.attempt_id
@@ -1417,6 +1516,7 @@ class GenerationService:
         creator_token: str | None,
         ids: Any | None = None,
         resolved: ResolvedGeneration | None = None,
+        demo_case_id: str | None = None,
     ) -> tuple[Any, Any, float]:
         """Fresh per-request controller; admission inside; synchronous run.
 
@@ -1488,6 +1588,9 @@ class GenerationService:
             provider_timeout_seconds=resolved.timeout_seconds,
             provider_name=resolved.provider_id,
             provider_model=resolved.model,
+            # Phase 28 — the FROZEN per-attempt demo fixture id (sanitized
+            # ``demo.started`` observability only; None for non-demo attempts).
+            demo_case_id=demo_case_id,
         )
         _t0 = time.perf_counter()
         try:
@@ -1896,12 +1999,63 @@ class GenerationService:
                 "the Ollama model string is invalid or unsupported"
             ) from None
 
+    def _resolve_demo_selection(
+        self,
+        demo_case_id: str | None,
+        selection: GenerationSelection,
+    ) -> Mapping[Any, Any] | None:
+        """Phase 28 — resolve ONE per-attempt demo fixture script (or None).
+
+        Fail-closed, per-generation-attempt semantics:
+
+        - ``None`` (no ``demoCaseId``): returns ``None``, and the resolver
+          keeps the configured default script (builtin ``dev_mode_case`` or
+          the ``FAKE_PROVIDER_SCRIPT`` override) — byte-identical backward
+          compatibility with the Demo-Case-#1-only behavior;
+        - a known registry id on a FAKE selection: returns that fixture's
+          script (resolved once at attempt start; the server never re-rolls
+          and never mutates global state — concurrent attempts stay isolated);
+        - an unknown/blank-id value, or any ``demoCaseId`` together with a
+          NON-fake provider, raises ``InvalidDemoCaseError`` (400
+          INVALID_DEMO_CASE) — the browser value is never echoed and can never
+          select fixtures on a real LLM path.
+
+        Phase 28 F1 — canonicalization happens ONCE at the service boundary
+        (``_canonical_demo_case_id``): this selector receives the SAME value
+        the milestone lookup and observability use, so ASCII-space padding
+        around a known id selects that exact fixture and ANY non-canonical
+        value (tab/newline padding, non-ASCII lookalikes, unknown ids) is
+        rejected here — the selector and milestone can never disagree again.
+
+        The script returned here is passed to ``_resolve_selection`` as the
+        ``fake_script`` override for THIS attempt only.
+        """
+        if demo_case_id is None:
+            return None
+        if not isinstance(demo_case_id, str):
+            raise InvalidDemoCaseError(
+                "demo case selection is invalid or unsupported"
+            )
+        if not demo_case_id:
+            # Blank / space-only value (already canonicalized at the service
+            # boundary) == absent (backward compatible).
+            return None
+        if selection.provider != "fake":
+            raise InvalidDemoCaseError(
+                "demo case selection requires the demo provider"
+            )
+        record = demo_cases.get_demo_case(demo_case_id)
+        if record is None:
+            raise InvalidDemoCaseError("unknown demo case")
+        return record.script
+
     def _resolve_selection(
         self,
         selection: GenerationSelection,
         *,
         strict_unavailable: bool,
         session: str | None = None,
+        fake_script: Mapping[Any, Any] | None = None,
     ) -> ResolvedGeneration:
         """The per-attempt resolver (Phase 25 §5) + error translation.
 
@@ -1910,6 +2064,11 @@ class GenerationService:
           process (single-flight, bounded — never per attempt) and ONLY when an
           Ollama selection needs it (a fake/live/frontier/bridge default never
           triggers a capability probe);
+        - ``fake_script`` (Phase 28): the FROZEN per-attempt fake-provider
+          script. None -> the configured default (the builtin ``dev_mode_case``
+          or ``FAKE_PROVIDER_SCRIPT`` override) exactly as before; a resolved
+          demo fixture script is passed for the demo cases. Per-attempt only:
+          concurrent attempts can never observe each other's fixture.
         - selection/config errors are translated to the service boundary types
           (the API layer never imports app.generation). Configuration errors
           keep their sanitized operator-facing message (never a secret).
@@ -1931,6 +2090,7 @@ class GenerationService:
         structured_flag = (
             self._structured_output_flag() if selection.provider == "ollama" else False
         )
+        script = self._get_fake_script() if fake_script is None else fake_script
         try:
             return resolve_selection(
                 selection,
@@ -1938,7 +2098,7 @@ class GenerationService:
                 session=session,
                 bridge_registry=self._bridge_registry,
                 ollama_structured_output=structured_flag,
-                fake_script=self._get_fake_script(),
+                fake_script=script,
                 strict_unavailable=strict_unavailable,
             )
         except SelectionInvalidProviderError:
@@ -2158,6 +2318,7 @@ __all__ = [
     "GenerationService",
     "GenerationServiceError",
     "IdentifierConflict",
+    "InvalidDemoCaseError",
     "InvalidGenerationProviderError",
     "InvalidOllamaModelError",
     "MAX_GENERATED_REQUESTS",

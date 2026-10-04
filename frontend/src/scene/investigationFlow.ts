@@ -100,9 +100,13 @@ export interface InteractionFeedback {
  * Phase 23 — the result of asking ONE closed interview question.
  * `ok:true` always carries the deterministic player-safe statement; when the
  * question legitimately discovered evidence, `record`/`discovery.record`
- * carry the (now player-known) evidence record the UI should open. `cached`
- * is true ONLY when the answer was served from the in-memory asked-store
- * (a re-ask — no POST, no duplicate, no re-opened panel).
+ * carry the (now player-known) evidence record the caller may surface.
+ * Phase 28 §1 — the scene route no longer OPENS the evidence panel for a
+ * witness-sourced record (the statement is already shown inside the witness
+ * panel); the record still flows into the session cache, the knowledge/scene
+ * flags and the notebook/discovery strip. `cached` is true ONLY when the
+ * answer was served from the in-memory asked-store (a re-ask — no POST, no
+ * duplicate, no re-opened panel).
  */
 export type WitnessAskOutcome =
   | {

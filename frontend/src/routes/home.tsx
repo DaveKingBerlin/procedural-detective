@@ -2,9 +2,10 @@ import { Link, useNavigate, useOutletContext } from "react-router";
 import type { BackendStatus } from "../hooks/useBackendStatus";
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import type { GenerationCapabilitiesResponse } from "../api/types";
-import { setJourneyParams } from "../journey/context";
+import { setJourneyParams, type JourneyParams } from "../journey/context";
+import { rollDemoCaseId } from "../journey/demoCaseSelection";
 import { EXAMPLE_PROMPT } from "../journey/demoPrompt";
-import { demoCtaLabel, demoCtaNote } from "../journey/generationMode";
+import { demoCtaLabel, demoCtaNote, demoCtaState } from "../journey/generationMode";
 import { GenerationModeDisplay } from "../journey/generationModeSelector";
 import {
   providerPathNoteFromCapabilities,
@@ -36,10 +37,11 @@ import {
  * (`configuredProvider == "fake"` or, on older servers, the availability-
  * derived demo-only shape). When the backend reports the local or live
  * provider (including a configured ollama/live backend whose probe FAILED —
- * DEF-096), the SAME action (startDemo -> setJourneyParams({prompt:
- * EXAMPLE_PROMPT, difficulty: "medium"}) -> /generating -> runDemo POST
- * /cases) is renamed to "Try an example case" with the truthful per-mode
- * note and an explicit "not the free deterministic demo" warning; a
+ * DEF-096), the SAME action (startDemo -> rollDemoCaseId() +
+ * setJourneyParams({prompt: EXAMPLE_PROMPT, difficulty: "medium",
+ * demoCaseId}) -> /generating -> runDemo POST /cases) is renamed to "Try an
+ * example case" with the truthful per-mode note and an explicit "not the free
+ * deterministic demo" warning; a
  * null/unreachable capability report downgrades the CTA to the neutral
  * label and a provider-neutral note — the frontend cannot know the provider
  * when the DTO is unavailable. No request field, mode switching or provider
@@ -69,7 +71,18 @@ export default function Home(overrides: HomeProps = {}) {
   const { state, message, readiness } = outletStatus;
 
   const startDemo = () => {
-    setJourneyParams({ prompt: EXAMPLE_PROMPT, difficulty: "medium" });
+    // Phase 28 — the random three-fixture Demo pool applies ONLY when the
+    // backend reports the demo-only allowlist (`demoCtaState === "demo"` —
+    // the exact state that earns the "Try Demo Case" label; the demo-only
+    // backend is server-enforced). rollDemoCaseId also pins the selection
+    // for the whole session. On a local/live/unknown backend the renamed
+    // example-case action keeps its byte-identical request: the backend
+    // rejects demoCaseId for any non-fake provider (400 INVALID_DEMO_CASE),
+    // so the frontend never sends it unless the fake path is confirmed.
+    const demoCaseId = demoCtaState(capabilities) === "demo" ? rollDemoCaseId() : undefined;
+    const params: JourneyParams = { prompt: EXAMPLE_PROMPT, difficulty: "medium" };
+    if (demoCaseId !== undefined) params.demoCaseId = demoCaseId;
+    setJourneyParams(params);
     navigate("/generating");
   };
 

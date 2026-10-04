@@ -458,6 +458,22 @@ describe("runDemo — Phase 25 provider selection", () => {
       ollamaModel: "hermes3:8b",
     });
   });
+
+  it("Phase 28 — a demoCaseId selection reaches createCase as the flat 4th-argument block (demo path only)", async () => {
+    const services = makeServices();
+    await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: { demoCaseId: "demo-laboratory" },
+    });
+    expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined, {
+      demoCaseId: "demo-laboratory",
+    });
+    // A second run WITHOUT a selection stays three arguments (byte-identical).
+    const plainServices = makeServices();
+    await runDemo("prompt", { services: plainServices, wait: NO_WAIT });
+    expect(plainServices.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined);
+  });
 });
 
 describe("runDemo — generation FAILED", () => {

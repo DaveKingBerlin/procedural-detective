@@ -125,6 +125,7 @@ class GenerationController:
         provider_timeout_seconds: float | None = None,
         provider_name: str | None = None,
         provider_model: str | None = None,
+        demo_case_id: str | None = None,
     ) -> None:
         self._provider = provider
         self._admission = admission
@@ -168,6 +169,11 @@ class GenerationController:
         )
         self._provider_name = provider_name
         self._provider_model = provider_model
+        # Phase 28 — the FROZEN per-attempt demo fixture id (a VALIDATED
+        # registry id such as ``demo-gallery``; None for non-demo attempts).
+        # Never truth, never a prompt, never internal fixture material; it is
+        # only carried into the sanitized ``generation.started`` observability.
+        self._demo_case_id = demo_case_id
         if isinstance(max_retained_attempts, bool) or not isinstance(
             max_retained_attempts, int
         ):
@@ -280,6 +286,15 @@ class GenerationController:
             configuredCoreProviderCallBudget=budget.max_core_calls,
             deadlineRemainingMs=int(budget.remaining_seconds() * 1000),
         )
+        if self._demo_case_id is not None:
+            emit_event(
+                "demo.started",
+                caseId=case_id,
+                generationAttemptId=attempt_id,
+                provider=self._provider_name,
+                demoCaseId=self._demo_case_id,
+                deadlineRemainingMs=int(budget.remaining_seconds() * 1000),
+            )
         self._advance(attempt)
         self._prune_retained_attempts()
         return GenerationHandle(

@@ -52,14 +52,34 @@ vi.mock("../api/playthroughToken", () => ({
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
   const interactObject = vi.fn(
-    async (_pt: string, objectId: string, interaction: string): Promise<InteractionResultDTO> => ({
-      objectId,
-      interaction,
-      evidenceId: null,
-      discovery: null,
-      result: "interacted",
-      inspection: { relevant: false, label: `Inspected ${objectId} (server)` },
-    }),
+    async (_pt: string, objectId: string, interaction: string): Promise<InteractionResultDTO> => {
+      // An ordinary OBJECT discovery (Phase 28 §14: object interactions still
+      // open the general evidence panel — only witness-ask auto-open is gone).
+      if (objectId === "apartment_laptop" && interaction === "read") {
+        return {
+          objectId,
+          interaction,
+          evidenceId: "email_thomas_01",
+          discovery: {
+            evidenceId: "email_thomas_01",
+            kind: "email",
+            title: "Laptop activity log",
+            interaction,
+            state: "discovered",
+          },
+          result: "interacted",
+          inspection: { relevant: true, label: "Laptop" },
+        };
+      }
+      return {
+        objectId,
+        interaction,
+        evidenceId: null,
+        discovery: null,
+        result: "interacted",
+        inspection: { relevant: false, label: `Inspected ${objectId} (server)` },
+      };
+    },
   );
   const interviewWitness = vi.fn(
     async (
@@ -310,7 +330,7 @@ describe("Phase 23 — /scene witness visibility (ON_SCENE + REMOTE_STATEMENT)",
 });
 
 describe("Phase 23 — interview question flow on /scene", () => {
-  it("asking TIME POSTs {questionType:'TIME'}, renders the statement, opens the discovery record, updates knowledge + notebook", async () => {
+  it("asking TIME POSTs {questionType:'TIME'}, renders the statement in the panel, does NOT open the evidence overlay, updates knowledge + notebook", async () => {
     await flushAsync();
     await waitForReady(mounted!.container);
     click(mounted!.container, `[data-testid="witness-${EMILY_WITNESS_ID}"]`);
@@ -336,8 +356,13 @@ describe("Phase 23 — interview question flow on /scene", () => {
     expect(observationTimes).toHaveLength(2);
     expect(observationTimes[0].getAttribute("dateTime")).toBe("23:40");
 
-    // Discovery record opened the EXISTING evidence panel.
-    expect(mounted!.container.querySelector('[data-testid="evidence-panel"]')).not.toBeNull();
+    // Phase 28 §1/§14 — the witness statement is NOT re-shown in a floating
+    // evidence-panel overlay (the SAME statement is already in the witness
+    // panel): no duplicate card, and no extra Close/Dismiss action exists.
+    expect(mounted!.container.querySelector('[data-testid="evidence-panel"]')).toBeNull();
+    expect(mounted!.container.querySelector('[data-testid="evidence-close"]')).toBeNull();
+
+    // The discovery toast still confirms the read (announcement preserved).
     expect(
       mounted!.container.querySelector('[data-testid="discovery-toast-text"]')?.textContent,
     ).toContain("Discovered:");
@@ -359,6 +384,59 @@ describe("Phase 23 — interview question flow on /scene", () => {
     expect(
       mounted!.container.querySelector('[data-testid="notebook-group-people-list"]')!.textContent,
     ).toContain("Emily Reed");
+  });
+
+  it("Phase 28 §14 — the witness answer is fully in-panel: panel + polite live region, no overlay, object interactions still open the evidence panel", async () => {
+    await flushAsync();
+    await waitForReady(mounted!.container);
+
+    // An OBJECT discovery still opens the general evidence-panel modal
+    // (unrelated modal behavior intact).
+    click(mounted!.container, '[data-testid="object-apartment_laptop"]');
+    await flushAsync();
+    expect(mounted!.container.querySelector('[data-testid="evidence-panel"]')).not.toBeNull();
+    expect(mounted!.container.querySelector('[data-testid="evidence-close"]')).not.toBeNull();
+
+    // Close the object evidence panel before the interview.
+    click(mounted!.container, '[data-testid="evidence-close"]');
+    await flushAsync();
+    expect(mounted!.container.querySelector('[data-testid="evidence-panel"]')).toBeNull();
+
+    // Now open the witness panel and ask a discovery-bearing question: the
+    // evidence panel must NOT auto-open on top of the scene — the answer
+    // stays in the witness panel only (no duplicate statement card).
+    click(mounted!.container, `[data-testid="witness-${EMILY_WITNESS_ID}"]`);
+    await flushAsync();
+    click(mounted!.container, '[data-testid="witness-question-TIME"]');
+    await flushAsync();
+
+    const panel = mounted!.container.querySelector('[data-testid="witness-panel"]')!;
+    expect(panel.querySelector('[data-testid="witness-panel-name"]')?.textContent).toBe(
+      "Emily Reed",
+    );
+    // The statement lives in the panel's normal answer flow.
+    expect(panel.querySelector('[data-testid="witness-statement-summary"]')?.textContent).toContain(
+      "heavy impact",
+    );
+    expect(panel.querySelector('[data-testid="witness-observations"]')).not.toBeNull();
+    // Accessibility: the answer region is still announced via a polite
+    // live region (Phase 28 §1 — no announcement duty is lost).
+    const answerSection = panel.querySelector('[data-testid="witness-answer-section"]');
+    expect(answerSection?.getAttribute("aria-live")).toBe("polite");
+    // No floating statement overlay and no extra Close/Dismiss action.
+    expect(mounted!.container.querySelector('[data-testid="evidence-panel"]')).toBeNull();
+    expect(mounted!.container.querySelector('[data-testid="evidence-close"]')).toBeNull();
+    // The discovery still landed exactly once (strip/toast/notebook).
+    expect(
+      mounted!.container.querySelector(`[data-testid="discovered-entry-${EMILY_TIME_EVIDENCE_ID}"]`),
+    ).not.toBeNull();
+    expect(
+      mounted!.container.querySelector('[data-testid="discovery-toast-text"]')?.textContent,
+    ).toContain("Discovered:");
+    const witnessLines = mounted!.container
+      .querySelector('[data-testid="notebook-group-witness-statements-list"]')!
+      .querySelectorAll("li");
+    expect(witnessLines).toHaveLength(1);
   });
 
   it("IDEMPOTENT re-ask: asking TIME again serves the cached statement — no POST, no duplicate notebook line", async () => {
