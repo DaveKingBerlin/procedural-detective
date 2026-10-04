@@ -102,6 +102,18 @@ class WorldObjectDTO(BaseModel):
     definition that passed the current compiler/schema projection gate (any
     mismatch skips the placement). Player-safe by construction: bounded
     declarative geometry + resolved colors, NO executable content.
+
+    Phase 26C5 Fix-C (C5-01/DEF-014) additive: ``displayLabel`` carries the
+    SEMANTIC humanized label of a TRUSTED-FALLBACK object (provenance
+    NORMALIZED_EXACT / CATEGORY_FALLBACK / GENERIC_FALLBACK at composition
+    time), derived from the PUBLIC object identity through the player-safe
+    semantic-label path (``bronze_ceremonial_ice_pick`` -> "Bronze Ceremonial
+    Ice Pick") — NEVER the substituted catalog asset's name and never a raw
+    assetId. It is set ONLY for trusted-fallback placements; every exact /
+    alias / semantic / procedural placement serializes byte-identically (the
+    key is OMITTED when null — the frontend treats absent == null and falls
+    back to its existing ``entry.label``). The composition's resolution
+    provenance is never exposed through this DTO.
     """
 
     objectId: str
@@ -115,21 +127,28 @@ class WorldObjectDTO(BaseModel):
     discovered: bool = False
     read: bool = False
     generated: GeneratedAssetDefinitionDTO | None = None
+    displayLabel: str | None = None
 
     @model_serializer
     def _serialize(self) -> dict[str, Any]:
-        """Serialize the signal fields, OMITTING ``generated`` when absent.
+        """Serialize the signal fields, OMITTING ``generated`` / ``displayLabel``
+        when absent.
 
         Phase 13 contract: ``generated`` is an OPTIONAL additive field — the
         golden (non-procedural) bootstrap response stays byte-identical
         (no ``generated`` key), while a procedural placement still carries its
-        validated definition. Every other (nullable) field keeps its value as
-        before (``subtype``/``evidenceId`` remain present-null).
+        validated definition. Phase 26C5 Fix-C: ``displayLabel`` is ALSO a
+        safe OPTIONAL additive field — OMITTED (absent == null) for every
+        exact/alias/semantic/procedural placement so non-fallback responses
+        stay byte-identical; the frontend falls back to ``entry.label`` when
+        it reads ``displayLabel`` as absent/null. Every other (nullable) field
+        keeps its value as before (``subtype``/``evidenceId`` remain
+        present-null).
         """
         result: dict[str, Any] = {}
         for field_name in type(self).model_fields:
             value = getattr(self, field_name)
-            if field_name == "generated" and value is None:
+            if field_name in ("generated", "displayLabel") and value is None:
                 continue
             result[field_name] = value
         return result

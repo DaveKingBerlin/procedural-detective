@@ -102,10 +102,11 @@ class AssetResolutionOrError:
     """The unified oracle outcome.
 
     ``resolution`` is ALWAYS the normal catalog resolver's result — for a
-    generated path it is the ORIGINAL FALLBACK (so callers can degrade
-    explicitly); ``generated`` carries the generated resolution when the
-    generation path succeeded; ``error`` is a sanitized message when the
-    generation path was attempted but failed (never an exception).
+    generated path it is the ORIGINAL FALLBACK (or Phase 26C5 trusted
+    CATEGORY_FALLBACK / GENERIC_FALLBACK) so callers can degrade explicitly;
+    ``generated`` carries the generated resolution when the generation path
+    succeeded; ``error`` is a sanitized message when the generation path was
+    attempted but failed (never an exception).
     """
 
     resolution: AssetResolution | None = None
@@ -214,8 +215,23 @@ class GeneratedAssetOracle:
         """
         catalog = catalog if catalog is not None else self._catalog
         resolution = resolve(request, catalog=catalog)
+        # A Phase 26C5 trusted NORMALIZED_EXACT / CATEGORY_FALLBACK /
+        # GENERIC_FALLBACK is a SAFE representation already; the bounded
+        # provider is still consulted (the PRE-EXISTING asset-spec attempt —
+        # same budget, cache-memoized) so a provider that CAN produce the
+        # specific object wins (the application-owned showcase fixtures), and
+        # a provider that yields nothing falls back to the trusted catalog
+        # asset (never a failure). UNRESOLVED is fail-closed and never
+        # escalates to a provider call.
         needs_generation = force_generate or (
-            resolution is not None and resolution.provenance is Provenance.FALLBACK
+            resolution is not None
+            and resolution.provenance
+            in (
+                Provenance.FALLBACK,
+                Provenance.NORMALIZED_EXACT,
+                Provenance.CATEGORY_FALLBACK,
+                Provenance.GENERIC_FALLBACK,
+            )
         )
         if spec_provider is None or not needs_generation:
             return AssetResolutionOrError(resolution=resolution)

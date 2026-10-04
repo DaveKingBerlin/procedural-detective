@@ -306,11 +306,25 @@ def test_unseen_examples_absent_from_production_lookups():
     names = {o.requested_name for o in extracted.objects}
     assert "carved ivory desk seal" in names
     assert "unusual forensic sample press" in names
-    # 6. catalog resolution of the unseen names is a MISS (falls back)
-    resolution = __import__("app.assets.resolver", fromlist=["resolve"]).resolve(
+    # 6. catalog resolution of the unseen names is a MISS (falls back) — the
+    #    exact phrase exists in NO catalog/alias lookup. Phase 26C5 adds the
+    #    DOCUMENTED trusted taxonomy ONLY for the C5 acceptance list (§12):
+    #    the ice pick now resolves through the explicit stabbing_weapon
+    #    category explicitly (CATEGORY_FALLBACK, same-class trusted prop),
+    #    while a genuinely unknown noun ("carved ivory desk seal") still
+    #    resolves to the neutral FALLBACK — never a random prop.
+    resolver_mod = __import__("app.assets.resolver", fromlist=["resolve"])
+    ice_pick_resolution = resolver_mod.resolve(
         AssetRequest(requested_name=BRONZE_ICE_PICK_NAME)
     )
-    assert resolution.provenance is Provenance.FALLBACK
+    assert ice_pick_resolution.provenance is Provenance.CATEGORY_FALLBACK
+    assert ice_pick_resolution.resolution_category == "stabbing_weapon"
+    assert ice_pick_resolution.asset_id == "PROP_KITCHEN_KNIFE_01"
+    desk_seal_resolution = resolver_mod.resolve(
+        AssetRequest(requested_name=CARVED_IVORY_DESK_SEAL_NAME)
+    )
+    assert desk_seal_resolution.provenance is Provenance.FALLBACK
+    assert desk_seal_resolution.asset_id == "PROP_FALLBACK_01"
 
 
 # --------------------------------------------------------------------------- #
@@ -551,8 +565,11 @@ def test_no_semantic_wrong_object_substitution():
     counting = _counting_provider()
     # the request carries a WEAPON tag that ties it to the kitchen knife at
     # confidence 3.0 (one tag) — BELOW CRITICAL_MIN_SEMANTIC_CONFIDENCE (6.0).
-    # A REQUIRED object is NEVER substituted by that unrelated catalog asset:
-    # it escalates to the provider and gets the REAL proc.* object.
+    # Phase 26C5: the resolver now classifies "bronze ceremonial ice pick" as
+    # the DOCUMENTED stabbing_weapon category. A REQUIRED object is NEVER
+    # substituted by an ARBITRARY catalog asset: the bounded provider is
+    # consulted FIRST and produces the REAL proc.* object; only a provider
+    # that yields nothing would fall back to the trusted knife prop.
     request = ObjectRequest(
         requested_name=BRONZE_ICE_PICK_NAME,
         tags=("weapon",),
@@ -580,18 +597,23 @@ def test_no_semantic_wrong_object_substitution():
     ]
     assert len(knife_placements) == 1  # the base only
 
-    # control: a DECORATIVE request with the SAME lossy tag match is NOT
-    # escalated (decorative props may degrade to the semantic match)
+    # control: a DECORATIVE request with the SAME tag match follows the
+    # pre-existing bounded provider path (the provider attempt is the same
+    # budgeted call a FALLBACK decorative would have made pre-C5; a cache hit
+    # memoizes it). C5 gives it a TRUSTED catalog answer when the provider
+    # yields nothing, so it is never left unresolved.
     deco = CountingSpecProvider(FakeAssetSpecProvider(UNSEEN_SPEC_CONTENT))
     deco_request = ObjectRequest(
         requested_name=BRONZE_ICE_PICK_NAME,
         tags=("weapon",),
         criticality="decorative",
     )
-    _compose_request(deco_request, deco)
-    assert deco.call_count == 0, "decorative lossy matches do not call the provider"
-    # failure side: REQUIRED + provider miss -> world.unresolved-object (the
-    # lossy substitution is the ONLY alternative and is rejected as well)
+    deco_composition = _compose_request(deco_request, deco)
+    assert deco.call_count == 1, "the decorative fallback attempts the provider once"
+    assert deco_composition.issues == ()
+    # failure side: REQUIRED + provider miss -> the TRUSTED CATEGORY_FALLBACK
+    # is used (provenance is explicit) — the case is never left unresolved and
+    # never silently substituted by an unnamed mechanism.
     miss_provider = CountingSpecProvider(FakeAssetSpecProvider({}))
     failed = compose_world(
         WorldRequirements(objects=(request,)),
@@ -602,11 +624,12 @@ def test_no_semantic_wrong_object_substitution():
         kit=_kits()["office"],
         cache=GeneratedAssetCache(),
     )
-    assert failed.issues
-    assert any("world.unresolved-object" in issue for issue in failed.issues)
-    assert "PROP_KITCHEN_KNIFE_01" not in {
-        p.asset_id for p in failed.placements
-    } or len([p for p in failed.placements if p.asset_id == "PROP_KITCHEN_KNIFE_01"]) == 1
+    assert failed.issues == ()
+    fallback_record = failed.resolution_record["resolved"][BRONZE_ICE_PICK_NAME]
+    assert fallback_record["assetId"] == "PROP_KITCHEN_KNIFE_01"
+    assert fallback_record["provenance"] == Provenance.CATEGORY_FALLBACK.value
+    assert fallback_record["resolutionStep"] == "category_fallback"
+    assert fallback_record["normalizedObjectId"] == "ice pick"
 
 
 def _resolver():
@@ -1179,14 +1202,19 @@ def test_composition_note_sanitized_and_absent_from_solver_input(database_url):
     assert "composition_notes" not in solver_input
 
 
-def test_decorative_only_unresolved_publishes_and_required_still_fails(database_url):
+def test_decorative_only_unresolved_publishes_and_required_fallback_publishes(database_url):
     # (a) decorative-only unresolved -> PUBLISHED (no FAILED)
     store, _service, started = _publish_decorative_note(database_url)
     assert started.status == "PUBLISHED", started
     assert store.get_published(started.case_id, 1) is not None
     store.dispose()  # release the file before the second service (fresh write)
-    # (b) a REQUIRED unresolved object with a failing provider -> FAILED,
-    #     never published, never a substituted tape asset (unchanged)
+    # (b) Phase 26C5: a REQUIRED object (the ice pick) with a provider that
+    #     yields nothing now resolves through the DOCUMENTED trusted category
+    #     taxonomy (stabbing_weapon -> the approved sharp prop) and PUBLISHES —
+    #     the case NEVER fails solely because the exact phrase is absent from
+    #     the catalog (Phase26C5-Fix-AssetFallback §3/§18). The fallback
+    #     provenance is explicit in the resolution record; the semantic label
+    #     is unchanged.
     from app.assets.spec_provider import FakeAssetSpecProvider as _Fake
     from app.persistence.timebase import EpochClock
 
@@ -1195,8 +1223,16 @@ def test_decorative_only_unresolved_publishes_and_required_still_fails(database_
     store2, service2 = _service_ctx(database_url, spec_provider=_Fake({}))
     clock = EpochClock()
     seed_session(store2, "SESS-REQ", clock)
-    failed = service2.start_case_generation(
+    published = service2.start_case_generation(
         UNSEEN_WEAPON_PROMPT, anonymous_quota_session_id="SESS-REQ"
     )
-    assert failed.status == "FAILED", failed
-    assert store2.get_published(failed.case_id, 1) is None
+    assert published.status == "PUBLISHED", published
+    payload = _payload(store2, published.case_id)
+    # the weapon's semantic id survives and the trusted fallback asset is used
+    ids = {o["object_id"] for o in payload["draft"]["objects"]}
+    assert "bronze_ceremonial_ice_pick" in ids
+    placement_assets = {
+        p.get("assetId") or p.get("asset_id")
+        for p in payload["draft"]["world_graph"]["placements"]
+    }
+    assert "PROP_KITCHEN_KNIFE_01" in placement_assets

@@ -1,16 +1,23 @@
-"""Phase 14_5 — CASE-CRITICAL FAILURE SEMANTICS (repair / fail-publication).
+"""Phase 14_5 + Phase 26C5 — CASE-CRITICAL FAILURE SEMANTICS.
 
 Required Phase 14_5 deliverable 3 behavior for a CRITICALITY_REQUIRED unknown
-object that cannot be generated:
+object, as amended by Phase 26C5 (robust asset fallback):
 
 (a) the successful procedural path publishes the unseen proc.* weapon;
-(b) a FORCED provider failure repaired by the world-repair provider publishes
-    (locked constraints unchanged) — the repair re-runs the COMPLETE
-    validation pipeline;
-(c) a FORCED provider failure with NO repair budget FAILS the attempt: never
-    published, never a substituted catalog/tape asset;
-(8) an AssetSpec that FAILS strict Phase 13 validation BLOCKS the critical
-    publication the same way (never published with a substitute).
+(b) a REQUIRED object whose provider FAILS resolves through the DOCUMENTED
+    trusted category taxonomy (stabbing_weapon -> the approved sharp prop) and
+    PUBLISHES — the case never fails solely because the exact phrase is absent
+    from the catalog (Phase26C5-Fix-AssetFallback §3/§18); the fallback
+    provenance is explicit (CATEGORY_FALLBACK), locked constraints unchanged;
+(c) the same holds with NO repair budget and with an invalid-asset-spec
+    provider: the trusted fallback stands in (never a failing publication,
+    never an arbitrary substitute);
+(8) an AssetSpec that FAILS strict Phase 13 validation is still sanitized and
+    the trusted fallback stands in — never published WITH the invalid asset.
+
+Fail-closed behavior still exists for objects with NO safe representation
+(firearm/explosive classes -> UNRESOLVED -> ``WORLD_ASSET_UNRESOLVED``), which
+is covered by the resolver tests and the driver failure-code tests.
 
 Deterministic, in-process, real SQLite files.
 """
@@ -182,11 +189,11 @@ def test_required_unseen_object_publishes(database_url):
 
 
 # --------------------------------------------------------------------------- #
-# (b) forced provider failure + repair provider fixes -> PUBLISHED
+# (b) forced provider failure -> the TRUSTED category fallback publishes
 # --------------------------------------------------------------------------- #
 
 
-def test_forced_provider_failure_repair_provider_fixes_and_publishes(database_url):
+def test_forced_provider_failure_publishes_via_trusted_fallback(database_url):
     flaky = FlakyOnceSpecProvider(
         BRONZE_ICE_PICK_NAME, UNSEEN_SPEC_CONTENT[BRONZE_ICE_PICK_NAME]
     )
@@ -199,42 +206,77 @@ def test_forced_provider_failure_repair_provider_fixes_and_publishes(database_ur
 
     started = _run_via_service(service)
     assert started.status == "PUBLISHED", started
-    assert flaky.calls >= 2, "the repair pass must re-attempt the provider"
-    assert repair.calls, "the world repair provider must have been consulted"
-    assert any("world.unresolved-object" in issue for issue in repair.calls[0])
+    # Phase 26C5: the first provider attempt is consulted (same pre-existing
+    # bounded budget) but its failure NEVER blocks the case — the documented
+    # trusted fallback resolves the REQUIRED weapon. No repair pass is
+    # required to rescue the case, so the flaky SECOND call is not made.
+    assert flaky.calls >= 1, "the bounded provider attempt must be consulted"
+    assert repair.calls == [], "the trusted fallback needs no repair rescue"
     payload = json.loads(store.get_published(started.case_id, 1).payload_json)
-    proc_placements = [
-        p for p in payload["draft"]["world_graph"]["placements"]
-        if (p.get("assetId") or p.get("asset_id") or "").startswith("proc.")
-    ]
-    assert proc_placements, "the repaired composition must include the proc.* object"
+    placed_assets = {
+        p.get("assetId") or p.get("asset_id")
+        for p in payload["draft"]["world_graph"]["placements"]
+    }
+    assert "PROP_KITCHEN_KNIFE_01" in placed_assets
     # locked constraints are UNCHANGED: the published payload pins the SAME
     # locked fields the attempt started from (repair never saw them)
     assert payload["locked"] == {key: value for key, value in locked.locked_fields()}
     assert locked_before == {key: value for key, value in locked.locked_fields()}
 
 
+def test_no_semantic_truth_alteration_in_fallback(database_url):
+    """The fallback only substitutes the VISUAL asset — CaseTruth / evidence
+    labels / solver input stay byte-identical (Phase26C5 §4)."""
+    failing = FailingSpecProvider()
+    store, service = _service_ctx(database_url, spec_provider=failing, world_repair_provider=None)
+    _locked, world_reqs = _extract_unseen_world_reqs()
+    started = _run_via_service(service)
+    assert started.status == "PUBLISHED", started
+    payload = json.loads(store.get_published(started.case_id, 1).payload_json)
+    # the semantic display identity survives: the weapon object carries the
+    # semantic slug id; the RESOLUTION record marks the explicit fallback.
+    object_ids = {
+        o.get("object_id") for o in payload["draft"].get("objects", ())
+    }
+    assert "bronze_ceremonial_ice_pick" in object_ids
+    # NOTE: the DEV/service lane publishes the GOLDEN crime (weapon id
+    # ``kitchen_knife``); the unseen weapon materializes as its OWN semantic
+    # world object (Phase 14_5) whose RENDER asset is the trusted fallback.
+    # The fallback asset id is never injected into the crime/evidence text.
+    serialized = json.dumps(payload["draft"]["crime"]) + json.dumps(
+        payload["draft"].get("evidence", ())
+    )
+    assert "PROP_KITCHEN_KNIFE_01" not in serialized
+
+
 # --------------------------------------------------------------------------- #
-# (c) forced provider failure + NO repair budget -> FAILED, never published
+# (c) no repair budget / invalid AssetSpec -> the trusted fallback still
+#     publishes (never a failing publication, never an arbitrary substitute)
 # --------------------------------------------------------------------------- #
 
 
-def test_forced_provider_failure_no_repair_fails_never_published(database_url):
+def test_forced_provider_failure_no_repair_publishes_via_fallback(database_url):
     failing = FailingSpecProvider()  # no content for the unseen name
     store, service = _service_ctx(database_url, spec_provider=failing, world_repair_provider=None)
     started = _run_via_service(service)
-    assert started.status == "FAILED", started
-    # NEVER published: no published row exists for the attempt
-    assert store.get_published(started.case_id, 1) is None
-    # the provider was actually consulted for the unseen request
+    assert started.status == "PUBLISHED", started
+    payload = json.loads(store.get_published(started.case_id, 1).payload_json)
+    placed_assets = {
+        p.get("assetId") or p.get("asset_id")
+        for p in payload["draft"]["world_graph"]["placements"]
+    }
+    assert "PROP_KITCHEN_KNIFE_01" in placed_assets
+    # the provider was actually consulted for the unseen request (same budget)
     assert failing.calls >= 1
     assert failing.call_log[0].requested_name == BRONZE_ICE_PICK_NAME
 
 
-def test_forced_provider_failure_with_repair_cannot_fix_is_terminal(database_url):
-    """A REQUIRED unresolved object with a repair provider that yields no
-    revision stays FAILED when the budget is exhausted — the golden world is
-    never silently swapped in, never substituted."""
+def test_forced_provider_failure_with_repair_cannot_fix_publishes_via_fallback(
+    database_url,
+):
+    """A repair provider that yields no revision is IRRELEVANT for the C5
+    fallback: the REQUIRED weapon is already resolved through the trusted
+    category taxonomy, so the case publishes without needing the repair path."""
 
     class NoOpRepair:
         def __init__(self):
@@ -242,29 +284,40 @@ def test_forced_provider_failure_with_repair_cannot_fix_is_terminal(database_url
 
         def __call__(self, diagnostics):
             self.calls += 1
-            return None  # no revision -> repair cannot fix
+            return None  # no revision
 
     failing = FailingSpecProvider()
     store, service = _service_ctx(
         database_url, spec_provider=failing, world_repair_provider=NoOpRepair()
     )
     started = _run_via_service(service)
-    assert started.status == "FAILED", started
-    assert store.get_published(started.case_id, 1) is None
+    assert started.status == "PUBLISHED", started
+    payload = json.loads(store.get_published(started.case_id, 1).payload_json)
+    placed_assets = {
+        p.get("assetId") or p.get("asset_id")
+        for p in payload["draft"]["world_graph"]["placements"]
+    }
+    assert "PROP_KITCHEN_KNIFE_01" in placed_assets
 
 
 # --------------------------------------------------------------------------- #
-# (8) failed AssetSpec validation BLOCKS critical publication
+# (8) invalid AssetSpec validation -> sanitized; the trusted fallback stands in
 # --------------------------------------------------------------------------- #
 
 
-def test_failed_asset_spec_validation_blocks_critical_publication(database_url):
+def test_invalid_asset_spec_falls_back_to_trusted_catalog_asset(database_url):
     invalid = InvalidSpecProvider()
     store, service = _service_ctx(database_url, spec_provider=invalid)
     started = _run_via_service(service)
-    assert started.status == "FAILED", started
-    # never published, never published WITH a substituted tape asset
-    assert store.get_published(started.case_id, 1) is None
+    assert started.status == "PUBLISHED", started
+    # never published WITH a broken spec-derived asset (sanitized first)
+    payload = json.loads(store.get_published(started.case_id, 1).payload_json)
+    placed_assets = {
+        p.get("assetId") or p.get("asset_id")
+        for p in payload["draft"]["world_graph"]["placements"]
+    }
+    assert not any(a.startswith("proc.") for a in placed_assets)
+    assert "PROP_KITCHEN_KNIFE_01" in placed_assets
     assert invalid.calls >= 1
 
 

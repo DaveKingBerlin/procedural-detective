@@ -155,9 +155,11 @@ def test_adv235_hostile_prompt_cannot_smuggle_unsafe_noun():
 
 def test_adv235_driver_unsafe_locked_weapon_fails_closed():
     """ADV-235 end-to-end (Ollama lane, mocked transport): `Weapon: gun` fails
-    closed with VALIDATION_FAILED — nothing published, no proc object, no
-    weapon evidence fact (the model's own world request for ``gun`` is also
-    stripped by the world-stage unsafe gate)."""
+    closed with WORLD_ASSET_UNRESOLVED (Phase 26C5 §15 — the precise code for
+    a REQUIRED scene object with NO trusted representation; gun has no safe
+    fallback) — nothing published, no proc object, no weapon evidence fact
+    (the model's own world request for ``gun`` is also stripped by the
+    world-stage unsafe gate)."""
     world_smuggled = {
         "environmentHint": "office",
         "objects": [{"name": "gun", "criticality": "required"}],
@@ -176,7 +178,7 @@ def test_adv235_driver_unsafe_locked_weapon_fails_closed():
         max_full_regenerations=0,
     )
     assert record.state is GenerationState.FAILED
-    assert record.failure_code == "VALIDATION_FAILED"
+    assert record.failure_code == "WORLD_ASSET_UNRESOLVED"
     assert record.published is None
     payload_text = (
         json.dumps(record.published.draft.__dict__ if record.published is not None else {})

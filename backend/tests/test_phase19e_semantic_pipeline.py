@@ -549,7 +549,10 @@ def test_duplicate_semantic_ids_never_create_duplicate_placements():
 def test_unsupported_weapon_with_no_representable_geometry_fails_closed():
     """The one intentionally unsupported weapon-like object with no valid
     declarative representation FAILS CLOSED: the injection requests it, the
-    procedural lane cannot pass Phase 13/Phase 17, and NOTHING publishes."""
+    procedural lane cannot pass Phase 13/Phase 17, and NOTHING publishes.
+    Phase 26C5 §15: the terminal code is the PRECISE WORLD_ASSET_UNRESOLVED
+    (a REQUIRED scene object has no trusted catalog OR procedural
+    representation) instead of the generic VALIDATION_FAILED."""
     world = _world_with(excluded=True)
     posts = [
         _j(_case_people(weapon="fork")),
@@ -568,7 +571,7 @@ def test_unsupported_weapon_with_no_representable_geometry_fails_closed():
     )
     assert record.state is GenerationState.FAILED
     assert record.published is None
-    assert record.failure_code == "VALIDATION_FAILED"
+    assert record.failure_code == "WORLD_ASSET_UNRESOLVED"
 
 
 # --------------------------------------------------------------------------- #

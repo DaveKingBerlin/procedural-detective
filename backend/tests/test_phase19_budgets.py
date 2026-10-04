@@ -373,7 +373,9 @@ def _always_bad_spec(initial_round=0):
 def test_no_infinite_asset_retry_loop_and_failed_asset_bounded():
     """A NEVER-valid procedural spec terminates inside the bounded
     ASSET_SPEC/REPAIR loop (1 initial + MAX_SPEC_REPAIR_PASSES repairs, never
-    an unbounded chain)."""
+    an unbounded chain). Phase 26C5: after the bounded loop the REQUIRED
+    weapon resolves through the TRUSTED category fallback and the case
+    PUBLISHES — the loop bound is unchanged, the failure is never a dead end."""
     from app.services.ollama_driver import MAX_SPEC_REPAIR_PASSES
 
     posts = [
@@ -386,16 +388,24 @@ def test_no_infinite_asset_retry_loop_and_failed_asset_bounded():
     for _ in range(MAX_SPEC_REPAIR_PASSES):
         posts.append(_always_bad_spec())  # repairs (all still invalid)
     record, transport = _run(posts, max_repair_passes=0, max_full_regenerations=0)
-    assert record.state is GenerationState.FAILED
-    assert record.published is None
+    assert record.state is GenerationState.PUBLISHED
+    assert record.published is not None
     # exactly 1 initial + bounded repairs; never a loop beyond the budget.
     assert transport.call_count == 7 + 1 + MAX_SPEC_REPAIR_PASSES
     assert record.budget.calls == 7 + 1 + MAX_SPEC_REPAIR_PASSES
+    # the REQUIRED weapon is represented by the trusted fallback, never dropped
+    assert any(
+        p.object_id == "bronze_ceremonial_ice_pick"
+        and p.asset_id == "PROP_KITCHEN_KNIFE_01"
+        for p in record.published.draft.world_graph.placements
+    )
 
 
-def test_essential_evidence_asset_failure_stays_fail_closed():
-    """The REQUIRED weapon's procedural generation failing is a terminal
-    world condition: nothing is published, no bare drop."""
+def test_essential_evidence_asset_failure_publishes_via_trusted_fallback():
+    """The REQUIRED weapon's procedural generation failing is no longer
+    terminal (Phase 26C5): the documented trusted category fallback stands in,
+    the case is FULLY published with a catalog asset — never a bare drop,
+    never a partial publish, never an arbitrary substitute."""
     posts = [
         _j(_case_people(weapon="bronze_ceremonial_ice_pick")),
         _j(_evidence(weapon_obj="bronze_ceremonial_ice_pick", murderer="paul_becker")),
@@ -406,14 +416,22 @@ def test_essential_evidence_asset_failure_stays_fail_closed():
         "<not-json>",  # ASSET_SPEC_REPAIR
     ]
     record, transport = _run(posts, max_repair_passes=0, max_full_regenerations=0)
-    assert record.state is GenerationState.FAILED
-    assert record.published is None
-    assert "bronze_ceremonial_ice_pick" in record.deferred_structural or True
+    assert record.state is GenerationState.PUBLISHED
+    assert record.published is not None
+    fallback = [
+        p for p in record.published.draft.world_graph.placements
+        if p.object_id == "bronze_ceremonial_ice_pick"
+    ]
+    assert fallback and fallback[0].asset_id == "PROP_KITCHEN_KNIFE_01"
+    assert record.deferred_structural == ()
 
 
 def test_decorative_asset_failure_falls_back_safely():
-    """A DECORATIVE unknown object that cannot be generated is left OUT with a
-    player-safe note; the rest of the world still publishes."""
+    """A DECORATIVE unknown object ("unusual trinket") with a provider that
+    yields nothing now resolves through the TRUSTED generic_prop category
+    (GENERIC_FALLBACK -> a safe catalog prop) instead of being dropped — the
+    rest of the world still publishes, the trinket is never an arbitrary
+    weapon."""
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
@@ -438,8 +456,10 @@ def test_decorative_asset_failure_falls_back_safely():
     assert record.state is GenerationState.PUBLISHED
     published = record.published.draft if record.published else record.draft
     assert any(o.object_id == "kitchen_knife" for o in published.objects)
-    assert all(o.object_id != "unusual_trinket" for o in published.objects)
-    assert any(
+    trinket = [o for o in published.objects if o.object_id == "unusual_trinket"]
+    assert trinket, "the trinket is no longer left out (generic fallback)"
+    assert trinket[0].asset_id == "PROP_BOOK_01"
+    assert not any(
         "unusual trinket" in note for note in (published.composition_notes or ())
     )
 

@@ -755,6 +755,43 @@ def _presentation_of(fact: dict[str, Any] | None) -> Mapping[str, Any]:
     return presentation if isinstance(presentation, Mapping) else {}
 
 
+# Phase 26C5 Fix-C (C5-01): the CLOSED set of Asset Oracle provenance tokens
+# that mean "this placement resolved through a TRUSTED fallback class" —
+# normalized exact / category fallback / generic fallback. ONLY these
+# placements publish the semantic ``displayLabel`` (exact/alias/semantic/
+# procedural placements keep today's byte-identical behaviour). The set is the
+# server's own closed enum surface — a crafted payload's unknown marker can
+# never enable the DTO branch (the label is ALWAYS derived from the PUBLIC
+# object id through ``weapon_label_of``; the marker only gates it).
+_FALLBACK_DISPLAY_LABEL_PROVENANCES: frozenset[str] = frozenset(
+    {"NORMALIZED_EXACT", "CATEGORY_FALLBACK", "GENERIC_FALLBACK"}
+)
+
+
+def _display_label_for_placement(
+    placement: Mapping[str, Any], object_id: str | None, asset_id: str
+) -> str | None:
+    """The semantic ``displayLabel`` of one world placement, or None.
+
+    Set ONLY when the placement resolved through a TRUSTED fallback class
+    (the composition recorded it on the placement in the frozen payload): the
+    label is the deterministic humanized SEMANTIC label of the public object
+    identity (``bronze_ceremonial_ice_pick`` -> "Bronze Ceremonial Ice Pick")
+    — the SAME player-safe semantic-label path the reveal/inspection modules
+    use — so a fallback object is NEVER mislabeled by the substituted catalog
+    asset's name (DEF-014 / C5-01). The raw provenance marker / assetId are
+    never exposed to the player here.
+    """
+    marker = placement.get("resolution_provenance")
+    if not isinstance(marker, str):
+        return None
+    if marker not in _FALLBACK_DISPLAY_LABEL_PROVENANCES:
+        return None
+    from app.services.reveal import weapon_label_of
+
+    return weapon_label_of(asset_id, object_id=object_id)
+
+
 def project_world_objects(
     payload: Mapping[str, Any],
     *,
@@ -785,6 +822,12 @@ def project_world_objects(
       / ``read`` flags, which mirror the caller's PlayerKnowledge, and its
       ``interaction`` affordance so the interact endpoint keeps working);
     - ``discovered`` / ``read`` flags come from the caller's PlayerKnowledge.
+    - Phase 26C5 Fix-C (C5-01): a placement the composition resolved through a
+      TRUSTED fallback class carries the additive ``displayLabel`` — the
+      SEMANTIC humanized label of the public object identity (never the
+      substituted catalog asset's name, never the raw assetId). Every other
+      placement is byte-identical (no ``displayLabel`` key; the frontend falls
+      back to its existing ``entry.label`` for absent/null).
 
     The output is deterministic: sorted by ``objectId`` with unique objectIds.
     """
@@ -868,6 +911,15 @@ def project_world_objects(
         }
         if generated is not None:
             item["generated"] = generated
+        # Phase 26C5 Fix-C (C5-01): a TRUSTED-FALLBACK placement carries the
+        # semantic displayLabel (derived from the public object identity);
+        # every other placement stays byte-identical (key absent -> the
+        # frontend falls back to its ``entry.label``, DEF-014).
+        display_label = _display_label_for_placement(
+            placement, object_id, str(asset_id)
+        )
+        if display_label is not None:
+            item["displayLabel"] = display_label
         emitted_object_ids.add(object_id)
         out.append(item)
     return sorted(out, key=lambda item: item["objectId"])

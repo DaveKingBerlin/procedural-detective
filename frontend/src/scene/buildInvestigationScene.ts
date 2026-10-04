@@ -381,6 +381,15 @@ function buildSceneWorldObject(
       ? { x: templateFaceBounds.x, y: templateFaceBounds.y, z: templateFaceBounds.z }
       : { x: entry.scale.x, y: entry.scale.y, z: entry.scale.z };
 
+  // Phase 26 (C5): a NORMALIZED fallback resolves the object's assetId to a
+  // known catalog substitute (renders correctly), but the object's SEMANTIC
+  // identity stays the original. The backend publishes that identity here as
+  // player-safe text; a non-empty string becomes the object label (the last
+  // surface reads SceneWorldObject.label, so the object list / hover / focus /
+  // captions all pick it up). Null/absent keeps TODAY's behavior exactly.
+  const displayLabel =
+    typeof dto.displayLabel === "string" && dto.displayLabel.trim() !== "" ? dto.displayLabel : null;
+
   return {
     objectId: dto.objectId,
     assetId: dto.assetId,
@@ -391,10 +400,11 @@ function buildSceneWorldObject(
     hitboxScale: entry.hitboxScale ?? 1,
     color: entry.color,
     scale,
-    // Unknown assets get no label: a neutral placeholder must never claim a
-    // name. Generated objects also keep label null — a server-provided
-    // canonicalName is never echoed onto the page (app-authored text only).
-    label: unknownAsset ? null : entry.label,
+    // A server-published semantic label wins (replaces the substitute's
+    // catalog label); otherwise unknown assets get no label (a neutral
+    // placeholder must never claim a name) and generated objects keep label
+    // null — a fallback canonicalName is never echoed onto the page.
+    label: displayLabel ?? (unknownAsset ? null : entry.label),
     position: { x: transform.position.x, y: transform.position.y, z: transform.position.z },
     rotation,
     interaction: dto.interaction,

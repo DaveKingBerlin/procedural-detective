@@ -26,6 +26,12 @@ class GenerationFailureCode(str, Enum):
     GEOMETRY_VALIDATION_FAILED = "GEOMETRY_VALIDATION_FAILED"
     SOLVER_AMBIGUOUS = "SOLVER_AMBIGUOUS"
     VALIDATION_FAILED = "VALIDATION_FAILED"
+    # Phase 26C5 §15 — the precise internal code for a REQUIRED semantic
+    # object that could not be represented in the world (no catalog fallback,
+    # no trusted procedural/asset-spec representation). ``VALIDATION_FAILED``
+    # was too generic to make the root cause obvious. Players keep the general
+    # safe copy; internal logs distinguish the asset-resolution boundary.
+    WORLD_ASSET_UNRESOLVED = "WORLD_ASSET_UNRESOLVED"
     PUBLICATION_FAILED = "PUBLICATION_FAILED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     # Phase 19 Fix C — the narrower hierarchical budget codes. The system

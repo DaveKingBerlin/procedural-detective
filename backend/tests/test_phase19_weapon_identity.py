@@ -362,7 +362,8 @@ def test_fail_closed_when_locked_weapon_cannot_be_represented():
     )
     assert record.state is GenerationState.FAILED
     assert record.published is None
-    assert record.failure_code == "VALIDATION_FAILED"
+    # Phase 26C5 §15: the precise code for an unrepresentable REQUIRED weapon
+    assert record.failure_code == "WORLD_ASSET_UNRESOLVED"
     assert any(
         "world.unresolved-object" in line
         for line in (record.deferred_structural or ())

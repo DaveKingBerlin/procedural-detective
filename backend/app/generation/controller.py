@@ -866,6 +866,11 @@ class GenerationController:
             return GenerationFailureCode.STRUCTURED_OUTPUT_INVALID
         if any("geometr" in item.lower() for item in diagnostics):
             return GenerationFailureCode.GEOMETRY_VALIDATION_FAILED
+        # Phase 26C5 §15: a REQUIRED scene object with NO safe representation
+        # is its own precise, attributable failure (never a generic
+        # VALIDATION_FAILED, never a provider code).
+        if any("world.unresolved-object" in item for item in diagnostics):
+            return GenerationFailureCode.WORLD_ASSET_UNRESOLVED
         return GenerationFailureCode.VALIDATION_FAILED
 
     def _reset_for_regeneration(self, attempt: AttemptRecord) -> None:

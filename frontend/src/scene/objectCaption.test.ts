@@ -109,6 +109,24 @@ describe("discoveredCaptionsForWorld — discovered-only scene captions", () => 
   });
 });
 
+describe("Phase 26 (C5) — caption text uses the displayLabel semantic identity", () => {
+  it("a discovered fallback-resolved object captions its semantic identity, not the substitute label", () => {
+    const weapon = worldObject({
+      objectId: "murder_weapon",
+      label: "Bronze Ceremonial Ice Pick",
+      discovered: true,
+    });
+    const captions = discoveredCaptionsForWorld(model(weapon).worldObjects, new Map());
+    expect(captions).toEqual([{ objectId: "murder_weapon", text: "Bronze Ceremonial Ice Pick" }]);
+  });
+
+  it("displayLabel null keeps the substitute's catalog label in the caption", () => {
+    const weapon = worldObject({ objectId: "murder_weapon", label: "Kitchen knife", discovered: true });
+    const captions = discoveredCaptionsForWorld(model(weapon).worldObjects, new Map());
+    expect(captions).toEqual([{ objectId: "murder_weapon", text: "Kitchen knife" }]);
+  });
+});
+
 describe("DEF-072 — captions appear from the LIVE merged model (no reload)", () => {
   it("a knife discovery merges into the model and its caption shows immediately", () => {
     // The model starts undiscovered — as a live bootstrap would.

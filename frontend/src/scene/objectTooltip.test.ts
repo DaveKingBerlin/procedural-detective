@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildInvestigationScene } from "./buildInvestigationScene";
 import { tooltipForHover, tooltipLabelFor } from "./objectTooltip";
-import { makeBootstrap } from "./testFixtures";
+import { makeBootstrap, makeWorldObject } from "./testFixtures";
 
 /**
  * Phase 8_1 B1 — hover tooltip data flow. The tooltip payload may carry ONLY
@@ -49,5 +49,34 @@ describe("tooltipForHover — hover state payload", () => {
     expect(tooltipForHover(MODEL, null)).toBeNull();
     expect(tooltipForHover(MODEL, "ghost")).toBeNull();
     expect(tooltipForHover(null, "kitchen_knife")).toBeNull();
+  });
+});
+
+describe("Phase 26 (C5) — tooltip picks up the displayLabel semantic identity", () => {
+  function fallbackModel(displayLabel: string | null | undefined): ReturnType<typeof buildInvestigationScene> {
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [
+      makeWorldObject({
+        objectId: "murder_weapon",
+        assetId: "PROP_KITCHEN_KNIFE_01",
+        interaction: "inspect",
+        evidenceId: "forensic_knife_match_01",
+        ...(displayLabel === undefined ? {} : { displayLabel }),
+      }),
+    ];
+    return buildInvestigationScene(bootstrap);
+  }
+
+  it("hover shows the semantic identity for a fallback-resolved object", () => {
+    const model = fallbackModel("Bronze Ceremonial Ice Pick");
+    expect(tooltipForHover(model, "murder_weapon")).toEqual({
+      objectId: "murder_weapon",
+      label: "Bronze Ceremonial Ice Pick",
+    });
+  });
+
+  it("hover keeps the substitute's catalog label when displayLabel is null/absent", () => {
+    expect(tooltipLabelFor(fallbackModel(null), "murder_weapon")).toBe("Kitchen knife");
+    expect(tooltipLabelFor(fallbackModel(undefined), "murder_weapon")).toBe("Kitchen knife");
   });
 });

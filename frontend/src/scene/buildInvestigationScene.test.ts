@@ -5,6 +5,7 @@ import { buildTemplateComposite } from "../templates/templateRegistry";
 import { ANCHOR_REGISTRY } from "./anchorRegistry";
 import { ASSET_REGISTRY, FALLBACK_ASSET, FALLBACK_COLOR, isKnownAsset, resolveAsset, type AssetEntry, type AssetRegistry } from "./assetRegistry";
 import { applyKnowledgeToSceneModel, bindEvidenceToSceneModel, buildInvestigationScene, type InvestigationSceneModel } from "./buildInvestigationScene";
+import { evidenceLabelFor, FALLBACK_EVIDENCE_LABEL } from "./objectLabel";
 import { EMITTED_ASSET_IDS, makeBootstrap, makeIcePickDefinition, makeOfficeBootstrap, makeProcWorldObject, makeTrophyDefinition, makeWorldObject, stripUndiscoveredEvidenceIds } from "./testFixtures";
 import { ValidationError } from "./validation";
 import type { GeneratedAssetDefinition } from "../api/types";
@@ -578,6 +579,78 @@ describe("Phase 13 — proc.* generated objects in the scene model", () => {
     const second = buildInvestigationScene(trophyBootstrap()).worldObjects.find((o) => o.objectId === "custom_trophy")!;
     expect(first.generatedParts).toEqual(second.generatedParts);
     expect(first.generatedParts!.length).toBe(3);
+  });
+});
+
+/* ======================================================================
+ * Phase 26 (C5) — displayLabel: semantic identity for fallback-resolved objects.
+ * ==================================================================== */
+
+describe("Phase 26 (C5) — displayLabel (fallback-resolved semantic identity)", () => {
+  /**
+   * A bootstrap whose ONLY world object carries the C5 scenario: the backend
+   * fell the object back onto a KNOWN catalog asset (the kitchen knife), so
+   * `assetId` renders, but the object's SEMANTIC identity is the original
+   * ("Bronze Ceremonial Ice Pick"). Pass `unknown` to inject an assetId the
+   * catalog does NOT know (proving the null-label regression stays intact).
+   */
+  function knifeBootstrap(options: { displayLabel?: string | null; unknown?: boolean } = {}): ReturnType<typeof makeBootstrap> {
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [
+      makeWorldObject({
+        objectId: "murder_weapon",
+        assetId: options.unknown ? "ASSET.UNKNOWN.999" : "PROP_KITCHEN_KNIFE_01",
+        assetType: "sharp_weapon",
+        subtype: "sharp_weapon",
+        anchor: "kitchen_counter",
+        interaction: "inspect",
+        evidenceId: "forensic_knife_match_01",
+        ...(options.displayLabel === undefined ? {} : { displayLabel: options.displayLabel }),
+      }),
+    ];
+    return bootstrap;
+  }
+
+  it("a non-empty displayLabel becomes the object label (replacing the substitute catalog label)", () => {
+    const weapon = buildInvestigationScene(knifeBootstrap({ displayLabel: "Bronze Ceremonial Ice Pick" })).worldObjects[0];
+    expect(weapon.assetId).toBe("PROP_KITCHEN_KNIFE_01");
+    expect(weapon.unknownAsset).toBe(false);
+    expect(weapon.label).toBe("Bronze Ceremonial Ice Pick");
+    // The object-list/focus surface reads SceneWorldObject.label -> semantic identity.
+    expect(evidenceLabelFor(weapon)).toBe("Bronze Ceremonial Ice Pick");
+  });
+
+  it("displayLabel null keeps the substitute's catalog label exactly as today", () => {
+    const weapon = buildInvestigationScene(knifeBootstrap({ displayLabel: null })).worldObjects[0];
+    expect(weapon.label).toBe("Kitchen knife");
+    expect(evidenceLabelFor(weapon)).toBe("Kitchen knife");
+  });
+
+  it("an ABSENT displayLabel keeps the catalog label exactly as today", () => {
+    const weapon = buildInvestigationScene(knifeBootstrap()).worldObjects[0];
+    expect(weapon.label).toBe("Kitchen knife");
+    expect(evidenceLabelFor(weapon)).toBe("Kitchen knife");
+  });
+
+  it("a whitespace-only displayLabel is treated as absent (catalog label wins)", () => {
+    const weapon = buildInvestigationScene(knifeBootstrap({ displayLabel: "   \t " })).worldObjects[0];
+    expect(weapon.label).toBe("Kitchen knife");
+  });
+
+  it("unknown/unknownAsset objects WITHOUT displayLabel keep the null label (no regression)", () => {
+    const weapon = buildInvestigationScene(knifeBootstrap({ unknown: true })).worldObjects[0];
+    expect(weapon.unknownAsset).toBe(true);
+    expect(weapon.label).toBeNull();
+    // Focus surface keeps the safe "Evidence Object" fallback for unknown objects.
+    expect(evidenceLabelFor(weapon)).toBe(FALLBACK_EVIDENCE_LABEL);
+  });
+
+  it("a displayLabel survives strict validation (parsed, not dropped)", () => {
+    const bootstrap = knifeBootstrap({ displayLabel: "Bronze Ceremonial Ice Pick" });
+    const weapon = buildInvestigationScene(bootstrap).worldObjects[0];
+    expect(weapon.label).toBe("Bronze Ceremonial Ice Pick");
+    // Deterministic: the same bootstrap builds the same label repeatedly.
+    expect(buildInvestigationScene(bootstrap).worldObjects[0].label).toBe("Bronze Ceremonial Ice Pick");
   });
 });
 

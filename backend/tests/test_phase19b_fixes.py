@@ -647,7 +647,8 @@ def test_adv218_hostile_weapon_id_yields_sanitized_guard_failure():
     record, _transport = _run(posts, prompt=PROMPT)
     assert record.state is GenerationState.FAILED
     assert record.published is None
-    assert record.failure_code == "VALIDATION_FAILED"
+    # Phase 26C5 §15: the precise code for an unrepresentable REQUIRED object
+    assert record.failure_code == "WORLD_ASSET_UNRESOLVED"
     assert record.failure_code in PUBLIC_FAILURE_CODES
     reason = record.reason or ""
     assert "http" not in reason

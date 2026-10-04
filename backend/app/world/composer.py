@@ -407,7 +407,13 @@ class KnownObjectSpecProvider:
 
 @dataclass(frozen=True)
 class ResolvedObject:
-    """One resolved object (provenance locked)."""
+    """One resolved object (provenance locked).
+
+    Phase 26C5 observability fields (``normalized_object_id`` /
+    ``resolution_category`` / ``resolution_step`` / ``fallback_depth``) are
+    diagnostic-only and NEVER serialized into any payload or DTO; they make
+    the internal asset-resolution logs root-cause-obvious (spec §13).
+    """
 
     asset_id: str
     provenance: str
@@ -415,6 +421,10 @@ class ResolvedObject:
     catalog_version: int | None = None
     requested_name: str = ""
     variant: str | None = None
+    normalized_object_id: str | None = None
+    resolution_category: str | None = None
+    resolution_step: str | None = None
+    fallback_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -842,6 +852,22 @@ def compose_world(
                     int((time.perf_counter() - resolve_started) * 1000)
                     if resolve_started else 0
                 ),
+                normalizedObjectId=(
+                    resolution.normalized_object_id
+                    if resolution is not None
+                    else None
+                ),
+                resolutionCategory=(
+                    resolution.resolution_category
+                    if resolution is not None
+                    else None
+                ),
+                resolutionStep=(
+                    resolution.resolution_step if resolution is not None else None
+                ),
+                fallbackDepth=(
+                    resolution.fallback_depth if resolution is not None else 0
+                ),
             )
             return ResolvedObject(
                 asset_id=generated.asset_id,
@@ -849,6 +875,22 @@ def compose_world(
                 definition=generated.definition,
                 catalog_version=catalog.catalog_version,
                 requested_name=semantic_name,
+                normalized_object_id=(
+                    resolution.normalized_object_id
+                    if resolution is not None
+                    else None
+                ),
+                resolution_category=(
+                    resolution.resolution_category
+                    if resolution is not None
+                    else None
+                ),
+                resolution_step=(
+                    resolution.resolution_step if resolution is not None else None
+                ),
+                fallback_depth=(
+                    resolution.fallback_depth if resolution is not None else 0
+                ),
             )
         if (
             resolution is None
@@ -869,6 +911,22 @@ def compose_world(
                 elapsedMs=(
                     int((time.perf_counter() - resolve_started) * 1000)
                     if resolve_started else 0
+                ),
+                normalizedObjectId=(
+                    resolution.normalized_object_id
+                    if resolution is not None
+                    else None
+                ),
+                resolutionCategory=(
+                    resolution.resolution_category
+                    if resolution is not None
+                    else None
+                ),
+                resolutionStep=(
+                    resolution.resolution_step if resolution is not None else None
+                ),
+                fallbackDepth=(
+                    resolution.fallback_depth if resolution is not None else 0
                 ),
             )
             return None
@@ -897,6 +955,10 @@ def compose_world(
                 int((time.perf_counter() - resolve_started) * 1000)
                 if resolve_started else 0
             ),
+            normalizedObjectId=resolution.normalized_object_id or None,
+            resolutionCategory=resolution.resolution_category or None,
+            resolutionStep=resolution.resolution_step or None,
+            fallbackDepth=resolution.fallback_depth or 0,
         )
         if resolution.provenance is Provenance.CATALOG_ALIAS:
             emit_event(
@@ -913,6 +975,10 @@ def compose_world(
             catalog_version=resolution.catalog_version,
             requested_name=semantic_name,
             variant=variant_note,
+            normalized_object_id=resolution.normalized_object_id or None,
+            resolution_category=resolution.resolution_category or None,
+            resolution_step=resolution.resolution_step or None,
+            fallback_depth=resolution.fallback_depth or 0,
         )
 
     # 1. base placements (golden facts verbatim, per-kit selection).
@@ -988,7 +1054,18 @@ def compose_world(
             _resolution = resolve(_asset_request, catalog=catalog)
         except Exception:  # noqa: BLE001 - the runtime resolution still governs
             _resolution = None
-        _needs = _resolution is None or _resolution.provenance is Provenance.FALLBACK
+        _needs = _resolution is None or _resolution.provenance in (
+            Provenance.FALLBACK,
+            # Phase 26C5: a trusted normalized-exact / category / generic
+            # fallback still attempts the PRE-EXISTING bounded provider (same
+            # budget, cache-memoized) so a provider that CAN produce the
+            # specific object wins (the application-owned showcase fixtures);
+            # a provider that yields nothing falls back to the trusted catalog
+            # asset (never a failure).
+            Provenance.NORMALIZED_EXACT,
+            Provenance.CATEGORY_FALLBACK,
+            Provenance.GENERIC_FALLBACK,
+        )
         if (
             not _needs
             and _criticality == CRITICALITY_REQUIRED
@@ -1038,6 +1115,10 @@ def compose_world(
         resolution_record["resolved"][requested_name] = {
             "assetId": resolved.asset_id,
             "provenance": resolved.provenance,
+            "normalizedObjectId": resolved.normalized_object_id or None,
+            "resolutionCategory": resolved.resolution_category or None,
+            "resolutionStep": resolved.resolution_step or None,
+            "fallbackDepth": resolved.fallback_depth or 0,
         }
         semantic_candidate = semantic_object_id(requested_name)
         if semantic_candidate in base_object_ids:
@@ -1295,6 +1376,13 @@ def compose_world(
                 interaction=p.interaction,
                 evidence_id=p.evidence_id,
                 generated_definition=_definition_json(definition),
+                # Phase 26C5 Fix-C (C5-01): the INTERNAL-ONLY resolution
+                # provenance of this placement (recorded per placed object in
+                # step 4). It is NEVER player-exposed; the published payload
+                # carries it so ``project_world_objects`` can emit the semantic
+                # ``displayLabel`` for trusted-fallback placements. Non-fallback
+                # placements keep ``None``.
+                resolution_provenance=provenance_by_object_id.get(p.object_id),
             )
         )
 
