@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from pd_ollama_bridge import protocol
+from pd_ollama_bridge.urls import server_origin
 
 from conftest import (
     TEST_PAIRING_CODE,
@@ -169,23 +170,26 @@ def test_memory_only_reconnect_within_same_process_with_bounded_backoff():
 def test_token_file_saved_with_0600(tmp_path: Path):
     """The ``--token-file`` opt-in: an explicit path is honored across runs
     (a fresh store reloads the token), with 0600 on POSIX and a best-effort
-    owner-only ACL applied on Windows."""
+    owner-only ACL applied on Windows. Phase 27 §9 — the persisted token is a
+    server-bound record (never a bare secret)."""
     path = tmp_path / "tokens" / "session_token"
+    origin = "ws://127.0.0.1:1"
     store = make_token_store(path)
-    store.save(TEST_TOKEN)
+    store.save(TEST_TOKEN, server_origin=origin)
     assert path.exists()
-    assert path.read_text(encoding="utf-8") == TEST_TOKEN
+    assert TEST_TOKEN in path.read_text(encoding="utf-8")
     fresh = make_token_store(path)
-    assert fresh.load() == TEST_TOKEN
+    assert fresh.load(server_origin=origin) == TEST_TOKEN
+    assert fresh.load(server_origin="wss://elsewhere.example") is None
     if os.name != "nt":
         assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_session_token_memory_only_by_default():
     store = make_token_store()
-    store.save(TEST_TOKEN)
+    store.save(TEST_TOKEN, server_origin="ws://127.0.0.1:1")
     assert store.path is None
-    assert store.load() is None
+    assert store.load(server_origin="ws://127.0.0.1:1") is None
     assert store.get() == TEST_TOKEN
 
 
@@ -636,7 +640,9 @@ def test_invalid_reconnect_token_is_terminal():
             reconnect_backoff_cap_seconds=0.1,
         )
         token_store = make_token_store()
-        token_store.save(TEST_TOKEN)
+        token_store.save(
+            TEST_TOKEN, server_origin=server_origin(server.server_url)
+        )
         ollama = make_ollama(mock, connect_timeout=1.0)
         bridge, _events = make_bridge(config, token_store, ollama)
         bridge_task = asyncio.create_task(bridge.run())

@@ -8,6 +8,8 @@ so pytest-asyncio is not required.
 
 from __future__ import annotations
 
+import os
+
 import httpx
 import pytest
 
@@ -28,6 +30,24 @@ TEST_SCHEMA = "ASSET_SPEC_v1"
 @pytest.fixture(autouse=True)
 def _hermetic_event_loops():
     yield
+
+
+# INFONote 7 — hermetic live environment: several CLI paths
+# (``_resolve_connect_plan`` / ``_list_models`` / ``_resolve_toml_path``) resolve
+# through the LIVE process ``os.environ``, so a stray host ``PD_BRIDGE_*`` /
+# ``LOCALAPPDATA`` / ``USERPROFILE`` / ``XDG_CONFIG_HOME`` / ``HOME`` could
+# silently perturb results. Scrub them before EVERY bridge test; a test that
+# WANTS an env value sets it itself with ``monkeypatch.setenv`` afterwards
+# (restored at teardown).
+_ENV_SCRUB_PREFIXES = ("PD_BRIDGE_",)
+_ENV_SCRUB_NAMES = {"LOCALAPPDATA", "USERPROFILE", "XDG_CONFIG_HOME", "HOME"}
+
+
+@pytest.fixture(autouse=True)
+def _scrub_live_bridge_env(monkeypatch):
+    for name in list(os.environ):
+        if name.startswith(_ENV_SCRUB_PREFIXES) or name in _ENV_SCRUB_NAMES:
+            monkeypatch.delenv(name, raising=False)
 
 
 def make_token_store(path=None):
@@ -59,7 +79,7 @@ def make_config(
 ) -> Config:
     return Config(
         pairing_code=pairing_code,
-        server_url=server_url or "http://127.0.0.1:0",
+        server_url=server_url or "http://127.0.0.1:1",
         ollama_url="http://127.0.0.1:11434",
         model="hermes3:8b",
         connect_timeout_seconds=connect_timeout_seconds,

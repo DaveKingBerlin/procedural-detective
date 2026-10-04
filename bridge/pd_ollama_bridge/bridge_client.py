@@ -34,6 +34,7 @@ from websockets.exceptions import ConnectionClosed
 from . import protocol
 from .config import Config, TokenStore
 from .ollama_client import OllamaClient, OllamaClientError
+from .urls import server_origin
 
 LOGGER = logging.getLogger("pd-ollama-bridge")
 
@@ -162,6 +163,16 @@ class BridgeClient:
     async def _handshake(self, ws: Any) -> tuple[str, str]:
         token = self.token_store.get()
         if token:
+            # Phase 27 §9 (defense in depth) — NEVER send a token bound to a
+            # different server origin, even if a mismatched token somehow got
+            # into the store. A changed server requires a fresh pairing.
+            bound = self.token_store.bound_server_origin
+            expected = server_origin(self.config.server_url)
+            if bound is not None and bound != expected:
+                raise SessionRejected(
+                    "stored bridge session token is bound to a different server; "
+                    "re-pair with a new pairing code"
+                )
             hello = protocol.bridge_hello_frame(bridge_session_token=token)
             kind = "reconnected"
         else:
@@ -203,7 +214,9 @@ class BridgeClient:
         if kind == "pairing":
             if not isinstance(server_token, str):
                 raise SessionRejected("server did not issue a bridge session token")
-            self.token_store.save(server_token)
+            self.token_store.save(
+                server_token, server_origin=server_origin(self.config.server_url)
+            )
         return session_id, kind
 
     # -- serving loop ----------------------------------------------------------
