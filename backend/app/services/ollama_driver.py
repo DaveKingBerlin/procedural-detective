@@ -2827,10 +2827,13 @@ class OllamaStageDriver:
         except SemanticObjectResolutionError as exc:
             # Phase 19 Fix B.3 â€” fail closed with a SANITIZED typed message
             # (public identifiers only) and a canonical code; never publish a
-            # case with a dangling weapon/evidence id.
+            # case with a dangling weapon/evidence id. Phase 26C5 Â§15: the
+            # precise WORLD_ASSET_UNRESOLVED code (not the generic
+            # VALIDATION_FAILED) makes the asset-resolution boundary
+            # root-cause-obvious in internal logs.
             raise StageDriverProviderFailure(
                 str(exc),
-                code=GenerationFailureCode.VALIDATION_FAILED,
+                code=GenerationFailureCode.WORLD_ASSET_UNRESOLVED,
             ) from None
         attempt._phase3_cache = None
         # Phase 19 Fix C Â§8/Â§13 â€” sanitized monotonic accounting snapshot

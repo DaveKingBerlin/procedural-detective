@@ -123,6 +123,17 @@ export interface WorldObjectDTO {
    * the field never overrides catalog identity).
    */
   generated?: GeneratedAssetDefinition | null;
+  /**
+   * Phase 26 (C5) — the SEMANTIC humanized label of the object, published by
+   * the backend ONLY for objects resolved through a trusted asset fallback
+   * (provenance NORMALIZED_EXACT / CATEGORY_FALLBACK / GENERIC_FALLBACK): the
+   * fallback turns the original asset into a known catalog asset so it
+   * renders, but the object's semantic identity stays the original (e.g.
+   * "Bronze Ceremonial Ice Pick" vs the substitute "Kitchen knife" label).
+   * Absent/null for every other object — the client then uses the catalog
+   * label (or null for unknown assets) exactly as before.
+   */
+  displayLabel?: string | null;
 }
 
 /** Current investigation location, as published in the player-safe scene. */

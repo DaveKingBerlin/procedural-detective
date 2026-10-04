@@ -365,6 +365,18 @@ class PlacementSpec:
     # parser REJECTS a raw provider placement that smuggles this key); the
     # projection gate re-validates it per the current compiler/schema versions.
     generated_definition: Mapping[str, Any] | None = None
+    # Phase 26C5 Fix-C (C5-01) — INTERNAL-ONLY Asset Oracle provenance marker.
+    # Set on the TRUSTED service path ONLY for the trusted fallback classes
+    # (``NORMALIZED_EXACT`` / ``CATEGORY_FALLBACK`` / ``GENERIC_FALLBACK``);
+    # ``None`` for every exact/alias/semantic/procedural placement. It is
+    # serialized into the frozen payload (a SERVER-INTERNAL document that no
+    # HTTP DTO ever emits) so the player-safe bootstrap projection can publish
+    # the semantic ``displayLabel`` of a fallback-resolved object. It NEVER
+    # carries caller-supplied content: only the closed provenance tokens the
+    # Asset Oracle records on a ``ResolvedObject`` are ever written here, and
+    # no DTO projection exposes the raw marker (the display label is derived
+    # from the PUBLIC object id, never from this value).
+    resolution_provenance: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("object_id", "asset_id", "location_id", "anchor"):
@@ -388,6 +400,14 @@ class PlacementSpec:
                 )
             object.__setattr__(
                 self, "generated_definition", _frozen(self.generated_definition)
+            )
+        if self.resolution_provenance is not None and (
+            not isinstance(self.resolution_provenance, str)
+            or not self.resolution_provenance
+        ):
+            raise ValueError(
+                "PlacementSpec.resolution_provenance must be None or a "
+                "non-empty string"
             )
 
 

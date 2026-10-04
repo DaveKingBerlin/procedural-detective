@@ -570,18 +570,33 @@ def definition_signature(definition) -> tuple[tuple[float, float, float], int, s
 
 
 def cross_class_probes() -> list[dict]:
-    """Deterministic semantic cross-class probes (never a wrong-class winner).
+    """Deterministic semantic cross-class probes (never an ARBITRARY
+    wrong-class winner).
 
     Each probe asks the Asset Oracle for a request whose NATURAL class differs
     from the pinned cross-class asset; the gate fails if the resolver picks the
-    cross-class asset as its winner. A lossy tag tie yields AMBIGUOUS (no
-    arbitrary winner) — also green. The world composer additionally escalates
-    REQUIRED low-confidence semantic matches to the provider (Phase 14_5), so a
-    wrong-class substitution can never become a placed world object.
+    cross-class asset through an UNDOCUMENTED mechanism (exact/alias/semantic/
+    ambiguous/neutral fallback). Phase 26C5 §7-§10 changes the CONTRACT for
+    these probes: the phrases now resolve through the DOCUMENTED trusted
+    category taxonomy (a bounded phrase/keyword -> category table backed ONLY
+    by real catalog assets). A ``CATEGORY_FALLBACK`` / ``GENERIC_FALLBACK`` /
+    ``NORMALIZED_EXACT`` result carries an EXPLICIT provenance that the mapping
+    is a deliberate, trusted resolution — e.g. "ice pick" ->
+    ``stabbing_weapon`` -> the approved sharp prop (``PROP_KITCHEN_KNIFE_01``)
+    — and is recorded as ``documented=True`` (NOT a wrong-class substitution).
+    A lossy tag tie yields AMBIGUOUS (no arbitrary winner) — also green. The
+    world composer additionally escalates REQUIRED low-confidence semantic
+    matches to the provider (Phase 14_5), so an arbitrary wrong-class
+    substitution can never become a placed world object.
     """
     from app.assets.oracle import resolve_or_generate
     from app.assets.resolver import AssetRequest, Provenance
 
+    documented = {
+        Provenance.CATEGORY_FALLBACK.value,
+        Provenance.GENERIC_FALLBACK.value,
+        Provenance.NORMALIZED_EXACT.value,
+    }
     probes = (
         (
             "ice pick",
@@ -615,13 +630,24 @@ def cross_class_probes() -> list[dict]:
         provenance = (
             resolution.provenance.value if resolution is not None else None
         )
-        cross_class_winner = winner == cross_class_asset
+        # A DOCUMENTED trusted fallback is the C5 contract, never an arbitrary
+        # cross-class winner.
+        is_documented = provenance in documented
+        cross_class_winner = (
+            winner == cross_class_asset and not is_documented
+        )
         results.append(
             {
                 "requestedName": requested_name,
                 "hints": dict(hints),
                 "winner": winner,
                 "provenance": provenance,
+                "resolutionCategory": (
+                    resolution.resolution_category
+                    if resolution is not None
+                    else None
+                ),
+                "documentedFallback": is_documented,
                 "ambiguous": bool(resolution is not None and resolution.ambiguous),
                 "crossClassAsset": cross_class_asset,
                 "crossClassWinner": cross_class_winner,

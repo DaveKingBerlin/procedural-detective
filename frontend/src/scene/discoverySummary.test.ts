@@ -79,6 +79,43 @@ describe("objectiveText", () => {
   });
 });
 
+describe("Phase 26 (C5) — the discovery summary uses the displayLabel semantic identity", () => {
+  it("a fallback-resolved world object titles its summary entry with the semantic label", () => {
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [
+      makeWorldObject({
+        objectId: "murder_weapon",
+        assetId: "PROP_KITCHEN_KNIFE_01",
+        anchor: "kitchen_counter",
+        interaction: "inspect",
+        evidenceId: "forensic_knife_match_01",
+        displayLabel: "Bronze Ceremonial Ice Pick",
+      }),
+    ];
+    const model = buildInvestigationScene(bootstrap);
+    const summary = summarizeDiscovery(["forensic_knife_match_01"], [], model.worldObjects, new Map());
+    expect(summary.entries[0].title).toBe("Bronze Ceremonial Ice Pick");
+    expect(summary.entries[0].title).not.toBe("Kitchen knife");
+  });
+
+  it("displayLabel null keeps the substitute's catalog label in the summary title", () => {
+    const bootstrap = makeBootstrap();
+    bootstrap.scene.worldObjects = [
+      makeWorldObject({
+        objectId: "murder_weapon",
+        assetId: "PROP_KITCHEN_KNIFE_01",
+        anchor: "kitchen_counter",
+        interaction: "inspect",
+        evidenceId: "forensic_knife_match_01",
+        displayLabel: null,
+      }),
+    ];
+    const model = buildInvestigationScene(bootstrap);
+    const summary = summarizeDiscovery(["forensic_knife_match_01"], [], model.worldObjects, new Map());
+    expect(summary.entries[0].title).toBe("Kitchen knife");
+  });
+});
+
 describe("scene integration — the golden fixture summary", () => {
   it("the canned bootstrap starts with zero discovered evidence (pre-reveal ids stripped)", () => {
     const model = buildInvestigationScene(

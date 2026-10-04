@@ -476,29 +476,67 @@ def test_harness_rerun_is_byte_deterministic(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-# -- 4a. cross-class semantic: "ice pick" never resolves to a kitchen knife ----
+# -- 4a. cross-class semantic: no ARBITRARY cross-class winner ----------------
+# Phase 26C5 §7-§10: the probes now resolve through the DOCUMENTED trusted
+# category taxonomy. The resolution carries an EXPLICIT CATEGORY_FALLBACK
+# provenance and selects an asset from the SAME semantic class (the stabbing /
+# blunt chains backed by real catalog assets) — never a wild wrong-class
+# substitution, never an arbitrary winner.
 
 
 @pytest.mark.parametrize(
-    "requested_name,hints,cross_class_asset",
+    "requested_name,hints,cross_class_asset,expected_category",
     [
-        ("ice pick", {"tags": ("weapon",)}, "PROP_KITCHEN_KNIFE_01"),
-        ("stiletto", {"tags": ("weapon", "sharp")}, "PROP_KITCHEN_KNIFE_01"),
-        ("tire iron", {"tags": ("tool", "blunt")}, "PROP_WRENCH_01"),
+        (
+            "ice pick",
+            {"tags": ("weapon",)},
+            "PROP_KITCHEN_KNIFE_01",
+            "stabbing_weapon",
+        ),
+        (
+            "stiletto",
+            {"tags": ("weapon", "sharp")},
+            "PROP_KITCHEN_KNIFE_01",
+            "stabbing_weapon",
+        ),
+        (
+            "tire iron",
+            {"tags": ("tool", "blunt")},
+            "PROP_WRENCH_01",
+            "blunt_weapon",
+        ),
     ],
 )
-def test_semantic_cross_class_never_wins(requested_name, hints, cross_class_asset):
-    outcome = resolve_or_generate(AssetRequest(requested_name=requested_name, **hints))
-    resolution = outcome.resolution
-    # an ambiguous tie is fine (never an arbitrary cross-class winner)
-    assert resolution is not None
-    assert resolution.asset_id != cross_class_asset, (
-        requested_name,
-        resolution.asset_id,
+def test_semantic_cross_class_never_wins(
+    requested_name,
+    hints,
+    cross_class_asset,
+    expected_category,
+):
+    from app.assets.resolver import SEMANTIC_CATEGORY_FALLBACK_ASSETS
+
+    outcome = resolve_or_generate(
+        AssetRequest(requested_name=requested_name, **hints), spec_provider=None
     )
-    # the REQUIRED composer path escalates lossy semantics to the provider
-    # instead of substituting (Phase 14_5): a REQUIRED ice pick becomes the
-    # real procedural object, never a knife.
+    resolution = outcome.resolution
+    assert resolution is not None
+    # C5: the trusted category taxonomy resolves the phrase to a DOCUMENTED
+    # asset of the SAME semantic class (stabbing_weapon -> approved sharp prop,
+    # blunt_weapon -> wrench family). The explicit provenance is the trust
+    # boundary: this is a deliberate, catalog-bound mapping — never an
+    # arbitrary cross-class winner.
+    assert resolution.provenance is Provenance.CATEGORY_FALLBACK, (
+        requested_name,
+        resolution.provenance,
+    )
+    assert resolution.resolution_category == expected_category
+    assert resolution.asset_id in SEMANTIC_CATEGORY_FALLBACK_ASSETS[expected_category]
+    assert resolution.normalized_object_id in (requested_name, "")
+    assert resolution.ambiguous is False
+    # the REQUIRED composer path prefers the bounded provider over the trusted
+    # fallback (Phase 14_5 + C5 §10): a REQUIRED ice pick becomes the real
+    # procedural object when the provider CAN produce one; the golden base
+    # knife is never duplicated.
     from app.assets.generated_cache import GeneratedAssetCache
     from app.assets.spec_provider import FakeAssetSpecProvider
     from app.environments.manifests import load_all_environments

@@ -172,6 +172,13 @@ export const validateWorldObject: Validator<WorldObjectDTO> = {
       generated: assetId.startsWith("proc.")
         ? validateGeneratedDefinition(raw.generated)
         : null,
+      // Phase 26 (C5): the optional SEMANTIC humanized label published only
+      // for fallback-resolved objects (`assetId` is then a known catalog
+      // substitute id while the object's identity stays the original).
+      // Absent/null normalize to null (the catalog label / unknown-null path
+      // stays byte-identical); a PRESENT non-string/non-null value is
+      // malformed and rejected — never silently coerced.
+      displayLabel: requireOptionalNullableString(raw, "displayLabel", "worldObject"),
     };
   },
 };
