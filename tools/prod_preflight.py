@@ -33,7 +33,11 @@ Checks (all fail-closed; ANY ``fail`` finding exits 1):
           from Caddy's INTERNAL CA and browsers/bridge reject it. The default
           chain is canonical prod compose alone (ready-to-host unchanged);
         - production frontend bundle is same-origin/clean when present;
-  3. compose logging bounds (F-04) — repeated as its own finding.
+  3. compose logging bounds (F-04) — repeated as its own finding, plus the
+     Phase 29 MON-15 monitoring-edge gates: Caddy access logging enabled as
+     JSON on stdout (`check_caddy_access_logging`) and no monitoring host
+     port published / no Docker-socket mount
+     (`check_compose_monitoring_safety`).
 
 The preflight invokes ``docker compose config --format json`` with the current
 process environment and project directory. Compose automatically uses ``.env``
@@ -136,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     findings.extend(release_check.check_compose_logging_bounds(_REPO_ROOT))
+    findings.extend(release_check.check_caddy_access_logging(_REPO_ROOT))
+    findings.extend(release_check.check_compose_monitoring_safety(_REPO_ROOT))
 
     # De-duplicate: the effective-config check already reports log-bound
     # problems (fail-closed reuse) — keep the standalone finding only when the

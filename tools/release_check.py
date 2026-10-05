@@ -81,8 +81,22 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
       FAILS ``_caddy_domain_problem`` in both plain and ``--allow-local``
       modes) and it stays silent for explicit local-smoke hostnames
       (localhost / .localhost / .local).
+11. PHASE 29 — MONITORING EDGE (MON-01/MON-02/MON-13/MON-15) — additive
+       gates over the opaque edge: ``check_caddy_access_logging`` asserts the
+       public HTTPS virtual host in ``docker/Caddyfile`` (and its byte-mirrored
+       ``Caddyfile.internal`` LAN variant) enables access logging with
+       ``output stdout`` + ``format json`` — fail-closed (P29-02): ANY access-
+       log block in the site that is not stdout+json (file output, contradictory
+       second block) FAILS — so logs are structured JSON on stdout and the
+       bounded Docker json-file rotation (F-04) stays the ONLY retention bound;
+       ``check_compose_monitoring_safety`` asserts ONLY the Caddy edge publishes
+       host ports (80/443) — inline or block ``ports:`` — and no service mounts
+       the Docker socket, declares ``network_mode: host`` or runs
+       ``privileged: true`` (P29-03). The rendered-model gate
+       (``check_prod_effective_config``) asserts the same invariants on the
+       AUTHORITATIVE compose render.
 
-The production-DEPLOYMENT checks (7, 8, 9) apply ONLY when the deployment
+The production-DEPLOYMENT checks (7, 8, 9, 11) apply ONLY when the deployment
 artifacts exist: a document tree without ``docker-compose.prod.yml`` or the
 ``.env.production.example`` template reports those checks as ``skip`` (the same
 pattern as the frontend-build bundle scan), never ``fail`` — a repo that simply
@@ -1140,6 +1154,306 @@ def check_compose_logging_bounds(repo_root: Path) -> list[Finding]:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 29 MON-15 — production monitoring edge checks (MON-01/02/13)
+# --------------------------------------------------------------------------- #
+#
+# Hermetic, daemon-free structural gates over the SHIPPED edge configuration
+# (the same textual/rendered-parse pattern as every other compose gate):
+#
+#   * ``check_caddy_access_logging``  — the public HTTPS virtual host in
+#     ``docker/Caddyfile`` (and the byte-mirrored ``Caddyfile.internal`` LAN
+#     variant) enables Caddy access logging with ``output stdout`` and
+#     ``format json`` (MON-01), i.e. the Docker json-file rotation (F-04)
+#     remains the ONLY retention bound (MON-02) — no unbounded file inside
+#     the container.
+#   * ``check_compose_monitoring_safety`` — in ``docker-compose.prod.yml``
+#     ONLY the Caddy edge publishes host ports (``80:80`` / ``443:443``);
+#     no service may publish an unprotected monitoring port (MON-02/MON-07)
+#     and NO service may mount the Docker socket (MON-13 — monitoring
+#     containers get the minimal mounts only).
+#
+# Existing findings are never weakened: these checks are strictly ADDITIVE.
+
+_CADDYFILE_PUBLIC = "docker/Caddyfile"
+_CADDYFILE_INTERNAL = "docker/Caddyfile.internal"
+_CADDY_SITE_HEADER = "{$CADDY_DOMAIN:localhost} {"
+
+# Compose service(s) that are ALLOWED to publish host ports (the TLS edge).
+_MONITORING_EDGE_SERVICE = "caddy"
+_DOCKER_SOCKET_TOKENS = ("/var/run/docker.sock",)
+
+# P29-03 fail-closed markers (defense-in-depth over the AUTHORITATIVE
+# rendered-model checks below): a host-networked / privileged monitoring
+# service could listen on the host network without a `ports:` declaration,
+# so these textual markers must FAIL the gate even when the render is absent.
+_NETWORK_MODE_HOST_RE = re.compile(
+    r"^\s*network_mode\s*:\s*[\"']?host[\"']?(?:\s*#.*)?$",
+    re.IGNORECASE,
+)
+_PRIVILEGED_TRUE_RE = re.compile(
+    r"^\s*privileged\s*:\s*[\"']?true[\"']?(?:\s*#.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _compose_declares_ports(line: str) -> bool:
+    """True for a ``ports:`` declaration in EITHER block form (``ports:``)
+    or inline flow-list form (``ports: ["9000:9000"]``), ignoring comments.
+
+    The Compose YAML key must sit at the start of the (stripped) line; an
+    item under an existing ``ports:`` map (``- "9000:9000"``) does not match.
+    """
+    content = line.strip()
+    if content.startswith("#"):
+        return False
+    content = content.split("#", 1)[0].rstrip()
+    return bool(re.fullmatch(r"ports\s*:\s*(?:\[.*)?", content))
+
+
+def _normalize_line(line: str) -> str:
+    """Strip whitespace and collapse internal whitespace runs to one space
+    (Caddy/compose formatting is not part of the contract)."""
+    return " ".join(line.split())
+
+
+def _extract_braced_block(lines: list[str], open_index: int) -> list[str]:
+    """Return the lines of the brace block starting at ``open_index``.
+
+    The block's own opening line is included; the matching closing ``}`` is
+    excluded. Handles nested braces (Caddy sub-blocks) with a depth counter.
+    """
+    depth = 0
+    block: list[str] = []
+    for line in lines[open_index:]:
+        block.append(line)
+        depth += line.count("{") - line.count("}")
+        if depth <= 0:
+            break
+    return block
+
+
+def _caddy_https_site_log(
+    text: str,
+) -> tuple[bool, bool, list[str]]:
+    """Inspect ``docker/Caddyfile``: return (log_directive_present,
+    json_stdout_format_present, problems).
+
+    The HTTPS site block is the ``{$CADDY_DOMAIN:localhost} { ... }`` block.
+    Access-logging must be enabled INSIDE that block (MON-01); a ``log``
+    directive that would only appear in the ``http://`` redirect block does
+    not count.
+
+    Fail-closed (P29-02): ``json_stdout_format_present`` is True ONLY when
+    EVERY access-log block inside the site declares ``output stdout`` +
+    ``format json``. A single contradictory block — an ``output file``, an
+    omitted ``output stdout``, an unbounded ``format access``-style block, or
+    a second block that overrides the first under Caddy's last-wins option
+    merge — fails the gate, because under Caddy the effective access log could
+    still end up in an unbounded in-container file (MON-02 bypass).
+    """
+    lines = text.splitlines()
+    site_index = next(
+        (idx for idx, line in enumerate(lines)
+         if _normalize_line(line) == _CADDY_SITE_HEADER),
+        None,
+    )
+    if site_index is None:
+        return False, False, ["HTTPS virtual host block not found"]
+    site_lines = _extract_braced_block(lines, site_index)
+    problems: list[str] = []
+    log_blocks = 0
+    all_stdout_json = True
+    for idx, line in enumerate(site_lines):
+        if _normalize_line(line) != "log {":
+            continue
+        log_blocks += 1
+        block = _extract_braced_block(site_lines, idx)
+        normalized = [_normalize_line(ln) for ln in block]
+        block_problems: list[str] = []
+        if "output stdout" not in normalized:
+            block_problems.append("access log does not declare `output stdout`")
+        if "format json" not in normalized:
+            block_problems.append("access log does not declare `format json`")
+        if block_problems:
+            all_stdout_json = False
+            problems.append(
+                f"log block (site line {idx + 1}): " + "; ".join(block_problems)
+            )
+    return log_blocks > 0, log_blocks > 0 and all_stdout_json, problems
+
+
+def check_caddy_access_logging(repo_root: Path) -> list[Finding]:
+    """MON-01/02/15 — the Caddy edge enables JSON access logging on stdout.
+
+    Asserts that BOTH the canonical public Caddyfile and its byte-mirrored
+    LAN variant (``docker/Caddyfile.internal``, when tracked) declare a
+    ``log { output stdout format json }`` block inside the HTTPS virtual
+    host, so the Docker json-file rotation stays the single retention bound
+    and log lines land as structured JSON on stdout. Skip when the Caddyfile
+    is absent (deployment artifact check).
+
+    Fail-closed (P29-02): if ANY access-log block inside the site is NOT
+    ``output stdout`` + ``format json`` (a file output, an omitted
+    ``output stdout``, an unbounded ``format access``-style block, or a
+    contradictory second block that could override the first under Caddy's
+    last-wins option merge), the finding FAILS.
+    """
+    caddyfile = repo_root / _CADDYFILE_PUBLIC
+    if not caddyfile.is_file():
+        return [
+            Finding(
+                "caddy-access-logging", "skip",
+                f"{_CADDYFILE_PUBLIC} not present in this document tree — "
+                "the Caddy access-logging gate applies only when the TLS edge "
+                "config exists (deployment artifact check)",
+            )
+        ]
+    try:
+        text = caddyfile.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [
+            Finding("caddy-access-logging", "fail",
+                    f"{_CADDYFILE_PUBLIC} cannot be read: {exc}")
+        ]
+    log_present, json_stdout, problems = _caddy_https_site_log(text)
+    if not log_present:
+        return [
+            Finding(
+                "caddy-access-logging", "fail",
+                "docker/Caddyfile: the HTTPS virtual host has no `log` "
+                "directive — Caddy access logging is DISABLED on the public "
+                "edge (Phase 29 MON-01) and no traffic can be evaluated",
+            )
+        ]
+    if not json_stdout:
+        return [
+            Finding(
+                "caddy-access-logging", "fail",
+                "docker/Caddyfile: access logging must write `format json` to "
+                "`output stdout` (Phase 29 MON-01/MON-02) — found: "
+                + "; ".join(problems)
+                if problems
+                else "the log block is incomplete",
+            )
+        ]
+    internal = repo_root / _CADDYFILE_INTERNAL
+    internal_problems: list[str] = []
+    if internal.is_file():
+        try:
+            internal_text = internal.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            internal_problems.append(f"{_CADDYFILE_INTERNAL} cannot be read: {exc}")
+        else:
+            internal_log, internal_json, internal_problems = _caddy_https_site_log(
+                internal_text
+            )
+            if not internal_log or not internal_json:
+                internal_problems.insert(
+                    0,
+                    "the LAN overlay Caddyfile.internal must carry the SAME "
+                    "access-logging block as the canonical Caddyfile (it is a "
+                    "byte-copy plus `tls internal`)",
+                )
+    if internal_problems:
+        return [
+            Finding(
+                "caddy-access-logging", "fail",
+                "docker/Caddyfile: " + "; ".join(internal_problems),
+            )
+        ]
+    return [
+        Finding(
+            "caddy-access-logging", "ok",
+            "Caddy access logging enabled (JSON on stdout, HTTPS virtual "
+            "host; Docker json-file rotation 10m x 5 remains the single "
+            "retention bound, no unbounded log file inside the container)",
+        )
+    ]
+
+
+def check_compose_monitoring_safety(repo_root: Path) -> list[Finding]:
+    """MON-02/07/13/15 — no monitoring host ports, no Docker-socket mounts.
+
+    Structural, daemon-free parse of ``docker-compose.prod.yml``:
+
+      * ONLY the Caddy edge service may declare a ``ports:`` block (the TLS
+        edge ``80:80`` / ``443:443`` — MON-07/MON-13 keep the public attack
+        surface at 22/80/443 and forbid an unprotected monitoring port);
+      * NO service may bind-mount the Docker socket
+        (``/var/run/docker.sock`` — MON-13: monitoring containers get the
+        minimal mounts only);
+      * NO service may declare ``network_mode: host`` or ``privileged: true``
+        (P29-03 fail-closed): a host-networked/privileged monitoring service
+        could bind/listen on the host's own interfaces without any
+        ``ports:`` declaration. These textual markers are defense-in-depth;
+        the rendered-model checks stay authoritative.
+
+    Skip when the compose file is absent (deployment artifact check).
+    """
+    compose = repo_root / _COMPOSE_PROD_FILE
+    if not compose.is_file():
+        return [
+            Finding(
+                "monitoring-safety", "skip",
+                f"{_COMPOSE_PROD_FILE} not present in this document tree — "
+                "the monitoring-port/Docker-socket gate applies only when the "
+                "production compose exists (deployment artifact check)",
+            )
+        ]
+    try:
+        text = compose.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [
+            Finding("monitoring-safety", "fail",
+                    f"{_COMPOSE_PROD_FILE} cannot be read: {exc}")
+        ]
+    services = _compose_service_blocks(text)
+    problems: list[str] = []
+    for name, body_lines in sorted(services.items()):
+        declares_ports = any(
+            _compose_declares_ports(line) for line in body_lines
+        )
+        if declares_ports and name != _MONITORING_EDGE_SERVICE:
+            problems.append(
+                f"service {name!r} publishes host ports (inline or block "
+                "`ports:`) — only the Caddy TLS edge may expose ports "
+                "(80/443); an unprotected monitoring/backend port would widen "
+                "the public attack surface (MON-07)"
+            )
+        for number, line in enumerate(body_lines, start=1):
+            if any(token in line for token in _DOCKER_SOCKET_TOKENS):
+                problems.append(
+                    f"service {name!r} (line {number}) mounts the Docker socket "
+                    "(/var/run/docker.sock) — monitoring/backend containers must "
+                    "not gain host-daemon control (MON-13)"
+                )
+            if _NETWORK_MODE_HOST_RE.match(line):
+                problems.append(
+                    f"service {name!r} (line {number}) declares `network_mode: "
+                    "host` — host networking bypasses the compose bridge "
+                    "isolation and lets a monitoring/backend service bind or "
+                    "listen directly on the host's network stack (MON-15 "
+                    "fail-closed)"
+                )
+            if _PRIVILEGED_TRUE_RE.match(line):
+                problems.append(
+                    f"service {name!r} (line {number}) declares `privileged: "
+                    "true` — the container gains host-equivalent capabilities "
+                    "(iptables/network listeners) outside the compose trust "
+                    "boundary (MON-15 fail-closed)"
+                )
+    if problems:
+        return [Finding("monitoring-safety", "fail", "; ".join(problems))]
+    return [
+        Finding(
+            "monitoring-safety", "ok",
+            "no monitoring host port published (only the Caddy edge exposes "
+            "80/443); no service mounts the Docker socket, declares "
+            "network_mode: host or runs privileged",
+        )
+    ]
+
+# --------------------------------------------------------------------------- #
 # Phase 21B Finding 2/7 — DEV vs PROD env examples + effective prod preflight
 # --------------------------------------------------------------------------- #
 
@@ -1730,7 +2044,7 @@ def check_prod_effective_config(
         )
     services = rendered.get("services")
     if isinstance(services, dict):
-        for service in services.values():
+        for service_name, service in services.items():
             if not isinstance(service, dict):
                 continue
             if "11434" in _rendered_port_targets(service):
@@ -1742,6 +2056,66 @@ def check_prod_effective_config(
                     )
                 )
                 break
+
+    # 4b. Phase 29 MON-07/13/15 — ONLY the Caddy edge publishes host ports and
+    # no service mounts the Docker socket. Strictly additive; it never weakens
+    # the backend-privacy and Ollama-privacy assertions above.
+    if isinstance(services, dict):
+        for service_name, service in services.items():
+            if not isinstance(service, dict):
+                continue
+            if service.get("network_mode") == "host":
+                findings.append(
+                    Finding(
+                        "prod-effective-config", "fail",
+                        f"the rendered service {service_name!r} uses "
+                        "network_mode: host — host networking bypasses the "
+                        "compose bridge isolation and could let a monitoring/"
+                        "backend service bind directly on the host's network "
+                        "stack (Phase 29 MON-15)",
+                    )
+                )
+            if service.get("privileged") is True:
+                findings.append(
+                    Finding(
+                        "prod-effective-config", "fail",
+                        f"the rendered service {service_name!r} runs "
+                        "privileged: true — the container gains host-equivalent "
+                        "capabilities (iptables/network listeners) outside the "
+                        "compose trust boundary (Phase 29 MON-15)",
+                    )
+                )
+            if (
+                _rendered_port_targets(service)
+                and service_name != "caddy"
+            ):
+                findings.append(
+                    Finding(
+                        "prod-effective-config", "fail",
+                        f"the rendered service {service_name!r} publishes a "
+                        "host port; only the Caddy TLS edge may expose "
+                        "80/443 — an unprotected monitoring/backend port "
+                        "widens the public attack surface (Phase 29 MON-07)",
+                    )
+                )
+            for mount in service.get("volumes") or []:
+                if not isinstance(mount, dict):
+                    continue
+                source = str(mount.get("source") or "")
+                target = str(mount.get("target") or "")
+                if any(
+                    token in source or token in target
+                    for token in _DOCKER_SOCKET_TOKENS
+                ):
+                    findings.append(
+                        Finding(
+                            "prod-effective-config", "fail",
+                            f"the rendered service {service_name!r} mounts "
+                            "the Docker socket (/var/run/docker.sock); "
+                            "monitoring/backend containers must not gain "
+                            "host-daemon control (Phase 29 MON-13)",
+                        )
+                    )
     if not _has_private_data_volume(rendered, backend):
         findings.append(
             Finding(
@@ -2379,6 +2753,8 @@ def run_all(
     findings.extend(scan_credentials(repo_root, tracked))
     findings.extend(check_dockerignore(repo_root))
     findings.extend(check_compose_logging_bounds(repo_root))
+    findings.extend(check_caddy_access_logging(repo_root))
+    findings.extend(check_compose_monitoring_safety(repo_root))
     findings.extend(check_prod_env_profile(repo_root))
     findings.extend(
         check_prod_effective_config(

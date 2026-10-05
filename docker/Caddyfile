@@ -42,6 +42,16 @@ http://{$CADDY_DOMAIN:localhost} {
 }
 
 {$CADDY_DOMAIN:localhost} {
+	# Phase 29 MON-01 — structured access logging on the public HTTPS edge.
+	# Access logs are emitted as JSON lines to stdout only; the Docker
+	# json-file rotation (F-04, 10 MB x 5) is the SOLE retention bound — there
+	# is deliberately NO separate log file inside the container and NO
+	# long-term host-side storage (MON-03 data minimization).
+	log {
+		output stdout
+		format json
+	}
+
 	request_body {
 		max_size 70000
 	}
