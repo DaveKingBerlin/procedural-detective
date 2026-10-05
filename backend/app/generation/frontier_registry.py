@@ -81,10 +81,10 @@ Security boundary (Phase30 §4 / §8 / §21):
   ``*.localtest.me``, ``*.vcap.me``, ``*.lvh.me``, ``*.dns.google``) is
   rejected by a hermetic ``endswith`` check on the lowercased hostname (no
   socket/DNS resolver). That closes the rebinding bypass where a hostile entry
-  hides a loopback/private/metadata IP *behind a hostname*
-  (``127.0.0.1.nip.io``, ``10.0.0.1.nip.io``, ``2130706433.nip.io``,
-  ``1.2.3.4.xip.io``, ``127.0.0.1.sslip.io``) past the literal-IP and
-  numeric-spelling guards.
+  hides a loopback/private/metadata IP *behind a hostname*: a loopback or
+  RFC-private address spelled as a dotted quad, or the numeric-spelling form
+  of a private address, joined to the rebinding domain as its leftmost-label
+  payload — past the literal-IP and numeric-spelling guards.
 - Validation is deterministic and hermetic (``urlparse`` + ``ipaddress`` +
   suffix ``endswith``), so the §30 registry-safety tests never touch the
   network.
@@ -133,21 +133,28 @@ _FORBIDDEN_REGISTRY_HOSTNAMES: frozenset[str] = frozenset(
 
 # Wildcard-DNS / DNS-rebinding host suffixes (LOW finding A17). These public
 # wildcard-DNS services resolve ARBITRARY subdomains to a caller-supplied IP
-# address (``127.0.0.1.nip.io`` -> 127.0.0.1), so a hostile registry entry
-# could hide a loopback/private/metadata target behind a "hostname" that
-# defeats the literal-IP and numeric-spelling guards above. A registry host is
-# therefore also rejected when its FINAL labels end in any of these suffixes
-# (hermetic ``endswith`` on the lowercased hostname — no socket, DNS or
-# resolver is ever consulted).
+# address, so a hostile registry entry could hide a loopback/private/metadata
+# target behind a "hostname" that defeats the literal-IP and numeric-spelling
+# guards above. A registry host is therefore also rejected when its FINAL
+# labels end in any of these suffixes (hermetic ``endswith`` on the lowercased
+# hostname — no socket, DNS or resolver is ever consulted).
 #
 # The set is a BOUNDED, documented static list of well-known wildcard-DNS
 # service suffixes (any-IP encoders + loopback wildcards):
 #
 #   nip.io / sslip.io / xip.io       any-IP wildcard-DNS rebinding encoders
 #   freeip.io / iluxa.me             any-IP wildcard-DNS services
-#   localtest.me / vcap.me / lvh.me  wildcard DNS -> 127.0.0.1 (loopback)
+#   localtest.me / vcap.me / lvh.me  wildcard DNS -> loopback
 #   dns.google                       Google wildcard-DNS family (incl. in the
 #                                    A17 documented wildcard-DNS list)
+#
+# Self-hygiene (release gate): this module's tracked prose NEVER writes a
+# concrete rebinding vector or a private-IP / numeric-spelling example in a
+# comment — ``tools.release_check`` scans the TRACKED tree and fails on any
+# private-IP literal in tracked prose (the repo's DEF-001 gate-green pattern:
+# hostile vectors are documented by CLASS and suffix DOMAIN here, while the
+# concrete deny vectors live in the hermetic test tree). The A17 denial is
+# implemented by this suffix set + the ``endswith`` checks, never by prose.
 _WILDCARD_DNS_SUFFIXES: frozenset[str] = frozenset(
     {
         "nip.io",
@@ -298,9 +305,10 @@ def validate_frontier_registry_endpoint(endpoint: str) -> str:
         )
     # LOW A17 — wildcard-DNS / DNS-rebinding host suffixes. A suffix match on
     # the lowercased hostname's FINAL labels is hermetic (no socket/DNS) and
-    # closes the rebinding bypass (e.g. ``127.0.0.1.nip.io``, ``10.0.0.1.nip.io``,
-    # ``2130706433.nip.io``, ``1.2.3.4.xip.io``, ``127.0.0.1.sslip.io``) that
-    # would otherwise hide a loopback/private/metadata IP behind a hostname.
+    # closes the rebinding bypass: a loopback or RFC-private address spelled
+    # as a dotted quad, or the numeric-spelling form of a private address,
+    # joined to the rebinding suffix — either payload would otherwise hide a
+    # loopback/private/metadata IP behind a hostname.
     if lowered in _WILDCARD_DNS_SUFFIXES or any(
         lowered.endswith("." + suffix) for suffix in _WILDCARD_DNS_SUFFIXES
     ):
@@ -312,8 +320,9 @@ def validate_frontier_registry_endpoint(endpoint: str) -> str:
         address = ipaddress.ip_address(lowered)
     except ValueError:
         # Not a canonical literal IP. Reject the remaining numeric-looking
-        # spellings (``2130706433``, ``1.2.3.4.5``) so a registry entry can
-        # never smuggle an IP target through a non-canonical form.
+        # spellings (an integer IPv4 value, or a dotted sequence that is not
+        # a canonical quad) so a registry entry can never smuggle an IP
+        # target through a non-canonical form.
         if lowered.replace(".", "").isdigit() and lowered.isascii():
             raise ValueError(
                 "registry endpoint host must be a hostname, not a numeric/IP address"
