@@ -52,6 +52,7 @@ from app.generation.provider import GenerationStage, Provider
 from app.generation.selection import (
     BROWSER_SELECTABLE_PROVIDERS,
     GenerationSelection,
+    InvalidFrontierConfigError as SelectionInvalidFrontierConfigError,
     InvalidOllamaModelError as SelectionInvalidOllamaModelError,
     InvalidProviderError as SelectionInvalidProviderError,
     OLLAMA_TRANSPORTS,
@@ -59,6 +60,9 @@ from app.generation.selection import (
     ResolvedGeneration,
     SelectionConfigError as SelectionConfigErrorBase,
     resolve as resolve_selection,
+    validate_frontier_api_key,
+    validate_frontier_model_string,
+    validate_frontier_provider_id,
     validate_ollama_model_string,
 )
 from app.generation.state_machine import GenerationState
@@ -189,6 +193,14 @@ class ProviderUnavailableError(GenerationServiceError):
 class InvalidOllamaModelError(GenerationServiceError):
     """Phase 25 — a user-supplied Ollama model string failed the central
     validator (-> 400 INVALID_OLLAMA_MODEL; never echoes the offending value)."""
+
+
+class InvalidFrontierConfigError(GenerationServiceError):
+    """Phase 30 — an invalid/missing browser BYOK frontier provider/key/model
+    (-> 400 INVALID_FRONTIER_CONFIG). Covers: a ``frontier`` block on a
+    non-frontier selection, a missing/unknown/disabled provider id, a missing/
+    invalid api key and a missing/invalid model. The offending value is NEVER
+    echoed and no outbound provider call ever happens."""
 
 
 class InvalidDemoCaseError(GenerationServiceError):
@@ -760,6 +772,9 @@ class GenerationService:
         ollama_transport: str | None = None,
         ollama_model: str | None = None,
         demo_case_id: str | None = None,
+        frontier_provider: str | None = None,
+        frontier_api_key: str | None = None,
+        frontier_model: str | None = None,
     ) -> CaseStarted:
         """Run one private case generation durably (version 1).
 
@@ -802,6 +817,18 @@ class GenerationService:
           ``InvalidDemoCaseError`` (400 INVALID_DEMO_CASE); a ``demo_case_id``
           with any non-fake provider -> ``InvalidDemoCaseError`` (400 — a
           browser value can never select fixtures on a real LLM path).
+        - ``frontier_provider`` / ``frontier_api_key`` / ``frontier_model``
+          (Phase 30): the browser BYOK frontier block. Required when
+          ``generation_provider="frontier"``; REJECTED on any other provider
+          (400 INVALID_FRONTIER_CONFIG) per the strict request-schema
+          convention (no ambiguous ignored data). The provider id must be an
+          exact enabled member of the trusted server-owned registry; the key
+          is an opaque validated secret and the model reuses the hardened
+          model-string validator. The trio is FROZEN into the immutable
+          per-attempt selection at attempt start, the endpoint is resolved
+          ONCE from the registry and the same endpoint/key/model drive EVERY
+          stage (case_truth/evidence/activity_log/repairs/world_graph/
+          regeneration). The key is NEVER persisted, logged or returned.
 
         Phase 28 F1 (adversarial fix): the id is CANONICALIZED here, once, at
         the service boundary. Only ASCII ``' '`` padding around a known
@@ -830,6 +857,11 @@ class GenerationService:
             generation_provider=generation_provider,
             ollama_transport=ollama_transport,
             ollama_model=ollama_model,
+            # Phase 30 — the browser BYOK frontier block (provider/key/model;
+            # validated + frozen here, never a silent fallback).
+            frontier_provider=frontier_provider,
+            frontier_api_key=frontier_api_key,
+            frontier_model=frontier_model,
         )
         # Phase 28 — resolve the demo fixture script BEFORE the provider
         # bundle is frozen (per-attempt isolation, fail-closed validation).
@@ -1390,6 +1422,9 @@ class GenerationService:
         generation_provider: str | None = None,
         ollama_transport: str | None = None,
         ollama_model: str | None = None,
+        frontier_provider: str | None = None,
+        frontier_api_key: str | None = None,
+        frontier_model: str | None = None,
     ) -> CaseStarted:
         """Generate the NEXT CaseVersion of an existing case (Phase5 B).
 
@@ -1401,13 +1436,19 @@ class GenerationService:
 
         ``generation_provider`` / ``ollama_transport`` / ``ollama_model``
 (Phase 25) are the OPTIONAL per-attempt selection (identical semantics
-        to ``start_case_generation``).
+        to ``start_case_generation``). ``frontier_provider`` /
+        ``frontier_api_key`` / ``frontier_model`` (Phase 30) are the browser
+        BYOK frontier block with the SAME strict semantics (required on
+        provider=frontier, rejected otherwise).
         """
         settings = self._settings
         selection, explicit = self._build_requested_selection(
             generation_provider=generation_provider,
             ollama_transport=ollama_transport,
             ollama_model=ollama_model,
+            frontier_provider=frontier_provider,
+            frontier_api_key=frontier_api_key,
+            frontier_model=frontier_model,
         )
         resolved = self._resolve_selection(
             selection,
@@ -1588,6 +1629,10 @@ class GenerationService:
             provider_timeout_seconds=resolved.timeout_seconds,
             provider_name=resolved.provider_id,
             provider_model=resolved.model,
+            # Phase 30 — the SAFE per-attempt BYOK provider id for the
+            # allowlisted ``frontierProvider`` observability field only
+            # (None for non-frontier attempts).
+            provider_sub_id=resolved.frontier_provider_id,
             # Phase 28 — the FROZEN per-attempt demo fixture id (sanitized
             # ``demo.started`` observability only; None for non-demo attempts).
             demo_case_id=demo_case_id,
@@ -1935,24 +1980,46 @@ class GenerationService:
         generation_provider: str | None,
         ollama_transport: str | None,
         ollama_model: str | None,
+        frontier_provider: str | None = None,
+        frontier_api_key: str | None = None,
+        frontier_model: str | None = None,
     ) -> tuple[GenerationSelection, bool]:
         """Validate + freeze the browser-supplied (or default) selection.
 
-        All three fields absent -> the configured default selection (backward
-        compatibility; ``explicit=False`` so a not-configured DEFAULT fails
-        closed as a configuration error, never as a request rejection).
-        Returns ``(selection, explicit)``. Validation never touches settings,
-        never calls the network and never leaks the offending value.
+        All selection fields absent -> the configured default selection
+        (backward compatibility; ``explicit=False`` so a not-configured
+        DEFAULT fails closed as a configuration error, never as a request
+        rejection). Returns ``(selection, explicit)``. Validation never
+        touches settings, never calls the network and never leaks the
+        offending value.
+
+        Phase 30 BYOK — the ``frontier_*`` trio is the browser frontier block:
+        REQUIRED when ``generationProvider="frontier"`` and REJECTED with 400
+        INVALID_FRONTIER_CONFIG on any other provider (strict request-schema
+        convention: no ambiguous ignored data). Provider id/key/model are
+        validated by the central Phase 30 validators (the offending value is
+        never echoed) and FROZEN into the immutable selection so every stage
+        of the attempt uses the SAME endpoint/key/model.
         """
+        frontier_present = any(
+            value is not None
+            for value in (frontier_provider, frontier_api_key, frontier_model)
+        )
         if (
             generation_provider is None
             and ollama_transport is None
             and ollama_model is None
+            and not frontier_present
         ):
             return self._default_selection(), False
         if generation_provider is None:
-            # A lone transport/model has no meaning without a provider: ignore
-            # it and resolve the configured default (defined, non-guessing).
+            # A lone transport/model/frontier block has no meaning without a
+            # provider: a frontier block is only meaningful with provider=
+            # frontier (strict rejection, never ambiguous ignored data).
+            if frontier_present:
+                raise InvalidFrontierConfigError(
+                    "frontier configuration requires generationProvider=frontier"
+                )
             return self._default_selection(), False
         provider = str(generation_provider).strip()
         if provider not in BROWSER_SELECTABLE_PROVIDERS:
@@ -1967,24 +2034,63 @@ class GenerationService:
                 raise InvalidGenerationProviderError(
                     "unknown or invalid ollama transport"
                 )
-        if provider == "ollama":
-            if transport is None:
-                # The server must NEVER guess a transport for an explicit
-                # provider=ollama request (Phase25 §4 rules — fail closed).
-                raise InvalidGenerationProviderError(
-                    "ollama transport is required when provider=ollama"
+        f_provider: str | None = None
+        f_key: str | None = None
+        f_model: str | None = None
+        if provider == "frontier":
+            # Phase 30 — BYOK: all three members are required, validated and
+            # frozen. Never a fallback to operator credentials/demo/ollama.
+            if not frontier_present:
+                raise InvalidFrontierConfigError(
+                    "a frontier provider, api key and model are required for "
+                    "generationProvider=frontier"
                 )
-            model = self._validated_ollama_model(ollama_model)
-            if model is None:
-                raise InvalidOllamaModelError("a model is required for provider=ollama")
+            try:
+                f_provider = validate_frontier_provider_id(frontier_provider)
+            except SelectionInvalidFrontierConfigError:
+                raise InvalidFrontierConfigError(
+                    "the frontier provider selection is invalid or unsupported"
+                ) from None
+            try:
+                f_key = validate_frontier_api_key(frontier_api_key)
+            except SelectionInvalidFrontierConfigError:
+                raise InvalidFrontierConfigError(
+                    "the frontier api key is invalid or unsupported"
+                ) from None
+            try:
+                f_model = validate_frontier_model_string(frontier_model)
+            except SelectionInvalidFrontierConfigError:
+                raise InvalidFrontierConfigError(
+                    "the frontier model is invalid or unsupported"
+                ) from None
         else:
-            # provider != ollama: an explicit transport/model are IGNORED
+            if frontier_present:
+                raise InvalidFrontierConfigError(
+                    "frontier configuration is only valid with "
+                    "generationProvider=frontier"
+                )
+            if provider == "ollama":
+                if transport is None:
+                    # The server must NEVER guess a transport for an explicit
+                    # provider=ollama request (Phase25 §4 rules — fail closed).
+                    raise InvalidGenerationProviderError(
+                        "ollama transport is required when provider=ollama"
+                    )
+                model = self._validated_ollama_model(ollama_model)
+                if model is None:
+                    raise InvalidOllamaModelError("a model is required for provider=ollama")
+            # provider == "fake": an explicit transport/model are IGNORED
             # (sanitized, never echoed, never travel in the immutable
             # selection) — they are meaningful only for an Ollama selection.
-            transport = None
+            transport = None if provider != "ollama" else transport
         return (
             GenerationSelection(
-                provider=provider, ollama_transport=transport, ollama_model=model
+                provider=provider,
+                ollama_transport=transport,
+                ollama_model=model,
+                frontier_provider=f_provider,
+                frontier_api_key=f_key,
+                frontier_model=f_model,
             ),
             True,
         )
@@ -2112,6 +2218,13 @@ class GenerationService:
         except SelectionInvalidOllamaModelError:
             raise InvalidOllamaModelError(
                 "the Ollama model string is invalid or unsupported"
+            ) from None
+        except SelectionInvalidFrontierConfigError:
+            # Phase 30 — a browser BYOK frontier provider/key/model failed the
+            # closed registry/shape validation (400 INVALID_FRONTIER_CONFIG;
+            # the offending value is NEVER echoed).
+            raise InvalidFrontierConfigError(
+                "the frontier provider configuration is invalid or unsupported"
             ) from None
         except SelectionConfigErrorBase as exc:
             raise ProviderConfigError(str(exc)) from None
@@ -2319,6 +2432,7 @@ __all__ = [
     "GenerationServiceError",
     "IdentifierConflict",
     "InvalidDemoCaseError",
+    "InvalidFrontierConfigError",
     "InvalidGenerationProviderError",
     "InvalidOllamaModelError",
     "MAX_GENERATED_REQUESTS",

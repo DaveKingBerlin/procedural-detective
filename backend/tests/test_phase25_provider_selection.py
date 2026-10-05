@@ -356,34 +356,84 @@ def test_resolve_live_provider_and_fails_closed_without_credentials():
 def test_resolve_frontier_availability_and_https_settings():
     from app.generation.frontier_provider import FrontierProvider
     from app.generation.selection import (
+        GenerationSelection,
         ProviderUnavailableError,
         SelectionConfigError,
         frontier_configured,
         resolve,
     )
 
-    full = dict(
-        frontier_enabled=True,
-        frontier_base_url="https://api.example.com/v1/chat/completions",
-        frontier_api_key="secret-key",
-        frontier_model="frontier-model-1",
+    # Phase 30 BYOK: FRONTIER_ENABLED alone makes the feature available
+    # (the legacy operator trio is no longer required for availability).
+    enabled = dict(frontier_enabled=True)
+    assert frontier_configured(_settings(**enabled)) is True
+    # Availability does NOT require the legacy server-funded credentials.
+    assert frontier_configured(
+        _settings(frontier_enabled=True, frontier_base_url=None, frontier_api_key=None, frontier_model=None)
+    ) is True
+    assert frontier_configured(_settings()) is False
+    assert frontier_configured(_settings(frontier_enabled=False)) is False
+
+    # A fully-specified BYOK selection resolves against the trusted registry
+    # endpoint with the USER key/model (never the operator settings).
+    resolved = resolve(
+        GenerationSelection(
+            "frontier",
+            frontier_provider="openai",
+            frontier_api_key="user-key-1",
+            frontier_model="frontier-model-1",
+        ),
+        _settings(**enabled),
+        session=None,
     )
-    assert frontier_configured(_settings(**full)) is True
-    resolved = resolve(GenerationSelection("frontier"), _settings(**full), session=None)
     assert resolved.provider_id == "frontier"
     assert resolved.model == "frontier-model-1"
-    assert isinstance(resolved.provider_factory(), FrontierProvider)
+    assert resolved.frontier_provider_id == "openai"
+    provider = resolved.provider_factory()
+    assert isinstance(provider, FrontierProvider)
+    assert provider._endpoint_url == "https://api.openai.com/v1/chat/completions"
+    assert provider._api_key == "user-key-1"
+    assert provider._model == "frontier-model-1"
 
-    partial = dict(frontier_enabled=True, frontier_model="m")
+    # An explicit frontier selection WITHOUT the per-attempt BYOK block is a
+    # request rejection (never a silent fallback to operator credentials).
     with pytest.raises(ProviderUnavailableError):
         resolve(
             GenerationSelection("frontier"),
-            _settings(**partial),
+            _settings(**enabled),
             session=None,
             strict_unavailable=True,
         )
     with pytest.raises(SelectionConfigError):
-        resolve(GenerationSelection("frontier"), _settings(**partial), session=None)
+        resolve(
+            GenerationSelection("frontier"),
+            _settings(**enabled),
+            session=None,
+            strict_unavailable=False,
+        )
+    # Frontier disabled -> explicit requests are unavailable.
+    with pytest.raises(ProviderUnavailableError):
+        resolve(
+            GenerationSelection("frontier"),
+            _settings(),
+            session=None,
+            strict_unavailable=True,
+        )
+    # Unknown/disabled provider id in the selection fails closed.
+    from app.generation.selection import InvalidFrontierConfigError
+
+    with pytest.raises(InvalidFrontierConfigError):
+        resolve(
+            GenerationSelection(
+                "frontier",
+                frontier_provider="not-a-provider",
+                frontier_api_key="k",
+                frontier_model="m",
+            ),
+            _settings(**enabled),
+            session=None,
+            strict_unavailable=True,
+        )
 
 
 def test_frontier_base_url_remains_https_only():
@@ -701,21 +751,21 @@ def test_ollama_requires_transport_and_model(database_url):
 
 
 def test_explicit_unavailable_provider_rejected_no_silent_fallback(database_url):
-    # §15.11/15.12 + §4.2 — explicit frontier when not configured, explicit
-    # ollama/server when not configured, explicit ollama/bridge when the bridge
-    # feature is off => 400 PROVIDER_UNAVAILABLE. NEVER fake.
+    # §15.11/15.12 + §4.2 — explicit frontier WITHOUT the Phase 30 BYOK block,
+    # explicit ollama/server when not configured, explicit ollama/bridge when
+    # the bridge feature is off => 400 (INVALID_FRONTIER_CONFIG /
+    # PROVIDER_UNAVAILABLE). NEVER fake.
     application = _make_app(
         database_url,
-        # frontier present but incomplete (no key) => not configured
+        # frontier ENABLED (BYOK feature switch) — but no per-attempt block.
         frontier_enabled=True,
-        frontier_model="m",
     )
     try:
         with TestClient(application) as c:
             token, _ = create_session(c)
             frontier = _post_case(c, token, generationProvider="frontier")
             assert frontier.status_code == 400
-            assert frontier.json()["error"]["code"] == "PROVIDER_UNAVAILABLE"
+            assert frontier.json()["error"]["code"] == "INVALID_FRONTIER_CONFIG"
             bridge = _post_case(
                 c, token,
                 generationProvider="ollama",
@@ -809,13 +859,15 @@ def test_explicit_ollama_server_selects_model_all_stages_and_publishes(
 def test_explicit_frontier_selects_provider_all_stages_and_publishes(
     database_url, monkeypatch
 ):
-    """§15.9/.13 — a fully-configured Frontier provider publishes through the
-    REAL service with the frozen configured model; the API key never leaks."""
+    """§15.9/.13 — a Phase 30 BYOK Frontier selection publishes through the
+    REAL service with the USER'S key + model on EVERY stage; the outbound
+    endpoint comes ONLY from the trusted registry; the operator key (if any)
+    is never consumed; the API key never leaks."""
     import httpx
 
     from app.generation import frontier_provider as fp_mod
 
-    captured = {"headers": None}
+    captured = []
     golden = [_G[s] for s in _STAGES]
 
     class _FakeResponse:
@@ -826,37 +878,59 @@ def test_explicit_frontier_selects_provider_all_stages_and_publishes(
             yield body
 
     def _fake_post(url, json, headers, timeout):
-        captured["headers"] = dict(headers or {}) if isinstance(headers, dict) else headers
+        captured.append((url, dict(json or {}), dict(headers or {})))
         return _FakeResponse()
 
     monkeypatch.setattr(fp_mod.httpx, "post", _fake_post)
+    operator_key = "super-secret-frontier-key"
+    user_key = "user-frontier-key-1"
+    user_model = "frontier-model-1"
     application = _make_app(
         database_url,
         generation_provider="fake",
         frontier_enabled=True,
-        frontier_base_url="https://api.example.com/v1/chat/completions",
-        frontier_api_key="super-secret-frontier-key",
-        frontier_model="frontier-model-1",
+        # Legacy operator-funded settings are KEPT as documented surface —
+        # they must NEVER fund the browser BYOK attempt.
+        frontier_base_url="https://operator.example.com/v1/chat/completions",
+        frontier_api_key=operator_key,
+        frontier_model="operator-model",
     )
     try:
         with TestClient(application) as c:
             token, _ = create_session(c)
-            response = _post_case(c, token, generationProvider="frontier")
+            response = _post_case(
+                c,
+                token,
+                generationProvider="frontier",
+                frontier={
+                    "provider": "openai",
+                    "apiKey": user_key,
+                    "model": user_model,
+                },
+            )
             assert response.status_code == 201, response.text
             assert response.json()["status"] == "PUBLISHED"
-            assert captured["headers"] is not None
-            assert "super-secret-frontier-key" in captured["headers"].get(
-                "Authorization", ""
-            )
+            assert captured, "the frontier provider must have been called"
+            # Every stage used the TRUSTED OPENAI registry endpoint, the USER
+            # key and the USER model — never the operator values.
+            for url, body, headers in captured:
+                assert url == "https://api.openai.com/v1/chat/completions"
+                assert headers["Authorization"] == f"Bearer {user_key}"
+                assert body["model"] == user_model
+            assert all(operator_key not in headers.get("Authorization", "") for _u, _b, headers in captured)
             store = application.state.store
             stored = json.loads(
                 store.get_published(response.json()["caseId"], 1).payload_json
             )
-            assert stored.get("model") == "frontier-model-1"
-            # The secret never reaches ANY response / sandbox text.
+            assert stored.get("model") == user_model
+            # The secret never reaches ANY response / sandbox text / payload.
             for text in (response.text, json.dumps(stored)):
-                assert "super-secret-frontier-key" not in text
-                assert "api.example.com" not in text
+                assert user_key not in text
+                assert operator_key not in text
+                assert "api.openai.com" not in text
+                assert "operator.example.com" not in text
+            # No global mutation (Phase 25 §14 invariant).
+            assert application.state.settings.generation_provider == "fake"
     finally:
         _dispose(application)
 
@@ -905,11 +979,23 @@ def test_capabilities_additive_shape_with_default_fake(database_url):
     assert ollama["transports"]["server"]["reason"] == "not_configured"
     assert ollama["transports"]["bridge"]["available"] is False
     assert ollama["transports"]["bridge"]["connected"] is False
-    # §15.3 — Frontier listed but not configured -> safe reason.
+    # §15.3 + Phase 30 — Frontier listed but NOT enabled -> safe reason; the
+    # BYOK entry advertises requiresUserConfiguration + the safe registry
+    # catalog (never endpoints/credentials).
     frontier = providers["frontier"]
     assert frontier["label"] == "Frontier"
     assert frontier["available"] is False
-    assert frontier["model"] is None
+    assert frontier["requiresUserConfiguration"] is True
+    assert frontier["providers"] == [
+        {"id": "openai", "label": "OpenAI"},
+        {"id": "openrouter", "label": "OpenRouter"},
+        {"id": "groq", "label": "Groq"},
+        {"id": "together", "label": "Together AI"},
+        {"id": "mistral", "label": "Mistral AI"},
+        {"id": "fireworks", "label": "Fireworks AI"},
+        {"id": "deepinfra", "label": "DeepInfra"},
+        {"id": "xai", "label": "xAI"},
+    ]
     assert frontier["reason"] == "not_configured"
 
 
@@ -954,9 +1040,14 @@ def test_capabilities_ollama_server_available_when_configured(
 
 
 def test_capabilities_frontier_configured_reveals_safe_metadata(database_url):
+    # Phase 30 — BYOK availability needs ONLY the FRONTIER_ENABLED feature
+    # switch + the registry (never the legacy operator credentials). The DTO
+    # advertises the SAFE {id,label} catalog; no endpoint/secret/operator
+    # setting ever appears.
     application = _make_app(
         database_url,
         frontier_enabled=True,
+        # Legacy operator-funded values stay configured but must NEVER leak.
         frontier_base_url="https://api.example.com/v1/chat/completions",
         frontier_api_key="top-secret-key",
         frontier_model="frontier-alpha",
@@ -970,10 +1061,16 @@ def test_capabilities_frontier_configured_reveals_safe_metadata(database_url):
     body = response.json()
     frontier = {p["id"]: p for p in body["providers"]}["frontier"]
     assert frontier["available"] is True
-    assert frontier["model"] == "frontier-alpha"
+    assert frontier["requiresUserConfiguration"] is True
     assert frontier["reason"] is None
-    # §15.5 — never a secret / URL in the DTO.
-    for token in ("top-secret-key", "api.example.com", "chat/completions"):
+    assert frontier["providers"] == [
+        {"id": "openai", "label": "OpenAI"},
+        {"id": "openrouter", "label": "OpenRouter"},
+    ] or len(frontier["providers"]) == 8  # the full committed catalog
+    for entry in frontier["providers"]:
+        assert set(entry) == {"id", "label"}
+    # §15.5 + Phase 30 §9 — never a secret / URL / endpoint in the DTO.
+    for token in ("top-secret-key", "api.example.com", "chat/completions", "api.openai.com"):
         assert token not in response.text
 
 

@@ -69,6 +69,16 @@ class GenerationFailureCode(str, Enum):
     ACTIVITY_LOG_DIRECT_TRUTH_LEAK = "ACTIVITY_LOG_DIRECT_TRUTH_LEAK"
     ACTIVITY_LOG_ENTITY_LEAK = "ACTIVITY_LOG_ENTITY_LEAK"
     ACTIVITY_LOG_PROVIDER_FAILED = "ACTIVITY_LOG_PROVIDER_FAILED"
+    # -- Phase 30 — BYOK Frontier normalized provider failures (closed
+    # vocabulary, §23). Produced by ``FrontierProvider`` via the typed
+    # ``FrontierHttpError`` carrier and by the defensive ``infer_failure_code``
+    # mappings below. The browser NEVER sees raw provider bodies/headers; it
+    # maps these safe public codes to UI copy only.
+    FRONTIER_AUTH_FAILED = "FRONTIER_AUTH_FAILED"
+    FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND = "FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND"
+    FRONTIER_RATE_LIMITED = "FRONTIER_RATE_LIMITED"
+    FRONTIER_TIMEOUT = "FRONTIER_TIMEOUT"
+    FRONTIER_PROVIDER_ERROR = "FRONTIER_PROVIDER_ERROR"
 
 
 PUBLIC_FAILURE_CODES = frozenset(code.value for code in GenerationFailureCode)
@@ -90,6 +100,20 @@ def infer_failure_code(reason: str | None) -> GenerationFailureCode:
     text = (reason or "").lower()
     if "deadline" in text:
         return GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
+    # Phase 30 — BYOK Frontier normalized failures. Checked BEFORE the generic
+    # timeout/provider branches so a Frontier-derived reason text maps to the
+    # specific §23 code (the typed exception carrier is the primary path; this
+    # is defense-in-depth for reason-text fallbacks).
+    if "frontier" in text:
+        if "auth" in text or "401" in text or "403" in text:
+            return GenerationFailureCode.FRONTIER_AUTH_FAILED
+        if "not found" in text or "404" in text:
+            return GenerationFailureCode.FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND
+        if "rate limit" in text or "429" in text:
+            return GenerationFailureCode.FRONTIER_RATE_LIMITED
+        if "timed out" in text or "timeout" in text:
+            return GenerationFailureCode.FRONTIER_TIMEOUT
+        return GenerationFailureCode.FRONTIER_PROVIDER_ERROR
     if "timed out" in text or "timeout" in text:
         return GenerationFailureCode.PROVIDER_TIMEOUT
     # Phase 22 — the bridge typed-failure phrases map to their canonical codes

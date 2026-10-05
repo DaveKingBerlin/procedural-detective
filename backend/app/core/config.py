@@ -417,8 +417,11 @@ class Settings(BaseSettings):
             "through the per-request selection (see app.generation.selection). "
             "remote_client is the Phase 22 'Bring Your Own Ollama' bridge mode: "
             "it requires ENABLE_BRIDGE=true and FAILS CLOSED at startup/config "
-            "time otherwise (ProviderConfigError). frontier requires every "
-            "FRONTIER_* setting and FAILS CLOSED at startup otherwise."
+            "time otherwise (ProviderConfigError). Phase 30: frontier is the "
+            "BYOK browser path — FRONTIER_ENABLED is its feature switch and the "
+            "player supplies provider/key/model per attempt; a frontier DEFAULT "
+            "(GENERATION_PROVIDER=frontier without a per-attempt BYOK block) "
+            "FAILS CLOSED at request time (no operator-funded fallback)."
         ),
     )
     llm_api_key: str | None = Field(
@@ -439,51 +442,65 @@ class Settings(BaseSettings):
             "(generation-stage -> list of directives/strings)."
         ),
     )
-    # -- Phase 25 — Frontier hosted OpenAI-compatible provider ----------------
-    # OPERATOR-ONLY configuration (mirror of the live trio). FRONTIER_API_KEY
-    # is a SERVER-ONLY secret: never logged, never embedded in exceptions and
-    # never emitted in any API DTO / capability response. Frontier is a NEW
-    # provider distinct from the legacy 'live' trio (LIVE_PROVIDER_URL /
-    # LLM_API_KEY / LLM_MODEL): both may be configured simultaneously and the
-    # browser may select frontier per case-generation request. DEFAULT is off:
-    # no FRONTIER_* setting is read unless frontier_enabled is true AND every
-    # required member is present (fail closed at selection time).
+    # -- Phase 25/30 — Frontier hosted OpenAI-compatible provider -------------
+    # Phase 30 turns the browser-facing Frontier path into BYOK: the player
+    # selects a logical provider id from the trusted server-owned registry and
+    # supplies only API key + model per attempt; the server maps the id to the
+    # verified official HTTPS endpoint and NEVER reads the operator trio below
+    # for a browser frontier attempt (no server-funded fallback, Phase30 §11).
+    # The trio is kept ONLY as documented legacy surface for backward
+    # configuration compatibility (validators unchanged); new deployments
+    # configure FRONTIER_ENABLED (+ optional FRONTIER_TIMEOUT_SECONDS) alone.
     frontier_enabled: bool = Field(
         default=False,
         description=(
-            "FRONTIER_ENABLED: master switch for the Frontier hosted provider. "
-            "False (default) -> frontier is never browser-selectable."
+            "FRONTIER_ENABLED: the BYOK Frontier feature switch. True -> the "
+            "trusted provider registry is browser-selectable (the player "
+            "supplies provider/apiKey/model per attempt; the server owns the "
+            "endpoint mapping). False (default) -> frontier is never "
+            "browser-selectable (explicit requests answer PROVIDER_UNAVAILABLE)."
         ),
     )
     frontier_base_url: str | None = Field(
         default=None,
         description=(
-            "FRONTIER_BASE_URL: operator-only full endpoint URL (OpenAI- "
-            "compatible, e.g. https://api.example.com/v1/chat/completions). "
-            "Must start with https:// when set (same https-only policy as "
+            "FRONTIER_BASE_URL: LEGACY SERVER-FUNDED operator-only endpoint "
+            "(Phase 25). Phase 30 browser BYOK NEVER reads it — the per-attempt "
+            "provider id resolves exclusively through the trusted registry. "
+            "Kept only for backward configuration compatibility; must start "
+            "with https:// when set (same https-only policy as "
             "LIVE_PROVIDER_URL)."
         ),
     )
     frontier_api_key: str | None = Field(
         default=None,
         description=(
-            "FRONTIER_API_KEY: server-only secret (never logged / never in "
-            "exceptions / never in responses; the adapter sends it only as the "
-            "Bearer Authorization header)."
+            "FRONTIER_API_KEY: LEGACY SERVER-FUNDED operator-only secret "
+            "(Phase 25), never logged / never in exceptions / never in "
+            "responses. Phase 30 browser BYOK NEVER reads it (the player's "
+            "transient key travels only in the immutable per-attempt "
+            "GenerationSelection). Kept only for backward configuration "
+            "compatibility; documented as unused by the browser Frontier path."
         ),
     )
     frontier_model: str | None = Field(
         default=None,
         description=(
-            "FRONTIER_MODEL: the configured hosted model name (public-safe "
-            "display metadata; the browser can never change it)."
+            "FRONTIER_MODEL: LEGACY SERVER-FUNDED operator-only model name "
+            "(Phase 25, public-safe display metadata). Phase 30 browser BYOK "
+            "NEVER reads it — the per-attempt model comes from the request. "
+            "Kept only for backward configuration compatibility."
         ),
     )
     frontier_timeout_seconds: float = Field(
         default=60.0,
         ge=5,
         le=300,
-        description="FRONTIER_TIMEOUT_SECONDS (bounded 5..300).",
+        description=(
+            "FRONTIER_TIMEOUT_SECONDS (bounded 5..300): the per-call outbound "
+            "timeout used by the Phase 30 Frontier BYOK adapter (in addition "
+            "to the generation-deadline clamp)."
+        ),
     )
     # -- Phase 16 local Ollama provider (configurable local generation) -------
     # OPERATOR-ONLY configuration: OLLAMA_BASE_URL can never come from a prompt

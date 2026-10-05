@@ -3,6 +3,24 @@
 Operator procedures for the supported single-node production deployment.
 This complements `docs/DEPLOYMENT.md` and `docs/PRIVACY.md`.
 
+> **Phase 30 — BYOK Frontier (operator note).** `FRONTIER_ENABLED=true` is the
+> BYOK feature switch: players select a hosted provider from the **trusted
+> server-owned registry** (openai / openrouter / groq / together / mistral /
+> fireworks / deepinfra / xai) and supply their own API key + model per
+> generation attempt. The server maps the provider ID to the verified official
+> HTTPS endpoint — the **browser never supplies a URL**. Operators do **not**
+> configure server-funded Frontier credentials for browser use: the legacy
+> `FRONTIER_BASE_URL` / `FRONTIER_API_KEY` / `FRONTIER_MODEL` settings are
+> documented as **not consumed** by browser BYOK (kept for backward
+> configuration compatibility only). Normal production configuration is
+> `GENERATION_PROVIDER=fake`, `ENABLE_BRIDGE=true` (optional), `FRONTIER_ENABLED=true`.
+> User keys are transient: they are never persisted in the SQLite database,
+> never logged, never returned by an API and never appear in monitoring input
+> (the backend test suite proves this with a mandatory sentinel secret scan).
+> Provider failures are normalized to the closed `FRONTIER_*` vocabulary so an
+> operator's log inspection stays secret-safe (only safe metadata such as
+> `provider="frontier"`, `frontierProvider=<id>` and the safe model is emitted).
+
 > **Single-writer rule:** stop every container that can write the SQLite
 > volume before backup, restore, or database maintenance. The audited tooling
 > checks the actual Docker mount state and fails closed when a writer is still

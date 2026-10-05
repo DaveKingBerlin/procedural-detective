@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
-import { DEMO_FAILURE_MESSAGES, generationFailed, pollDelayMs, runDemo, type DemoFlowServices, type DemoProgress } from "./demoFlow";
+import {
+  DEMO_FAILURE_MESSAGES,
+  frontierFailureMessage,
+  generationFailed,
+  mapDemoError,
+  pollDelayMs,
+  runDemo,
+  type DemoFlowServices,
+  type DemoProgress,
+} from "./demoFlow";
 
 /**
  * runDemo state machine coverage (Phase 8 A) with fully injected fakes —
@@ -1038,5 +1047,178 @@ describe("pollDelayMs — deterministic bounded backoff", () => {
     expect(pollDelayMs(1, 50, 1000)).toBe(50);
     expect(pollDelayMs(5, 50, 1000)).toBe(800);
     expect(pollDelayMs(10, 50, 1000)).toBe(1000);
+  });
+});
+
+describe("Phase 30 §23 — BYOK Frontier failure-code mapping (generationFailed)", () => {
+  it("maps the five FRONTIER_* provider codes to their frozen safe copy, never the raw code", () => {
+    const cases: Array<[string, string]> = [
+      ["FRONTIER_AUTH_FAILED", DEMO_FAILURE_MESSAGES.frontierAuthFailed],
+      [
+        "FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND",
+        DEMO_FAILURE_MESSAGES.frontierEndpointOrModelNotFound,
+      ],
+      ["FRONTIER_RATE_LIMITED", DEMO_FAILURE_MESSAGES.frontierRateLimited],
+      ["FRONTIER_TIMEOUT", DEMO_FAILURE_MESSAGES.frontierTimeout],
+      ["FRONTIER_PROVIDER_ERROR", DEMO_FAILURE_MESSAGES.frontierProviderError],
+    ];
+    for (const [failureCode, expected] of cases) {
+      const failure = generationFailed(failureCode);
+      expect(failure.kind).toBe("provider");
+      expect(failure.message).toBe(expected);
+      expect(failure.message).not.toContain(failureCode);
+      expect(failure.message).not.toContain("_");
+    }
+  });
+
+  it("exact copy for each of the five codes (§23 wording)", () => {
+    expect(generationFailed("FRONTIER_AUTH_FAILED").message).toBe(
+      "The selected provider rejected the supplied API credentials.",
+    );
+    expect(generationFailed("FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND").message).toBe(
+      "The selected provider or model could not be found. Check the model name, then try again.",
+    );
+    expect(generationFailed("FRONTIER_RATE_LIMITED").message).toBe(
+      "The selected provider is rate-limiting requests right now. Wait a moment, then try again.",
+    );
+    expect(generationFailed("FRONTIER_TIMEOUT").message).toBe(
+      "The selected provider took too long to respond. Please try again.",
+    );
+    expect(generationFailed("FRONTIER_PROVIDER_ERROR").message).toBe(
+      "The selected provider reported an error. Please try again.",
+    );
+  });
+
+  it("maps the backend's 400-level INVALID_FRONTIER_CONFIG code to the safe 'check your provider/key/model' copy", () => {
+    const failure = generationFailed("INVALID_FRONTIER_CONFIG");
+    expect(failure.kind).toBe("provider");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.frontierInvalidConfiguration);
+    expect(failure.message).not.toContain("INVALID_FRONTIER_CONFIG");
+  });
+
+  it("exact strings only — a hostile/legacy prefix or substring variant NEVER narrows into the Frontier buckets", () => {
+    for (const hostile of [
+      "FRONTIER_AUTH_FAILED_2",
+      "X_FRONTIER_RATE_LIMITED",
+      "FRONTIER_TIMEOUT_NOW",
+      "INVALID_FRONTIER_CONFIG_EXTRA",
+      "X_INVALID_FRONTIER_CONFIG",
+      "PROVIDER_FRONTIER_ERROR",
+      "NOT_FRONTIER_AUTH_FAILED",
+    ]) {
+      const failure = generationFailed(hostile);
+      expect(failure.kind).toBe("failed");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+      expect(failure.message).not.toContain(hostile);
+    }
+  });
+
+  it("keeps every pre-Phase-30 mapping unchanged (no narrowing regressions)", () => {
+    expect(generationFailed("PROVIDER_TIMEOUT").kind).toBe("provider");
+    expect(generationFailed("PROVIDER_UNAVAILABLE").kind).toBe("provider");
+    expect(generationFailed("GENERATION_DEADLINE_EXCEEDED").kind).toBe("deadline");
+    expect(generationFailed("BRIDGE_NOT_CONNECTED").message).toBe(
+      DEMO_FAILURE_MESSAGES.bridgeNotConnected,
+    );
+    expect(generationFailed("CORE_PROVIDER_CALL_BUDGET_EXHAUSTED").kind).toBe("safetyLimit");
+  });
+});
+
+describe("Phase 30 §23 — Frontier codes also map from a REAL run and from mapDemoError", () => {
+  it("a FAILED frontier generation (createCase returns FAILED with FRONTIER_AUTH_FAILED) surfaces the frozen copy", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => ({
+        caseId: "CASE-demo-01",
+        generationId: "GEN-demo-01",
+        generationAttemptId: "ATT-demo-01",
+        creatorAccessToken: CREATOR,
+        status: "FAILED",
+        failureCode: "FRONTIER_AUTH_FAILED",
+      })),
+    });
+    const result = await runDemo("prompt", { services, wait: NO_WAIT });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.failure.kind).toBe("provider");
+    expect(result.failure.message).toBe(
+      "The selected provider rejected the supplied API credentials.",
+    );
+    expect(result.failure.message).not.toContain("FRONTIER_AUTH_FAILED");
+  });
+
+  it("an HTTP-rejected frontier attempt (400 INVALID_FRONTIER_CONFIG via mapDemoError) maps to the safe copy", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => {
+        throw new ApiError(400, "INVALID_FRONTIER_CONFIG", "provider or model invalid", null);
+      }),
+    });
+    const result = await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: {
+        generationProvider: "frontier",
+        frontier: { provider: "openai", apiKey: "sk-test", model: "x" },
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.failure.kind).toBe("provider");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.frontierInvalidConfiguration);
+    expect(result.failure.message).not.toContain("INVALID_FRONTIER_CONFIG");
+    expect(result.failure.message).not.toContain("x");
+    // Exactly one attempt — no silent fallback after the explicit selection.
+    expect(services.createCase).toHaveBeenCalledTimes(1);
+  });
+
+  it("mapDemoError maps the FRONTIER_* codes exactly and keeps non-frontier codes untouched", () => {
+    const auth = mapDemoError(new ApiError(502, "FRONTIER_AUTH_FAILED", "upstream", null));
+    expect(auth.kind).toBe("provider");
+    expect(auth.message).toBe(DEMO_FAILURE_MESSAGES.frontierAuthFailed);
+    const rate = mapDemoError(new ApiError(429, "FRONTIER_RATE_LIMITED", "slow down", null));
+    expect(rate.message).toBe(DEMO_FAILURE_MESSAGES.frontierRateLimited);
+    // ADMISSION_DENIED still wins for the quota path (checked BEFORE frontier).
+    const quota = mapDemoError(new ApiError(429, "ADMISSION_DENIED", "quota", null));
+    expect(quota.kind).toBe("quota");
+    // Unknown codes still fall to the generic retryable copy.
+    const unknown = mapDemoError(new ApiError(400, "FRONTIER_WHATEVER_FUTURE", "x", null));
+    expect(unknown.kind).toBe("retryable");
+    expect(unknown.message).toBe(DEMO_FAILURE_MESSAGES.generic);
+    // A hostile/legacy prefix variant of the real 400 code NEVER narrows in.
+    const hostileConfig = mapDemoError(
+      new ApiError(400, "INVALID_FRONTIER_CONFIG_EXTRA", "x", null),
+    );
+    expect(hostileConfig.kind).toBe("retryable");
+    expect(hostileConfig.message).toBe(DEMO_FAILURE_MESSAGES.generic);
+  });
+
+  it("frontierFailureMessage is the exact-string single helper used by both paths", () => {
+    expect(frontierFailureMessage("FRONTIER_AUTH_FAILED")).toBe(
+      "The selected provider rejected the supplied API credentials.",
+    );
+    expect(frontierFailureMessage("INVALID_FRONTIER_CONFIG")).toBe(
+      DEMO_FAILURE_MESSAGES.frontierInvalidConfiguration,
+    );
+    expect(frontierFailureMessage("INVALID_FRONTIER_CONFIG_EXTRA")).toBeNull();
+    expect(frontierFailureMessage("X_INVALID_FRONTIER_CONFIG")).toBeNull();
+    expect(frontierFailureMessage("FRONTIER_AUTH_FAILED_X")).toBeNull();
+    expect(frontierFailureMessage(null)).toBeNull();
+    expect(frontierFailureMessage(undefined)).toBeNull();
+  });
+
+  it("runDemo carries a COMPLETE frontier generation block through to createCase unchanged", async () => {
+    const services = makeServices();
+    const result = await runDemo("prompt", {
+      services,
+      wait: NO_WAIT,
+      generation: {
+        generationProvider: "frontier",
+        frontier: { provider: "openai", apiKey: "sk-test", model: "gpt-4o-mini" },
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(services.createCase).toHaveBeenCalledWith(ANON, "prompt", undefined, {
+      generationProvider: "frontier",
+      frontier: { provider: "openai", apiKey: "sk-test", model: "gpt-4o-mini" },
+    });
   });
 });

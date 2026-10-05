@@ -125,6 +125,7 @@ class GenerationController:
         provider_timeout_seconds: float | None = None,
         provider_name: str | None = None,
         provider_model: str | None = None,
+        provider_sub_id: str | None = None,
         demo_case_id: str | None = None,
     ) -> None:
         self._provider = provider
@@ -169,6 +170,11 @@ class GenerationController:
         )
         self._provider_name = provider_name
         self._provider_model = provider_model
+        # Phase 30 — the SAFE per-attempt sub-provider id ("openai",
+        # "openrouter", ...) emitted ONLY as the allowlisted player-safe
+        # ``frontierProvider`` monitoring field. Never a key / endpoint /
+        # Authorization header / previous-user selection.
+        self._provider_sub_id = provider_sub_id
         # Phase 28 — the FROZEN per-attempt demo fixture id (a VALIDATED
         # registry id such as ``demo-gallery``; None for non-demo attempts).
         # Never truth, never a prompt, never internal fixture material; it is
@@ -277,6 +283,9 @@ class GenerationController:
             providerCallCount=0,
             repairCount=0,
             regenerationCount=0,
+            # Phase 30 — safe allowlisted BYOK sub-provider id (None for
+            # non-frontier attempts; never a key/endpoint).
+            frontierProvider=self._provider_sub_id,
             # Phase 26C3 §14 — safe observability: the configured CORE-bucket
             # provider-call ceiling (the integer cap, never pipeline topology).
             providerCallBudget=budget.max_core_calls,
@@ -645,6 +654,9 @@ class GenerationController:
             stage=stage.value,
             provider=self._provider_name,
             model=self._provider_model,
+            # Phase 30 — safe allowlisted BYOK sub-provider id (None for
+            # non-frontier attempts; never a key/endpoint).
+            frontierProvider=self._provider_sub_id,
             configuredGenerationDeadlineMs=int(attempt.budget.deadline_seconds * 1000),
             deadlineRemainingMs=_remaining_ms(attempt),
             configuredProviderTimeoutMs=(
@@ -678,11 +690,17 @@ class GenerationController:
             result = self._provider.generate(request)
         except ProviderError as exc:
             # Expected provider-level failures: terminal, sanitized, no retry.
-            code = (
-                GenerationFailureCode.PROVIDER_TIMEOUT
-                if exc.__class__.__name__ == "ProviderTimeout"
-                else GenerationFailureCode.PROVIDER_UNAVAILABLE
-            )
+            # Phase 30 — a typed carrier (``FrontierHttpError``) supplies its
+            # canonical ``GenerationFailureCode`` (401/403/404/429/timeout/5xx
+            # -> FRONTIER_*) that the attempt FAILS with; the legacy carriers
+            # keep the historical PROVIDER_TIMEOUT / PROVIDER_UNAVAILABLE map.
+            code = getattr(exc, "code", None)
+            if not isinstance(code, GenerationFailureCode):
+                code = (
+                    GenerationFailureCode.PROVIDER_TIMEOUT
+                    if exc.__class__.__name__ == "ProviderTimeout"
+                    else GenerationFailureCode.PROVIDER_UNAVAILABLE
+                )
             emit_event(
                 "provider.call.timeout" if code is GenerationFailureCode.PROVIDER_TIMEOUT else "provider.call.error",
                 caseId=attempt.case_id,

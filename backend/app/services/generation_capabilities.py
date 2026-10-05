@@ -53,6 +53,9 @@ import threading
 from collections import OrderedDict
 from typing import Any, Callable
 
+from app.generation.frontier_registry import (
+    frontier_catalog as _registry_frontier_catalog,
+)
 from app.generation.ollama_provider import (
     ollama_available as _probe_ollama,
 )
@@ -249,12 +252,27 @@ def ollama_server_configured(settings: object) -> bool:
 
 
 def frontier_configured(settings: object) -> bool:
-    """True when every FRONTIER_* member is present (Phase25 §3.1)."""
+    """True when BYOK Frontier is available as a feature (Phase30 §10/§11):
+    ``FRONTIER_ENABLED=true`` + a non-empty enabled registry. The legacy
+    server-funded trio is NOT required (the player supplies key/model per
+    attempt)."""
     return _selection_frontier_configured(settings)
+
+
+def frontier_catalog() -> tuple[tuple[str, str], ...]:
+    """Phase 30 — the SAFE player-facing BYOK provider catalog.
+
+    Returns ``(provider_id, label)`` tuples for the ENABLED trusted registry
+    entries (display order). The capability DTO emits ONLY this safe id/label
+    surface — never endpoints, credentials, secrets or previous-user
+    selections (Phase30 §9 / §22).
+    """
+    return _registry_frontier_catalog()
 
 
 __all__ = [
     "CapabilityProbeCache",
+    "frontier_catalog",
     "frontier_configured",
     "ollama_available",
     "ollama_server_configured",

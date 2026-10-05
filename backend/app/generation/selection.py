@@ -42,6 +42,10 @@ from typing import Any, Callable, Mapping
 from app.core.config import DEFAULT_OLLAMA_BASE_URL
 from app.generation.bridge_protocol import MAX_MODEL_LABEL_LENGTH
 from app.generation.fake_provider import FakeProvider
+from app.generation.frontier_registry import (
+    frontier_enabled_providers as _frontier_enabled_providers,
+    frontier_provider_definition as _frontier_provider_definition,
+)
 from app.generation.live_provider import LiveHttpProvider
 from app.generation.provider import Provider
 from app.generation.remote_client_provider import RemoteClientProvider
@@ -193,19 +197,114 @@ def ollama_bridge_available(settings: object, bridge_registry: object) -> bool:
 
 
 def frontier_configured(settings: object) -> bool:
-    """True when every FRONTIER_* member is present (Phase25 §3.1 Frontier)."""
+    """True when BYOK Frontier is available as a feature (Phase30 §10/§11).
+
+    ``FRONTIER_ENABLED=true`` is the operator kill switch AND the registry
+    contains at least one enabled provider. The legacy server-funded trio
+    (FRONTIER_BASE_URL / FRONTIER_API_KEY / FRONTIER_MODEL) is deliberately
+    NOT required for browser BYOK availability — the player supplies the key
+    and model per attempt (Phase30 §1/§11).
+    """
     return bool(
         getattr(settings, "frontier_enabled", False)
-        and getattr(settings, "frontier_base_url", None)
-        and getattr(settings, "frontier_api_key", None)
-        and getattr(settings, "frontier_model", None)
+        and bool(_frontier_enabled_providers())
     )
 
 
 def frontier_display_model(settings: object) -> str | None:
-    """The PUBLIC-SAFE configured Frontier model display name (never the key)."""
+    """The PUBLIC-SAFE legacy configured Frontier model display name (never
+    the key). Kept as documented legacy surface: Phase 30 browser BYOK never
+    reads it (the resolver builds only from the per-attempt user config)."""
     value = getattr(settings, "frontier_model", None)
     return str(value) if value else None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 30 — user-supplied BYOK frontier validation (provider id / api key /
+# model). Mirror of the Phase 25 model-string hardening: the offending value
+# is NEVER echoed, only structured data travels, nothing is shell-interpolated
+# and no global allowlist gates model availability.
+# --------------------------------------------------------------------------- #
+
+# Bounded user-supplied API key (Phase30 §17: opaque secret, no sk- prefix
+# requirement; bounding the length is a cheap transport/UI protection).
+MAX_FRONTIER_API_KEY_LENGTH = 4096
+# Bounded provider id (registry ids are tiny; the bound guards a hostile giant
+# body before it even reaches the registry lookup).
+MAX_FRONTIER_PROVIDER_ID_LENGTH = 64
+
+
+def validate_frontier_provider_id(value: object) -> str:
+    """Validate the user-supplied logical Frontier provider ID.
+
+    Returns the trimmed, validated id; raises ``InvalidFrontierConfigError``
+    (400 INVALID_FRONTIER_CONFIG) for a missing/oversized/control-char value
+    and for ANY id that is not an EXACT enabled member of the trusted
+    server-owned registry (Phase30 §21/§29: unknown ids, URL/path/query/header
+    injection shapes and disabled providers all fail closed — the closed
+    registry membership is the authoritative gate).
+    """
+    if not isinstance(value, str):
+        raise InvalidFrontierConfigError("frontier provider must be selected")
+    text = value.strip()
+    if not text:
+        raise InvalidFrontierConfigError("frontier provider must be selected")
+    if _CTRL_OR_NON_ASCII_RE.search(text):
+        raise InvalidFrontierConfigError(
+            "frontier provider contains a control or non-ASCII character"
+        )
+    if len(text) > MAX_FRONTIER_PROVIDER_ID_LENGTH:
+        raise InvalidFrontierConfigError("frontier provider is too long")
+    definition = _frontier_provider_definition(text)
+    if definition is None or not definition.enabled:
+        raise InvalidFrontierConfigError("unknown or disabled frontier provider")
+    return text
+
+
+def validate_frontier_api_key(value: object) -> str:
+    """Validate the user-supplied opaque Frontier API key (Phase30 §17).
+
+    The key is trimmed, must be non-empty and printable-ASCII only (CR/LF/NUL
+    and all other control characters are rejected — header injection is
+    impossible), bounded to ``MAX_FRONTIER_API_KEY_LENGTH`` and returned as a
+    plain string. The key is NEVER shell-interpolated or appended to a URL:
+    ``FrontierProvider`` sends it only as the ``Authorization: Bearer <key>``
+    header. No ``sk-``-prefix requirement. Raises
+    ``InvalidFrontierConfigError`` — the offending value is never echoed.
+    """
+    if value is None:
+        raise InvalidFrontierConfigError("frontier api key must not be empty")
+    if not isinstance(value, str):
+        raise InvalidFrontierConfigError("frontier api key must be a string")
+    text = value.strip()
+    if not text:
+        raise InvalidFrontierConfigError("frontier api key must not be empty")
+    if _CTRL_OR_NON_ASCII_RE.search(text):
+        raise InvalidFrontierConfigError(
+            "frontier api key contains a control or non-ASCII character"
+        )
+    if len(text) > MAX_FRONTIER_API_KEY_LENGTH:
+        raise InvalidFrontierConfigError("frontier api key is too long")
+    return text
+
+
+def validate_frontier_model_string(value: object) -> str:
+    """Validate the user-supplied Frontier model (Phase30 §18).
+
+    Reuses the hardened Phase 25 model-string validator shape unchanged (trim,
+    non-empty, printable-ASCII, no URL-ish/path-traversal shapes, bounded,
+    structured-data-only, no global allowlist). Raises
+    ``InvalidFrontierConfigError`` (400 INVALID_FRONTIER_CONFIG) for an
+    invalid value — never a provider-specific code, and the offending value is
+    never echoed.
+    """
+    try:
+        model = validate_ollama_model_string(value)
+    except InvalidOllamaModelError:
+        raise InvalidFrontierConfigError("frontier model is invalid or unsupported") from None
+    if model is None:
+        raise InvalidFrontierConfigError("frontier model must not be empty")
+    return model
 
 
 # --------------------------------------------------------------------------- #
@@ -221,11 +320,22 @@ class GenerationSelection:
     browser selections; ``live``/``remote_client`` for legacy configured
     defaults). ``ollama_transport`` (``server``/``bridge``) and ``ollama_model``
     apply to Ollama selections only.
+
+    Phase 30 — ``frontier_provider`` / ``frontier_api_key`` / ``frontier_model``
+    are the FROZEN per-attempt BYOK members (the user's logical provider id,
+    transient key and model). They are valid ONLY for a ``frontier`` selection;
+    ``__post_init__`` rejects them on any other provider so a browser value can
+    never leak into another transport. The key lives ONLY in this immutable
+    attempt-scoped selection (never in Settings, never in any dataclass that
+    gets serialized/logged).
     """
 
     provider: str
     ollama_transport: str | None = None
     ollama_model: str | None = None
+    frontier_provider: str | None = None
+    frontier_api_key: str | None = None
+    frontier_model: str | None = None
 
     def __post_init__(self) -> None:
         if self.provider not in ALL_PROVIDER_IDS:
@@ -242,6 +352,17 @@ class GenerationSelection:
             raise InvalidProviderError(
                 "ollama transport is only valid for an ollama selection"
             )
+        if self.provider != "frontier" and any(
+            value is not None
+            for value in (
+                self.frontier_provider,
+                self.frontier_api_key,
+                self.frontier_model,
+            )
+        ):
+            raise InvalidProviderError(
+                "frontier provider configuration is only valid for a frontier selection"
+            )
 
 
 @dataclass(frozen=True)
@@ -256,6 +377,11 @@ class ResolvedGeneration:
     ``timeout_seconds`` is the frozen provider timeout carried to the
     controller. ``needs_driver`` is True only for the driver-run providers
     (ollama server / ollama bridge / legacy remote_client).
+
+    Phase 30 — ``frontier_provider_id`` is the SAFE per-attempt BYOK provider
+    id ("openai", "openrouter", ...) used ONLY for player-safe monitoring
+    metadata (``provider="frontier"`` + ``frontierProvider=<id>``); ``None``
+    for every non-frontier resolution.
     """
 
     provider_factory: Callable[[], Provider]
@@ -264,6 +390,7 @@ class ResolvedGeneration:
     timeout_seconds: float | None
     needs_driver: bool
     selection: GenerationSelection
+    frontier_provider_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -285,6 +412,14 @@ class ProviderUnavailableError(GenerationSelectionError):
 
 class InvalidOllamaModelError(GenerationSelectionError):
     """A user-supplied Ollama model string failed the central validator."""
+
+
+class InvalidFrontierConfigError(GenerationSelectionError):
+    """Phase 30 — a browser-supplied BYOK frontier provider/key/model failed
+    validation (missing/unknown/disabled provider, invalid or missing api key,
+    invalid or missing model, or a frontier block on a non-frontier
+    selection). Translated to the service-level ``InvalidFrontierConfigError``
+    and surfaced as the sanitized 400 INVALID_FRONTIER_CONFIG envelope."""
 
 
 class SelectionConfigError(GenerationSelectionError):
@@ -365,16 +500,38 @@ def resolve(
         )
 
     if provider == "frontier":
+        # Phase 30 BYOK — the operator FRONTIER_ENABLED flag is the feature
+        # kill switch; the PER-ATTEMPT user config (provider id + key + model)
+        # is resolved against the trusted server-owned registry. The operator
+        # credentials (FRONTIER_API_KEY / FRONTIER_BASE_URL / FRONTIER_MODEL)
+        # are NEVER read here and can never fund a browser BYOK attempt
+        # (Phase30 §11).
         if not frontier_configured(settings):
             if strict_unavailable:
-                raise ProviderUnavailableError("frontier provider is not configured")
+                raise ProviderUnavailableError("frontier provider is not available")
             raise SelectionConfigError(
-                "generation_provider=frontier requires FRONTIER_ENABLED=true, "
-                "FRONTIER_BASE_URL, FRONTIER_API_KEY and FRONTIER_MODEL"
+                "generation_provider=frontier requires FRONTIER_ENABLED=true"
             )
-        endpoint = str(settings.frontier_base_url)
-        api_key = str(settings.frontier_api_key)
-        model = str(settings.frontier_model)
+        if not (
+            selection.frontier_provider
+            and selection.frontier_api_key
+            and selection.frontier_model
+        ):
+            if strict_unavailable:
+                raise ProviderUnavailableError(
+                    "a frontier provider, api key and model are required for "
+                    "a frontier selection"
+                )
+            raise SelectionConfigError(
+                "generation_provider=frontier requires a per-attempt frontier "
+                "provider id, api key and model (Phase 30 browser BYOK)"
+            )
+        definition = _frontier_provider_definition(selection.frontier_provider)
+        if definition is None or not definition.enabled:
+            raise InvalidFrontierConfigError("unknown or disabled frontier provider")
+        # The user's model is ALREADY validated at the service boundary; the
+        # resolver freezes it (defensive re-strip keeps the provider strict).
+        frontier_model = str(selection.frontier_model)
         timeout = float(
             getattr(settings, "frontier_timeout_seconds", 60.0) or 60.0
         )
@@ -382,19 +539,20 @@ def resolve(
 
         def _frontier() -> Provider:
             return FrontierProvider(
-                endpoint_url=endpoint,
-                api_key=api_key,
-                model=model,
+                endpoint_url=definition.endpoint,
+                api_key=str(selection.frontier_api_key),
+                model=frontier_model,
                 timeout_seconds=timeout,
             )
 
         return ResolvedGeneration(
             provider_factory=_frontier,
             provider_id="frontier",
-            model=model,
+            model=frontier_model,
             timeout_seconds=timeout,
             needs_driver=False,
             selection=selection,
+            frontier_provider_id=definition.provider_id,
         )
 
     if provider in ("ollama", "remote_client"):
@@ -486,8 +644,11 @@ __all__ = [
     "BROWSER_SELECTABLE_PROVIDERS",
     "GenerationSelection",
     "GenerationSelectionError",
+    "InvalidFrontierConfigError",
     "InvalidOllamaModelError",
     "InvalidProviderError",
+    "MAX_FRONTIER_API_KEY_LENGTH",
+    "MAX_FRONTIER_PROVIDER_ID_LENGTH",
     "MAX_USER_MODEL_LENGTH",
     "OLLAMA_TRANSPORTS",
     "ProviderUnavailableError",
@@ -498,5 +659,8 @@ __all__ = [
     "ollama_bridge_available",
     "ollama_server_configured",
     "resolve",
+    "validate_frontier_api_key",
+    "validate_frontier_model_string",
+    "validate_frontier_provider_id",
     "validate_ollama_model_string",
 ]

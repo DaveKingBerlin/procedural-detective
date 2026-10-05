@@ -294,6 +294,16 @@ export function GenerationJourney({
               generationProvider: params.generationProvider,
               ollamaTransport: params.ollamaTransport ?? null,
               ollamaModel: params.ollamaModel ?? "",
+              // Phase 30 — the Frontier BYOK fields travel ONLY for a
+              // frontier journey: the trusted provider id + model (non-secret)
+              // and the MEMORY-ONLY API key carried inside JourneyParams
+              // (§15/§24). `toCreateCaseGeneration` emits the `frontier`
+              // block only when the selection is complete; otherwise the
+              // POST carries the flat `{generationProvider:"frontier"}` and
+              // the backend fail-closes with the safe INVALID_FRONTIER_CONFIG copy.
+              frontierProviderId: params.frontierProviderId ?? null,
+              frontierModel: params.frontierModel ?? "",
+              frontierApiKey: params.frontierApiKey ?? "",
             })
           : undefined;
       if (providerGeneration !== undefined || params.demoCaseId !== undefined) {

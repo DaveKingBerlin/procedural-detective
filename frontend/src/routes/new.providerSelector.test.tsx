@@ -9,6 +9,8 @@ import { getBridgeStatus } from "../api/client";
 import NewCasePage from "./new";
 import { clearJourneyParams, getJourneyParams } from "../journey/context";
 import {
+  FRONTIER_MODEL_STORAGE_KEY,
+  FRONTIER_PROVIDER_STORAGE_KEY,
   GENERATION_MODEL_STORAGE_KEY,
   GENERATION_PROVIDER_STORAGE_KEY,
   OLLAMA_TRANSPORT_STORAGE_KEY,
@@ -464,6 +466,304 @@ describe("/new — Phase 26C1 the VISIBLE transport drives the SERIALIZED payloa
     expect(getJourneyParams()?.generationProvider).toBe("ollama");
     expect(getJourneyParams()?.ollamaTransport).toBe("bridge");
     expect(getJourneyParams()?.ollamaModel).toBe("hermes3:8b");
+  });
+});
+
+// Phase 30 — BYOK Frontier: the route reveals the BYOK panel, gates the
+// submit until provider + key + model + cost ack are complete, carries the
+// selection (AND the memory-only key) through stageJourney — while the key
+// NEVER enters any storage surface (§15/§24/§32).
+describe("/new — Phase 30 BYOK Frontier selection (§5/§24/§32)", () => {
+  const SENTINEL_KEY = "SECRET-PHASE30-MUST-NOT-PERSIST-123";
+
+  const CAPS_WITH_FRONTIER_AVAILABLE: GenerationCapabilitiesResponse = {
+    modes: [{ id: "demo", available: true }],
+    configuredProvider: "fake",
+    defaultProvider: "fake",
+    providers: [
+      { id: "fake", label: "Demo / Fake", available: true, model: null, reason: null },
+      {
+        id: "ollama",
+        label: "Local Ollama",
+        available: true,
+        defaultModel: "qwen2.5:1.5b",
+        manualModelEntry: true,
+        transports: {
+          server: { available: true, reason: null },
+          bridge: { available: true, connected: false, reason: "not_connected" },
+        },
+      },
+      {
+        id: "frontier",
+        label: "Frontier",
+        available: true,
+        requiresUserConfiguration: true,
+        providers: [
+          { id: "openai", label: "OpenAI" },
+          { id: "openrouter", label: "OpenRouter" },
+          { id: "groq", label: "Groq" },
+        ],
+      },
+    ],
+  };
+
+  let container: HTMLDivElement;
+  let root: ReturnType<typeof createRoot>;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    sessionStorage.clear();
+    clearJourneyParams();
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    container.remove();
+    sessionStorage.clear();
+    clearJourneyParams();
+  });
+
+  async function mountWith(capabilities: GenerationCapabilitiesResponse | null): Promise<void> {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/new"]}>
+          <NewCasePage capabilities={capabilities} />
+        </MemoryRouter>,
+      );
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+  }
+
+  function clickRadio(testid: string): void {
+    const input = container.querySelector<HTMLInputElement>(
+      `[data-testid="${testid}"] input[type="radio"]`,
+    );
+    if (!input) throw new Error(`radio not found: ${testid}`);
+    act(() => {
+      input.click();
+    });
+  }
+
+  function setInputValue(testid: string, value: string): void {
+    const input = container.querySelector<HTMLInputElement>(`[data-testid="${testid}"]`);
+    if (!input) throw new Error(`input not found: ${testid}`);
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    const setter = descriptor?.set;
+    if (!descriptor || typeof setter !== "function") {
+      throw new Error("HTMLInputElement.prototype.value setter is missing");
+    }
+    act(() => {
+      Object.defineProperty(input, "value", { configurable: true, ...descriptor });
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  function selectProviderOption(id: string): void {
+    const select = container.querySelector<HTMLSelectElement>(
+      '[data-testid="generation-frontier-provider-select"]',
+    );
+    if (!select) throw new Error("provider select not found");
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+    const setter = descriptor?.set;
+    if (!descriptor || typeof setter !== "function") {
+      throw new Error("HTMLSelectElement.prototype.value setter is missing");
+    }
+    act(() => {
+      Object.defineProperty(select, "value", { configurable: true, ...descriptor });
+      setter.call(select, id);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+
+  function setModel(value: string): void {
+    setInputValue("generation-frontier-model-input", value);
+  }
+
+  function setKey(value: string): void {
+    setInputValue("generation-frontier-key-input", value);
+  }
+
+  function clickAck(): void {
+    const checkbox = container.querySelector<HTMLInputElement>(
+      '[data-testid="generation-frontier-ack-checkbox"]',
+    );
+    if (!checkbox) throw new Error("ack checkbox not found");
+    act(() => {
+      checkbox.click();
+    });
+  }
+
+  function typePrompt(text: string): void {
+    const ta = container.querySelector<HTMLTextAreaElement>('[data-testid="prompt-input"]');
+    if (!ta) throw new Error("prompt textarea not found");
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+    const setter = descriptor?.set;
+    if (!descriptor || typeof setter !== "function") {
+      throw new Error("HTMLTextAreaElement.prototype.value setter is missing");
+    }
+    act(() => {
+      Object.defineProperty(ta, "value", { configurable: true, ...descriptor });
+      setter.call(ta, text);
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  function submit(): void {
+    const form = container.querySelector<HTMLFormElement>('[data-testid="prompt-form"]');
+    if (!form) throw new Error("prompt form not found");
+    act(() => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+  }
+
+  function generateButton(): HTMLButtonElement {
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="generate-case"]');
+    if (!button) throw new Error("generate-case button not found");
+    return button;
+  }
+
+  /** Complete provider + key + model + ack and return to the caller with the
+   *  prompt typed and one frontier radio click applied. */
+  async function completeFrontierConfig(): Promise<void> {
+    await mountWith(CAPS_WITH_FRONTIER_AVAILABLE);
+    clickRadio("generation-provider-frontier");
+    selectProviderOption("openai");
+    setKey(SENTINEL_KEY);
+    setModel("gpt-4o-mini");
+    clickAck();
+    expect(generateButton().disabled).toBe(false);
+  }
+
+  it("frontier radio click reveals the BYOK panel with the provider dropdown sourced from the capability registry", async () => {
+    await mountWith(CAPS_WITH_FRONTIER_AVAILABLE);
+    expect(container.querySelector('[data-testid="generation-frontier-controls"]')).toBeNull();
+    clickRadio("generation-provider-frontier");
+    expect(container.querySelector('[data-testid="generation-frontier-controls"]')).not.toBeNull();
+    const options = Array.from(
+      container.querySelectorAll("#generation-frontier-provider-select option"),
+    ).map((option) => (option as HTMLOptionElement).textContent);
+    expect(options).toEqual(["Select a provider", "OpenAI", "OpenRouter", "Groq"]);
+    // The key starts as a PASSWORD field.
+    expect(
+      container.querySelector<HTMLInputElement>('[data-testid="generation-frontier-key-input"]')?.type,
+    ).toBe("password");
+  });
+
+  it("the Generate button stays DISABLED until provider + key + model + cost ack are all valid", async () => {
+    await mountWith(CAPS_WITH_FRONTIER_AVAILABLE);
+    expect(generateButton().disabled).toBe(false); // default provider fake -> not gated
+    clickRadio("generation-provider-frontier");
+    // Frontier active + incomplete -> gated (disabled).
+    expect(generateButton().disabled).toBe(true);
+    selectProviderOption("openai");
+    expect(generateButton().disabled).toBe(true);
+    setKey("sk-some-key");
+    expect(generateButton().disabled).toBe(true);
+    setModel("gpt-4o-mini");
+    expect(generateButton().disabled).toBe(true);
+    clickAck();
+    expect(generateButton().disabled).toBe(false);
+  });
+
+  it("submit is BLOCKED while the frontier config is incomplete (defense-in-depth gate on stageJourney)", async () => {
+    await mountWith(CAPS_WITH_FRONTIER_AVAILABLE);
+    clickRadio("generation-provider-frontier");
+    selectProviderOption("openai");
+    setKey("sk-some-key");
+    setModel("gpt-4o-mini");
+    // NO ack yet: a direct form submit must NOT stage the journey.
+    clearJourneyParams();
+    typePrompt("A body in the library at midnight.");
+    submit();
+    expect(getJourneyParams()).toBeNull();
+    const error = container.querySelector<HTMLElement>('[data-testid="prompt-error"]')?.textContent ?? "";
+    expect(error).toContain("cost notice");
+  });
+
+  it("a COMPLETE frontier submission carries provider/key/model through JourneyParams while the key NEVER reaches sessionStorage", async () => {
+    await completeFrontierConfig();
+    typePrompt("A body in the library at midnight.");
+    submit();
+    const params = getJourneyParams();
+    expect(params?.generationProvider).toBe("frontier");
+    expect(params?.frontierProviderId).toBe("openai");
+    expect(params?.frontierModel).toBe("gpt-4o-mini");
+    // The key travels ONLY in memory (JourneyParams) — it is NOT in storage.
+    expect(params?.frontierApiKey).toBe(SENTINEL_KEY);
+    // SessionStorage holds EXACTLY the three non-secret preference keys —
+    // never the apiKey, never the ack.
+    expect(sessionStorage.getItem(GENERATION_PROVIDER_STORAGE_KEY)).toBe("frontier");
+    expect(sessionStorage.getItem(FRONTIER_PROVIDER_STORAGE_KEY)).toBe("openai");
+    expect(sessionStorage.getItem(FRONTIER_MODEL_STORAGE_KEY)).toBe("gpt-4o-mini");
+    expect(sessionStorage.length).toBe(3);
+    for (let i = 0; i < sessionStorage.length; i += 1) {
+      const key = sessionStorage.key(i);
+      const value = key === null ? "" : sessionStorage.getItem(key) ?? "";
+      expect(value).not.toContain(SENTINEL_KEY);
+      expect(String(key)).not.toContain("api");
+      expect(String(key)).not.toContain("ack");
+    }
+  });
+
+  it("the Frontier API key is MEMORY-ONLY: a full submit then reload REPEATS re-entry (no key on a fresh resolve)", async () => {
+    await completeFrontierConfig();
+    typePrompt("A body in the library at midnight.");
+    submit();
+    // A real RELOAD is a brand-new route instance (fresh React state). The
+    // harness must unmount the old root first — a `root.render` of the same
+    // component type would merely MUTATE the existing instance (React
+    // reconciliation), which would wrongly keep the in-memory key.
+    act(() => {
+      root.unmount();
+    });
+    await mountWith(CAPS_WITH_FRONTIER_AVAILABLE);
+    const keyInput = container.querySelector<HTMLInputElement>(
+      '[data-testid="generation-frontier-key-input"]',
+    );
+    expect(keyInput?.value ?? "").toBe("");
+    // The stored provider restores (DISCARD-IF-STALE vs the catalog)…
+    expect(sessionStorage.getItem(FRONTIER_PROVIDER_STORAGE_KEY)).toBe("openai");
+    // …but without a fresh key the form is gated again.
+    expect(generateButton().disabled).toBe(true);
+  });
+
+  it("a stored UNKNOWN/stale Frontier provider id is DISCARDED (dropdown placeholder; submit gated)", async () => {
+    sessionStorage.setItem(GENERATION_PROVIDER_STORAGE_KEY, "frontier");
+    sessionStorage.setItem(FRONTIER_PROVIDER_STORAGE_KEY, "deepinfra"); // not in the catalog
+    sessionStorage.setItem(FRONTIER_MODEL_STORAGE_KEY, "gpt-4o-mini");
+    await mountWith(CAPS_WITH_FRONTIER_AVAILABLE);
+    // The stale provider id is not restored: the dropdown shows a blank value.
+    const select = container.querySelector<HTMLSelectElement>(
+      '[data-testid="generation-frontier-provider-select"]',
+    );
+    expect(select?.value ?? "").toBe("");
+    expect(generateButton().disabled).toBe(true);
+  });
+
+  it("switching AWAY from Frontier never persisted the key — later stages carry NO secret", async () => {
+    await completeFrontierConfig();
+    // Switch back to Demo / Fake before submitting.
+    clickRadio("generation-provider-fake");
+    typePrompt("A body in the library at midnight.");
+    submit();
+    const params = getJourneyParams();
+    expect(params?.generationProvider).toBe("fake");
+    expect(params).not.toHaveProperty("frontierProviderId");
+    expect(params).not.toHaveProperty("frontierModel");
+    expect(params).not.toHaveProperty("frontierApiKey");
+    // The non-secret frontier prefs stay inert in storage; the key has no
+    // storage surface at all.
+    expect(sessionStorage.getItem(GENERATION_PROVIDER_STORAGE_KEY)).toBe("fake");
+    for (let i = 0; i < sessionStorage.length; i += 1) {
+      const key = sessionStorage.key(i);
+      const value = key === null ? "" : sessionStorage.getItem(key) ?? "";
+      expect(value).not.toContain(SENTINEL_KEY);
+    }
   });
 });
 

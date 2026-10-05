@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { GenerationCapabilitiesResponse } from "../api/types";
 import { GenerationProviderSelector } from "./GenerationProviderSelector";
@@ -460,5 +460,311 @@ describe("GenerationProviderSelector — interactive selectProvider (INFONote A1
       root.unmount();
     });
     container.remove();
+  });
+});
+
+describe("GenerationProviderSelector — Phase 30 BYOK Frontier panel (§5/§24/§33)", () => {
+  /** Phase 30 §9 fixture: frontier available with the trusted provider catalog. */
+  const FRONTIER_CAPS: GenerationCapabilitiesResponse = {
+    modes: [{ id: "demo", available: true }],
+    defaultProvider: "fake",
+    providers: [
+      { id: "fake", label: "Demo / Fake", available: true, model: null, reason: null },
+      {
+        id: "frontier",
+        label: "Frontier",
+        available: true,
+        requiresUserConfiguration: true,
+        providers: [
+          { id: "openai", label: "OpenAI" },
+          { id: "openrouter", label: "OpenRouter" },
+          { id: "groq", label: "Groq" },
+        ],
+      },
+    ],
+  };
+
+  const ACTIVE_FRONTIER: GenerationProviderSelection = {
+    generationProvider: "frontier",
+    ollamaTransport: null,
+    ollamaModel: "",
+    frontierProviderId: null,
+    frontierModel: "",
+  };
+
+  it("reveals the provider/key/model/cost-ack panel ONLY when Frontier is the ACTIVE provider", () => {
+    // Fake selection: no frontier panel anywhere.
+    const fakeMarkup = render(FRONTIER_CAPS, FAKE_SELECTION);
+    expect(fakeMarkup).not.toContain('data-testid="generation-frontier-controls"');
+    expect(fakeMarkup).not.toContain('data-testid="generation-frontier-key-input"');
+    // Frontier active: the panel appears.
+    const markup = render(FRONTIER_CAPS, ACTIVE_FRONTIER);
+    expect(markup).toContain('data-testid="generation-frontier-controls"');
+    expect(markup).toContain('data-testid="generation-frontier-provider-select"');
+    expect(markup).toContain('data-testid="generation-frontier-key-input"');
+    expect(markup).toContain('data-testid="generation-frontier-model-input"');
+    expect(markup).toContain('data-testid="generation-frontier-ack-checkbox"');
+  });
+
+  it("populates the provider dropdown from the server's safe catalog (ids + labels only; no URL anywhere)", () => {
+    const markup = render(FRONTIER_CAPS, ACTIVE_FRONTIER);
+    expect(markup).toContain("<option value=\"openai\">OpenAI</option>");
+    expect(markup).toContain("<option value=\"openrouter\">OpenRouter</option>");
+    expect(markup).toContain("<option value=\"groq\">Groq</option>");
+    expect(markup).not.toContain("https://");
+    expect(markup).not.toContain("api.");
+  });
+
+  it("renders the API key as a PASSWORD field with the Show toggle", () => {
+    const markup = render(FRONTIER_CAPS, ACTIVE_FRONTIER);
+    expect(markup).toContain('type="password"');
+    expect(markup).toContain('data-testid="generation-frontier-key-toggle"');
+    expect(markup).toContain("Show");
+    // autoComplete discourages password-manager capture; never "off" secrets in a visible field.
+    expect(markup).toContain('autoComplete="new-password"');
+  });
+
+  it("renders the frozen privacy copy (§33) and the cost acknowledgement copy (§25)", () => {
+    const markup = render(FRONTIER_CAPS, ACTIVE_FRONTIER);
+    expect(markup).toContain("Use your own hosted AI API");
+    expect(markup).toContain("sends the generation request through our server using your key");
+    expect(markup).toContain("is not stored");
+    expect(markup).toContain("may charge your account for usage");
+    // The §33 line must NEVER claim the key is invisible to the server.
+    expect(markup).not.toContain("never see your key");
+    expect(markup).not.toContain("we never see");
+    expect(markup).toContain(
+      "I understand that this request uses my API key and may create charges with the selected provider.",
+    );
+  });
+
+  it("never renders a secret/URL from a hostile provider catalog label into the dropdown", () => {
+    const hostile = {
+      ...FRONTIER_CAPS,
+      providers: [
+        ...FRONTIER_CAPS.providers!.slice(0, 1),
+        {
+          id: "frontier",
+          label: "Frontier",
+          available: true,
+          providers: [{ id: "openai", label: "https://evil.example — token=abc" }],
+        },
+      ],
+    } as GenerationCapabilitiesResponse;
+    const markup = render(hostile, ACTIVE_FRONTIER);
+    expect(markup).not.toContain("evil.example");
+    expect(markup).not.toContain("token=abc");
+    // The SAFE id falls back as the visible label — the option stays usable.
+    expect(markup).toContain("<option value=\"openai\">openai</option>");
+  });
+
+  it("a hostile catalog URL/query id is dropped from the dropdown entirely", () => {
+    const hostile = {
+      ...FRONTIER_CAPS,
+      providers: [
+        ...FRONTIER_CAPS.providers!.slice(0, 1),
+        {
+          id: "frontier",
+          label: "Frontier",
+          available: true,
+          providers: [{ id: "https://evil.example", label: "Evil" }],
+        },
+      ],
+    } as GenerationCapabilitiesResponse;
+    const markup = render(hostile, ACTIVE_FRONTIER);
+    expect(markup).not.toContain("evil.example");
+    expect(markup).not.toContain("<option value=\"https");
+  });
+});
+
+describe("GenerationProviderSelector — Phase 30 interactive secrets (jsdom)", () => {
+  const FRONTIER_CAPS: GenerationCapabilitiesResponse = {
+    modes: [{ id: "demo", available: true }],
+    defaultProvider: "fake",
+    providers: [
+      { id: "fake", label: "Demo / Fake", available: true, model: null, reason: null },
+      {
+        id: "frontier",
+        label: "Frontier",
+        available: true,
+        requiresUserConfiguration: true,
+        providers: [
+          { id: "openai", label: "OpenAI" },
+          { id: "groq", label: "Groq" },
+        ],
+      },
+    ],
+  };
+
+  /** The shared "active frontier, empty fields" selection state. */
+  const ACTIVE_FRONTIER: GenerationProviderSelection = {
+    generationProvider: "frontier",
+    ollamaTransport: null,
+    ollamaModel: "",
+    frontierProviderId: null,
+    frontierModel: "",
+    frontierApiKey: "",
+  };
+
+  let container: HTMLDivElement;
+  let root: ReturnType<typeof createRoot>;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    container.remove();
+    sessionStorage.clear();
+  });
+
+  /** Render the selector with a frontier selection and capture the onChange payloads. */
+  function mountFrontier(
+    selection: GenerationProviderSelection,
+  ): GenerationProviderSelection[] {
+    const changes: GenerationProviderSelection[] = [];
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <GenerationProviderSelector
+          capabilities={FRONTIER_CAPS}
+          selection={selection}
+          onChange={(next) => void changes.push(next)}
+        />,
+      );
+    });
+    return changes;
+  }
+
+  function clickToggle(): void {
+    const toggle = container.querySelector<HTMLElement>('[data-testid="generation-frontier-key-toggle"]');
+    if (!toggle) throw new Error("key toggle not found");
+    act(() => {
+      toggle.click();
+    });
+  }
+
+  function setKeyInput(value: string): void {
+    const input = container.querySelector<HTMLInputElement>('[data-testid="generation-frontier-key-input"]');
+    if (!input) throw new Error("key input not found");
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    const setter = descriptor?.set;
+    if (!descriptor || typeof setter !== "function") {
+      throw new Error("HTMLInputElement.prototype.value setter is missing");
+    }
+    act(() => {
+      Object.defineProperty(input, "value", { configurable: true, ...descriptor });
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  function selectProviderOption(id: string): void {
+    const select = container.querySelector<HTMLSelectElement>(
+      '[data-testid="generation-frontier-provider-select"]',
+    );
+    if (!select) throw new Error("provider select not found");
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+    const setter = descriptor?.set;
+    if (!descriptor || typeof setter !== "function") {
+      throw new Error("HTMLSelectElement.prototype.value setter is missing");
+    }
+    act(() => {
+      Object.defineProperty(select, "value", { configurable: true, ...descriptor });
+      setter.call(select, id);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+
+  function clickProviderRadio(testid: string): void {
+    const input = container.querySelector<HTMLInputElement>(`[data-testid="${testid}"] input[type="radio"]`);
+    if (!input) throw new Error(`radio not found: ${testid}`);
+    act(() => {
+      input.click();
+    });
+  }
+
+  it("Show/Hide toggles the key field between password and text", () => {
+    const keyInput = () =>
+      container.querySelector<HTMLInputElement>('[data-testid="generation-frontier-key-input"]');
+    mountFrontier(ACTIVE_FRONTIER);
+    expect(keyInput()?.type).toBe("password");
+    clickToggle();
+    expect(keyInput()?.type).toBe("text");
+    expect(container.querySelector('[data-testid="generation-frontier-key-toggle"]')?.textContent).toBe(
+      "Hide",
+    );
+    clickToggle();
+    expect(keyInput()?.type).toBe("password");
+    expect(container.querySelector('[data-testid="generation-frontier-key-toggle"]')?.textContent).toBe(
+      "Show",
+    );
+  });
+
+  it("typing the key emits a sanitized, memory-only selection change (CR/LF stripped)", () => {
+    const changes = mountFrontier(ACTIVE_FRONTIER);
+    setKeyInput("sk-secret\r\nphase30");
+    expect(changes.length).toBe(1);
+    expect(changes[0].frontierApiKey).toBe("sk-secretphase30");
+  });
+
+  it("switching the Frontier PROVIDER clears ONLY the re-entered key (documented §24 decision)", () => {
+    const changes = mountFrontier({
+      generationProvider: "frontier",
+      ollamaTransport: null,
+      ollamaModel: "",
+      frontierProviderId: "openai",
+      frontierModel: "gpt-4o-mini",
+      frontierApiKey: "sk-openai-1234",
+      frontierAck: true,
+    });
+    selectProviderOption("groq");
+    expect(changes.length).toBe(1);
+    expect(changes[0].frontierProviderId).toBe("groq");
+    expect(changes[0].frontierApiKey).toBe("");
+    // The NON-SENSITIVE model preference + generic cost ack are preserved:
+    // only the provider-bound secret must be re-entered (§24 documented).
+    expect(changes[0].frontierModel).toBe("gpt-4o-mini");
+    expect(changes[0].frontierAck).toBe(true);
+  });
+
+  it("switching AWAY from Frontier drops the secret from state (and keeps nothing sensitive)", () => {
+    const changes = mountFrontier({
+      generationProvider: "frontier",
+      ollamaTransport: null,
+      ollamaModel: "",
+      frontierProviderId: "openai",
+      frontierModel: "gpt-4o-mini",
+      frontierApiKey: "sk-openai-1234",
+      frontierAck: true,
+    });
+    clickProviderRadio("generation-provider-fake");
+    expect(changes.length).toBe(1);
+    const next = changes[0];
+    expect(next.generationProvider).toBe("fake");
+    // The new selection object carries NO frontier fields at all — the
+    // memory-only key and the ack are GONE from state.
+    expect(next).not.toHaveProperty("frontierApiKey");
+    expect(next).not.toHaveProperty("frontierAck");
+    expect(next).not.toHaveProperty("frontierProviderId");
+  });
+
+  it("the component itself performs NO storage writes (the sentinel key never reaches sessionStorage)", () => {
+    mountFrontier(ACTIVE_FRONTIER);
+    setKeyInput("SECRET-PHASE30-MUST-NOT-PERSIST-123");
+    // This component never touches storage — the parent owns persistence. A
+    // sentinel key value can therefore not exist in any storage surface here.
+    // (The route-level persistence contract is pinned in new.providerSelector.)
+    const stored: Array<[string, string]> = [];
+    for (let i = 0; i < sessionStorage.length; i += 1) {
+      const key = sessionStorage.key(i);
+      if (key !== null) stored.push([key, sessionStorage.getItem(key) ?? ""]);
+    }
+    expect(stored).toEqual([]);
   });
 });
