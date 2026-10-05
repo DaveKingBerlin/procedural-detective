@@ -47,6 +47,7 @@ from fastapi import APIRouter, Request
 from app.api.v1.errors import http_error
 from app.core.ratelimit import resolve_client_ip
 from app.services.generation_capabilities import (
+    frontier_catalog as _frontier_catalog_service,
     frontier_configured as _frontier_configured_service,
     ollama_available,
     ollama_server_configured as _ollama_server_configured_service,
@@ -263,19 +264,26 @@ def _ollama_entry(request: Request, settings: object) -> dict:
 
 
 def _frontier_entry(settings: object) -> dict:
-    """Phase 25 — the fixed ``frontier`` provider entry of ``providers``.
+    """Phase 30 — the fixed ``frontier`` provider entry of ``providers``.
 
-    Available only when every FRONTIER_* member is present. The displayed
-    ``model`` is the operator-configured public-safe model name (never the API
-    key, base URL or any credential). Unavailable -> safe ``not_configured``.
+    BYOK surface: ``available`` == the feature switch (``FRONTIER_ENABLED`` +
+    a non-empty enabled registry — the legacy server-funded trio is never
+    required), ``requiresUserConfiguration=true`` and ``providers`` = the SAFE
+    {id, label} catalog of the trusted server-owned registry (enabled entries
+    only). NEVER endpoints, credentials, secrets or previous-user selections.
+    Unavailable -> safe ``not_configured``.
     """
     configured = _frontier_configured(settings)
-    model = getattr(settings, "frontier_model", None)
+    providers = [
+        {"id": provider_id, "label": label}
+        for provider_id, label in _frontier_catalog_service()
+    ]
     return {
         "id": "frontier",
         "label": "Frontier",
         "available": configured,
-        "model": str(model) if model else None,
+        "requiresUserConfiguration": True,
+        "providers": providers,
         "reason": None if configured else "not_configured",
     }
 

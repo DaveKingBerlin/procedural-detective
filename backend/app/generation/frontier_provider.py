@@ -1,4 +1,4 @@
-"""Phase 25 — Frontier hosted OpenAI-compatible provider adapter.
+"""Phase 25/30 — Frontier BYOK OpenAI-compatible provider adapter.
 
 ``FrontierProvider`` implements the EXACT existing ``Provider`` protocol
 (``Provider.generate(GenerateRequest) -> ProviderResult``) and reuses the
@@ -7,25 +7,41 @@ OpenAI-compatible ``{model, messages:[{role, content}]}`` body + Bearer auth),
 with the SAME Phase 20 hardening:
 
 - PD-SEC-06: provider-derived error content is NEVER echoed. A non-2xx body
-  is reduced to ``"provider failure: HTTP <status>"`` — no ``response.text``,
-  no exception ``str()`` (``httpx.RequestError`` strings embed the request
-  URL). A provider body carrying secrets/vendor error text can therefore never
-  reach ``ProviderResult.error`` and never appear in a dev trace or log.
+  is reduced to the sanitized status only — never ``response.text``, never an
+  exception ``str()`` (``httpx.RequestError`` strings embed the request URL).
 - PD-SEC-09: 2xx responses are bounded (``MAX_FRONTIER_RESPONSE_BYTES``,
   256 KiB — the same cap LiveHttpProvider and OllamaProvider enforce); an
-  over-cap body degrades to the clean ``"provider response exceeded the size
-  cap"`` error instead of being buffered unboundedly.
-- The API key is SERVER-ONLY: it lives in this adapter's constructor (from
-  operator Settings), is never logged, never embedded in an exception and
-  never serialized into any DTO / capability response / case material.
+  over-cap body degrades to the clean size-cap error instead of being
+  buffered unboundedly.
+- The API key is an attempt-scoped TRANSIENT secret: it lives in this
+  adapter's constructor (from the immutable per-attempt ``GenerationSelection``
+  — Phase 30 browser BYOK), is never logged, never embedded in an exception
+  and never serialized into any DTO / capability response / case material. It
+  travels ONLY as the ``Authorization: Bearer <key>`` header of the outbound
+  POST.
+
+Phase 30 — typed provider failures (``FrontierHttpError``): every non-2xx
+status, timeout and network/size-cap failure raises a ``ProviderError``
+subclass carrying a canonical ``GenerationFailureCode`` so the generation
+controller classifies the attempt WITHOUT ever parsing provider internals:
+
+    HTTP 401/403  -> FRONTIER_AUTH_FAILED
+    HTTP 404      -> FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND
+    HTTP 429      -> FRONTIER_RATE_LIMITED
+    request timeout -> FRONTIER_TIMEOUT
+    HTTP 5xx (and any other non-2xx status) -> FRONTIER_PROVIDER_ERROR
+    network request failure / oversize 2xx  -> FRONTIER_PROVIDER_ERROR
+
+The STATUS BAND is therefore available to the controller for the §23
+normalized code mapping, while the browser still never sees raw bodies,
+headers or credentials.
 
 Why a separate adapter instead of overloading ``LiveHttpProvider``:
 ``LiveHttpProvider`` is the legacy ``live`` provider pair (``LIVE_PROVIDER_URL``
 / ``LLM_API_KEY`` / ``LLM_MODEL``) with its own configured model bound at
-construction. Phase 25 needs a SECOND hosted provider (``frontier``) with its
-own ``FRONTIER_*`` settings so both can be available simultaneously and the
-deployment can switch defaults without breaking the legacy live trio. The
-transport pattern (bounded, sanitized) is deliberately mirrored here.
+construction. Phase 25/30 need a SECOND hosted provider (``frontier``) whose
+endpoint comes from the trusted server-owned registry and whose key + model
+are the user's per-attempt BYOK values.
 
 ``sink`` is accepted for interface compatibility; this sync adapter never
 produces ``pending`` results (the call blocks until completion or timeout).
@@ -37,12 +53,12 @@ from typing import Any
 
 import httpx
 
+from app.generation.failure_codes import GenerationFailureCode
 from app.generation.provider import (
     GenerateRequest,
     GenerationStage,
     ProviderError,
     ProviderResult,
-    ProviderTimeout,
 )
 
 # Bounded 2xx response cap (PD-SEC-09 parity with the live/ollama adapters).
@@ -53,11 +69,49 @@ MAX_FRONTIER_RESPONSE_BYTES = 256 * 1024  # 256 KiB
 DEFAULT_FRONTIER_TIMEOUT_SECONDS = 60.0
 
 
+class FrontierHttpError(ProviderError):
+    """A typed, sanitized Frontier provider failure (Phase 30 §23).
+
+    Carries ``code`` — a canonical ``GenerationFailureCode`` from the closed
+    Phase 30 vocabulary (FRONTIER_AUTH_FAILED / FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND /
+    FRONTIER_RATE_LIMITED / FRONTIER_TIMEOUT / FRONTIER_PROVIDER_ERROR) — so
+    the generation controller can classify the attempt without ever parsing
+    provider internals. ``message`` is always sanitized: never a provider
+    body, never a header, never a credential, never a request URL (the
+    ``httpx`` exception class name would embed the URL and is omitted).
+    """
+
+    def __init__(self, message: str, *, code: GenerationFailureCode) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def frontier_failure_code_for_status(status_code: int) -> GenerationFailureCode:
+    """Phase30 §23 — deterministic status-band -> canonical failure code.
+
+    Closed mapping: 401/403 -> FRONTIER_AUTH_FAILED, 404 ->
+    FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND, 429 -> FRONTIER_RATE_LIMITED, 5xx
+    (and every OTHER non-2xx status the adapter refuses) ->
+    FRONTIER_PROVIDER_ERROR. Timeouts are classified separately by the adapter
+    (``httpx.TimeoutException`` -> FRONTIER_TIMEOUT).
+    """
+    if status_code in (401, 403):
+        return GenerationFailureCode.FRONTIER_AUTH_FAILED
+    if status_code == 404:
+        return GenerationFailureCode.FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND
+    if status_code == 429:
+        return GenerationFailureCode.FRONTIER_RATE_LIMITED
+    return GenerationFailureCode.FRONTIER_PROVIDER_ERROR
+
+
 class FrontierProvider:
     """Synchronous, bounded OpenAI-compatible hosted-language adapter.
 
-    All constructor arguments are OPERATOR configuration (already validated by
-    ``Settings``); nothing is ever derivable from a ``GenerateRequest``.
+    ``endpoint_url`` is the trusted server-owned registry endpoint (never a
+    browser value); ``api_key`` is the user's TRANSIENT per-attempt key and
+    ``model`` the user's validated per-attempt model (Phase 30 BYOK).
+    The key is never logged, never embedded in an exception and never
+    serialized into any DTO / capability response / case material.
     """
 
     def __init__(
@@ -95,21 +149,30 @@ class FrontierProvider:
                 timeout=timeout_seconds,
             )
         except httpx.TimeoutException:
-            raise ProviderTimeout(
-                f"provider request timed out after {timeout_seconds}s"
+            raise FrontierHttpError(
+                f"provider request timed out after {timeout_seconds}s",
+                code=GenerationFailureCode.FRONTIER_TIMEOUT,
             ) from None
         except httpx.RequestError as exc:
             # PD-SEC-06: str(exc) may embed the request URL — never surface it.
-            return ProviderResult(
-                error=f"provider request failed: {type(exc).__name__}"
-            )
+            raise FrontierHttpError(
+                f"provider request failed: {type(exc).__name__}",
+                code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
+            ) from None
         if not (200 <= response.status_code < 300):
             # PD-SEC-06: the response body may carry provider/vendor error
-            # content — reduce it to the sanitized status only.
-            return ProviderResult(error=f"provider failure: HTTP {response.status_code}")
+            # content — reduce it to the sanitized status band only, and carry
+            # the normalized code so the controller can classify the attempt.
+            raise FrontierHttpError(
+                f"provider failure: HTTP {response.status_code}",
+                code=frontier_failure_code_for_status(response.status_code),
+            ) from None
         text = self._read_bounded(response)
         if text is None:
-            return ProviderResult(error="provider response exceeded the size cap")
+            raise FrontierHttpError(
+                "provider response exceeded the size cap",
+                code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
+            ) from None
         return ProviderResult(content=text)
 
     def _read_bounded(self, response: httpx.Response) -> str | None:
@@ -154,6 +217,8 @@ class FrontierProvider:
 
 __all__ = [
     "DEFAULT_FRONTIER_TIMEOUT_SECONDS",
+    "FrontierHttpError",
     "FrontierProvider",
     "MAX_FRONTIER_RESPONSE_BYTES",
+    "frontier_failure_code_for_status",
 ]

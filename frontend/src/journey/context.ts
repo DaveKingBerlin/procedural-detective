@@ -7,6 +7,11 @@
  * intentionally NON-persistent: a hard refresh of /generating loses it and
  * the route renders a friendly "start again" state instead — the safest
  * failure mode (no credential material survives in the address bar).
+ *
+ * Phase 24 P0 — the bridge-pairing anonymous-session bearer travels here
+ * (memory-only). Phase 30 — the Frontier API key travels ONLY in this
+ * in-memory context (memory-only by construction, exactly like the session
+ * bearer); it is never placed in any persistent browser surface.
  */
 
 import type { GenerationProviderId, OllamaTransportId } from "../api/types";
@@ -53,6 +58,26 @@ export interface JourneyParams {
    * POST /cases then omits demoCaseId (generated-case behavior unchanged).
    */
   demoCaseId?: string;
+  /**
+   * Phase 30 — the OPTIONAL trusted Frontier provider id (a member of the
+   * server's safe catalog) that travels ONLY when `generationProvider ===
+   * "frontier"`. Non-secret preference.
+   */
+  frontierProviderId?: string | null;
+  /**
+   * Phase 30 — the OPTIONAL user-supplied Frontier model identifier that
+   * travels ONLY when `generationProvider === "frontier"`. Non-secret.
+   */
+  frontierModel?: string;
+  /**
+   * Phase 30 — the OPTIONAL Frontier API key. MEMORY-ONLY (this in-memory
+   * context is the ONLY place it travels outside the component state): it
+   * must NEVER be persisted to localStorage/sessionStorage/IndexedDB/URL/
+   * history (§15/§24). A hard refresh of /generating loses it (re-entry is
+   * expected and preferred) exactly like every other journey field here.
+   * Absent for every non-frontier path (the anonymousSessionToken precedent).
+   */
+  frontierApiKey?: string;
 }
 
 let current: JourneyParams | null = null;

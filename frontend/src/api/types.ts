@@ -675,6 +675,21 @@ export interface OllamaTransportStatusDTO {
   reason?: string | null;
 }
 
+/**
+ * Phase 30 — ONE trusted-hosted-provider catalog entry published by the
+ * backend's generation-capabilities DTO. It carries ONLY the logical provider
+ * id + public display label — NEVER an endpoint, base URL, port, credential,
+ * header, or raw server Settings (§9/§7). The registry is server-owned and
+ * immutable; the browser submits the bare id and the backend resolves the
+ * verified HTTPS endpoint.
+ */
+export interface FrontierProviderEntryDTO {
+  /** Logical trusted provider id ("openai", "openrouter", "groq", ...). */
+  id: string;
+  /** Public display label ("OpenAI", "OpenRouter", "Groq", ...) — safe text only. */
+  label: string;
+}
+
 /** One entry of the additive `providers` list of generation-capabilities. */
 export interface GenerationProviderDTO {
   /** "fake" | "ollama" | "frontier" — anything else is dropped by the parser. */
@@ -695,6 +710,55 @@ export interface GenerationProviderDTO {
     server?: OllamaTransportStatusDTO;
     bridge?: OllamaTransportStatusDTO;
   };
+  /**
+   * Phase 30 — Frontier-only: true when the browser must supply the user's
+   * own configuration (provider id + API key + model) before generation is
+   * allowed. A `frontier` entry with this true is BYOK-enabled.
+   */
+  requiresUserConfiguration?: boolean;
+  /**
+   * Phase 30 — Frontier-only: the SAFE provider CATALOG (ids + public labels
+   * only, §9). Never endpoints/URLs/secrets. Absent on pre-30 servers.
+   */
+  providers?: FrontierProviderEntryDTO[] | null;
+}
+
+/**
+ * Phase 30 — the browser-side BYOK Frontier request block of POST /api/v1/cases
+ * (§6). The browser sends ONLY the logical trusted provider id, the user's
+ * transient API key and the model — NEVER a URL, endpoint, header or config
+ * value. The backend resolves the provider id to its trusted registry endpoint
+ * and uses the key for the current attempt only.
+ */
+export interface CreateCaseFrontier {
+  /** Logical trusted provider id from the capability catalog. */
+  provider: string;
+  /** User-supplied transient API key (memory-only; never persisted). */
+  apiKey: string;
+  /** User-supplied validated model identifier. */
+  model: string;
+}
+
+/** Phase 25 §4 — the flat optional generation-selection block of POST /api/v1/cases. */
+export interface CreateCaseGeneration {
+  generationProvider?: GenerationProviderId;
+  ollamaTransport?: OllamaTransportId;
+  ollamaModel?: string;
+  /**
+   * Phase 28 — the OPTIONAL closed Demo-fixture id selected by the frontend's
+   * "Try Demo Case" action ("demo-apartment" | "demo-gallery" |
+   * "demo-laboratory"). Sent ONLY on the demo/fake path; the backend validates
+   * it against a closed allowlist. Absent for generated cases (the POST /cases
+   * body stays byte-identical, §13).
+   */
+  demoCaseId?: string;
+  /**
+   * Phase 30 — the OPTIONAL BYOK Frontier block. Travels ONLY when the caller
+   * actually carries a COMPLETE frontier selection (`generationProvider ===
+   * "frontier"` AND a non-empty apiKey). Never contains a URL (§6). Absent
+   * keeps fake/ollama/no-selection bodies byte-identical.
+   */
+  frontier?: CreateCaseFrontier | null;
 }
 
 /** Phase 25 §4 — the flat optional generation-selection block of POST /api/v1/cases. */

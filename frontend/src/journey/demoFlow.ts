@@ -154,6 +154,24 @@ export const DEMO_FAILURE_MESSAGES = Object.freeze({
   // internal budget number or pipeline topology is ever revealed.
   safetyLimit:
     "This case could not be completed within the generation safety limits. Please try again.",
+  // Phase 30 §23 — BYOK Frontier provider failures, each mapped to frozen safe
+  // copy. The raw provider response/body/code is NEVER surfaced (and the
+  // client never included a provider URL, so no endpoint text can leak).
+  // 401/403 -> FRONTIER_AUTH_FAILED; 404 -> FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND;
+  // 429 -> FRONTIER_RATE_LIMITED; timeout -> FRONTIER_TIMEOUT; 5xx ->
+  // FRONTIER_PROVIDER_ERROR. The backend's SINGLE 400-level BYOK validation
+  // code INVALID_FRONTIER_CONFIG (missing/invalid provider/key/model, unknown
+  // provider id — backend/app/api/v1/errors.py) maps to the single "check
+  // your Frontier provider/key/model" copy. Exact code only.
+  frontierAuthFailed: "The selected provider rejected the supplied API credentials.",
+  frontierEndpointOrModelNotFound:
+    "The selected provider or model could not be found. Check the model name, then try again.",
+  frontierRateLimited:
+    "The selected provider is rate-limiting requests right now. Wait a moment, then try again.",
+  frontierTimeout: "The selected provider took too long to respond. Please try again.",
+  frontierProviderError: "The selected provider reported an error. Please try again.",
+  frontierInvalidConfiguration:
+    "Check your Frontier provider, API key and model, then try again.",
 });
 
 export interface RunDemoOptions {
@@ -215,6 +233,14 @@ export function mapDemoError(error: unknown): DemoFlowFailure {
     if (error.code === "PROVIDER_UNAVAILABLE") {
       return { kind: "provider", message: DEMO_FAILURE_MESSAGES.providerUnavailableExplicit };
     }
+    // Phase 30 §23 — a Frontier failure surfaced as an HTTP error envelope
+    // (the backend rejects the BYOK attempt with FRONTIER_* / the single 400
+    // INVALID_FRONTIER_CONFIG code). Exact-string match only, mapped to the
+    // frozen safe copy — never the raw code/body.
+    const frontierMessage = frontierFailureMessage(error.code);
+    if (frontierMessage !== null) {
+      return { kind: "provider", message: frontierMessage };
+    }
     if (error.status === 0) {
       return { kind: "retryable", message: DEMO_FAILURE_MESSAGES.network };
     }
@@ -223,6 +249,34 @@ export function mapDemoError(error: unknown): DemoFlowFailure {
     }
   }
   return { kind: "retryable", message: DEMO_FAILURE_MESSAGES.generic };
+}
+
+/**
+ * Phase 30 §23 — EXACT-STRING map from a Frontier failure code to its frozen
+ * safe player-facing copy, or null when the code is not a known Frontier
+ * code. Used by BOTH mapping paths (`generationFailed` for a FAILED
+ * generation, `mapDemoError` for a rejected POST /cases). The project's
+ * exact-string rule guarantees a hostile/legacy prefix or substring variant
+ * can never narrow into these buckets — unknown codes fall through to the
+ * generic safe message. No raw code/provider text is ever surfaced.
+ */
+export function frontierFailureMessage(code: string | null | undefined): string | null {
+  if (code === "FRONTIER_AUTH_FAILED") return DEMO_FAILURE_MESSAGES.frontierAuthFailed;
+  if (code === "FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND") {
+    return DEMO_FAILURE_MESSAGES.frontierEndpointOrModelNotFound;
+  }
+  if (code === "FRONTIER_RATE_LIMITED") return DEMO_FAILURE_MESSAGES.frontierRateLimited;
+  if (code === "FRONTIER_TIMEOUT") return DEMO_FAILURE_MESSAGES.frontierTimeout;
+  if (code === "FRONTIER_PROVIDER_ERROR") return DEMO_FAILURE_MESSAGES.frontierProviderError;
+  // The backend's SINGLE 400-level BYOK request-validation code
+  // INVALID_FRONTIER_CONFIG (missing/invalid provider / api key / model,
+  // unknown provider id — backend/app/api/v1/errors.py) maps to ONE safe
+  // "check your Frontier provider/key/model" copy. Exact code only — a
+  // hostile/legacy prefix or substring variant can never narrow in.
+  if (code === "INVALID_FRONTIER_CONFIG") {
+    return DEMO_FAILURE_MESSAGES.frontierInvalidConfiguration;
+  }
+  return null;
 }
 
 /** The bounded exponential backoff delay for a poll attempt (1-based). */
@@ -377,6 +431,13 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
  * (BRIDGE_PAIRING_EXPIRED / BRIDGE_BUSY / BRIDGE_PROTOCOL_ERROR /
  * LOCAL_PROVIDER_INVALID_OUTPUT) and every unknown/hostile variant fall
  * through to the generic failed message — no raw code is ever surfaced.
+ *
+ * Phase 30 notes (§23, BYOK Frontier): FRONTIER_AUTH_FAILED /
+ * FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND / FRONTIER_RATE_LIMITED /
+ * FRONTIER_TIMEOUT / FRONTIER_PROVIDER_ERROR and the 400-level
+ * INVALID_FRONTIER_CONFIG validation code map to frozen safe copy through
+ * {@link frontierFailureMessage} (exact strings only). The provider's raw
+ * response body/endpoint/credentials are never echoed back to the browser.
  */
 export function generationFailed(failureCode?: string | null): DemoFlowFailure {
   if (failureCode === "GENERATION_DEADLINE_EXCEEDED") {
@@ -432,6 +493,15 @@ export function generationFailed(failureCode?: string | null): DemoFlowFailure {
   }
   if (failureCode === "LOCAL_PROVIDER_TIMEOUT") {
     return { kind: "provider", message: DEMO_FAILURE_MESSAGES.localProviderTimeout };
+  }
+  // Phase 30 §23 — a generation that FAILED with a Frontier provider code
+  // (401/403 auth, 404 endpoint-or-model, 429 rate limit, timeout, 5xx, and
+  // the 400-level INVALID_FRONTIER_CONFIG validation code) maps to frozen
+  // safe copy via the exact-string helper. Every variant/unknown code falls
+  // through to the generic failed message — no raw code ever surfaces.
+  const frontierMessage = frontierFailureMessage(failureCode);
+  if (frontierMessage !== null) {
+    return { kind: "provider", message: frontierMessage };
   }
   return { kind: "failed", message: DEMO_FAILURE_MESSAGES.failed };
 }

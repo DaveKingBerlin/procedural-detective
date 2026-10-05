@@ -1,5 +1,7 @@
 import type {
+  CreateCaseFrontier,
   CreateCaseGeneration,
+  FrontierProviderEntryDTO,
   GenerationCapabilitiesResponse,
   GenerationProviderDTO,
   GenerationProviderId,
@@ -44,13 +46,26 @@ import { isUnsafeDisplayString, safeDisplay } from "./generationMode";
  *     (generationProvider / ollamaTransport / ollamaModel). NEVER a
  *     credential, token, URL or configuration value (§1.4 / §10.1).
  *
+ * Phase 30 adds the BYOK Frontier selection: the capability DTO's frontier
+ * offer carries the SAFE provider catalog (`requiresUserConfiguration` +
+ * `providers[]` ids/labels only — §9), and the browser selection stores the
+ * NON-SECRET frontier provider id + model in sessionStorage (the new
+ * `pd_frontier_provider` / `pd_frontier_model` keys) while the API KEY is
+ * MEMORY-ONLY — there is no storage key for it anywhere (§15/§24). The
+ * serialized POST block is `frontier: {provider, apiKey, model}` (§6) — never
+ * a URL/endpoint/header. The cost acknowledgement (§25) is UI consent only
+ * and is never persisted.
+ *
  * Hard guarantees:
  *   - NO host/IP, credential, URL or provider configuration ever leaves this
  *     module: the only strings it produces are frozen public labels, the
- *     sanitized DTO label/model, the sanitized short reason, and the user's
- *     own model text (trimmed, non-empty);
- *   - the browser never supplies an endpoint/URL/API key: the only
- *     user-supplied provider-specific string is the Ollama model identifier;
+ *     sanitized DTO label/model, the sanitized short reason, the user's
+ *     own model text (trimmed, non-empty), the sanitized catalog ids/labels
+ *     and — on the /generating POST path only — the user's memory-only
+ *     Frontier API key inside the typed `frontier` request block;
+ *   - the browser never supplies an endpoint/URL/API key to the backend for
+ *     fake/ollama, and for frontier it supplies ONLY the trusted catalog id,
+ *     the key and the model (Phase 30 §4/§6);
  *   - absence of the additive keys (an OLDER server) resolves to `null` — the
  *     routes then offer no selector and POST /cases carries NO selection
  *     (pre-25 behavior byte-identical);
@@ -94,10 +109,18 @@ export const MODEL_INPUT_LABEL = "Model";
  * the player bundle — a storage key or identifier containing the contiguous
  * sequence would be flagged. The LOGICAL preference names remain
  * generationProvider / ollamaTransport / ollamaModel (§10.1); these strings
- * are the internal non-secret key spellings only. */
+ * are the internal non-secret key spellings only.
+ *
+ * Phase 30 (§24) — Frontier adds TWO more non-secret preference keys
+ * (frontierProviderId / frontierModel). The Frontier API KEY and the cost
+ * acknowledgement are MEMORY-ONLY and have NO storage key whatsoever: a
+ * storage write for them would be a defect.
+ */
 export const GENERATION_PROVIDER_STORAGE_KEY = "pd_generation_provider";
 export const OLLAMA_TRANSPORT_STORAGE_KEY = "pd_ollama_transport";
 export const GENERATION_MODEL_STORAGE_KEY = "pd_generation_model";
+export const FRONTIER_PROVIDER_STORAGE_KEY = "pd_frontier_provider";
+export const FRONTIER_MODEL_STORAGE_KEY = "pd_frontier_model";
 
 /** Known short reasons mapped to frozen friendly copy. UNKNOWN safe text is
  *  NOT rendered at all (a raw exception/diagnostic string can never reach the
@@ -114,11 +137,37 @@ export const PROVIDER_UNAVAILABLE_LABEL = "unavailable";
  * The resolved browser-side provider selection. `ollamaTransport` /
  * `ollamaModel` are only ever non-null/non-empty while the provider is
  * "ollama" (they are carried to the backend ONLY in that case).
+ *
+ * Phase 30 — the Frontier fields (`frontierProviderId` / `frontierModel`) are
+ * NON-SECRET preferences that MAY persist in sessionStorage (§24);
+ * `frontierApiKey` is MEMORY-ONLY — it must NEVER be persisted to
+ * localStorage/sessionStorage/IndexedDB/URL/history and NEVER survives a
+ * provider switch (each hosted provider owns a different key, §15/§24). The
+ * cost acknowledgement `frontierAck` is UI consent (§25) and is also
+ * memory-only. All four fields are OPTIONAL on the type so every pre-30
+ * call site stays byte-identical (absent == empty/false); `toCreateCaseGeneration`
+ * and the storage layer together guarantee the secret can never leak into
+ * a persistence surface.
  */
 export interface GenerationProviderSelection {
   generationProvider: GenerationProviderId;
   ollamaTransport: OllamaTransportId | null;
   ollamaModel: string;
+  /** Phase 30 — Frontier provider id from the trusted capability catalog, or
+   *  null/absent while the provider is not "frontier". Non-secret preference. */
+  frontierProviderId?: string | null;
+  /** Phase 30 — the user-supplied Frontier model identifier (non-secret). */
+  frontierModel?: string;
+  /**
+   * Phase 30 — the user-supplied Frontier API key. MEMORY-ONLY (component
+   * state + in-memory JourneyParams): NEVER persisted, never rendered after
+   * input, cleared when the Frontier provider changes and cleared when the
+   * user switches away from Frontier. Absent/empty == no key entered.
+   */
+  frontierApiKey?: string;
+  /** Phase 30 — cost-acknowledgement consent for Frontier generation (§25).
+   *  UI consent only, memory-only, never persisted. */
+  frontierAck?: boolean;
 }
 
 /** Minimal sessionStorage surface used here (sessionStorage-compatible). */
@@ -156,6 +205,36 @@ export interface GenerationProviderOffer {
     server: ParsedGenerationTransport;
     bridge: ParsedGenerationTransport;
   };
+  /**
+   * Phase 30 — Frontier-only: true when the browser must supply the user's
+   * own configuration (provider id + API key + model) before Frontier
+   * generation is allowed.
+   */
+  requiresUserConfiguration: boolean;
+  /**
+   * Phase 30 — Frontier-only: the sanitized SAFE provider catalog (ids +
+   * public labels ONLY, §9). Hostile/URL-like entries are dropped defensively.
+   * Empty while provider is not "frontier" or on a pre-30 server.
+   */
+  providers: FrontierProviderEntryDTO[];
+}
+
+/**
+ * Phase 30 (§17) — defensive Frontier provider-id hardening. A catalog id is
+ * accepted ONLY when it carries no control/whitespace characters, no URL-ish
+ * or header-ish delimiters and passes the shared safe-display guard. The
+ * backend registry is the authoritative allowlist; this is last-line defense
+ * so a hostile reply/stored replay can never smuggle a URL/scheme/header
+ * fragment into a dropdown option or into the persisted preference.
+ */
+export function isSafeFrontierProviderId(value: unknown): value is string {
+  if (typeof value !== "string" || value === "") return false;
+  if (value.length > 128) return false;
+  if (/\s/.test(value)) return false; // whitespace, CR/LF, NUL, control-ish
+  if (isUnsafeDisplayString(value)) return false;
+  // Query/fragment/scheme/separation characters never belong in a provider id.
+  if (/[:/?#@[\]{}()"'<>\\,&=%_\u0000-\u001f]/.test(value)) return false;
+  return true;
 }
 
 function isGenerationProviderId(value: unknown): value is GenerationProviderId {
@@ -194,6 +273,31 @@ function parseDisplay(value: unknown): string | null {
 }
 
 /**
+ * Phase 30 — parse the UNTRUSTED frontier `providers[]` CATALOG (Section 9).
+ * ONLY `id` + `label` survive; every other field (endpoint, base URL, port,
+ * credential, header or any unrecognized key) is ignored — a hostile reply
+ * can never smuggle an endpoint URL/secret into the selector. Entry ids pass
+ * {@link isSafeFrontierProviderId}; duplicate ids are dropped (first wins);
+ * an unsafe/absent label falls back to the (already-safe) id so the entry
+ * stays selectable without ever rendering hostile text. Never throws.
+ */
+export function parseFrontierProviders(raw: unknown): FrontierProviderEntryDTO[] {
+  if (!Array.isArray(raw)) return [];
+  const out: FrontierProviderEntryDTO[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const em = entry as { id?: unknown; label?: unknown };
+    const id = em.id;
+    if (!isSafeFrontierProviderId(id) || seen.has(id)) continue;
+    seen.add(id);
+    const label = parseDisplay(em.label);
+    out.push({ id, label: label !== null ? label : id });
+  }
+  return out;
+}
+
+/**
  * Re-parse the UNTRUSTED `providers[]` additive key into sanitized
  * {@link GenerationProviderDTO}s. ONLY the closed provider ids survive;
  * unknown ids and duplicate ids are DROPPED (first occurrence wins, ADV-208
@@ -219,6 +323,8 @@ export function parseGenerationProviders(raw: unknown): GenerationProviderDTO[] 
       defaultModel?: unknown;
       manualModelEntry?: unknown;
       transports?: unknown;
+      requiresUserConfiguration?: unknown;
+      providers?: unknown;
     };
     const dto: GenerationProviderDTO = {
       id,
@@ -246,6 +352,15 @@ export function parseGenerationProviders(raw: unknown): GenerationProviderDTO[] 
       if (Object.keys(transports).length > 0) {
         dto.transports = transports;
       }
+    }
+    // Phase 30 — the BYOK Frontier catalog (ids + labels only). Both fields
+    // are OMITTED when absent so pre-30 parsed payloads stay byte-identical.
+    if (typeof em.requiresUserConfiguration === "boolean" && em.requiresUserConfiguration) {
+      dto.requiresUserConfiguration = true;
+    }
+    const frontierProviders = parseFrontierProviders(em.providers);
+    if (frontierProviders.length > 0) {
+      dto.providers = frontierProviders;
     }
     out.push(dto);
   }
@@ -332,6 +447,11 @@ export function buildProviderOffers(
         server: parseTransport(server),
         bridge: parseTransport(bridge),
       },
+      // Phase 30 — a hand-constructed (parser-bypassed) capabilities object is
+      // re-sanitized here too: strict boolean + the FULL defensive catalog
+      // parse (ids + safe labels only; every other field dropped).
+      requiresUserConfiguration: dto.requiresUserConfiguration === true,
+      providers: parseFrontierProviders(dto.providers),
     });
   }
   return offers;
@@ -508,13 +628,118 @@ export function clearOllamaModel(storage?: GenerationProviderStorage | null): vo
   }
 }
 
-/** Persist the full resolved selection — only the three non-secret keys.
+/* ======================================================================
+ * Phase 30 — Frontier NON-SECRET preference storage (§24).
+ *
+ * ONLY the provider id + model are stored (and both are NON-SECRET). There is
+ * deliberately NO storage key (and NO storage helper) for the API key: the key
+ * is memory-only by construction (§15/§24). `frontierApiKey` / `frontierAck`
+ * never appear in this section or in `persistGenerationSelection`.
+ * ==================================================================== */
+
+/** Persist the Frontier provider preference (best-effort; id must be safe). */
+export function setFrontierProvider(
+  providerId: string,
+  storage?: GenerationProviderStorage | null,
+): boolean {
+  if (!isSafeFrontierProviderId(providerId)) return false;
+  const store = storage ?? defaultStorage();
+  if (!store) return false;
+  try {
+    store.setItem(FRONTIER_PROVIDER_STORAGE_KEY, providerId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Read the stored Frontier provider id. ONLY values that pass the defensive
+ *  id guard are returned — a tampered/hostile replay reads null (the caller
+ *  then validates catalog membership too — DISCARD-IF-STALE, §10.1). */
+export function getFrontierProvider(
+  storage?: GenerationProviderStorage | null,
+): string | null {
+  const store = storage ?? defaultStorage();
+  if (!store) return null;
+  let raw: string | null = null;
+  try {
+    raw = store.getItem(FRONTIER_PROVIDER_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  return isSafeFrontierProviderId(raw) ? raw : null;
+}
+
+/** Remove the stored Frontier provider id (best-effort). */
+export function clearFrontierProvider(storage?: GenerationProviderStorage | null): void {
+  const store = storage ?? defaultStorage();
+  if (!store) return;
+  try {
+    store.removeItem(FRONTIER_PROVIDER_STORAGE_KEY);
+  } catch {
+    // Best-effort: never crash the page.
+  }
+}
+
+/** Persist the Frontier model preference (best-effort; blanks clear the key).
+ *  A NON-SECRET preference string — the backend validates the identifier. */
+export function setFrontierModel(
+  model: string,
+  storage?: GenerationProviderStorage | null,
+): boolean {
+  const trimmed = typeof model === "string" ? model.trim() : "";
+  if (trimmed === "") {
+    clearFrontierModel(storage);
+    return false;
+  }
+  const store = storage ?? defaultStorage();
+  if (!store) return false;
+  try {
+    store.setItem(FRONTIER_MODEL_STORAGE_KEY, trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Read the stored Frontier model preference (trimmed, empty -> null). */
+export function getFrontierModel(storage?: GenerationProviderStorage | null): string | null {
+  const store = storage ?? defaultStorage();
+  if (!store) return null;
+  let raw: string | null = null;
+  try {
+    raw = store.getItem(FRONTIER_MODEL_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed !== "" ? trimmed : null;
+}
+
+/** Remove the stored Frontier model (best-effort). */
+export function clearFrontierModel(storage?: GenerationProviderStorage | null): void {
+  const store = storage ?? defaultStorage();
+  if (!store) return;
+  try {
+    store.removeItem(FRONTIER_MODEL_STORAGE_KEY);
+  } catch {
+    // Best-effort: never crash the page.
+  }
+}
+
+/** Persist the full resolved selection — only the NON-SECRET preference keys.
  *  Phase 26C1 §4 — for a NON-ollama selection the transport/model preference
  *  keys are PRESERVED (not cleared): they are the user's Ollama preference
  *  for the next time they choose the Ollama provider (Fake -> Ollama restores
  *  the intended transport, §8). While the provider is non-ollama those keys
  *  are INERT — never rendered, never serialized. `clearGenerationSelection`
- *  remains the full reset for reset flows. */
+ *  remains the full reset for reset flows.
+ *
+ *  Phase 30 (§24) — a FRONTIER selection persists the provider id + model
+ *  (non-secret) and only while the provider is "frontier"; the API key and
+ *  the cost acknowledgement are NEVER written here (the key is memory-only
+ *  and the ack is UI consent — there is no storage surface for either). */
 export function persistGenerationSelection(
   selection: GenerationProviderSelection,
   storage?: GenerationProviderStorage | null,
@@ -531,15 +756,30 @@ export function persistGenerationSelection(
     } else {
       clearOllamaModel(storage);
     }
+  } else if (selection.generationProvider === "frontier") {
+    // Phase 30 — non-secret Frontier preferences (provider id + model) only.
+    if (typeof selection.frontierProviderId === "string" && selection.frontierProviderId !== "") {
+      setFrontierProvider(selection.frontierProviderId, storage);
+    } else {
+      clearFrontierProvider(storage);
+    }
+    if (typeof selection.frontierModel === "string" && selection.frontierModel.trim() !== "") {
+      setFrontierModel(selection.frontierModel, storage);
+    } else {
+      clearFrontierModel(storage);
+    }
   }
-  // Non-ollama: the transport/model keys are deliberately left untouched.
+  // Non-ollama/non-frontier: the transport/model/frontier preference keys are
+  // deliberately left untouched (inert while the provider differs).
 }
 
-/** Clear all three stored preference keys (reset flows; never credentials). */
+/** Clear ALL stored preference keys (reset flows; never credentials). */
 export function clearGenerationSelection(storage?: GenerationProviderStorage | null): void {
   clearGenerationProvider(storage);
   clearOllamaTransport(storage);
   clearOllamaModel(storage);
+  clearFrontierProvider(storage);
+  clearFrontierModel(storage);
 }
 
 /* ======================================================================
@@ -689,11 +929,38 @@ export function resolveProviderSelection(
     }
   }
 
-  return {
+  // Phase 30 — Frontier: the stored provider id/model preferences are restored
+  // ONLY when still valid (DISCARD-IF-STALE applies to the provider id too):
+  // the id must be a member of the server's CURRENT safe catalog (a removed/
+  // renamed provider is never restored — the dropdown resets to its placeholder
+  // and the submit stays gated). The API key is memory-only and always starts
+  // ABSENT after a fresh resolve (re-entry is expected, §15/§24).
+  let frontierProviderId: string | null = null;
+  let frontierModel = "";
+  if (provider === "frontier") {
+    const frontier = offers.find((offer) => offer.id === "frontier");
+    if (frontier !== undefined) {
+      const catalogIds = new Set(frontier.providers.map((entry) => entry.id));
+      const storedId = getFrontierProvider(storage);
+      frontierProviderId = storedId !== null && catalogIds.has(storedId) ? storedId : null;
+      frontierModel = getFrontierModel(storage) ?? "";
+    }
+  }
+
+  // Phase 30 — a NON-frontier selection must stay SHAPE-IDENTICAL to Phase 25
+  // (no extra keys): the frontier fields exist ONLY while frontier is active.
+  const resolved: GenerationProviderSelection = {
     generationProvider: provider,
     ollamaTransport: provider === "ollama" ? ollamaTransport : null,
     ollamaModel: provider === "ollama" ? ollamaModel : "",
   };
+  if (provider === "frontier") {
+    resolved.frontierProviderId = frontierProviderId;
+    resolved.frontierModel = frontierModel;
+    // frontierApiKey is intentionally ABSENT here: it is memory-only and a
+    // fresh resolve must never resurrect a secret (there is no storage read).
+  }
+  return resolved;
 }
 
 /**
@@ -721,5 +988,104 @@ export function toCreateCaseGeneration(
     if (selection.ollamaTransport !== null) generation.ollamaTransport = selection.ollamaTransport;
     if (selection.ollamaModel !== "") generation.ollamaModel = selection.ollamaModel;
   }
+  if (selection.generationProvider === "frontier") {
+    // Phase 30 — the BYOK block carries ONLY {provider, apiKey, model}; NEVER
+    // a URL, endpoint, header or configuration value (§6). The model travels
+    // trimmed; the key travels VERBATIM (non-empty). An INCOMPLETE frontier
+    // selection (missing key/model/provider) emits NO frontier block — the
+    // caller keeps the flat `{generationProvider:"frontier"}` and the backend
+    // fail-closes with a safe INVALID_FRONTIER_CONFIG error (never a silent
+    // fallback). The key is the caller's memory-only value — this function
+    // only serializes it into the POST body once.
+    const providerId =
+      typeof selection.frontierProviderId === "string" ? selection.frontierProviderId : "";
+    const model = typeof selection.frontierModel === "string" ? selection.frontierModel.trim() : "";
+    const apiKey = typeof selection.frontierApiKey === "string" ? selection.frontierApiKey : "";
+    if (providerId !== "" && model !== "" && apiKey !== "" && apiKey.trim() !== "") {
+      const frontier: CreateCaseFrontier = { provider: providerId, apiKey, model };
+      generation.frontier = frontier;
+    }
+  }
   return generation;
+}
+
+/* ======================================================================
+ * Phase 30 — Frontier BYOK panel copy + readiness gate (§5/§24/§25/§33).
+ * All copy is frozen app text (no DTO string can reach it); the API key has
+ * no storage surface anywhere in this module.
+ * ==================================================================== */
+
+/** Phase 30 §33 — frozen privacy copy shown near the Frontier panel. Deliberately
+ *  truthful: the key DOES transit through the Procedural Detective server for the
+ *  current attempt (never claimed to be invisible to the server). */
+export const FRONTIER_PRIVACY_COPY =
+  "Use your own hosted AI API — Choose a supported provider and enter your API key and model. "
+  + "Procedural Detective sends the generation request through our server using your key. "
+  + "The key is used only for the current generation attempt and is not stored. "
+  + "Your selected provider may charge your account for usage.";
+
+/** Frozen public labels for the Frontier BYOK panel (§5). */
+export const FRONTIER_PROVIDER_LABEL = "Frontier Provider";
+export const FRONTIER_API_KEY_LABEL = "API Key";
+export const FRONTIER_PROVIDER_PLACEHOLDER = "Select a provider";
+export const FRONTIER_KEY_SHOW_LABEL = "Show";
+export const FRONTIER_KEY_HIDE_LABEL = "Hide";
+
+/** Phase 30 §25 — the cost-acknowledgement consent copy (UI consent only). */
+export const FRONTIER_COST_ACKNOWLEDGEMENT_COPY =
+  "I understand that this request uses my API key and may create charges with the "
+  + "selected provider.";
+
+/** Phase 30 — frozen message when a Frontier submit is attempted while the
+ *  BYOK fields are incomplete (defense-in-depth; the primary guard is the
+ *  disabled Generate button). */
+export const FRONTIER_SUBMIT_REQUIRED_MESSAGE =
+  "Choose a Frontier provider, enter your API key and model, and accept the cost notice to generate.";
+
+/** Phase 30 §17 — sanitize a pasted Frontier API key. The key is an opaque
+ *  secret: its printable content is preserved VERBATIM, but CR/LF and every
+ *  other control character are stripped so a single-line password field can
+ *  never smuggle header/CRLF content into the serialized request. */
+export function sanitizeFrontierApiKey(raw: string): string {
+  if (typeof raw !== "string") return "";
+  return raw.replace(/[\u0000-\u001f\u007f]/g, "");
+}
+
+/**
+ * Phase 30 §5/§24 — "can the form be submitted?" for the CURRENT selection.
+ *
+ * Returns TRUE (not gated) when:
+ *   - no selection exists (OLDER server / null);
+ *   - the active provider is NOT "frontier" (fake/ollama are unaffected);
+ *   - frontier is not presently offerable at all (its radio is disabled — the
+ *     server rejects the explicit selection with the safe error copy instead
+ *     of the form locking up).
+ *
+ * When the active provider IS a selectable frontier, the generation submit
+ * stays disabled until the provider id (a member of the CURRENT safe catalog),
+ * a non-empty API key and model AND the cost acknowledgement are all present —
+ * §5: the browser may not start a BYOK generation while any of the four is
+ * missing.
+ */
+export function isFrontierSubmitReady(
+  selection: GenerationProviderSelection | null,
+  capabilities: GenerationCapabilitiesResponse | null,
+): boolean {
+  if (selection === null || selection.generationProvider !== "frontier") return true;
+  if (!hasGenerationProviderOffer(capabilities)) return true;
+  const frontier = buildProviderOffers(capabilities).find((offer) => offer.id === "frontier");
+  if (frontier === undefined || !frontier.available) return true;
+  const providerId =
+    typeof selection.frontierProviderId === "string" ? selection.frontierProviderId.trim() : "";
+  const apiKey = typeof selection.frontierApiKey === "string" ? selection.frontierApiKey : "";
+  const model = typeof selection.frontierModel === "string" ? selection.frontierModel.trim() : "";
+  const catalogIds = new Set(frontier.providers.map((entry) => entry.id));
+  return (
+    providerId !== "" &&
+    catalogIds.has(providerId) &&
+    apiKey !== "" &&
+    apiKey.trim() !== "" &&
+    model !== "" &&
+    selection.frontierAck === true
+  );
 }

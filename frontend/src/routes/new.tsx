@@ -17,8 +17,10 @@ import { getGenerationMode, isLocalModeAvailable, LOCAL_AI_SHOWCASE_NOTE, demoCt
 import { GenerationModeDisplay } from "../journey/generationModeSelector";
 import { GenerationProviderSelector } from "../journey/GenerationProviderSelector";
 import {
+  FRONTIER_SUBMIT_REQUIRED_MESSAGE,
   bridgePairedSelection,
   hasGenerationProviderOffer,
+  isFrontierSubmitReady,
   persistGenerationSelection,
   resolveProviderSelection,
   type GenerationProviderSelection,
@@ -241,6 +243,13 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
       setError(validation.error ?? "Describe a crime first — a sentence or two is enough.");
       return false;
     }
+    // Phase 30 — an ACTIVE but INCOMPLETE Frontier selection must never stage:
+    // the primary guard is the disabled Generate button; this is the
+    // defense-in-depth gate (the same rule gates the example-case/demo CTA).
+    if (!isFrontierSubmitReady(providerSelection, capabilities)) {
+      setError(FRONTIER_SUBMIT_REQUIRED_MESSAGE);
+      return false;
+    }
     setError(null);
     const params: JourneyParams = { prompt: validation.trimmed, difficulty: level };
     // Phase 25 — carry the browser-selected generation provider into the
@@ -255,6 +264,29 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
         }
         if (providerSelection.ollamaModel !== "") {
           params.ollamaModel = providerSelection.ollamaModel;
+        }
+      }
+      // Phase 30 — a COMPLETE Frontier selection travels in-memory: the
+      // trusted provider id + model (non-secret) and — inside JourneyParams
+      // ONLY, never any persistence surface — the user's API key (§15/§24).
+      if (providerSelection.generationProvider === "frontier") {
+        if (
+          typeof providerSelection.frontierProviderId === "string" &&
+          providerSelection.frontierProviderId !== ""
+        ) {
+          params.frontierProviderId = providerSelection.frontierProviderId;
+        }
+        if (
+          typeof providerSelection.frontierModel === "string" &&
+          providerSelection.frontierModel.trim() !== ""
+        ) {
+          params.frontierModel = providerSelection.frontierModel.trim();
+        }
+        if (
+          typeof providerSelection.frontierApiKey === "string" &&
+          providerSelection.frontierApiKey !== ""
+        ) {
+          params.frontierApiKey = providerSelection.frontierApiKey;
         }
       }
     }
@@ -445,7 +477,17 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
         )}
 
         <div className="new-case-actions">
-          <button type="submit" className="new-case-submit" data-testid="generate-case">
+          {/* Phase 30 §5 — while an ACTIVE Frontier selection is incomplete
+              (provider/key/model/cost ack) the Generate button is DISABLED:
+              a BYOK request must never start without the full user
+              configuration. The same readiness gate blocks stageJourney
+              (the example-case CTA path) as defense-in-depth. */}
+          <button
+            type="submit"
+            className="new-case-submit"
+            data-testid="generate-case"
+            disabled={!isFrontierSubmitReady(providerSelection, capabilities)}
+          >
             Generate case
           </button>
         </div>

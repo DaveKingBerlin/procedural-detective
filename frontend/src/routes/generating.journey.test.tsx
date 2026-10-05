@@ -449,6 +449,41 @@ describe("Phase 25 — the generation-selection carried from /new reaches the jo
     expect(run.mock.calls[0][5]).toBeUndefined();
     await releaseRun();
   });
+
+  it("Phase 30 — a frontier journey carries provider/key/model into the RunFn generation block (and nothing else)", async () => {
+    const params: JourneyParams = {
+      prompt: "A crime",
+      difficulty: "medium",
+      generationProvider: "frontier",
+      frontierProviderId: "openai",
+      frontierModel: "gpt-4o-mini",
+      frontierApiKey: "sk-test-phase30-0000",
+    };
+    const { run, releaseRun } = mountJourney(demoOnly, params);
+    await settleEffects();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0][5]).toEqual({
+      generationProvider: "frontier",
+      frontier: { provider: "openai", apiKey: "sk-test-phase30-0000", model: "gpt-4o-mini" },
+    });
+    // The serialized block carries the key ONLY for the POST — nothing here
+    // writes any storage surface (the storage contract is pinned elsewhere).
+    await releaseRun();
+  });
+
+  it("Phase 30 — a frontier journey with an EMPTY key (defense-in-depth) emits NO frontier block (fail-closed)", async () => {
+    const params: JourneyParams = {
+      prompt: "A crime",
+      difficulty: "medium",
+      generationProvider: "frontier",
+      frontierProviderId: "openai",
+      frontierModel: "gpt-4o-mini",
+    };
+    const { run, releaseRun } = mountJourney(demoOnly, params);
+    await settleEffects();
+    expect(run.mock.calls[0][5]).toEqual({ generationProvider: "frontier" });
+    await releaseRun();
+  });
 });
 
 describe("Phase 28 §17 — Back to start resets the per-session demo holder", () => {

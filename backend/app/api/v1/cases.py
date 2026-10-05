@@ -94,6 +94,12 @@ def create_case(
             # only; unknown ids and non-fake providers are rejected with the
             # canonical 400 INVALID_DEMO_CASE envelope).
             demo_case_id=body.demoCaseId,
+            # Phase 30 — the optional BYOK frontier block (provider + key +
+            # model; validated + frozen by the service; the browser NEVER
+            # supplies a URL — the endpoint comes from the trusted registry).
+            frontier_provider=body.frontier.provider if body.frontier else None,
+            frontier_api_key=body.frontier.apiKey if body.frontier else None,
+            frontier_model=body.frontier.model if body.frontier else None,
         )
     except HTTPException:
         raise

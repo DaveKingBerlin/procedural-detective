@@ -89,6 +89,9 @@ Default values in the table below are the *container* defaults; the two
 | `PD_DEV_TRACE` | Developer trace. **Must be `false` in production** — the prod profile forces it `false` (see §12). | `false` |
 | `TRUST_PROXY` | Honor proxy-forwarded client IPs (`X-Forwarded-For` etc.) ONLY when `true` and the TLS edge is the defined trusted proxy (§7). The APP is the sole authority — uvicorn itself always runs with `--no-proxy-headers`, so forwarded headers are never double-processed. | `false` (dev) / `true` (prod compose with Caddy) |
 | `GENERATION_PROVIDER` | `fake` (deterministic demo, default) or `live` / `ollama` (opt-in). | `fake` |
+| `FRONTIER_ENABLED` | **Phase 30 BYOK Frontier feature switch.** When `true`, players can select a hosted provider from the **trusted server-owned registry** (`openai` / `openrouter` / `groq` / `together` / `mistral` / `fireworks` / `deepinfra` / `xai`) and supply an **API key + model per generation attempt**. The backend maps the provider ID to the verified official HTTPS endpoint — the **browser never supplies a URL** (a future custom-provider phase may add user endpoints with its own dedicated SSRF design). The operator trio below is **never** consumed by browser BYOK; no operator API key is required. | `false` |
+| `FRONTIER_BASE_URL` / `FRONTIER_API_KEY` / `FRONTIER_MODEL` | **Legacy server-funded Phase-25 Frontier configuration — DOCUMENTED AS NOT USED by browser BYOK** (Phase 30 §11). Kept for backward configuration compatibility (validators unchanged) but the Phase-30 resolver never reads any of them for a browser frontier attempt, so there is no ambiguous fallback from user BYOK to operator credentials. | unset |
+| `FRONTIER_TIMEOUT_SECONDS` | Phase-30 per-call outbound timeout (5..300), clamped by the generation deadline before each call, exactly like the other providers. | `60` |
 | `LLM_API_KEY` | Live-mode credential. **Never committed.** | unset |
 | `LLM_MODEL` | Live-mode model name (e.g. `gpt-4.1`). Required for live. | unset |
 | `LIVE_PROVIDER_URL` | Live-mode HTTPS endpoint. Rejected unless `https://`. | unset |
@@ -501,6 +504,31 @@ provider timeout  <  remaining backend generation deadline
 - No secrets logged; `.env` keeps credentials out of git **and** out of Docker
   build contexts.
 - HSTS only at the TLS boundary; no preload unless the operator explicitly opts in.
+
+### 17b. BYOK Frontier security posture (Phase 30)
+
+- **Server-owned registry**: the browser selects only a logical provider ID;
+  the server maps it to one of the reviewed official HTTPS endpoints committed
+  in `backend/app/generation/frontier_registry.py`. The registry is validated
+  at import/startup (hermetic, deterministic): HTTPS-only, public DNS hostname,
+  no credentials/query/fragment/control characters, no loopback/private/link-
+  local/metadata/`localhost`/`*.local` targets. The browser request model
+  accepts exactly `{provider, apiKey, model}` — a URL/endpoint/header/proxy/
+  TLS field is rejected at the schema and/or service boundary.
+- **No operator-funded fallback**: browser BYOK never reads
+  `FRONTIER_BASE_URL` / `FRONTIER_API_KEY` / `FRONTIER_MODEL`; there is no
+  ambiguous fallback to operator credentials, demo, Ollama or the bridge.
+- **Transient key handling**: the key lives only in the immutable per-attempt
+  selection and is sent only as the outbound `Authorization: Bearer` header;
+  it is never persisted (SQLite), logged, exposed in events or returned in API
+  responses (verified by the §27 sentinel test).
+- **Normalized provider errors**: 401/403 → `FRONTIER_AUTH_FAILED`, 404 →
+  `FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND`, 429 → `FRONTIER_RATE_LIMITED`,
+  timeout → `FRONTIER_TIMEOUT`, 5xx/other → `FRONTIER_PROVIDER_ERROR`; raw
+  provider bodies/headers are never echoed to the browser.
+- Charges for a BYOK generation are borne by the account associated with the
+  supplied key (the selected provider's terms); the app does not estimate or
+  guarantee provider pricing.
 
 ## 18. Quick reference
 

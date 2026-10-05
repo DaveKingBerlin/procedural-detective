@@ -14,7 +14,46 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class FrontierBlock(BaseModel):
+    """Phase 30 — browser BYOK frontier selection block (exactly 3 fields).
+
+    The browser supplies ONLY the logical trusted provider ID + the transient
+    API key + the model. The server owns the endpoint mapping (trusted
+    registry) — the block MUST NOT carry a URL/endpoint/headers/proxy/timeout/
+    TLS field, and ``extra="forbid"`` rejects any unknown key (422 validation
+    envelope) per Phase30 §4/§6.
+
+    The three fields are schema-OPTIONAL on purpose (mirroring the Phase 25
+    ``ollamaModel`` pattern): the service validators are the SINGLE
+    authoritative gate, so a missing/unknown/disabled provider/key/model
+    answers the canonical 400 INVALID_FRONTIER_CONFIG envelope (the offending
+    value is never echoed) instead of a generic FastAPI 422.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = Field(
+        default=None,
+        description="Logical trusted provider ID (must be an enabled member of "
+        "the server-owned registry; validated centrally, 400 "
+        "INVALID_FRONTIER_CONFIG otherwise — the offending value is never "
+        "echoed).",
+    )
+    apiKey: str | None = Field(
+        default=None,
+        description="The user's transient provider API key (opaque validated "
+        "secret; no schema-level bound — the service validator is the single "
+        "authoritative gate, 400 INVALID_FRONTIER_CONFIG).",
+    )
+    model: str | None = Field(
+        default=None,
+        description="The user-supplied provider model identifier (validated by "
+        "the hardened central model-string validator, 400 "
+        "INVALID_FRONTIER_CONFIG).",
+    )
 
 
 class CaseCreateRequest(BaseModel):
@@ -84,6 +123,19 @@ class CaseCreateRequest(BaseModel):
         description="Phase 28 optional built-in demo case id (demo-apartment "
         "| demo-gallery | demo-laboratory). Only meaningful on the fake/demo "
         "provider path; unknown values are rejected (400 INVALID_DEMO_CASE).",
+    )
+    # Phase 30 — optional browser BYOK frontier block (provider + apiKey +
+    # model). Required when generationProvider=frontier; REJECTED on any other
+    # provider (strict request-schema convention, 400 INVALID_FRONTIER_CONFIG);
+    # the nested block accepts exactly those three keys (extra="forbid"). The
+    # provider ID maps to a trusted server-owned endpoint — the browser never
+    # supplies a URL.
+    frontier: FrontierBlock | None = Field(
+        default=None,
+        description="Phase 30 optional BYOK frontier selection (provider + "
+        "apiKey + model). Only meaningful when generationProvider=frontier; "
+        "the provider ID is resolved against the trusted server-owned "
+        "registry and the key is used only for the current attempt.",
     )
 
 

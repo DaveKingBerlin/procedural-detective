@@ -1,24 +1,36 @@
 import { describe, expect, it } from "vitest";
-import type { GenerationCapabilitiesResponse } from "../api/types";
+import type { FrontierProviderEntryDTO, GenerationCapabilitiesResponse } from "../api/types";
 import { parseGenerationCapabilities } from "./generationMode";
 import {
+  FRONTIER_MODEL_STORAGE_KEY,
+  FRONTIER_PROVIDER_STORAGE_KEY,
   GENERATION_PROVIDER_STORAGE_KEY,
   GENERATION_MODEL_STORAGE_KEY,
   OLLAMA_TRANSPORT_STORAGE_KEY,
   bridgePairedSelection,
   buildProviderOffers,
+  clearFrontierModel,
+  clearFrontierProvider,
   clearGenerationSelection,
   clearGenerationProvider,
   defaultOllamaTransport,
+  getFrontierModel,
+  getFrontierProvider,
   getGenerationProvider,
   getOllamaModel,
   getOllamaTransport,
   hasGenerationProviderOffer,
+  isFrontierSubmitReady,
+  isSafeFrontierProviderId,
   parseDefaultGenerationProvider,
+  parseFrontierProviders,
   parseGenerationProviders,
   persistGenerationSelection,
   providerReasonLabel,
   resolveProviderSelection,
+  sanitizeFrontierApiKey,
+  setFrontierModel,
+  setFrontierProvider,
   setGenerationProvider,
   setOllamaModel,
   setOllamaTransport,
@@ -701,5 +713,403 @@ describe("Phase 26C1 — the SELECTED transport is authoritative (§1-§8)", () 
       ),
     ).toBe("server");
     expect(defaultOllamaTransport(undefined)).toBeNull();
+  });
+});
+
+/* ======================================================================
+ * Phase 30 — BYOK Frontier: catalog parsing, state distribution (§24),
+ * serialization (§6) and the submit-readiness gate (§5).
+ * ==================================================================== */
+
+/** Phase 30 §9 fixture: the frontier offer with the safe provider catalog. */
+const CAPS_WITH_FRONTIER: GenerationCapabilitiesResponse = {
+  modes: [{ id: "demo", available: true }],
+  defaultProvider: "fake",
+  providers: [
+    { id: "fake", label: "Demo / Fake", available: true, model: null, reason: null },
+    {
+      id: "frontier",
+      label: "Frontier",
+      available: true,
+      requiresUserConfiguration: true,
+      providers: [
+        { id: "openai", label: "OpenAI" },
+        { id: "openrouter", label: "OpenRouter" },
+        { id: "groq", label: "Groq" },
+      ],
+    },
+  ],
+};
+
+/** The "empty" frontier selection a fresh resolve produces (key always absent). */
+const FRONTIER_SELECTION: GenerationProviderSelection = {
+  generationProvider: "frontier",
+  ollamaTransport: null,
+  ollamaModel: "",
+  frontierProviderId: null,
+  frontierModel: "",
+};
+
+/** A COMPLETE frontier selection (provider + key + model + ack). */
+function completeFrontierSelection(
+  overrides: Partial<GenerationProviderSelection> = {},
+): GenerationProviderSelection {
+  return {
+    generationProvider: "frontier",
+    ollamaTransport: null,
+    ollamaModel: "",
+    frontierProviderId: "openai",
+    frontierModel: "gpt-4o-mini",
+    frontierApiKey: "sk-test-phase30-0000",
+    frontierAck: true,
+    ...overrides,
+  };
+}
+
+describe("Phase 30 — parseFrontierProviders (the safe catalog, §9)", () => {
+  it("keeps ONLY {id, label} pairs and drops every other field (endpoints/secrets never survive)", () => {
+    const parsed = parseFrontierProviders([
+      { id: "openai", label: "OpenAI" },
+      { id: "openrouter", label: "OpenRouter" },
+      // A hostile/verbose backend could add operational fields — they must be
+      // ignored (the catalog surface carries ids + labels ONLY, §9).
+      {
+        id: "groq",
+        label: "Groq",
+        endpoint: "https://api.groq.example/chat/completions",
+        baseUrl: "https://groq.example",
+        apiKey: "sk-op",
+      },
+    ]);
+    expect(parsed).toEqual([
+      { id: "openai", label: "OpenAI" },
+      { id: "openrouter", label: "OpenRouter" },
+      { id: "groq", label: "Groq" },
+    ]);
+  });
+
+  it("drops duplicate ids (first wins), unsafe ids and unsafe labels (fallback = the safe id)", () => {
+    const parsed = parseFrontierProviders([
+      { id: "openai", label: "OpenAI" },
+      { id: "openai", label: "Duplicate OpenAI" },
+      { id: "https://evil.example", label: "Evil" },
+      { id: "openai?url=https://evil.example", label: "Sneaky" },
+      { id: "openrouter\nAuthorization: x", label: "Header" },
+      { id: "groq", label: "https://evil.example — token=abc" },
+      { id: "together", label: "http://127.0.0.1:11434" },
+      { id: "fireworks", label: "oklabel@host" },
+    ]);
+    expect(parsed).toEqual([
+      { id: "openai", label: "OpenAI" },
+      // The hostile label falls back to the SAFE id (the id passed the
+      // defensive guard — the entry stays selectable without hostile text).
+      { id: "groq", label: "groq" },
+      { id: "together", label: "together" },
+      { id: "fireworks", label: "fireworks" },
+    ]);
+  });
+
+  it("treats an absent/malformed catalog as empty", () => {
+    expect(parseFrontierProviders(undefined)).toEqual([]);
+    expect(parseFrontierProviders("nope")).toEqual([]);
+    expect(parseFrontierProviders([42, null, { label: "no-id" }])).toEqual([]);
+  });
+});
+
+describe("Phase 30 — isSafeFrontierProviderId (defensive id guard)", () => {
+  it("accepts plain trusted provider ids", () => {
+    for (const id of [
+      "openai",
+      "openrouter",
+      "groq",
+      "together-ai",
+      "mistral",
+      "fireworks",
+      "deepinfra",
+      "xai",
+    ]) {
+      expect(isSafeFrontierProviderId(id), id).toBe(true);
+    }
+  });
+
+  it("rejects URL/query/header/control-smuggling ids", () => {
+    for (const id of [
+      "https://evil.example",
+      "openai?url=https://evil.example",
+      "openai#fragment",
+      "openai\\x",
+      "openai/x",
+      "../openai",
+      "openai\nAuthorization: x",
+      "openai\tgroq",
+      "  openai",
+      "openai@host",
+      "a:b",
+      "openai&x=1",
+      "",
+      "   ",
+    ]) {
+      expect(isSafeFrontierProviderId(id), JSON.stringify(id)).toBe(false);
+    }
+  });
+});
+
+describe("Phase 30 — sanitizeFrontierApiKey (§17: CR/LF + control chars stripped)", () => {
+  it("strips CR/LF and control characters, preserving the printable secret verbatim", () => {
+    expect(sanitizeFrontierApiKey("sk-test")).toBe("sk-test");
+    expect(sanitizeFrontierApiKey("sk-test\r\nContinued")).toBe("sk-testContinued");
+    expect(sanitizeFrontierApiKey("sk-\u0000nul\u001f")).toBe("sk-nul");
+    expect(sanitizeFrontierApiKey("")).toBe("");
+  });
+});
+
+describe("Phase 30 — parseGenerationCapabilities carries the frontier offer (requiresUserConfiguration + catalog)", () => {
+  it("carries the sanitized BYOK offer through the additive parse", () => {
+    const parsed = parseGenerationCapabilities({ ...CAPS_WITH_FRONTIER });
+    expect(parsed.providers?.find((p) => p.id === "frontier")).toEqual({
+      id: "frontier",
+      label: "Frontier",
+      available: true,
+      requiresUserConfiguration: true,
+      providers: [
+        { id: "openai", label: "OpenAI" },
+        { id: "openrouter", label: "OpenRouter" },
+        { id: "groq", label: "Groq" },
+      ],
+    });
+  });
+
+  it("buildProviderOffers re-sanitizes even a hand-constructed (parser-bypassed) catalog", () => {
+    const hostile: GenerationCapabilitiesResponse = {
+      modes: [],
+      providers: [
+        {
+          id: "frontier",
+          label: "Frontier",
+          available: true,
+          requiresUserConfiguration: true,
+          providers: [
+            { id: "openai", label: "OpenAI" },
+            {
+              id: "https://evil.example",
+              label: "Evil",
+              endpoint: "https://evil.example/api",
+              // A hand-constructed hostile entry (endpoint/URL surface)
+              // asserted through the DTO type so the last-line re-parse is
+              // what gets exercised.
+            } as FrontierProviderEntryDTO,
+            { id: "openai", label: "Duplicate" },
+            { id: "openrouter", label: "https://evil.example — token=abc" },
+          ],
+        },
+      ],
+    };
+    const frontier = buildProviderOffers(hostile).find((offer) => offer.id === "frontier");
+    expect(frontier?.requiresUserConfiguration).toBe(true);
+    expect(frontier?.providers).toEqual([
+      { id: "openai", label: "OpenAI" },
+      { id: "openrouter", label: "openrouter" },
+    ]);
+    // No endpoint/secret text can ever reach the offer surface.
+    expect(JSON.stringify(frontier)).not.toContain("evil.example");
+  });
+});
+
+describe("Phase 30 — Frontier sessionStorage state distribution (§24)", () => {
+  it("persists exactly the provider id + model keys (never the API key, never the ack)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(completeFrontierSelection(), storage);
+    expect(storage.entries.get(GENERATION_PROVIDER_STORAGE_KEY)).toBe("frontier");
+    expect(storage.entries.get(FRONTIER_PROVIDER_STORAGE_KEY)).toBe("openai");
+    expect(storage.entries.get(FRONTIER_MODEL_STORAGE_KEY)).toBe("gpt-4o-mini");
+    // EXACTLY the three non-secret keys — the memory-only apiKey and the ack
+    // must leave NO trace in storage.
+    expect(storage.entries.size).toBe(3);
+    for (const [key, value] of storage.entries) {
+      expect(String(key)).not.toContain("key");
+      expect(String(value)).not.toContain("sk-test-phase30");
+    }
+  });
+
+  it("set/get/clear round-trip the frontier provider id; hostile stored values read null", () => {
+    const storage = fakeStorage();
+    expect(setFrontierProvider("openai", storage)).toBe(true);
+    expect(getFrontierProvider(storage)).toBe("openai");
+    expect(setFrontierProvider("https://evil.example", storage)).toBe(false);
+    storage.setItem(FRONTIER_PROVIDER_STORAGE_KEY, "openai?url=https://evil.example");
+    expect(getFrontierProvider(storage)).toBeNull();
+    clearFrontierProvider(storage);
+    expect(getFrontierProvider(storage)).toBeNull();
+  });
+
+  it("set/get/clear round-trip the frontier model (trimmed; blank clears)", () => {
+    const storage = fakeStorage();
+    expect(getFrontierModel(storage)).toBeNull();
+    expect(setFrontierModel("  gpt-4o-mini  ", storage)).toBe(true);
+    expect(getFrontierModel(storage)).toBe("gpt-4o-mini");
+    expect(setFrontierModel("   ", storage)).toBe(false);
+    expect(storage.entries.has(FRONTIER_MODEL_STORAGE_KEY)).toBe(false);
+    clearFrontierModel(storage);
+    expect(storage.entries.has(FRONTIER_MODEL_STORAGE_KEY)).toBe(false);
+  });
+
+  it("persisting a NON-frontier selection leaves the frontier preference keys INERT (Fake -> Frontier restore)", () => {
+    const storage = fakeStorage();
+    persistGenerationSelection(completeFrontierSelection(), storage);
+    // Switch to Fake: the non-secret frontier prefs stay (inert), so returning
+    // to Frontier restores provider + model while the key must be re-entered.
+    persistGenerationSelection(
+      { generationProvider: "fake", ollamaTransport: null, ollamaModel: "" },
+      storage,
+    );
+    expect(storage.entries.get(GENERATION_PROVIDER_STORAGE_KEY)).toBe("fake");
+    expect(storage.entries.get(FRONTIER_PROVIDER_STORAGE_KEY)).toBe("openai");
+    expect(storage.entries.get(FRONTIER_MODEL_STORAGE_KEY)).toBe("gpt-4o-mini");
+    // The reset clears the frontier preference keys too.
+    clearGenerationSelection(storage);
+    expect(storage.entries.has(FRONTIER_PROVIDER_STORAGE_KEY)).toBe(false);
+    expect(storage.entries.has(FRONTIER_MODEL_STORAGE_KEY)).toBe(false);
+  });
+});
+
+describe("Phase 30 — resolveProviderSelection restores frontier prefs with DISCARD-IF-STALE (catalog membership)", () => {
+  it("restores a stored frontier provider id + model when both are still valid", () => {
+    const storage = fakeStorage();
+    setGenerationProvider("frontier", storage);
+    setFrontierProvider("openrouter", storage);
+    setFrontierModel("claude-3-5-sonnet", storage);
+    const selection = resolveProviderSelection(CAPS_WITH_FRONTIER, storage);
+    expect(selection?.generationProvider).toBe("frontier");
+    expect(selection?.frontierProviderId).toBe("openrouter");
+    expect(selection?.frontierModel).toBe("claude-3-5-sonnet");
+    // The API key is memory-only: a fresh resolve NEVER resurrects a secret.
+    expect(selection?.frontierApiKey).toBeUndefined();
+  });
+
+  it("DISCARD-IF-STALE: a stored provider id no longer in the catalog resolves to null (dropdown resets)", () => {
+    const storage = fakeStorage();
+    setGenerationProvider("frontier", storage);
+    setFrontierProvider("deepinfra", storage); // not in the fixture catalog
+    const selection = resolveProviderSelection(CAPS_WITH_FRONTIER, storage);
+    expect(selection?.generationProvider).toBe("frontier");
+    expect(selection?.frontierProviderId).toBeNull();
+  });
+
+  it("a hostile stored provider id (URL/query injection) is dropped, never restored", () => {
+    const storage = fakeStorage();
+    setGenerationProvider("frontier", storage);
+    storage.setItem(FRONTIER_PROVIDER_STORAGE_KEY, "openai?url=https://evil.example");
+    const selection = resolveProviderSelection(CAPS_WITH_FRONTIER, storage);
+    expect(selection?.frontierProviderId).toBeNull();
+    expect(selection?.frontierModel).toBe("");
+  });
+
+  it("an unavailable stored FRONTIER provider is ignored by the provider DISCARD-IF-STALE rule (fake wins)", () => {
+    const storage = fakeStorage();
+    setGenerationProvider("frontier", storage);
+    setFrontierProvider("openai", storage);
+    const selection = resolveProviderSelection(CAPS_WITH_PROVIDERS, storage); // frontier unavailable fixture
+    expect(selection?.generationProvider).toBe("fake");
+    // The non-frontier selection carries NO frontier keys at all (the resolved
+    // shape is byte-identical to Phase 25 for fake/ollama).
+    expect(selection).not.toHaveProperty("frontierProviderId");
+    expect(selection).not.toHaveProperty("frontierModel");
+  });
+});
+
+describe("Phase 30 — toCreateCaseGeneration serializes the BYOK block (§6)", () => {
+  it("a COMPLETE frontier selection emits frontier: {provider, apiKey, model} — and NO URL anywhere", () => {
+    const generation = toCreateCaseGeneration(completeFrontierSelection());
+    expect(generation).toEqual({
+      generationProvider: "frontier",
+      frontier: { provider: "openai", apiKey: "sk-test-phase30-0000", model: "gpt-4o-mini" },
+    });
+    const serialized = JSON.stringify(generation);
+    expect(serialized).not.toContain("http");
+    expect(serialized).not.toContain("url");
+    expect(serialized).not.toContain("endpoint");
+  });
+
+  it("an INCOMPLETE frontier selection emits NO frontier block (fail-closed flat generationProvider only)", () => {
+    // Missing key.
+    expect(toCreateCaseGeneration(completeFrontierSelection({ frontierApiKey: "" }))).toEqual({
+      generationProvider: "frontier",
+    });
+    // Whitespace-only key.
+    expect(toCreateCaseGeneration(completeFrontierSelection({ frontierApiKey: "   " }))).toEqual({
+      generationProvider: "frontier",
+    });
+    // Missing provider id.
+    expect(toCreateCaseGeneration(completeFrontierSelection({ frontierProviderId: null }))).toEqual({
+      generationProvider: "frontier",
+    });
+    // Missing model.
+    expect(toCreateCaseGeneration(completeFrontierSelection({ frontierModel: "  " }))).toEqual({
+      generationProvider: "frontier",
+    });
+  });
+
+  it("fake/ollama/no-selection serializations stay BYTE-IDENTICAL to Phase 25/28", () => {
+    expect(
+      toCreateCaseGeneration({ generationProvider: "fake", ollamaTransport: null, ollamaModel: "" }),
+    ).toEqual({ generationProvider: "fake" });
+    expect(
+      toCreateCaseGeneration({
+        generationProvider: "ollama",
+        ollamaTransport: "bridge",
+        ollamaModel: "hermes3:8b",
+      }),
+    ).toEqual({ generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" });
+    expect(toCreateCaseGeneration(null)).toBeUndefined();
+  });
+});
+
+describe("Phase 30 — isFrontierSubmitReady (§5: provider + key + model + ack gating)", () => {
+  it("is NOT gated for null selections, non-frontier providers and older servers", () => {
+    expect(isFrontierSubmitReady(null, CAPS_WITH_FRONTIER)).toBe(true);
+    expect(
+      isFrontierSubmitReady(
+        { generationProvider: "fake", ollamaTransport: null, ollamaModel: "" },
+        CAPS_WITH_FRONTIER,
+      ),
+    ).toBe(true);
+    expect(
+      isFrontierSubmitReady(
+        { generationProvider: "ollama", ollamaTransport: null, ollamaModel: "" },
+        CAPS_WITH_FRONTIER,
+      ),
+    ).toBe(true);
+    // No additive offer (older server) -> nothing to gate.
+    expect(isFrontierSubmitReady(FRONTIER_SELECTION, { modes: [{ id: "demo", available: true }] })).toBe(
+      true,
+    );
+  });
+
+  it("is TRUE only when provider + key + model + ack are all present AND the provider is in the CURRENT catalog", () => {
+    expect(isFrontierSubmitReady(completeFrontierSelection(), CAPS_WITH_FRONTIER)).toBe(true);
+    expect(isFrontierSubmitReady(FRONTIER_SELECTION, CAPS_WITH_FRONTIER)).toBe(false);
+    expect(isFrontierSubmitReady(completeFrontierSelection({ frontierApiKey: "" }), CAPS_WITH_FRONTIER)).toBe(
+      false,
+    );
+    expect(
+      isFrontierSubmitReady(completeFrontierSelection({ frontierApiKey: "   " }), CAPS_WITH_FRONTIER),
+    ).toBe(false);
+    expect(isFrontierSubmitReady(completeFrontierSelection({ frontierAck: false }), CAPS_WITH_FRONTIER)).toBe(
+      false,
+    );
+    expect(isFrontierSubmitReady(completeFrontierSelection({ frontierModel: "" }), CAPS_WITH_FRONTIER)).toBe(
+      false,
+    );
+    // A provider id NOT in the current catalog is stale -> not ready.
+    expect(
+      isFrontierSubmitReady(completeFrontierSelection({ frontierProviderId: "deepinfra" }), CAPS_WITH_FRONTIER),
+    ).toBe(false);
+  });
+
+  it("stays NOT gated when frontier is no longer offered/available (its radio is disabled; the server rejects explicitly)", () => {
+    // Frontier is unavailable in this fixture (CAPS_WITH_PROVIDERS) — a leftover
+    // frontier selection must not lock the form: the explicit provider
+    // rejection surfaces through the safe error copy instead.
+    expect(isFrontierSubmitReady(completeFrontierSelection(), CAPS_WITH_PROVIDERS)).toBe(true);
   });
 });

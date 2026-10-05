@@ -82,6 +82,11 @@ _SAFE_FIELDS = frozenset(
         # only: demo-apartment | demo-gallery | demo-laboratory; never truth,
         # never prompt material, never internal fixture fields).
         "demoCaseId",
+        # Phase 30 — safe BYOK frontier provider metadata: the VALIDATED
+        # logical provider id ("openai", "openrouter", ... — player-safe, from
+        # the closed server-owned registry). NEVER the API key, the registry
+        # endpoint, Authorization header or any previous-user selection.
+        "frontierProvider",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

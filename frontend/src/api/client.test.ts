@@ -540,6 +540,53 @@ describe("Phase 8 journey endpoints", () => {
     });
   });
 
+  it("Phase 30 — createCase serializes the BYOK frontier block {provider, apiKey, model} with NO URL anywhere", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery", "medium", {
+      generationProvider: "frontier",
+      frontier: { provider: "openai", apiKey: "sk-test-phase30-0000", model: "gpt-4o-mini" },
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body).toEqual({
+      prompt: "A mystery",
+      difficulty: "medium",
+      generationProvider: "frontier",
+      frontier: { provider: "openai", apiKey: "sk-test-phase30-0000", model: "gpt-4o-mini" },
+    });
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("http");
+    expect(serialized).not.toContain("url");
+    expect(serialized).not.toContain("endpoint");
+    // The key rides ONLY in this request body — a test for storage surfaces
+    // lives in the journey/new suites; here the client contract is exact.
+    expect(body.frontier.apiKey).not.toBe("sk-operator");
+  });
+
+  it("Phase 30 — createCase omits the frontier block when it is null / not provided (fake + no-selection stay byte-identical)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery", "easy", {
+      generationProvider: "frontier",
+      frontier: null,
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      prompt: "A mystery",
+      difficulty: "easy",
+      generationProvider: "frontier",
+    });
+    // A fake selection keeps the exact Phase 25 body — no frontier key.
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(jsonResponse({}, 201));
+    await createCase("anon-token", "A mystery", "easy", { generationProvider: "fake" });
+    const [, init2] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init2 as RequestInit).body as string)).toEqual({
+      prompt: "A mystery",
+      difficulty: "easy",
+      generationProvider: "fake",
+    });
+  });
+
   it("getGenerationProgress GETs /generations/{id} with the creator bearer", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ caseId: "C1", generationId: "G1", status: "RUNNING", progress: 45, stage: "world" }, 200),

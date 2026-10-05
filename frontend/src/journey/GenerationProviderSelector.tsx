@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   GenerationCapabilitiesResponse,
   GenerationProviderId,
@@ -5,6 +6,13 @@ import type {
 } from "../api/types";
 import {
   FAKE_PROVIDER_SUBTITLE,
+  FRONTIER_API_KEY_LABEL,
+  FRONTIER_COST_ACKNOWLEDGEMENT_COPY,
+  FRONTIER_KEY_HIDE_LABEL,
+  FRONTIER_KEY_SHOW_LABEL,
+  FRONTIER_PRIVACY_COPY,
+  FRONTIER_PROVIDER_LABEL,
+  FRONTIER_PROVIDER_PLACEHOLDER,
   MODEL_INPUT_LABEL,
   OLLAMA_TRANSPORT_BRIDGE_LABEL,
   OLLAMA_TRANSPORT_HEADING,
@@ -15,6 +23,7 @@ import {
   getOllamaTransport,
   hasGenerationProviderOffer,
   providerReasonLabel,
+  sanitizeFrontierApiKey,
   type GenerationProviderSelection,
 } from "./generationProvider";
 
@@ -31,6 +40,18 @@ import {
  *     the value with any valid Ollama model string, §2);
  *   - Frontier     — server-configured; shown disabled with its safe reason
  *     when not configured.
+ * Phase 30 — when the backend reports the frontier offer AVAILABLE, Frontier
+ * is selectable and the ACTIVE frontier selection reveals the BYOK panel
+ * (§5): a provider dropdown sourced from the server's trusted catalog
+ * (`providers[]` ids+labels only — §9, no URL/endpoint anywhere), an API-key
+ * password input with a Show/Hide toggle, a Model input and a cost-
+ * acknowledgement checkbox. The API key is MEMORY-ONLY (component state +
+ * in-memory JourneyParams): it is NEVER persisted to sessionStorage/localStorage,
+ * is cleared when the Frontier provider changes (each provider owns a
+ * different key) and is cleared (dropped) when the user switches away from
+ * Frontier (§15/§24). The generation submit is gated until provider + key +
+ * model + cost ack are all present (`isFrontierSubmitReady` in
+ * src/journey/generationProvider.ts).
  * Unavailable providers stay VISIBLE but DISABLED with the safe reason; the
  * current/default provider is preselected (server `defaultProvider`, a valid
  * sessionStorage choice — resolved by src/journey/generationProvider.ts —
@@ -45,7 +66,10 @@ import {
  *     are rendered — no secret, URL, IP, credential or raw exception text can
  *     reach the DOM (§1.4 / §2);
  *   - the browser only ever supplies logical ids and a model STRING — never
- *     an endpoint, API key or configuration value (§1.3);
+ *     an endpoint (the Frontier provider dropdown emits a catalog id, never
+ *     a URL, §6);
+ *   - the Frontier API key is stored ONLY in component/in-memory state: it is
+ *     never persisted by anything this component calls (§15/§24);
  *   - when the additive provider offer is ABSENT (older server) this
  *     component renders NOTHING and the /new page stays byte-identical.
  */
@@ -70,7 +94,13 @@ export function GenerationProviderSelector({
   const offers = buildProviderOffers(capabilities);
   if (offers.length === 0) return null;
 
+  // Phase 30 — the Show/Hide toggle for the Frontier API-key field. The key
+  // value itself lives in the PARENT's memory-only selection state; this local
+  // boolean only controls whether the password input is redacted on screen.
+  const [showKey, setShowKey] = useState(false);
+
   const ollamaOffer = offers.find((offer) => offer.id === "ollama");
+  const frontierOffer = offers.find((offer) => offer.id === "frontier");
   const firstAvailable = offers.find((offer) => offer.available);
   // While the parent's effect has not materialized a resolved selection (or in
   // any null-selection render), the DEFAULT provider (when still available) is
@@ -108,6 +138,10 @@ export function GenerationProviderSelector({
           selection.ollamaModel !== "" ? selection.ollamaModel : (ollamaOffer?.defaultModel ?? ""),
       });
     } else {
+      // Phase 30 §24 — a NON-frontier selection carries NO frontier fields on
+      // purpose: the memory-only API key and the cost acknowledgement are
+      // DROPPED from state (switching away clears the secret) and the
+      // non-secret frontier provider/model preferences stay inert in storage.
       onChange({ generationProvider: id, ollamaTransport: null, ollamaModel: "" });
     }
   };
@@ -122,6 +156,35 @@ export function GenerationProviderSelector({
     onChange({ ...selection, ollamaModel: model });
   };
 
+  // Phase 30 — Frontier BYOK handlers. The KEY is the only sensitive piece:
+  // it is memory-only, sanitized on input (CR/LF + control chars stripped),
+  // cleared when the provider changes (a key belongs to ONE provider account)
+  // and dropped entirely when the user switches away from Frontier.
+  const selectFrontierProvider = (frontierProviderId: string) => {
+    if (disabled || selection === null) return;
+    if (frontierProviderId === selection.frontierProviderId) return;
+    // Documented decision (§24): switching the Frontier PROVIDER clears the
+    // re-entered API key (each provider account owns a different key); the
+    // non-secret model preference and the generic cost acknowledgement are
+    // preserved — only the key is sensitive here.
+    onChange({ ...selection, frontierProviderId, frontierApiKey: "" });
+  };
+
+  const onFrontierKeyChange = (key: string) => {
+    if (disabled || selection === null) return;
+    onChange({ ...selection, frontierApiKey: sanitizeFrontierApiKey(key) });
+  };
+
+  const onFrontierModelChange = (frontierModel: string) => {
+    if (disabled || selection === null) return;
+    onChange({ ...selection, frontierModel });
+  };
+
+  const onFrontierAckChange = (frontierAck: boolean) => {
+    if (disabled || selection === null) return;
+    onChange({ ...selection, frontierAck });
+  };
+
   // Phase 26C1 §5/§7 — the visible transport IS the selection's transport and
   // nothing else: a null selection means NO transport radio is checked (the
   // serialized payload omits the transport on that documented path), so the
@@ -133,6 +196,10 @@ export function GenerationProviderSelector({
   const bridgeTransport = ollamaOffer?.transports.bridge;
   const showBridgeControls = currentTransport === "bridge";
   const bridgeConnected = bridgeTransport?.connected === true;
+
+  // Phase 30 — the BYOK Frontier panel is revealed when Frontier is the ACTIVE
+  // provider AND the offer exists (it is offered/selectable per the catalog).
+  const frontierActive = currentId === "frontier" && frontierOffer !== undefined;
 
   return (
     <div className="generation-provider" data-testid="generation-provider-selector">
@@ -247,6 +314,93 @@ export function GenerationProviderSelector({
             disabled={disabled}
             onChange={(event) => onModelChange(event.target.value)}
           />
+        </div>
+      )}
+
+      {/* Phase 30 — BYOK Frontier panel (§5). Shown ONLY while Frontier is the
+          ACTIVE provider. Every input is CONTROLLED by the memory-only parent
+          selection: the provider dropdown carries the SERVER-CATALOG ids/labels
+          (no URL/endpoint anywhere, §9), the API key is a password field with a
+          Show/Hide toggle and is NEVER persisted (§15/§24), the model is plain
+          text, and the cost acknowledgement is the §25 UI consent. */}
+      {frontierActive && (
+        <div className="generation-frontier" data-testid="generation-frontier-controls">
+          <p
+            className="generation-frontier-privacy"
+            data-testid="generation-frontier-privacy-note"
+          >
+            {FRONTIER_PRIVACY_COPY}
+          </p>
+          <label className="generation-frontier-provider-label" htmlFor="generation-frontier-provider-select">
+            {FRONTIER_PROVIDER_LABEL}
+          </label>
+          <select
+            id="generation-frontier-provider-select"
+            data-testid="generation-frontier-provider-select"
+            value={selection?.frontierProviderId ?? ""}
+            disabled={disabled}
+            onChange={(event) => selectFrontierProvider(event.target.value)}
+          >
+            <option value="" disabled>
+              {FRONTIER_PROVIDER_PLACEHOLDER}
+            </option>
+            {frontierOffer.providers.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+          <label className="generation-frontier-key-label" htmlFor="generation-frontier-key-input">
+            {FRONTIER_API_KEY_LABEL}
+          </label>
+          <input
+            id="generation-frontier-key-input"
+            data-testid="generation-frontier-key-input"
+            type={showKey ? "text" : "password"}
+            maxLength={512}
+            autoComplete="new-password"
+            spellCheck={false}
+            value={selection?.frontierApiKey ?? ""}
+            disabled={disabled}
+            onChange={(event) => onFrontierKeyChange(event.target.value)}
+          />
+          <button
+            type="button"
+            className="generation-frontier-key-toggle"
+            data-testid="generation-frontier-key-toggle"
+            disabled={disabled}
+            onClick={() => setShowKey((current: boolean) => !current)}
+          >
+            {showKey ? FRONTIER_KEY_HIDE_LABEL : FRONTIER_KEY_SHOW_LABEL}
+          </button>
+          <label className="generation-frontier-model-label" htmlFor="generation-frontier-model-input">
+            {MODEL_INPUT_LABEL}
+          </label>
+          <input
+            id="generation-frontier-model-input"
+            data-testid="generation-frontier-model-input"
+            type="text"
+            maxLength={256}
+            autoComplete="off"
+            spellCheck={false}
+            value={selection?.frontierModel ?? ""}
+            disabled={disabled}
+            onChange={(event) => onFrontierModelChange(event.target.value)}
+          />
+          <label
+            className="generation-frontier-ack"
+            data-testid="generation-frontier-ack"
+          >
+            <input
+              type="checkbox"
+              name="generation-frontier-cost-ack"
+              data-testid="generation-frontier-ack-checkbox"
+              checked={selection?.frontierAck === true}
+              disabled={disabled}
+              onChange={(event) => onFrontierAckChange(event.target.checked)}
+            />
+            <span className="generation-frontier-ack-label">{FRONTIER_COST_ACKNOWLEDGEMENT_COPY}</span>
+          </label>
         </div>
       )}
     </div>

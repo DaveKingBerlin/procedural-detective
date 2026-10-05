@@ -35,6 +35,7 @@ from app.services.generation import (
     GenerationServiceError,
     IdentifierConflict,
     InvalidDemoCaseError,
+    InvalidFrontierConfigError,
     InvalidGenerationProviderError,
     InvalidOllamaModelError,
     PromptValidationError,
@@ -62,6 +63,15 @@ def map_service_error(exc: Exception) -> HTTPException:
     if isinstance(exc, AdmissionDeniedError):
         # SANITIZED: the denial reason may carry quota internals — never echo.
         return http_error(429, "ADMISSION_DENIED", "Generation capacity exhausted")
+    if isinstance(exc, InvalidFrontierConfigError):
+        # Phase 30 — an invalid/missing BYOK frontier provider/key/model, or a
+        # frontier block on a non-frontier selection. NEVER echo the offending
+        # value (it may embed URL/header/secret material).
+        return http_error(
+            400,
+            "INVALID_FRONTIER_CONFIG",
+            "The frontier provider configuration is invalid or unsupported",
+        )
     if isinstance(exc, PromptValidationError):
         # Never echo the prompt or the offending value back.
         return http_error(422, "PROMPT_ERROR", "Prompt is invalid or exceeds the limit")

@@ -32,6 +32,13 @@ import type {
  * Phase 28 — `demoCaseId` is the OPTIONAL selected closed Demo fixture id
  * (another key of the same selection object); it is serialized ONLY when the
  * caller passes it (the demo path) — generated-case bodies stay untouched.
+ *
+ * Phase 30 — `frontier` is the OPTIONAL BYOK Frontier block
+ * ({provider, apiKey, model}); it is serialized ONLY when the caller provides
+ * it (a COMPLETE frontier selection — see toCreateCaseGeneration in
+ * src/journey/generationProvider.ts) and it NEVER contains a URL/endpoint
+ * (§6). The API key rides inside this request body in transit only — the
+ * client never stores it anywhere (§15/§24).
  */
 interface CreateCaseRequest {
   prompt: string;
@@ -40,6 +47,7 @@ interface CreateCaseRequest {
   ollamaTransport?: CreateCaseGeneration["ollamaTransport"];
   ollamaModel?: string;
   demoCaseId?: CreateCaseGeneration["demoCaseId"];
+  frontier?: CreateCaseGeneration["frontier"];
 }
 
 /**
@@ -501,6 +509,13 @@ export function createCase(
     // body without the key (§13 backward compat, generated-case behavior).
     if (typeof generation.demoCaseId === "string" && generation.demoCaseId !== "") {
       body.demoCaseId = generation.demoCaseId;
+    }
+    // Phase 30 — the BYOK Frontier block travels ONLY when the caller actually
+    // provided it (a COMPLETE frontier selection — `toCreateCaseGeneration`
+    // never emits it otherwise); absent keeps fake/ollama/no-selection bodies
+    // byte-identical (§13).
+    if (generation.frontier !== undefined && generation.frontier !== null) {
+      body.frontier = generation.frontier;
     }
   }
   return authedRequest<CreateCaseResponse>("/api/v1/cases", anonymousSessionToken, {
