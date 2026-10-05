@@ -401,6 +401,40 @@ layers, so no log stream can grow without limit:
   `docker compose -f docker-compose.prod.yml config` renders the effective
   logging policy.
 
+**Phase 29 — structured Caddy access logging (MON-01/MON-02).** The public
+HTTPS virtual host in `docker/Caddyfile` (and its byte-mirrored
+`docker/Caddyfile.internal` LAN variant) enables access logging with
+`output stdout` + `format json`: every request is one JSON object on
+`stdout` (Caddy 2 `format json` field names — `request.method` /
+`request.uri`, top-level `ts` / `status` / `size`). There is **no log file
+inside the container**; the Docker `json-file` rotation above (10 MB x 5)
+remains the **single** retention bound. The HTTP→HTTPS redirect, TLS/HSTS,
+body limit and reverse-proxy configuration are unchanged (MON-18).
+
+## 15b. Monitoring & usage analytics (Phase 29)
+
+Read **`docs/MONITORING.md`** — the full operator guide (viewing access logs,
+running the report, troubleshooting, privacy/retention, GoAccess decision,
+health checks). Summary:
+
+```bash
+# 1) Structured access logs via Docker (JSON lines on stdout, bounded):
+docker compose -f docker-compose.prod.yml logs caddy --since=1h
+
+# 2) Compact 24 h status report (read-only DB snapshot + access logs):
+docker compose -f docker-compose.prod.yml cp \
+  procedural-detective:/data/procedural_detective.db ./pd-snapshot.db
+docker compose -f docker-compose.prod.yml logs caddy --since=24h | \
+  python -m tools.monitoring_report --logs - --db ./pd-snapshot.db --summary
+
+# 3) Production preflight now also verifies the monitoring edge (MON-15):
+python -m tools.prod_preflight
+```
+
+The monitoring layer is observability-only: no new public port, no Docker
+socket, no long-running container, no external SaaS, and no change to the
+trust boundary (MON-12/MON-13/MON-14/MON-17/MON-18).
+
 ## 16. Timeout envelope (Phase 21 P-02)
 
 A generation request spans four layers, each with its own timeout. The strict
@@ -494,6 +528,14 @@ python -m tools.prod_preflight
 # Release gate (includes the .dockerignore + production-bundle scans + the
 # DEV/PROD env-example split + the effective-config assertions):
 python -m tools.release_check --allow-hosted-placeholders
+
+# Monitor (Phase 29): structured access logs + compact 24 h status report
+# (full guide: docs/MONITORING.md):
+docker compose -f docker-compose.prod.yml logs caddy --since=1h
+docker compose -f docker-compose.prod.yml cp \
+  procedural-detective:/data/procedural_detective.db ./pd-snapshot.db
+docker compose -f docker-compose.prod.yml logs caddy --since=24h | \
+  python -m tools.monitoring_report --logs - --db ./pd-snapshot.db --summary
 ```
 
 ## 19. Operations & maintenance
