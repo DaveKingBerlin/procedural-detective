@@ -35,6 +35,7 @@ mechanism.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Iterable, Mapping
 
@@ -64,6 +65,7 @@ from app.domain.activity_log import (
 )
 from app.domain.evidence import PROPOSITION_TYPES
 from app.domain.time_interval import epoch_to_iso, parse_iso8601
+from app.generation.schemas import AFFORDANCE_VOCABULARY
 from app.world.environment import ENVIRONMENT_IDS
 
 # --- schema-contract builder (deterministic, authoritative) ----------------
@@ -75,6 +77,33 @@ from app.world.environment import ENVIRONMENT_IDS
 # value (interpolated, never a copy).
 
 _PROPOSITION_TYPE_HINT_PREFIX = "use EXACTLY one of the proposition type tokens:"
+
+# Phase31A (Track B, class B — schema construction) — the transport grammar
+# for affordance ARRAY ITEMS.
+#
+# The canonical closed affordance vocabulary lives in ``app.generation.schemas``
+# (``AFFORDANCE_VOCABULARY`` = the PUBLIC ``AFFORDANCES`` tuples + the documented
+# optional weapon-subtype tokens — the SAME vocabulary the strict parser
+# enforces via ``parser._string_list_field(..., vocabulary=...)``). The FULL
+# DRAFT / stage contracts carry every ``affordances`` field as a plain
+# list-of-strings hint, so ``_contract_to_json_schema`` rendered it as an
+# unconstrained ``{"type":"array","items":{"type":"string"}}`` — the structured
+# output GRAMMAR never taught the model the closed tokens, so live models
+# freely invented free-text affordances (e.g. ``"discovered"`` / ``"dusting for
+# prints"`` / ``"investigate"`` / ``"autopsy"``) that the (correct, unchanged)
+# strict parser then rejected forever (RECOVERABLE_REPAIR ->
+# REPAIR_BUDGET_EXHAUSTED with repairEffectiveness UNCHANGED across passes).
+#
+# The rule below therefore renders ANY list-of-strings hint found under a key
+# named ``affordances`` with a CLOSED ``enum`` of the canonical vocabulary
+# (sorted for determinism — the same deterministic treatment as the evidence
+# ``PROPOSITION_TYPES`` enum and the ``enum <tokens>`` marker hints). Every
+# OTHER list-of-strings contract shape is untouched (``travelRules`` is a list
+# of objects; ``rooms``/``tags``/``locationTokens`` stay permissive strings;
+# the evidence proposition ``type`` keeps its own dedicated enum). This is a
+# server-owned transport-schema STRENGTHENING only — the strict parser and all
+# validators are byte-identical and remain the sole acceptance authority.
+_AFFORDANCE_VOCABULARY_ENUM: tuple[str, ...] = tuple(sorted(AFFORDANCE_VOCABULARY))
 
 # The closed ``environmentHint`` enum (Phase 19 Fix A). The hint text carries
 # this exact ``enum <tokens>`` marker so the derived transport JSON Schema
@@ -631,7 +660,9 @@ def _hint_json_types(hint: str) -> tuple[str, ...]:
     return ("string",)
 
 
-def _contract_to_json_schema(node: Any) -> dict[str, Any]:
+def _contract_to_json_schema(
+    node: Any, *, _field_key: str | None = None
+) -> dict[str, Any]:
     """Deterministic structural JSON Schema derived from the authoritative
     ``_stage_contract`` mapping (never a hand-maintained duplicate).
 
@@ -645,7 +676,11 @@ def _contract_to_json_schema(node: Any) -> dict[str, Any]:
       bound — the Ollama grammar can therefore never emit a one-row repair
       wrapper); absent markers simply leave the JSON-Schema bounds unset;
     - a list of one dict is an array whose items are that dict's schema; a list
-      of strings is an array of strings;
+      of strings is an array of strings — EXCEPT a list of strings under a key
+      named ``affordances``, which derives the CLOSED canonical affordance enum
+      (``_AFFORDANCE_VOCABULARY_ENUM``, Phase31A Track B class B: the grammar
+      now teaches the documented tokens instead of letting the model invent
+      free-text affordances the strict parser must reject);
     - a hint containing ``[x,y,z]`` declares the documented vector object with
       exactly x/y/z numeric properties;
     - a hint mentioning ``null`` marks the property optional (not required);
@@ -674,7 +709,7 @@ def _contract_to_json_schema(node: Any) -> dict[str, Any]:
                 schema["description"] = str(note)
             return schema
         props = {
-            key: _contract_to_json_schema(value)
+            key: _contract_to_json_schema(value, _field_key=key)
             for key, value in container.items()
             if key != "maxParts"
         }
@@ -693,6 +728,20 @@ def _contract_to_json_schema(node: Any) -> dict[str, Any]:
         if not node:
             return {"type": "array"}
         if all(isinstance(item, str) for item in node):
+            if _field_key == "affordances":
+                # Phase31A Track B (class B): the canonical closed affordance
+                # vocabulary becomes the ARRAY-ITEMS enum (sorted for
+                # determinism). Everything else about the array shape is
+                # unchanged — items stay strings, the strict parser + all
+                # validators stay byte-identical and remain the sole
+                # acceptance authority.
+                return {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": list(_AFFORDANCE_VOCABULARY_ENUM),
+                    },
+                }
             return {"type": "array", "items": {"type": "string"}}
         return {"type": "array", "items": _contract_to_json_schema(node[0])}
     if isinstance(node, bool):
@@ -822,6 +871,97 @@ def json_schema_for_stage_output(stage_value: str) -> dict[str, Any] | None:
     if contract is None:
         return None
     return _contract_to_json_schema(contract)
+
+
+# --------------------------------------------------------------------------- #
+# Phase31A — stable schema fingerprinting (SAFE diagnostics only)
+# --------------------------------------------------------------------------- #
+#
+# ``schema_fingerprint`` hashes a LOCAL trusted schema into a stable 64-char
+# SHA-256 hex, so observability can record WHICH schema a stage used (and its
+# canonical byte size) without ever logging schema contents. The sources are
+# ONLY this module's server-owned ``_stage_contract`` constants (derived via
+# the public ``json_schema_for_stage_output`` / ``json_schema_for_generation_stage``
+# helpers) — a provider/browser value can never reach these functions. The
+# canonical serialization sorts every mapping key recursively, so the output
+# never depends on insertion order.
+
+_CANONICAL_JSON_SEPARATORS = (",", ":")
+
+
+def _canonical_sort(value: Any) -> Any:
+    """Recursively sort mapping keys so the canonical form is a pure function
+    of the object graph (never of insertion order). Lists keep their order
+    (array positions are semantically meaningful in a JSON Schema)."""
+    if isinstance(value, Mapping):
+        return {
+            key: _canonical_sort(value[key])
+            for key in sorted(value, key=lambda item: str(item))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_sort(item) for item in value]
+    return value
+
+
+def canonical_schema_bytes(schema: Mapping) -> bytes:
+    """Deterministic canonical UTF-8 serialization of a trusted schema mapping.
+
+    Keys are recursively sorted, separators are the stable minimal comma/colon
+    pair and non-ASCII is escaped (``ensure_ascii=True``), so the returned
+    bytes are a pure function of the schema object graph. Used by
+    ``schema_fingerprint`` and ``schema_byte_length_for_stage_output`` only —
+    never sent anywhere or logged.
+    """
+    if not isinstance(schema, Mapping):
+        raise TypeError("schema must be a mapping")
+    return json.dumps(
+        _canonical_sort(schema),
+        sort_keys=True,
+        separators=_CANONICAL_JSON_SEPARATORS,
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+
+def schema_fingerprint(schema: Mapping) -> str:
+    """Stable SHA-256 hex (64 lowercase hex chars) of a trusted schema.
+
+    Additive Phase31A diagnostics helper: hashes the CANONICAL serialization
+    (sorted keys, stable separators) so identical schemas always produce the
+    identical fingerprint regardless of how the mapping was constructed.
+    """
+    return hashlib.sha256(canonical_schema_bytes(schema)).hexdigest()
+
+
+def schema_fingerprint_for_generation_stage(stage_value: str) -> str | None:
+    """Fingerprint of the trusted OLLAMA/transport contract for a
+    ``GenerationStage.value`` (``json_schema_for_generation_stage``), or None
+    for unmapped values. Local-trusted-schema-only."""
+    schema = json_schema_for_generation_stage(stage_value)
+    if schema is None:
+        return None
+    return schema_fingerprint(schema)
+
+
+def schema_fingerprint_for_stage_output(stage_value: str) -> str | None:
+    """Fingerprint of the trusted PARSER-SHAPED stage-OUTPUT schema
+    (``json_schema_for_stage_output`` — the exact schema the Frontier adapter
+    sends as native structured output), or None for unmapped values.
+    Local-trusted-schema-only: never a provider/browser value."""
+    schema = json_schema_for_stage_output(stage_value)
+    if schema is None:
+        return None
+    return schema_fingerprint(schema)
+
+
+def schema_byte_length_for_stage_output(stage_value: str) -> int | None:
+    """Canonical byte length (``len(canonical_schema_bytes...``) of the trusted
+    stage-OUTPUT schema for a ``GenerationStage.value``, or None for unmapped
+    values. A safe size/probe diagnostic: the number is logged, the schema
+    contents never are."""
+    schema = json_schema_for_stage_output(stage_value)
+    if schema is None:
+        return None
+    return len(canonical_schema_bytes(schema))
 
 
 # --- shared template fragments ---------------------------------------------
@@ -2170,8 +2310,13 @@ __all__ = [
     "build_evidence_prompt",
     "build_repair_prompt",
     "build_world_requirements_prompt",
+    "canonical_schema_bytes",
     "json_schema_for_generation_stage",
     "json_schema_for_stage_output",
+    "schema_byte_length_for_stage_output",
     "schema_contract",
     "schema_contract_as_json_schema",
+    "schema_fingerprint",
+    "schema_fingerprint_for_generation_stage",
+    "schema_fingerprint_for_stage_output",
 ]

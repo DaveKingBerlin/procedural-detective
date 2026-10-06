@@ -98,6 +98,27 @@ never supply or replace schema/response_format/endpoint/protocol — the
 else is registry + stage derived. Providers/entries without the capability
 (mode ``None``) keep the existing bounded prompt-embedded fallback and report
 ``structuredOutput=false`` truthfully via ``last_structured_output``.
+
+Phase31A — two PROVEN compatibility fixes (see ADVERSARIAL_REVIEW.md
+"Phase 31A — Live Dev-Box root-cause session"):
+
+- Track A (Cohere evidence 400): a server-owned protocol-adaptation layer
+  (``app.generation.schema_adapters``) rewrites ONLY the TRANSPORT
+  ``response_format`` schema — never the canonical schema/fingerprint/parser —
+  so the EVIDENCE_v1 open ``structured`` object satisfies Cohere's "every
+  object must declare >= 1 required property" JSON-Schema rule while keeping
+  the open-object intent (``additionalProperties``). The adapter is selected
+  by a closed server-side function of the validated model + registry
+  capability; every non-Cohere provider keeps the byte-identical canonical
+  wire.
+- Track B (DeepSeek REPAIR_BUDGET_EXHAUSTED from envelope leakage): a bounded,
+  shape-gated content-EXTRACTION step in the 2xx path
+  (``extract_openai_chat_completions_content``) unwraps an OpenAI-compatible
+  Chat Completions envelope (``choices[i].message.content`` / top-level
+  ``content``) into the bare stage-document string BEFORE the strict stage
+  parser sees it. Non-envelope bodies (bare golden-mock stage JSON, code-
+  fenced docs, malformed fixtures) pass through UNCHANGED. Strict parsers and
+  validators are untouched.
 """
 
 from __future__ import annotations
@@ -108,15 +129,24 @@ from typing import Any
 
 import httpx as _httpx
 
+from app.assets.depthguard import (
+    BoundedJsonError,
+    bounded_json_loads,
+)
 from app.generation.clock import Clock, RealClock
 from app.generation.failure_codes import GenerationFailureCode
 from app.generation.frontier_registry import (
     STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
 )
+from app.generation.prompts import canonical_schema_bytes, schema_fingerprint
 from app.generation.provider import (
     GenerateRequest,
     ProviderError,
     ProviderResult,
+)
+from app.generation.schema_adapters import (
+    adapt_schema_for_transport,
+    schema_adapter_id_for_frontier_call,
 )
 
 # Bounded 2xx response cap (PD-SEC-09 parity with the live/ollama adapters).
@@ -137,6 +167,188 @@ _WALL_CLOCK_POLL_QUANTUM_SECONDS = 0.02
 # when the trusted registry entry declared it AND the stage carries a
 # server-owned schema.
 _FRONTIER_RESPONSE_FORMAT_JSON_SCHEMA = "openai_json_schema"
+
+
+# --------------------------------------------------------------------------- #
+# Phase31A (Track B) — OpenAI-compatible 2xx envelope content extraction.
+#
+# PROVEN ROOT CAUSE (``ADVERSARIAL_REVIEW.md`` — "Phase 31A — Live Dev-Box
+# root-cause session", Track B): deepseek/deepseek-v4.1-flash exhausts the
+# repair budget with providerCallCount=6 / repairCount=2 and validator codes
+# [STRUCTURED_OUTPUT_INVALID] unchanged across every pass. The free-text
+# issue root is ``case_truth: unknown key 'choices'/'created'/'id'/'model'/...
+# missing required 'crime'`` — the STRICT stage parser was receiving the RAW
+# OpenRouter OpenAI-compatible Chat Completions ENVELOPE
+# ``{"choices":[{"message":{"content":"<stage JSON as a string>"}}], "id":...,
+# "model":..., "usage":...}`` instead of the stage document. Repairs cannot
+# fix a transport/extraction defect, hence UNCHANGED -> REPAIR_BUDGET_EXHAUSTED.
+#
+# The fix is a SERVER-OWNED, SHAPE-GATED content-EXTRACTION step in the 2xx
+# path (NOT a validator change, NOT a model/prompt change): if the bounded
+# body is exactly an OpenAI-compatible envelope, ONLY the first usable
+# ``choices[i].message.content`` string (or a top-level ``content`` string)
+# becomes the stage content; otherwise the body passes through UNCHANGED, so
+# the Phase 30 golden-mock wires (bare stage JSON documents / code-fenced
+# docs / "malformed" fixtures) stay byte-identical. The strict parser and the
+# full validation suite are untouched.
+# --------------------------------------------------------------------------- #
+#
+# Bounded + NaN-rejecting decode: the body is already transport-bounded
+# (MAX_FRONTIER_RESPONSE_BYTES); ``bounded_json_loads`` (the repo-wide depth
+# preflight parser) additionally rejects a nesting-bomb BEFORE ``json.loads``,
+# and ``_reject_non_finite_anywhere`` rejects the non-standard JSON numbers
+# (``NaN`` / ``Infinity`` / ``-Infinity``) that ``json.loads`` would accept.
+# Any decode/hazard failure means "not the envelope shape" -> pass-through.
+
+
+def _reject_non_finite_anywhere(node: Any) -> None:
+    """Iterative (never recursive) non-finite-number presence check.
+
+    ``json.loads`` accepts the non-standard ``NaN``/``Infinity``/
+    ``-Infinity`` constants by default; a non-finite number anywhere makes a
+    body ineligible for envelope extraction (pass-through to the strict
+    parser, which then reports its own deterministic issue). Never recurses,
+    so a hostile deep tree cannot stack-blow here (the depth preflight has
+    already bounded the document).
+    """
+    stack = [node]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise ValueError("non-finite JSON number")
+
+
+def extract_openai_chat_completions_content(text: str) -> str | None:
+    """Return only the inner stage-content string when ``text`` is an
+    OpenAI-compatible Chat Completions 2xx ENVELOPE; ``None`` otherwise.
+
+    Envelope shapes that are extracted (server-owned, deterministic):
+
+      1. ``{"choices": [{"message": {"content": "<str>"}}, ...], ...}`` — the
+         FIRST dict item carrying a ``message.content`` string wins (never a
+         list of items, never raw output, never multiple-choices ambiguity);
+      2. ``{"content": "<str>", ...}`` — the OpenAI-compatible top-level
+         content form.
+
+    Every other shape — a BARE stage JSON document, a code-fenced document,
+    invalid JSON, a deep/bombed document, a non-finite-number body, a
+    malformed envelope without a usable content string — returns ``None`` so
+    the caller passes the original body through UNCHANGED (the strict parser
+    then reports its deterministic issue, exactly as before the fix).
+
+    The extracted string is further bounded to ``MAX_FRONTIER_RESPONSE_BYTES``
+    (belt-and-braces: the transport read was already capped). The envelope
+    keys/markup (id/model/usage/choices-array) are NEVER echoed — only the
+    content string leaves this function.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        parsed = bounded_json_loads(text)
+        _reject_non_finite_anywhere(parsed)
+    except (BoundedJsonError, TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    top_content = parsed.get("content")
+    if isinstance(top_content, str):
+        if len(top_content.encode("utf-8")) > MAX_FRONTIER_RESPONSE_BYTES:
+            return None
+        return top_content
+    choices = parsed.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                if len(content.encode("utf-8")) > MAX_FRONTIER_RESPONSE_BYTES:
+                    return None
+                return content
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Phase31A — INTERNAL safe upstream status classification (diagnostics only)
+# --------------------------------------------------------------------------- #
+#
+# The PUBLIC failure-code vocabulary (FRONTIER_*) is unchanged. These closed
+# tokens are an ADDITIONAL internal diagnostic that distinguishes a schema-
+# level 4xx rejection from a 5xx provider outage without ever reading the
+# upstream body/text. Every token is a member of this closed set and is NEVER
+# derived from raw provider content.
+
+SAFE_ERROR_CLASS_SCHEMA_REJECTED = "SCHEMA_REJECTED"
+SAFE_ERROR_CLASS_AUTH_FAILED = "AUTH_FAILED"
+SAFE_ERROR_CLASS_NOT_FOUND = "NOT_FOUND"
+SAFE_ERROR_CLASS_RATE_LIMITED = "RATE_LIMITED"
+SAFE_ERROR_CLASS_UPSTREAM_ERROR = "UPSTREAM_ERROR"
+SAFE_ERROR_CLASS_TIMEOUT = "TIMEOUT"
+SAFE_ERROR_CLASS_NETWORK = "NETWORK"
+
+CLOSED_SAFE_ERROR_CLASSES: frozenset[str] = frozenset(
+    {
+        SAFE_ERROR_CLASS_SCHEMA_REJECTED,
+        SAFE_ERROR_CLASS_AUTH_FAILED,
+        SAFE_ERROR_CLASS_NOT_FOUND,
+        SAFE_ERROR_CLASS_RATE_LIMITED,
+        SAFE_ERROR_CLASS_UPSTREAM_ERROR,
+        SAFE_ERROR_CLASS_TIMEOUT,
+        SAFE_ERROR_CLASS_NETWORK,
+    }
+)
+
+# The status bands that most plausibly mean "the request/schema was rejected"
+# (deterministic, documented; never read from the response body).
+_SCHEMA_REJECTED_STATUSES: frozenset[int] = frozenset({400, 422})
+
+
+def frontier_safe_error_class_for_status(
+    status_code: int | None,
+    *,
+    timeout: bool = False,
+    network: bool = False,
+) -> str | None:
+    """Phase31A — deterministic internal status-band -> safe error class.
+
+    Closed mapping (see ``CLOSED_SAFE_ERROR_CLASSES``), sanitized and
+    deterministic — never a raw provider message:
+
+    - ``timeout=True``   -> ``"TIMEOUT"``
+    - ``network=True``   -> ``"NETWORK"``
+    - 400/422            -> ``"SCHEMA_REJECTED"``
+    - 401/403            -> ``"AUTH_FAILED"``
+    - 404                -> ``"NOT_FOUND"``
+    - 429                -> ``"RATE_LIMITED"``
+    - 5xx                -> ``"UPSTREAM_ERROR"``
+    - anything else      -> ``None`` (default — no claim is made)
+
+    This is an INTERNAL diagnostic only; the public ``failureCode`` stays the
+    existing FRONTIER_* vocabulary. ``timeout``/``network`` win over a status
+    so a transport-level failure never misreports a status band.
+    """
+    if timeout:
+        return SAFE_ERROR_CLASS_TIMEOUT
+    if network:
+        return SAFE_ERROR_CLASS_NETWORK
+    if status_code in _SCHEMA_REJECTED_STATUSES:
+        return SAFE_ERROR_CLASS_SCHEMA_REJECTED
+    if status_code in (401, 403):
+        return SAFE_ERROR_CLASS_AUTH_FAILED
+    if status_code == 404:
+        return SAFE_ERROR_CLASS_NOT_FOUND
+    if status_code == 429:
+        return SAFE_ERROR_CLASS_RATE_LIMITED
+    if isinstance(status_code, int) and 500 <= status_code < 600:
+        return SAFE_ERROR_CLASS_UPSTREAM_ERROR
+    return None
 
 
 class _ActiveCallState:
@@ -222,11 +434,32 @@ class FrontierHttpError(ProviderError):
     provider internals. ``message`` is always sanitized: never a provider
     body, never a header, never a credential, never a request URL (the
     ``httpx`` exception class name would embed the URL and is omitted).
+
+    Phase31A — internal safe diagnostic carriers: ``safe_error_class`` is an
+    OPTIONAL closed-token internal classification (``SCHEMA_REJECTED`` /
+    ``AUTH_FAILED`` / ``NOT_FOUND`` / ``RATE_LIMITED`` / ``UPSTREAM_ERROR`` /
+    ``TIMEOUT`` / ``NETWORK`` — see ``frontier_safe_error_class_for_status``),
+    and ``safe_upstream_status`` is the sanitized upstream status INTEGER (the
+    only safe upstream signal ever read; the raw body/text is never opened).
+    They are diagnostics only: the public ``code`` is never affected.
     """
 
-    def __init__(self, message: str, *, code: GenerationFailureCode) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: GenerationFailureCode,
+        safe_error_class: str | None = None,
+        safe_upstream_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        if safe_error_class is not None and safe_error_class not in CLOSED_SAFE_ERROR_CLASSES:
+            safe_error_class = None
+        self.safe_error_class = safe_error_class
+        self.safe_upstream_status = (
+            int(safe_upstream_status) if isinstance(safe_upstream_status, int) else None
+        )
 
 
 def frontier_failure_code_for_status(status_code: int) -> GenerationFailureCode:
@@ -298,6 +531,15 @@ class FrontierProvider:
         # native ``response_format`` was attached, else ``None``). The
         # controller reads it to report ``structuredOutput`` truthfully.
         self.last_structured_output: str | None = None
+        # Phase31A — SAFE per-call schema diagnostics, derived ONLY from the
+        # server-owned request carrier (``request.json_schema`` / ``schema_id``),
+        # never from a provider/browser value. Contents are never stored: only
+        # the stable fingerprint, schema-id token, canonical byte length and
+        # response-format type token.
+        self.last_schema_fingerprint: str | None = None
+        self.last_schema_id: str | None = None
+        self.last_request_schema_byte_length: int | None = None
+        self.last_response_format_type: str | None = None
 
     # -- Provider protocol ---------------------------------------------------
 
@@ -320,6 +562,9 @@ class FrontierProvider:
             raise FrontierHttpError(
                 "provider request timed out",
                 code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                safe_error_class=frontier_safe_error_class_for_status(
+                    None, timeout=True
+                ),
             )
         # Phase30-fix DEF-B — native structured output from the SERVER-OWNED
         # stage schema only. The schema travels on the request (attached by
@@ -334,14 +579,47 @@ class FrontierProvider:
             and isinstance(request.json_schema, dict)
         )
         if native_structured:
+            # Phase31A (Track A) — server-owned protocol adaptation at the
+            # TRANSPORT boundary only. ``schema_adapter_id_for_frontier_call``
+            # derives the closed adapter family from the validated model +
+            # registry capability (``None`` for every non-Cohere model: the
+            # canonical schema goes on the wire byte-identical); when an
+            # adapter applies, ONLY the deep-copied transport representation
+            # changes (Cohere's ">= 1 required property per object" rule for
+            # open objects). ``request.json_schema`` itself is never mutated,
+            # and the canonical fingerprint/byte-length diagnostics below stay
+            # canonical.
+            adapter_id = schema_adapter_id_for_frontier_call(
+                self._model, self._structured_output_mode
+            )
+            transport_schema = adapt_schema_for_transport(
+                request.json_schema, adapter=adapter_id
+            )
             body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": request.schema_id or f"generation_{request.stage.value}",
-                    "schema": request.json_schema,
+                    "schema": transport_schema,
                 },
             }
         self.last_structured_output = (
+            _FRONTIER_RESPONSE_FORMAT_JSON_SCHEMA if native_structured else None
+        )
+        # Phase31A — safe per-call schema diagnostics. Derived ONLY from the
+        # LOCAL trusted request carrier (never contents are stored): a stable
+        # fingerprint + canonical byte length when the request carried a
+        # server-owned schema, plus the schema-id / response-format type
+        # tokens when native structured output is actually sent.
+        if isinstance(request.json_schema, dict):
+            self.last_schema_fingerprint = schema_fingerprint(request.json_schema)
+            self.last_request_schema_byte_length = len(
+                canonical_schema_bytes(request.json_schema)
+            )
+        else:
+            self.last_schema_fingerprint = None
+            self.last_request_schema_byte_length = None
+        self.last_schema_id = request.schema_id if native_structured else None
+        self.last_response_format_type = (
             _FRONTIER_RESPONSE_FORMAT_JSON_SCHEMA if native_structured else None
         )
 
@@ -374,6 +652,9 @@ class FrontierProvider:
                     box["error"] = FrontierHttpError(
                         f"provider request timed out after {timeout_seconds}s",
                         code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                        safe_error_class=frontier_safe_error_class_for_status(
+                            None, timeout=True
+                        ),
                     )
                     return
                 except httpx.RequestError as exc:
@@ -382,6 +663,9 @@ class FrontierProvider:
                     box["error"] = FrontierHttpError(
                         f"provider request failed: {type(exc).__name__}",
                         code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
+                        safe_error_class=frontier_safe_error_class_for_status(
+                            None, network=True
+                        ),
                     )
                     return
                 except Exception as exc:  # noqa: BLE001 - DEF-018
@@ -392,10 +676,15 @@ class FrontierProvider:
                 if not (200 <= response.status_code < 300):
                     # PD-SEC-06: the response body may carry provider/vendor
                     # error content — reduce it to the sanitized status band
-                    # only.
+                    # only (the safe integer + the internal closed-token class
+                    # derived from the status; the raw body is never read).
                     box["error"] = FrontierHttpError(
                         f"provider failure: HTTP {response.status_code}",
                         code=frontier_failure_code_for_status(response.status_code),
+                        safe_error_class=frontier_safe_error_class_for_status(
+                            response.status_code
+                        ),
+                        safe_upstream_status=int(response.status_code),
                     )
                     return
                 try:
@@ -417,7 +706,20 @@ class FrontierProvider:
                         code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
                     )
                     return
-                box["result"] = ProviderResult(content=text)
+                # Phase31A (Track B) — envelope content extraction. When the
+                # bounded 2xx body is an OpenAI-compatible Chat Completions
+                # envelope, ONLY the inner stage-content string becomes the
+                # ProviderResult content (the strict stage parser must never
+                # see the envelope keys ``choices``/``id``/``model``/``usage``
+                # ...); every other body shape passes through UNCHANGED so the
+                # Phase 30 golden-mock wires (bare stage JSON / code-fenced
+                # docs / malformed fixtures) stay byte-identical. The repair
+                # path flows through the SAME extraction — a repair response
+                # that arrives as an envelope becomes the bare full draft.
+                extracted = extract_openai_chat_completions_content(text)
+                box["result"] = ProviderResult(
+                    content=text if extracted is None else extracted
+                )
             except Exception as exc:  # noqa: BLE001 - absolute safety net
                 # DEF-018: NO exception may escape the supervised worker with
                 # the box incomplete; every conceivable failure lands as a
@@ -450,6 +752,9 @@ class FrontierProvider:
                 raise FrontierHttpError(
                     f"provider request timed out after {timeout_seconds}s",
                     code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                    safe_error_class=frontier_safe_error_class_for_status(
+                        None, timeout=True
+                    ),
                 ) from None
             worker.join(timeout=min(remaining, _WALL_CLOCK_POLL_QUANTUM_SECONDS))
         # The worker finished. DEF-021: success is contractually returned only
@@ -462,6 +767,9 @@ class FrontierProvider:
             raise FrontierHttpError(
                 f"provider request timed out after {timeout_seconds}s",
                 code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                safe_error_class=frontier_safe_error_class_for_status(
+                    None, timeout=True
+                ),
             ) from None
         if box["error"] is not None:
             raise box["error"]
@@ -490,10 +798,16 @@ class FrontierProvider:
             return FrontierHttpError(
                 f"{phase} timed out",
                 code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                safe_error_class=frontier_safe_error_class_for_status(
+                    None, timeout=True
+                ),
             )
         return FrontierHttpError(
             f"{phase} failed: {type(exc).__name__}",
             code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
+            safe_error_class=frontier_safe_error_class_for_status(
+                None, network=True
+            ),
         )
 
     @staticmethod
@@ -541,6 +855,9 @@ class FrontierProvider:
                     raise FrontierHttpError(
                         "provider request timed out",
                         code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                        safe_error_class=frontier_safe_error_class_for_status(
+                            None, timeout=True
+                        ),
                     )
                 total += len(chunk)
                 if total > MAX_FRONTIER_RESPONSE_BYTES:
@@ -580,9 +897,19 @@ class FrontierProvider:
 
 
 __all__ = [
+    "CLOSED_SAFE_ERROR_CLASSES",
     "DEFAULT_FRONTIER_TIMEOUT_SECONDS",
     "FrontierHttpError",
     "FrontierProvider",
     "MAX_FRONTIER_RESPONSE_BYTES",
+    "SAFE_ERROR_CLASS_AUTH_FAILED",
+    "SAFE_ERROR_CLASS_NETWORK",
+    "SAFE_ERROR_CLASS_NOT_FOUND",
+    "SAFE_ERROR_CLASS_RATE_LIMITED",
+    "SAFE_ERROR_CLASS_SCHEMA_REJECTED",
+    "SAFE_ERROR_CLASS_TIMEOUT",
+    "SAFE_ERROR_CLASS_UPSTREAM_ERROR",
+    "extract_openai_chat_completions_content",
     "frontier_failure_code_for_status",
+    "frontier_safe_error_class_for_status",
 ]
