@@ -815,6 +815,35 @@ CALL_EVENTS = frozenset(
 )
 TERMINAL_EVENTS = frozenset({"generation.published", "generation.failed"})
 
+# Phase31A §26 — non-secret per-attempt compatibility artifacts.
+COMPATIBILITY_DIR_NAME = "compatibility"
+# The artifact is assembled ONLY from the app's own allowlisted observability
+# fields; these strings are the documented NEVER-included material (the writer
+# never introduces them, and the hermetic tests assert the absence of every one).
+COMPAT_FORBIDDEN_FRAGMENTS: frozenset[str] = frozenset(
+    {
+        "apiKey", "api_key", "authorization", "Authorization",
+        "prompt", "promptContext", "prompt_context", "caseTruth", "CaseTruth",
+        "upstreamBody", "upstream_body", "sessionSecret", "session_secret",
+        "response_format", "json_schema", "messages", "content",
+    }
+)
+# The EXACT closed key set of the §26 safe artifact (everything else would be
+# a protocol violation). ``schemaId`` is optional (present only when the
+# attempt actually used native structured output).
+COMPAT_ARTIFACT_KEYS: frozenset[str] = frozenset(
+    {
+        "generationAttemptId", "provider", "model", "stage",
+        "structuredOutput", "passes", "finalFailureCode", "schemaId",
+    }
+)
+COMPAT_PASS_KEYS: frozenset[str] = frozenset(
+    {"repairCount", "validatorCodes", "repairEffectiveness"}
+)
+REPAIR_EFFECTIVENESS_LABELS: frozenset[str] = frozenset(
+    {"VALID", "IMPROVED", "UNCHANGED", "REGRESSED"}
+)
+
 
 def _reject_json_nonfinite(constant: str) -> float:
     raise ValueError(f"non-finite JSON numeric constant {constant}")
@@ -1095,6 +1124,188 @@ def percentile(sorted_values: Sequence[float], pct: float) -> float:
     return float(sorted_values[lo]) + frac * (
         sorted_values[hi] - sorted_values[lo]
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phase31A §26 — per-attempt NON-SECRET compatibility artifacts
+# --------------------------------------------------------------------------- #
+
+
+def _safe_atomic(value: Any) -> Any:
+    """Coerce an observability value to a JSON-safe scalar.
+
+    Bounded strings (200 chars), passthrough numbers/booleans/None; every
+    composite/unsupported value collapses to ``None`` so hostile telemetry can
+    never smuggle structure into the artifact.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:200]
+    return None
+
+
+def _last_safe_scalar(
+    events: Sequence[dict[str, Any]], key: str
+) -> Any:
+    """Last non-null JSON-safe scalar for ``key`` across ``events``."""
+    for event in reversed(events):
+        if not isinstance(event, dict):
+            continue
+        value = event.get(key)
+        if value is None:
+            continue
+        scalar = _safe_atomic(value)
+        if scalar is not None:
+            return scalar
+    return None
+
+
+def _bounded_int(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def build_compatibility_artifact(
+    generation_attempt_id: str,
+    attempt_events: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Phase31A §26 — build the NON-SECRET per-attempt compatibility artifact.
+
+    Safe shape (see ``COMPAT_ARTIFACT_KEYS``): the attempt id, provider/model,
+    the failing stage, whether structured output was used, an ordered
+    ``passes`` list (initial validation at ``repairCount`` 0 plus each repair's
+    re-validation with its validator-code tuple and — when the controller
+    emitted it — the deterministic ``repairEffectiveness`` label), the final
+    failure code and the optional schema id.
+
+    The artifact is assembled ONLY from the app's own allowlisted
+    observability fields (the same events ``enrich_result`` consumes). It
+    NEVER includes prompt / raw JSON draft / CaseTruth / API key /
+    Authorization header / upstream body / session secret. Returns ``None``
+    when no usable telemetry exists (a writer must then omit the artifact —
+    never fabricate).
+    """
+    if not attempt_events:
+        return None
+    events = [e for e in attempt_events if isinstance(e, dict)]
+    if not events:
+        return None
+    call_events = [e for e in events if e.get("event") in CALL_EVENTS]
+    terminal = [e for e in events if e.get("event") in TERMINAL_EVENTS]
+    validation_failed = [
+        e for e in events if e.get("event") == "generation.stage.validation_failed"
+    ]
+    repair_outcomes = [
+        e for e in events if e.get("event") == "generation.repair.outcome"
+    ]
+
+    # provider: prefer the safe allowlisted trusted sub-provider id
+    # (``frontierProvider`` — e.g. "openrouter"), falling back to the logical
+    # generation provider name ("frontier"/"ollama"/"fake"). Never a key /
+    # endpoint / Authorization header.
+    provider = _last_safe_scalar(
+        events, "frontierProvider"
+    ) or _last_safe_scalar(events, "provider")
+    model = _last_safe_scalar(call_events, "model")
+    schema_id = _last_safe_scalar(call_events, "schemaId")
+    final_failure = _last_safe_scalar(
+        terminal, "failureCode"
+    ) or _last_safe_scalar(events, "failureCode")
+
+    # stage: the repair/validation family reports "validation"; otherwise the
+    # last provider.call stage (e.g. the Cohere evidence rejection).
+    if any(
+        e.get("event")
+        in (
+            "generation.stage.validation_failed",
+            "generation.repair.outcome",
+            "generation.validation.complete",
+        )
+        for e in events
+    ):
+        stage = "validation"
+    else:
+        stage = _last_safe_scalar(call_events, "stage")
+
+    structured = any(
+        e.get("event") == "provider.call.complete" and e.get("structuredOutput") is True
+        for e in events
+    )
+
+    # passes: keyed by the repairCount recorded on each validation-failed pass.
+    passes: dict[int, dict[str, Any]] = {}
+    for event in validation_failed:
+        count = _bounded_int(event.get("repairCount"), 0)
+        entry = passes.setdefault(
+            count, {"repairCount": count, "validatorCodes": []}
+        )
+        codes = event.get("validatorCodes")
+        if isinstance(codes, (list, tuple)):
+            entry["validatorCodes"] = [
+                str(code)[:120] for code in codes if code is not None
+            ][:64]
+        elif isinstance(codes, str) and codes:
+            entry["validatorCodes"] = [codes[:120]]
+    # Attach the deterministic effectiveness label from the matching
+    # repair.outcome event (its repairCount is the pass index it produced).
+    for outcome in repair_outcomes:
+        count = _bounded_int(outcome.get("repairCount"), -1)
+        if count < 0:
+            continue
+        entry = passes.setdefault(
+            count, {"repairCount": count, "validatorCodes": []}
+        )
+        label = outcome.get("repairEffectiveness")
+        if isinstance(label, str) and label in REPAIR_EFFECTIVENESS_LABELS:
+            entry["repairEffectiveness"] = label
+
+    artifact: dict[str, Any] = {
+        "generationAttemptId": str(generation_attempt_id)[:120],
+        "provider": provider,
+        "model": model,
+        "stage": stage,
+        "structuredOutput": bool(structured),
+        "passes": [passes[key] for key in sorted(passes)],
+        "finalFailureCode": final_failure,
+    }
+    if schema_id is not None:
+        artifact["schemaId"] = schema_id
+    return artifact
+
+
+def write_compatibility_artifacts(
+    output_dir: Path,
+    records: Sequence[dict[str, Any]],
+    telemetry_by_attempt: Mapping[str, Sequence[dict[str, Any]]],
+) -> int:
+    """Phase31A §26 — write one non-secret artifact per attempt with telemetry.
+
+    Artifacts land in ``<output_dir>/compatibility/<attempt-id>.json`` to a
+    deterministic JSON shape (``_atomic_write_json``). Returns how many were
+    written. When no attempt has real telemetry the ``compatibility/``
+    directory is simply ABSENT — artifacts are NEVER fabricated.
+    """
+    written = 0
+    for record in records:
+        attempt_id = record.get("generationAttemptId")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            continue
+        attempt_events = telemetry_by_attempt.get(attempt_id)
+        if not attempt_events:
+            continue
+        artifact = build_compatibility_artifact(attempt_id, attempt_events)
+        if artifact is None:
+            continue
+        compat_dir = output_dir / COMPATIBILITY_DIR_NAME
+        compat_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(compat_dir / f"{attempt_id}.json", artifact)
+        written += 1
+    return written
 
 
 # --------------------------------------------------------------------------- #
@@ -1531,7 +1742,16 @@ class InProcessDriver:
         if frontier_timeout_seconds is not None:
             kwargs["frontier_timeout_seconds"] = frontier_timeout_seconds
         if generation_deadline_seconds is not None:
-            kwargs["generation_deadline_seconds"] = generation_deadline_seconds
+            # ADV-31A-H01: Settings.generation_deadline_seconds is bound via
+            # validation_alias="CASE_GENERATION_DEADLINE_SECONDS" (config.py),
+            # so the non-canonical field-name kwarg is silently ignored by the
+            # pydantic-settings constructor and the field would stay at its 60s
+            # default. Always pass the canonical alias as the constructor key
+            # (the CLI flag name --generation-deadline-seconds is unchanged;
+            # metadata/result recording reads the resolved field, which works).
+            kwargs["CASE_GENERATION_DEADLINE_SECONDS"] = int(
+                generation_deadline_seconds
+            )
         self._settings = Settings(**kwargs)
         # The Store requires a MIGRATED database (the same Alembic head the
         # production backend applies at boot).
@@ -3439,6 +3659,12 @@ def run_benchmark(args: argparse.Namespace) -> int:
         rewrite_results_jsonl(
             results_path, sorted(records, key=lambda r: r["executionOrder"])
         )
+
+    # Phase31A §26 — per-attempt NON-SECRET compatibility artifacts. Written
+    # ONLY for attempts whose telemetry actually exists (the compatibility/
+    # dir stays absent otherwise — never fabricated); the resulting files are
+    # covered by the post-run secret-safety scan below.
+    write_compatibility_artifacts(output_dir, records, telemetry_by_attempt)
 
     finished_at = time.time()
     finished_iso = _dt.datetime.fromtimestamp(

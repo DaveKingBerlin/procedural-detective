@@ -55,6 +55,12 @@ from app.generation.state_machine import (
     ValidationOutcome,
     assert_transition,
 )
+from app.generation.validation_codes import (
+    failure_set_delta,
+    failure_set_fingerprint,
+    repair_effectiveness,
+    validation_failure_codes,
+)
 from app.core.observability import emit_event
 
 _PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
@@ -489,6 +495,20 @@ class GenerationController:
             if state is GenerationState.VALIDATING:
                 report = pipeline.validate_draft(attempt)
                 outcome = report.outcome
+                # Phase31A (Track B) — bounded validator-code observability
+                # derived from the report buckets (closed tokens only, never
+                # free-text issues/raw generated content).
+                validator_codes = validation_failure_codes(report)
+                if attempt._repair_before_codes is not None:
+                    # The most recent repair just completed: emit the bounded
+                    # repair-delta diagnosis (before = the code set that
+                    # TRIGGERED the repair, after = this re-validation's set).
+                    self._emit_repair_outcome(
+                        attempt,
+                        before_codes=attempt._repair_before_codes,
+                        after_codes=validator_codes,
+                    )
+                    attempt._repair_before_codes = None
                 if outcome is not ValidationOutcome.VALID:
                     emit_event(
                         "generation.stage.validation_failed",
@@ -498,6 +518,18 @@ class GenerationController:
                         deadlineRemainingMs=_remaining_ms(attempt),
                         validatorIssueCodes=(
                             report.repair_diagnostics if report.repair_diagnostics else None
+                        ),
+                        validatorCodes=validator_codes,
+                        failureCodeSetFingerprint=(
+                            failure_set_fingerprint(validator_codes)
+                            if validator_codes else None
+                        ),
+                        repairCount=(
+                            attempt.budget.repair_passes
+                            if attempt.budget is not None else None
+                        ),
+                        providerCallCount=(
+                            attempt.budget.calls if attempt.budget is not None else None
                         ),
                     )
                 if outcome is ValidationOutcome.VALID:
@@ -516,6 +548,10 @@ class GenerationController:
                             code=GenerationFailureCode.REPAIR_BUDGET_EXHAUSTED,
                         )
                         return
+                    # Phase31A (Track B) — remember the validator-code set this
+                    # repair must address; it is consumed (and the bounded
+                    # delta emitted) on the very next validation pass.
+                    attempt._repair_before_codes = validator_codes
                     emit_event(
                         "generation.repair.started",
                         caseId=attempt.case_id,
@@ -740,6 +776,14 @@ class GenerationController:
             provider_timeout_occurred = self._is_provider_timeout_code(code)
             if provider_timeout_occurred and self._deadline_exhausted(attempt):
                 code = GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
+            # Phase31A (Track A) — INTERNAL safe error classification. A
+            # ``FrontierHttpError`` may carry a closed ``safe_error_class``
+            # token (e.g. SCHEMA_REJECTED for a 400/422) + the sanitized
+            # upstream status INTEGER; those are added to the event while the
+            # public ``failureCode`` stays completely unchanged. Never the raw
+            # body/text.
+            safe_error_class = getattr(exc, "safe_error_class", None)
+            safe_upstream_status = getattr(exc, "safe_upstream_status", None)
             emit_event(
                 "provider.call.timeout" if provider_timeout_occurred else "provider.call.error",
                 caseId=attempt.case_id,
@@ -759,6 +803,12 @@ class GenerationController:
                 providerCallCount=attempt.budget.calls,
                 repairCount=attempt.budget.repair_passes,
                 regenerationCount=attempt.budget.regenerations,
+                safeProviderErrorClass=(
+                    safe_error_class if isinstance(safe_error_class, str) else None
+                ),
+                safeUpstreamStatus=(
+                    safe_upstream_status if isinstance(safe_upstream_status, int) else None
+                ),
             )
             self._fail(attempt, _PROVIDER_FAILURE_REASON, code=code)
             return False
@@ -874,6 +924,17 @@ class GenerationController:
         # never over-claims a schema id that no schema reached the wire for.
         structured_output_mode = getattr(self._provider, "last_structured_output", None)
         native_structured = structured_output_mode is not None
+        # Phase31A — safe per-call schema diagnostics (Track A). Reported only
+        # when the request actually carried a schema that was sent; the values
+        # are a stable fingerprint, the canonical byte length and the
+        # response-format type token — NEVER schema contents/prompts/bodies.
+        schema_fingerprint = getattr(self._provider, "last_schema_fingerprint", None)
+        request_schema_byte_length = getattr(
+            self._provider, "last_request_schema_byte_length", None
+        )
+        response_format_type = getattr(
+            self._provider, "last_response_format_type", None
+        )
         emit_event(
             "provider.call.complete",
             caseId=attempt.case_id,
@@ -888,6 +949,11 @@ class GenerationController:
             structuredOutputRequested=native_structured,
             structuredOutputMode=structured_output_mode,
             schemaId=(request.schema_id if native_structured else None),
+            schemaFingerprint=(schema_fingerprint if native_structured else None),
+            requestSchemaByteLength=(
+                request_schema_byte_length if native_structured else None
+            ),
+            responseFormatType=(response_format_type if native_structured else None),
             configuredProviderTimeoutMs=(
                 int(self._provider_timeout_seconds * 1000)
                 if self._provider_timeout_seconds is not None else None
@@ -950,6 +1016,42 @@ class GenerationController:
         if any("world.unresolved-object" in item for item in diagnostics):
             return GenerationFailureCode.WORLD_ASSET_UNRESOLVED
         return GenerationFailureCode.VALIDATION_FAILED
+
+    @staticmethod
+    def _emit_repair_outcome(
+        attempt: AttemptRecord,
+        *,
+        before_codes: tuple[str, ...],
+        after_codes: tuple[str, ...],
+    ) -> None:
+        """Phase31A (Track B) — bounded repair-delta observability.
+
+        Emits ``generation.repair.outcome`` once per completed repair with the
+        CLOSED validator-code sets before/after the repair, the deterministic
+        fixed/introduced/unchanged set algebra and the §14 repair-effectiveness
+        classification. Safe fields only: never drafts, prompts, truth,
+        provider output or free-text issues.
+        """
+        delta = failure_set_delta(before_codes, after_codes)
+        emit_event(
+            "generation.repair.outcome",
+            caseId=attempt.case_id,
+            generationAttemptId=attempt.attempt_id,
+            repairCount=(
+                attempt.budget.repair_passes if attempt.budget is not None else None
+            ),
+            providerCallCount=(
+                attempt.budget.calls if attempt.budget is not None else None
+            ),
+            stage="validation",
+            validatorCodesBefore=tuple(sorted(before_codes)),
+            validatorCodesAfter=tuple(sorted(after_codes)),
+            codesFixed=delta["codes_fixed"],
+            codesIntroduced=delta["codes_introduced"],
+            codesUnchanged=delta["codes_unchanged"],
+            repairEffectiveness=repair_effectiveness(before_codes, after_codes),
+            failureCodeSetFingerprint=failure_set_fingerprint(after_codes),
+        )
 
     def _reset_for_regeneration(self, attempt: AttemptRecord) -> None:
         """Reset staged outputs for a full regeneration (§32.2/§32.5).

@@ -99,6 +99,12 @@ class AttemptRecord:
     published: Any | None = None  # PublishedCaseVersion (frozen) once published
     published_at: float | None = None
     _admission_released: bool = False
+    # Phase31A (Track B) — transient validator-code tuple that triggered the
+    # most recent repair (set by the controller before a REPAIR starts,
+    # consumed on the very next validation pass to emit the bounded
+    # ``generation.repair.outcome`` delta). Diagnostics only — never read by
+    # validators/solvers/budgets and never leaves the attempt.
+    _repair_before_codes: tuple[str, ...] | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -96,6 +96,28 @@ _SAFE_FIELDS = frozenset(
         # NEVER the schema object itself, its internals, prompts or bodies.
         "structuredOutputRequested",
         "structuredOutputMode",
+        # Phase31A — safe schema/upstream diagnostics (Track A). Field values
+        # are ONLY a stable schema fingerprint hex, the canonical schema byte
+        # length, the closed response-format type token, the closed internal
+        # safe error-class token and the sanitized upstream status INTEGER.
+        # NEVER schema contents, raw upstream bodies/text, prompts or keys.
+        "schemaFingerprint",
+        "requestSchemaByteLength",
+        "responseFormatType",
+        "safeProviderErrorClass",
+        "safeUpstreamStatus",
+        # Phase31A — bounded validator-code telemetry (Track B). Values are
+        # closed token tuples / fingerprints over them / deterministic
+        # effectiveness labels ONLY. NEVER free-text issue strings, drafts,
+        # prompts, generated values or CaseTruth.
+        "validatorCodes",
+        "failureCodeSetFingerprint",
+        "repairEffectiveness",
+        "codesFixed",
+        "codesIntroduced",
+        "codesUnchanged",
+        "validatorCodesBefore",
+        "validatorCodesAfter",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})
