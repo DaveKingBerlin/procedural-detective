@@ -1,0 +1,6 @@
+{
+  "id": "hard-pharmacy-001",
+  "difficulty": "hard",
+  "prompt": "Victim: dr_hubert_kane\nMurderer: pharma_griffin\nMotive: professional_rivalry\nWeapon: medication_bottle\nTime: 2026-10-19T23:50:00+02:00\nWitness: nurse_palmer\n",
+  "tags": ["pharmacy", "night-shift", "poison-scene", "unusual-weapon"]
+}

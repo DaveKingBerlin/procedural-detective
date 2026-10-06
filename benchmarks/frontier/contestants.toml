@@ -1,0 +1,81 @@
+# Phase 31 — server-owned benchmark contestants (no secrets).
+#
+# This file is TRACKED and must never contain API keys, endpoints, response
+# formats, schemas, system prompts, or security/timeout/validator overrides.
+# The trusted provider endpoint ALWAYS comes from the server-owned Frontier
+# registry (app.generation.frontier_registry); each contestant supplies ONLY
+# the logical provider id, the model id, the credential env-var name and
+# display metadata. The runner rejects any other field.
+#
+# Credentials are loaded ONLY from the process environment or the git-ignored
+# ".env.benchmark" file — never from this file, never from CLI arguments.
+#
+# A contestant id is a LOGICAL name; the concrete provider/model identity is
+# what matters for billing. "enabled = false" contestants are documented but
+# are never executed and never billed.
+#
+# Verified-available OpenRouter model ids (orchestrator-verified):
+#   openai/gpt-6-luna                (Luna-family model id ON OpenRouter only)
+#   cohere/command-a-plus
+#   deepseek/deepseek-v4-flash
+#   ~deepseek/deepseek-v4-flash-latest
+# plus the canonical cheap flash pick deepseek/deepseek-v4.1-flash.
+#
+# Luna baseline: BLOCKED-EXTERNAL. There is NO verified official OpenAI API
+# model id for the Luna product model ("openai/gpt-6-luna" is an OpenRouter id,
+# not an official OpenAI API model id). Never invent one; enable only when an
+# operator pins a verified official OpenAI API model id.
+
+[[contestants]]
+id = "openrouter-model-a"
+label = "OpenRouter DeepSeek V4.1 Flash"
+provider = "openrouter"
+model = "deepseek/deepseek-v4.1-flash"
+credential_env = "OPENROUTER_API_KEY"
+enabled = true
+tags = ["flash", "cheap", "deepseek"]
+
+[[contestants]]
+id = "openrouter-command-a-plus"
+label = "OpenRouter Cohere Command A+"
+provider = "openrouter"
+model = "cohere/command-a-plus"
+credential_env = "OPENROUTER_API_KEY"
+enabled = true
+tags = ["fast", "cheap"]
+
+[[contestants]]
+id = "openrouter-deepseek-v4-flash"
+label = "OpenRouter DeepSeek V4 Flash"
+provider = "openrouter"
+model = "deepseek/deepseek-v4-flash"
+credential_env = "OPENROUTER_API_KEY"
+enabled = true
+tags = ["flash", "cheap", "deepseek"]
+
+[[contestants]]
+id = "openrouter-luna-proxy"
+label = "OpenRouter Luna-family model (OpenRouter 'openai/gpt-6-luna')"
+provider = "openrouter"
+model = "openai/gpt-6-luna"
+credential_env = "OPENROUTER_API_KEY"
+enabled = false
+tags = ["luna-family", "openrouter-proxy"]
+# DISABLED by default: 'openai/gpt-6-luna' is an OpenRouter MODEL id, not a
+# verified official OpenAI API model id. An operator may enable this ONLY after
+# reviewing live OpenRouter pricing on the Dev-Box (the 'luna-baseline'
+# contestant remains BLOCKED-EXTERNAL regardless: it pins the official OpenAI
+# API, for which no verified Luna model id exists).
+
+[[contestants]]
+id = "luna-baseline"
+label = "Luna Baseline (official OpenAI API)"
+provider = "openai"
+model = ""
+credential_env = "OPENAI_API_KEY"
+enabled = false
+tags = ["luna"]
+# BLOCKED-EXTERNAL — no verified official OpenAI API model id exists for the
+# Luna product model ('openai/gpt-6-luna' is an OpenRouter id only). This
+# contestant stays disabled; enabling it requires an OPERATOR-pinned, verified
+# official OpenAI API model id (and OpenAI billing credentials).

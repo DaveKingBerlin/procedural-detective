@@ -1,0 +1,6 @@
+{
+  "id": "hard-lighthouse-001",
+  "difficulty": "hard",
+  "prompt": "Victim: sigmund_barrow\nMurderer: atlas_finn\nMotive: insurance_fraud\nWeapon: rope\nTime: 2026-08-08T23:41:00+01:00\nWitness: wynn_windgate\n",
+  "tags": ["lighthouse", "storm-night", "isolated"]
+}

@@ -259,6 +259,9 @@ screenshots/generated/
 *.sqlite3
 tmp/
 
+# Phase 31 benchmark run artifacts (never committed; may contain run state)
+benchmark-results/
+
 # Optional runtime lifecycle logs
 logs/
 

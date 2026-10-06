@@ -1,0 +1,6 @@
+{
+  "id": "hard-observatory-001",
+  "difficulty": "hard",
+  "prompt": "Victim: dr_mae_west\nMurderer: prof_blackwood\nMotive: professional_rivalry\nWeapon: telescope_counterweight\nTime: 2026-12-24T00:07:00-05:00\nWitness: nils_torque\n",
+  "tags": ["observatory", "holiday-eve", "cross-midnight", "unusual-weapon"]
+}

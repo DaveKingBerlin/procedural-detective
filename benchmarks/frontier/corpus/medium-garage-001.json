@@ -1,0 +1,6 @@
+{
+  "id": "medium-garage-001",
+  "difficulty": "medium",
+  "prompt": "Victim: hank_parker\nMurderer: dana_riggs\nMotive: debt\nWeapon: baseball_bat\nTime: 2026-06-05T23:59:00+01:00\nWitness: miles_faraday\n",
+  "tags": ["garage", "midnight", "blunt-force"]
+}

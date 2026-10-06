@@ -1,0 +1,6 @@
+{
+  "id": "easy-hotel-001",
+  "difficulty": "easy",
+  "prompt": "Victim: kurt_michaels\nMurderer: fiona_lowe\nMotive: inheritance\nWeapon: rope\nTime: 2026-06-20T23:15:00+03:00\nWitness: rick_harlow\n",
+  "tags": ["hotel", "explicit-facts", "night"]
+}

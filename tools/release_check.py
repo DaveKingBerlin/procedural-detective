@@ -459,7 +459,15 @@ _TRACKED_SECRET_DIRS = ("logs",)
 # _SANCTIONED_EXAMPLE_FILES). Phase 21B split the docs examples in two: the DEV
 # example (.env.example) and the PRODUCTION profile example
 # (.env.production.example) are BOTH templates, never operator secrets.
-_SANCTIONED_ENV_EXAMPLES = frozenset({".env.example", ".env.production.example"})
+# Phase 31 adds the trackable PLACEHOLDER-ONLY benchmark credential template
+# (.env.benchmark.example): it carries zero secret VALUES by contract (the
+# .env.benchmark file itself stays git-ignored; the runner refuses to execute
+# without externally supplied values). It is sanctioned exactly like the other
+# example templates and is still gated by every other scan (private endpoints,
+# credentials, placeholders) like any other tracked file.
+_SANCTIONED_ENV_EXAMPLES = frozenset(
+    {".env.example", ".env.production.example", ".env.benchmark.example"}
+)
 
 
 def _git(

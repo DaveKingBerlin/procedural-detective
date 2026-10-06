@@ -1,0 +1,6 @@
+{
+  "id": "medium-salon-001",
+  "difficulty": "medium",
+  "prompt": "Victim: bea_hollow\nMurderer: ted_nash\nMotive: jealousy\nWeapon: scissors\nTime: 2026-03-28T17:45:00+09:00\nWitness: yuri_okada\n",
+  "tags": ["salon", "evening", "far-east-timezone"]
+}
