@@ -521,7 +521,9 @@ def test_transport_structured_output_fallback_json_and_repair_stage():
     assert provider2.last_format == "schema"
     assert provider2.structured_output_sent is True
 
-    # an unknown/unmapped stage value keeps the deterministic "json" fallback.
+    # an unknown/unmapped stage value keeps the deterministic "json" fallback;
+    # a REAL controller stage (public_world — Phase30-fix) now carries its own
+    # authoritative contract (previously unmapped -> ``"json"`` fallback).
     transport3 = MockOllamaTransport(posts=['{"x": 1}'])
     provider3 = _provider(transport3, structured_output=True)
     provider3.generate(
@@ -531,7 +533,21 @@ def test_transport_structured_output_fallback_json_and_repair_stage():
             prompt_context="ctx",
         )
     )
-    assert transport3.format_of_call(0) == "json"
+    sent3 = transport3.format_of_call(0)
+    assert isinstance(sent3, dict)
+    assert sent3 == prompts.json_schema_for_generation_stage("public_world")
+    assert set(sent3["properties"]) == {
+        "persons",
+        "motives",
+        "objects",
+        "locations",
+        "travelRules",
+        "scene",
+    }
+    assert provider3.last_format == "schema"
+    # a genuinely unknown stage value (never a real GenerationStage) keeps the
+    # deterministic "json" fallback (fail-closed: no guessed schema).
+    assert prompts.json_schema_for_generation_stage("not_a_real_stage") is None
 
 
 def test_structured_output_probe_matches_documented_ollama_version():
@@ -582,6 +598,9 @@ def test_stage_mapping_versions_are_current_no_stale_strings():
     assert current == expected
     assert set(prompts.STAGE_TO_CONTRACT.values()) == set(prompts.CONTRACT_KEYS) == {
         "case_people",
+        # Phase30-fix: public_world is a real controller stage and now owns a
+        # canonical contract (strict parser _PUBLIC_WORLD_TOP).
+        "public_world",
         "evidence",
         "world_requirements",
         "asset_spec",
@@ -589,6 +608,8 @@ def test_stage_mapping_versions_are_current_no_stale_strings():
         "full_draft",
     }
     assert prompts.STAGE_TO_CONTRACT["repair"] == "full_draft"
+    assert prompts.STAGE_TO_CONTRACT["public_world"] == "public_world"
+    assert prompts.schema_id_for_generation_stage("public_world") == "PUBLIC_WORLD_v1"
 
     # the rendered prompts embed the CURRENT versions verbatim.
     assert "case_people_v1" in prompts.build_case_people_prompt("x", None)

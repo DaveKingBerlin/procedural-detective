@@ -170,14 +170,34 @@ _WILDCARD_DNS_SUFFIXES: frozenset[str] = frozenset(
 )
 
 
+# --------------------------------------------------------------------------- #
+# Phase30-fix — server-owned structured-output capability metadata.
+#
+# The registry entry declares the NATIVE structured-output mechanism its
+# adapter/protocol family supports (Phase30-Fix §6: a tested adapter/protocol
+# capability model, never a blind browser-supplied flag). Today the catalog is
+# uniformly the OpenAI-compatible Chat Completions ``response_format``
+# mechanism (``openai_json_schema``), so ONE mode exists — but the value is
+# per-entry, validated at import, and ``None`` is the safe fail-closed default
+# for any future entry that does not opt into a documented mechanism.
+# --------------------------------------------------------------------------- #
+
+STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA = "openai_json_schema"
+FRONTIER_STRUCTURED_OUTPUT_MODES: frozenset[str] = frozenset(
+    {STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA}
+)
+
+
 @dataclass(frozen=True)
 class FrontierProviderDefinition:
     """One immutable, server-owned BYOK Frontier provider (Phase30 §7).
 
     Only trusted server-owned metadata lives here: the logical provider ID,
     the safe public display label, the verified HTTPS endpoint, the adapter
-    protocol family and the enabled state. Never API keys, never per-user
-    state, never mutable browser data.
+    protocol family, the enabled state and the declared native
+    structured-output mode (Phase30-Fix §6 — ``None`` when the entry does not
+    support native structured output). Never API keys, never per-user state,
+    never mutable browser data.
     """
 
     provider_id: str
@@ -185,50 +205,66 @@ class FrontierProviderDefinition:
     endpoint: str
     protocol: str = "openai_chat_completions"
     enabled: bool = True
+    structured_output_mode: str | None = None
 
 
 # The committed catalog (order is display order). Appendix in the module
 # docstring records the official documentation source reviewed for each.
+# Every committed endpoint services OpenAI-compatible Chat Completions and
+# officially supports the native ``response_format`` JSON Schema mechanism
+# (``structured_output_mode="openai_json_schema"``). The value is still
+# declared EXPLICITLY per entry so the capability is reviewable and a future
+# entry that cannot serve the mechanism simply leaves it ``None``
+# (fail-closed: the adapter keeps the bounded prompt-embedded fallback and
+# reports ``structuredOutput=false`` truthfully).
 FRONTIER_PROVIDER_REGISTRY: tuple[FrontierProviderDefinition, ...] = (
     FrontierProviderDefinition(
         provider_id="openai",
         label="OpenAI",
         endpoint="https://api.openai.com/v1/chat/completions",
+        structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
     ),
     FrontierProviderDefinition(
         provider_id="openrouter",
         label="OpenRouter",
         endpoint="https://openrouter.ai/api/v1/chat/completions",
+        structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
     ),
     FrontierProviderDefinition(
         provider_id="groq",
         label="Groq",
         endpoint="https://api.groq.com/openai/v1/chat/completions",
+        structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
     ),
     FrontierProviderDefinition(
         provider_id="together",
         label="Together AI",
         endpoint="https://api.together.ai/v1/chat/completions",
+        structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
     ),
     FrontierProviderDefinition(
         provider_id="mistral",
         label="Mistral AI",
         endpoint="https://api.mistral.ai/v1/chat/completions",
+        structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
     ),
     FrontierProviderDefinition(
         provider_id="fireworks",
         label="Fireworks AI",
         endpoint="https://api.fireworks.ai/inference/v1/chat/completions",
+        structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
     ),
     FrontierProviderDefinition(
         provider_id="deepinfra",
         label="DeepInfra",
         endpoint="https://api.deepinfra.com/v1/openai/chat/completions",
+        structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
     ),
     FrontierProviderDefinition(
         provider_id="xai",
         label="xAI",
         endpoint="https://api.x.ai/v1/chat/completions",
+        structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
     ),
 )
 
@@ -339,6 +375,18 @@ def validate_frontier_registry_endpoint(endpoint: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def validate_structured_output_mode(provider_id: str, mode: str | None) -> None:
+    """Deterministic validation of ONE registry entry's structured-output
+    capability. ``None`` is the documented fail-closed default (no native
+    structured output); anything else must be a member of the CLOSED
+    ``FRONTIER_STRUCTURED_OUTPUT_MODES`` set. Hermetic (parse-only)."""
+    if mode is not None and mode not in FRONTIER_STRUCTURED_OUTPUT_MODES:
+        raise ValueError(
+            f"registry provider {provider_id!r} declares an unsupported "
+            "structured-output mode"
+        )
+
+
 def _validate_committed_registry() -> None:
     seen: set[str] = set()
     for definition in FRONTIER_PROVIDER_REGISTRY:
@@ -357,6 +405,12 @@ def _validate_committed_registry() -> None:
             raise ValueError(f"duplicate registry provider id {definition.provider_id!r}")
         seen.add(definition.provider_id)
         validate_frontier_registry_endpoint(definition.endpoint)
+        # Phase30-fix — structured-output capability must be either the
+        # documented fail-closed ``None`` or a member of the CLOSED set of
+        # supported native mechanisms (hermetic: parse-only, no network).
+        validate_structured_output_mode(
+            definition.provider_id, definition.structured_output_mode
+        )
 
 
 _validate_committed_registry()
@@ -412,9 +466,12 @@ def frontier_catalog() -> tuple[tuple[str, str], ...]:
 
 __all__ = [
     "FRONTIER_PROVIDER_REGISTRY",
+    "FRONTIER_STRUCTURED_OUTPUT_MODES",
+    "STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA",
     "FrontierProviderDefinition",
     "frontier_catalog",
     "frontier_enabled_providers",
     "frontier_provider_definition",
     "validate_frontier_registry_endpoint",
+    "validate_structured_output_mode",
 ]

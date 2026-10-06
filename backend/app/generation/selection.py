@@ -543,6 +543,11 @@ def resolve(
                 api_key=str(selection.frontier_api_key),
                 model=frontier_model,
                 timeout_seconds=timeout,
+                # Phase30-fix DEF-B: the SERVER-OWNED registry capability is
+                # frozen into the per-attempt provider instance; the browser
+                # can never influence it (the FrontierBlock carries only
+                # provider/apiKey/model).
+                structured_output_mode=definition.structured_output_mode,
             )
 
         return ResolvedGeneration(

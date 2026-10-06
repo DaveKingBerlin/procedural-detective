@@ -178,6 +178,8 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
     """
     if stage == "full_draft":
         return _full_draft_contract()
+    if stage == "public_world":
+        return _public_world_contract()
     if stage == "asset_spec":
         contract: Mapping[str, Any] = {
             "canonicalName": "non-empty string (80 chars max)",
@@ -391,6 +393,30 @@ def _full_draft_contract() -> Mapping[str, Any]:
     }
 
 
+def _public_world_contract() -> Mapping[str, Any]:
+    """The authoritative PUBLIC_WORLD stage contract (Phase30-fix DEF-B).
+
+    ``public_world`` is a REAL controller generation stage (``STAGE_ORDER``)
+    that previously had NO canonical schema — Frontier/Ollama could never send
+    native structured output for it. This contract matches the strict parser's
+    ``_PUBLIC_WORLD_TOP`` EXACTLY (persons, motives, objects, locations,
+    travelRules, scene) — the player-visible projections of the ``case_people``
+    sections plus the ``objects`` section of the full-draft contract — so the
+    derived transport JSON Schema and the deterministic parser share one
+    source of truth.
+    """
+    case = _stage_contract("case_people")
+    full_draft = _full_draft_contract()
+    return {
+        "persons": case["persons"],
+        "motives": case["motives"],
+        "objects": full_draft["objects"],
+        "locations": case["locations"],
+        "travelRules": case["travelRules"],
+        "scene": case["scene"],
+    }
+
+
 def _activity_log_prompt_contract() -> Mapping[str, Any]:
     """The PROMPT-FACING activity-log contract: the unambiguous ARRAY shape.
 
@@ -421,12 +447,12 @@ def _activity_log_prompt_contract() -> Mapping[str, Any]:
 def schema_contract(stage: str) -> str:
     """Deterministic JSON text of the per-stage schema skeleton (authoritative).
 
-    ``stage`` is one of ``case_people`` / ``evidence`` / ``world_requirements`` /
-    ``asset_spec`` / ``full_draft``. The returned text carries the exact numeric
-    bounds from the authoritative schema constants. A unit test asserts the
-    rendered values equal the constants (schema-drift guard). Rendered from the
-    single ``_stage_contract`` source (Phase17B: the transport JSON Schema and
-    the prompt share this mapping — no duplicate).
+    ``stage`` is one of ``case_people`` / ``public_world`` / ``evidence`` /
+    ``world_requirements`` / ``asset_spec`` / ``full_draft``. The returned text
+    carries the exact numeric bounds from the authoritative schema constants. A
+    unit test asserts the rendered values equal the constants (schema-drift
+    guard). Rendered from the single ``_stage_contract`` source (Phase17B: the
+    transport JSON Schema and the prompt share this mapping — no duplicate).
 
     Phase19J-RI (ADV-A): for ``activity_log`` (the ONLY stage whose contract
     carries a directive object) the rendered PROMPT text shows the unambiguous
@@ -457,6 +483,10 @@ def schema_contract(stage: str) -> str:
 # Documented stage mapping (smoke alias -> GenerationStage.value ->
 # prompt-template version -> schema contract):
 #   case_truth      -> CASE_TRUTH      -> case_people_v1        -> case_people
+#   public_world    -> PUBLIC_WORLD    -> (stage driver joins the public
+#                                          world sections into the case_people
+#                                          account; the non-driver pipeline
+#                                          stage)                     -> public_world
 #   evidence        -> EVIDENCE        -> evidence_v1           -> evidence
 #   world_requirements -> WORLD_GRAPH  -> world_requirements_v1 -> world_requirements
 #   asset_spec      -> ASSET_SPEC      -> asset_spec_v1         -> asset_spec
@@ -476,6 +506,10 @@ STAGE_TO_PROMPT_VERSION: Mapping[str, str] = {
 }
 STAGE_TO_CONTRACT: Mapping[str, str] = {
     "case_truth": "case_people",
+    # Phase30-fix DEF-B: PUBLIC_WORLD is a real controller generation stage and
+    # now carries its OWN canonical contract (persons/motives/objects/
+    # locations/travelRules/scene — the strict parser's ``_PUBLIC_WORLD_TOP``).
+    "public_world": "public_world",
     "evidence": "evidence",
     "world_graph": "world_requirements",
     "asset_spec": "asset_spec",
@@ -489,6 +523,7 @@ STAGE_TO_CONTRACT: Mapping[str, str] = {
 CONTRACT_KEYS: frozenset[str] = frozenset(
     {
         "case_people",
+        "public_world",
         "evidence",
         "world_requirements",
         "asset_spec",
@@ -496,6 +531,32 @@ CONTRACT_KEYS: frozenset[str] = frozenset(
         "full_draft",
     }
 )
+
+# Phase30-fix DEF-B — stable server-owned schema ids for the generation
+# contract vocabulary (the wire ``name`` of a native structured-output
+# ``response_format``). The shared tokens mirror the bridge protocol ids where
+# both copies exist; ``PUBLIC_WORLD_v1`` is the new closed-token entry for the
+# previously-unmapped controller stage. Safe, non-secret, bounded.
+STAGE_TO_GENERATION_SCHEMA_ID: Mapping[str, str] = {
+    "case_truth": "CASE_PEOPLE_v1",
+    "public_world": "PUBLIC_WORLD_v1",
+    "evidence": "EVIDENCE_v1",
+    "world_graph": "WORLD_REQUIREMENTS_v1",
+    "asset_spec": "ASSET_SPEC_v1",
+    "asset_spec_repair": "ASSET_SPEC_REPAIR_v1",
+    "activity_log": "ACTIVITY_LOG_v1",
+    "activity_log_repair": "ACTIVITY_LOG_REPAIR_v1",
+    "repair": "REPAIR_v1",
+}
+
+
+def schema_id_for_generation_stage(stage_value: str) -> str | None:
+    """The stable server-owned schema id for a ``GenerationStage.value``.
+
+    ``None`` for unknown/unmapped values (the caller then simply omits the
+    native structured-output request — fail-closed, never a guessed id).
+    """
+    return STAGE_TO_GENERATION_SCHEMA_ID.get(stage_value)
 
 
 def _hint_nullable(hint: str) -> bool:
@@ -686,12 +747,81 @@ def json_schema_for_generation_stage(stage_value: str) -> dict[str, Any] | None:
     when the stage has no schema contract. Every generation stage the Ollama
     provider serves has one — including ``repair`` (the full-draft REPAIR
     contract, Phase17D C §2 — structured transport demands the COMPLETE draft,
-    never a partial patch); unknown/unmapped values return None (fail-closed:
-    the provider keeps ``format: "json"``)."""
+    never a partial patch) and ``public_world`` (Phase30-fix: the strict
+    ``_PUBLIC_WORLD_TOP`` contract). Unknown/unmapped values return None
+    (fail-closed: the provider keeps ``format: "json"`` / the prompt-embedded
+    fallback)."""
     contract_stage = STAGE_TO_CONTRACT.get(stage_value)
     if contract_stage is None:
         return None
     return schema_contract_as_json_schema(contract_stage)
+
+
+# --------------------------------------------------------------------------- #
+# DEF-019 — the FRONTIER response_format schemas (parser-shaped stage OUTPUT)
+# --------------------------------------------------------------------------- #
+#
+# ``json_schema_for_generation_stage`` is the OLLAMA/transport contract: it
+# describes the PROMPT-facing document of each stage, e.g. ``case_people`` for
+# the ``case_truth`` stage. Those contracts were designed for Ollama's grammar
+# path, where the strict parsers stay the sole acceptance authority and extra
+# top-level keys are tolerated at runtime. When the SAME contract is pushed
+# through a strict native structured-output provider (Frontier
+# ``response_format`` with ``required`` keys), the provider is FORCED to emit a
+# document whose top-level keys the strict controller parser REJECTS
+# (``_CASE_TRUTH_TOP = {crime}`` vs the case_people contract's
+# [crime, persons, motives, locations, travelRules, scene]) — recreating the
+# DEF-B repair->REPAIR_BUDGET_EXHAUSTED loop.
+#
+# ``json_schema_for_stage_output`` therefore returns the PARSER-SHAPED
+# stage-OUTPUT JSON Schema for the controller-pipeline stages: the document a
+# strict provider is asked to emit is EXACTLY the document
+# ``parser.parse_stage``/``collect_full_draft_issues`` accepts. The overrides
+# are derived from the SAME trusted contract sources (never browser-supplied):
+#
+#   case_truth   -> {"crime": <the trusted case_people crime section>}
+#   world_graph  -> {"worldGraph": <the trusted full-draft worldGraph section>}
+#   evidence / public_world / repair -> unchanged (already parser-aligned)
+#
+# ``json_schema_for_generation_stage`` and every other existing consumer stay
+# byte-identical (Direct/Bridge/Ollama/Fake behavior unregressed); only the
+# Frontier native-structured-output boundary consumes this mapping
+# (``pipeline.build_request`` -> ``GenerateRequest.json_schema``).
+
+
+def _stage_output_contract(stage_value: str) -> Mapping[str, Any] | None:
+    """The authoritative output-document contract for a ``GenerationStage.value``.
+
+    ``case_truth`` wraps the trusted ``case_people`` ``crime`` section in the
+    strict parser's ``{crime}`` top level; ``world_graph`` wraps the trusted
+    ``full_draft`` ``worldGraph`` section in the strict parser's
+    ``{worldGraph}`` top level. Every other mapped stage keeps its existing
+    generation-stage contract verbatim. ``None`` for unknown/unmapped values
+    (fail-closed)."""
+    if stage_value == "case_truth":
+        case = _stage_contract("case_people")
+        return {"crime": case["crime"]}
+    if stage_value == "world_graph":
+        return {"worldGraph": _full_draft_contract()["worldGraph"]}
+    contract_stage = STAGE_TO_CONTRACT.get(stage_value)
+    if contract_stage is None:
+        return None
+    return _stage_contract(contract_stage)
+
+
+def json_schema_for_stage_output(stage_value: str) -> dict[str, Any] | None:
+    """The parser-shaped JSON Schema the Frontier adapter sends as native
+    structured output for a controller-pipeline stage (DEF-019).
+
+    The returned schema describes a document the strict controller parser
+    accepts for that stage (``case_truth`` -> ``{crime}``, ``world_graph`` ->
+    ``{worldGraph}``, ``evidence`` / ``public_world`` / ``repair`` unchanged),
+    derived from the SAME trusted contract sources as the Ollama transport
+    schemas. ``None`` for unknown/unmapped values (fail-closed)."""
+    contract = _stage_output_contract(stage_value)
+    if contract is None:
+        return None
+    return _contract_to_json_schema(contract)
 
 
 # --- shared template fragments ---------------------------------------------
@@ -2041,6 +2171,7 @@ __all__ = [
     "build_repair_prompt",
     "build_world_requirements_prompt",
     "json_schema_for_generation_stage",
+    "json_schema_for_stage_output",
     "schema_contract",
     "schema_contract_as_json_schema",
 ]

@@ -87,6 +87,15 @@ _SAFE_FIELDS = frozenset(
         # the closed server-owned registry). NEVER the API key, the registry
         # endpoint, Authorization header or any previous-user selection.
         "frontierProvider",
+        # Phase30-fix — safe structured-output diagnostic fields. Booleans and
+        # a closed non-secret mode token only: ``structuredOutputRequested`` /
+        # ``structuredOutput`` tell whether native structured mode was actually
+        # requested/used, ``structuredOutputMode`` is the adapter/protocol
+        # capability token ("openai_json_schema" or None) and ``schemaId`` (the
+        # existing bridge field) is the stable non-secret schema name token.
+        # NEVER the schema object itself, its internals, prompts or bodies.
+        "structuredOutputRequested",
+        "structuredOutputMode",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

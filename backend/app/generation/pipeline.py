@@ -41,7 +41,7 @@ from app.domain.public import (
 )
 from app.domain.solver import solve_case
 from app.domain.truth import CaseTruth, Crime, CrimeTime
-from app.generation import parser, prompt as prompt_mod, safety
+from app.generation import parser, prompt as prompt_mod, prompts, safety
 from app.generation.budgets import BudgetTracker
 from app.generation.constraints import LockedConstraints
 from app.generation.provider import GenerateRequest, GenerationStage
@@ -408,7 +408,20 @@ def build_request(
     diagnostics: tuple[str, ...] = (),
     timeout_seconds: float | None = None,
 ) -> GenerateRequest:
-    """Build the next provider invocation for ``stage`` (sanitized material)."""
+    """Build the next provider invocation for ``stage`` (sanitized material).
+
+    Phase30-fix DEF-B — the canonical server-owned stage JSON Schema (and its
+    stable schema id) is attached here so every non-driver provider receives
+    the trusted transport schema: ``FrontierProvider`` sends it as native
+    structured output when its registry entry declared the capability; other
+    providers (Fake/Live) simply ignore it. Never browser-supplied.
+    DEF-019 — the attached schema is the PARSER-SHAPED stage-output schema
+    (``json_schema_for_stage_output``: case_truth -> ``{crime}``, world_graph
+    -> ``{worldGraph}``, the other stages unchanged), so a strict native
+    structured-output provider can never be forced to emit a document the
+    controller's strict parsers reject. ``json_schema_for_generation_stage``
+    (the Ollama/transport contract) and every other consumer are unchanged.
+    """
     return GenerateRequest(
         attempt_id=attempt.attempt_id,
         stage=stage,
@@ -417,6 +430,8 @@ def build_request(
         diagnostics=tuple(diagnostics),
         seed=attempt.seed,
         timeout_seconds=timeout_seconds,
+        json_schema=prompts.json_schema_for_stage_output(stage.value),
+        schema_id=prompts.schema_id_for_generation_stage(stage.value),
     )
 
 
