@@ -1,0 +1,6 @@
+{
+  "id": "easy-bakery-001",
+  "difficulty": "easy",
+  "prompt": "Victim: mabel_grant\nMurderer: willie_finch\nMotive: jealousy\nWeapon: scissors\nTime: 2026-02-02T08:25:00+01:00\nWitness: chen_lee\n",
+  "tags": ["bakery", "explicit-facts", "morning"]
+}

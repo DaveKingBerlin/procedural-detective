@@ -1,0 +1,6 @@
+{
+  "id": "easy-office-001",
+  "difficulty": "easy",
+  "prompt": "Victim: sarah_miller\nMurderer: thomas_reed\nMotive: cover_up_embezzlement\nWeapon: kitchen_knife\nTime: 2026-09-11T22:17:00+02:00\nWitness: emily_reed\n",
+  "tags": ["office", "explicit-facts", "canonical-golden"]
+}

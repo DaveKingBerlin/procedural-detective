@@ -1,0 +1,6 @@
+{
+  "id": "hard-vault-001",
+  "difficulty": "hard",
+  "prompt": "Victim: ken_swift\nMurderer: irene_locks\nMotive: debt\nWeapon: wrench\nTime: 2026-07-07T00:29:00+02:00\nWitness: duke_pryce\n",
+  "tags": ["vault", "midnight", "restricted-area"]
+}

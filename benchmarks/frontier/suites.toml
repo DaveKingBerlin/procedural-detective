@@ -1,0 +1,19 @@
+# Phase 31 — benchmark suites (case counts per difficulty).
+#
+# Every contestant runs the SAME logical workload for a given suite: the same
+# prompt texts, same difficulty counts, same repeat count, same pipeline.
+#
+#   smoke    — Easy 1 / Medium 1 / Hard 1   (3 cases per contestant)
+#   standard — Easy 5 / Medium 5 / Hard 10  (20 cases per contestant)
+#
+# Counts are configurable; "standard" is the canonical comparative workload.
+
+[suites.smoke]
+easy = 1
+medium = 1
+hard = 1
+
+[suites.standard]
+easy = 5
+medium = 5
+hard = 10

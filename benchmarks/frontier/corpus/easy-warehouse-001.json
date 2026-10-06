@@ -1,0 +1,6 @@
+{
+  "id": "easy-warehouse-001",
+  "difficulty": "easy",
+  "prompt": "Victim: ty_stellar\nMurderer: ivan_chess\nMotive: debt\nWeapon: wrench\nTime: 2026-04-02T05:45:00-05:00\nWitness: raul_gomez\n",
+  "tags": ["warehouse", "explicit-facts", "dawn"]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "easy-apartment-001",
+  "difficulty": "easy",
+  "prompt": "Victim: dana_whitfield\nMurderer: carl_hensley\nMotive: insurance_fraud\nWeapon: hammer\nTime: 2026-08-14T19:40:00+01:00\nWitness: lena_hensley\n",
+  "tags": ["apartment", "explicit-facts", "evening"]
+}
