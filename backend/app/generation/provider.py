@@ -12,6 +12,7 @@ the attached ``CompletionSink``. There is no threading and no sleeping.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -72,6 +73,15 @@ class GenerateRequest:
     # lifecycle controller/driver and is intentionally optional so FakeProvider
     # and existing callers remain unchanged.
     timeout_seconds: float | None = None
+    # Phase30-fix — server-owned native structured-output carrier. The
+    # controller attaches the canonical trusted PARSER-SHAPED per-stage JSON
+    # Schema (``prompts.json_schema_for_stage_output`` — DEF-019) plus its
+    # stable schema id via ``pipeline.build_request``. Providers that support
+    # native structured output MAY send it (never a browser-supplied value);
+    # all other providers keep their existing behavior by ignoring it.
+    # Optional so FakeProvider and legacy callers remain unchanged.
+    json_schema: dict | None = None
+    schema_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_id, str) or not self.attempt_id:
@@ -96,9 +106,28 @@ class GenerateRequest:
         if self.timeout_seconds is not None and (
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
+            or not math.isfinite(self.timeout_seconds)
             or self.timeout_seconds <= 0
         ):
-            raise ValueError("GenerateRequest.timeout_seconds must be positive when set")
+            # DEF-022 — nan/inf/-inf/0/negative are NEVER accepted: a non-finite
+            # value would poison ``min(remaining, quantum)`` in ``join`` (the
+            # untyped float() ValueError) or silently disable the wall-clock
+            # bound (inf deadline). Rejecting here matches the existing
+            # validation style of this dataclass.
+            raise ValueError(
+                "GenerateRequest.timeout_seconds must be a finite positive "
+                "number when set"
+            )
+        if self.json_schema is not None and not isinstance(self.json_schema, dict):
+            raise ValueError(
+                "GenerateRequest.json_schema must be a dict or None (server-owned)"
+            )
+        if self.schema_id is not None and (
+            not isinstance(self.schema_id, str) or not self.schema_id
+        ):
+            raise ValueError(
+                "GenerateRequest.schema_id must be a non-empty string or None"
+            )
 
 
 @dataclass(frozen=True)

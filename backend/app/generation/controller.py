@@ -26,7 +26,11 @@ from typing import Any
 
 from app.generation import pipeline
 from app.generation.admission import AdmissionController, AdmissionDenied
-from app.generation.budgets import BudgetTracker, CORE_BUCKET
+from app.generation.budgets import (
+    PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
+    BudgetTracker,
+    CORE_BUCKET,
+)
 from app.generation.clock import Clock
 from app.generation.failure_codes import (
     GenerationFailureCode,
@@ -597,6 +601,31 @@ class GenerationController:
                 continue
             return  # pragma: no cover - defensive
 
+    def _deadline_exhausted(self, attempt: AttemptRecord) -> bool:
+        """True when a provider timeout means the GENERATION DEADLINE is the
+        operative bound (Phase30-fix DEF-A classification).
+
+        The effective per-call provider timeout is
+        ``min(configured, remaining_deadline - margin)``. When the deadline is
+        the binding bound, a call that exhausts it leaves at most ``margin`` of
+        generation deadline remaining — so a provider timeout at that point is
+        classified ``GENERATION_DEADLINE_EXCEEDED``. When the configured
+        provider timeout was the binding bound (ample deadline remains), the
+        canonical provider-timeout code (``PROVIDER_TIMEOUT`` /
+        ``FRONTIER_TIMEOUT``) is kept. Deterministic; never mutates state.
+        """
+        budget = attempt.budget
+        if budget is None:
+            return False
+        return budget.remaining_seconds() <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS
+
+    @staticmethod
+    def _is_provider_timeout_code(code: GenerationFailureCode) -> bool:
+        return code in (
+            GenerationFailureCode.PROVIDER_TIMEOUT,
+            GenerationFailureCode.FRONTIER_TIMEOUT,
+        )
+
     def _invoke_provider(
         self,
         attempt: AttemptRecord,
@@ -701,8 +730,18 @@ class GenerationController:
                     if exc.__class__.__name__ == "ProviderTimeout"
                     else GenerationFailureCode.PROVIDER_UNAVAILABLE
                 )
+            # Phase30-fix DEF-A — deterministic classification: when the
+            # remaining generation deadline was the operative per-call bound
+            # (it is now exhausted down to the safety margin), a provider
+            # timeout is classified as the generation-deadline failure;
+            # otherwise the canonical provider-timeout code is kept. The event
+            # name stays tied to the UNDERLYING cause (a provider call that
+            # timed out), while ``failureCode`` carries the final code.
+            provider_timeout_occurred = self._is_provider_timeout_code(code)
+            if provider_timeout_occurred and self._deadline_exhausted(attempt):
+                code = GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
             emit_event(
-                "provider.call.timeout" if code is GenerationFailureCode.PROVIDER_TIMEOUT else "provider.call.error",
+                "provider.call.timeout" if provider_timeout_occurred else "provider.call.error",
                 caseId=attempt.case_id,
                 generationAttemptId=attempt.attempt_id,
                 stage=stage.value,
@@ -795,8 +834,13 @@ class GenerationController:
                 if result.timed_out
                 else infer_failure_code(result.error)
             )
+            # Phase30-fix DEF-A — deadline-first classification (see the
+            # raised-``ProviderError`` path above).
+            provider_timeout_occurred = self._is_provider_timeout_code(code)
+            if provider_timeout_occurred and self._deadline_exhausted(attempt):
+                code = GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
             emit_event(
-                "provider.call.timeout" if code is GenerationFailureCode.PROVIDER_TIMEOUT else "provider.call.error",
+                "provider.call.timeout" if provider_timeout_occurred else "provider.call.error",
                 caseId=attempt.case_id,
                 generationAttemptId=attempt.attempt_id,
                 stage=stage.value,
@@ -817,6 +861,19 @@ class GenerationController:
             )
             self._fail(attempt, _PROVIDER_FAILURE_REASON, code=code)
             return False
+        # Phase30-fix DEF-B — truthful structured-output telemetry. The
+        # provider records what it ACTUALLY sent for this call
+        # (``last_structured_output`` — the native mode name when a real
+        # ``response_format`` was attached, else None); ``structuredOutput`` /
+        # ``structuredOutputRequested`` are true exactly then. Providers that
+        # ignore the schema carrier (Fake/Live) keep ``False``, and a fallback
+        # call never pretends structured output was used.
+        # Phase30-fix DEF-023 — ``schemaId`` is a structured-output diagnostic:
+        # it is reported ONLY when native structured output was actually
+        # requested/used (the mode came back non-None), so a fallback call
+        # never over-claims a schema id that no schema reached the wire for.
+        structured_output_mode = getattr(self._provider, "last_structured_output", None)
+        native_structured = structured_output_mode is not None
         emit_event(
             "provider.call.complete",
             caseId=attempt.case_id,
@@ -827,7 +884,10 @@ class GenerationController:
             success=True,
             elapsedMs=int((time.perf_counter() - _t0) * 1000),
             responseBytes=len(result.content.encode("utf-8")),
-            structuredOutput=False,
+            structuredOutput=native_structured,
+            structuredOutputRequested=native_structured,
+            structuredOutputMode=structured_output_mode,
+            schemaId=(request.schema_id if native_structured else None),
             configuredProviderTimeoutMs=(
                 int(self._provider_timeout_seconds * 1000)
                 if self._provider_timeout_seconds is not None else None

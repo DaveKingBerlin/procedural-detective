@@ -45,18 +45,76 @@ are the user's per-attempt BYOK values.
 
 ``sink`` is accepted for interface compatibility; this sync adapter never
 produces ``pending`` results (the call blocks until completion or timeout).
+
+Phase30-fix (DEF-A) — REAL wall-clock timeout enforcement. The httpx
+``timeout=`` argument is a PER-OPERATION (connect/write/read/pool) timeout,
+NOT a total wall-clock deadline: a slow/dribbling response-body read, DNS
+resolution, connection-pool wait or upstream stream can legally outlive it
+(the live production defect: a call advertised as 180000 ms effective ran
+~579348 ms and still logged success). This adapter therefore bounds the ENTIRE
+outbound operation — connect, request write, upstream processing, response
+headers, response-body read and decode — with a real monotonic deadline equal
+to ``request.timeout_seconds`` (already the controller's
+``min(configured provider timeout, remaining generation deadline - margin)``).
+
+Phase30-fix DEF-020 — TRUE cancellation at the wall-clock bound. The
+outbound call runs in a short-lived supervised worker over a DEDICATED,
+per-call ``httpx.Client`` owned by this adapter. When the supervising caller
+thread observes the deadline while the call is still in flight it CLOSES that
+client from the supervisor side — closing the connection interrupts the
+blocked request/body-read port — instead of merely discarding a still-running
+call that keeps holding the user's key. The worker therefore terminates at/
+before the bound (bounded re-join), and repeated timeouts cannot accumulate
+live outbound threads. A timed-out call is NEVER allowed to produce a
+``ProviderResult`` afterwards: the outcome box is private to this adapter and
+discarded on timeout, so a late worker completion can never surface as a
+successful stale mutation to the controller.
+
+Phase30-fix DEF-018 — NO unhandled thread exception may escape the supervised
+worker. Every transport/body/streaming failure (``httpx.ReadTimeout``,
+``httpx.RemoteProtocolError``, ``httpx.ConnectError``, ``OSError``, ...) is
+reduced to the typed canonical path: ``FRONTIER_TIMEOUT`` when the wall-clock
+deadline has been reached, otherwise ``FRONTIER_PROVIDER_ERROR`` with a
+sanitized message (never the exception ``str()`` which may embed the URL).
+``generate()`` ALWAYS returns a ``ProviderResult`` or raises a
+``FrontierHttpError`` — never None.
+
+The module-level ``httpx`` name is a SMALL TRANSPORT SEAM
+(``_FrontierTransportSeam``): its ``post`` attribute is the injectable
+outbound dispatch (deterministic mocks replace it in tests), and its default
+implementation issues the POST through the dedicated per-call client,
+registering that client in the call's outcome box so the supervisor can abort
+it. The seam exposes the real httpx exception/class vocabulary unchanged.
+
+Phase30-fix (DEF-B) — canonical trusted stage schemas reach the wire. The
+controller attaches the server-owned per-stage output JSON Schema (from
+``prompts.json_schema_for_stage_output`` — a parser-shaped schema, see
+DEF-019) to the ``GenerateRequest``; when the registry entry declared the
+native ``openai_json_schema`` capability, the adapter sends the
+OpenAI-compatible ``response_format={"type": "json_schema", "json_schema":
+{...}}`` representation of THAT server-owned schema only. The browser can
+never supply or replace schema/response_format/endpoint/protocol — the
+``FrontierBlock`` accepts exactly ``provider/apiKey/model`` and everything
+else is registry + stage derived. Providers/entries without the capability
+(mode ``None``) keep the existing bounded prompt-embedded fallback and report
+``structuredOutput=false`` truthfully via ``last_structured_output``.
 """
 
 from __future__ import annotations
 
+import math
+import threading
 from typing import Any
 
-import httpx
+import httpx as _httpx
 
+from app.generation.clock import Clock, RealClock
 from app.generation.failure_codes import GenerationFailureCode
+from app.generation.frontier_registry import (
+    STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+)
 from app.generation.provider import (
     GenerateRequest,
-    GenerationStage,
     ProviderError,
     ProviderResult,
 )
@@ -67,6 +125,91 @@ MAX_FRONTIER_RESPONSE_BYTES = 256 * 1024  # 256 KiB
 # Documented default timeout when the caller does not supply one (the service
 # always passes the operator-configured FRONTIER_TIMEOUT_SECONDS).
 DEFAULT_FRONTIER_TIMEOUT_SECONDS = 60.0
+
+# The caller-thread poll quantum: how long the supervising thread may wait on
+# the worker before re-reading its monotonic clock. Small enough that a
+# fake/accelerated clock (tests) is re-read promptly; large enough not to
+# spin the CPU on every fast successful call.
+_WALL_CLOCK_POLL_QUANTUM_SECONDS = 0.02
+
+# The native OpenAI-compatible JSON Schema structured-output mode name (the
+# single supported member of ``FRONTIER_STRUCTURED_OUTPUT_MODES``). Sent ONLY
+# when the trusted registry entry declared it AND the stage carries a
+# server-owned schema.
+_FRONTIER_RESPONSE_FORMAT_JSON_SCHEMA = "openai_json_schema"
+
+
+class _ActiveCallState:
+    """Where the CURRENT supervised call lives.
+
+    ``box`` holds the private outcome box of the call being executed by THIS
+    thread (the worker). The real outbound seam reads it to register the
+    dedicated abortable client so the supervisor can reach it; a test-driven
+    mock reads it to register its own abort handle (same contract).
+    Thread-local: concurrent attempts A/B never cross-talk.
+    """
+
+    def __init__(self) -> None:
+        self.box: dict[str, Any] | None = None
+
+
+_ACTIVE_CALL: "threading.local[_ActiveCallState]" = threading.local()
+
+
+class _FrontierTransportSeam:
+    """The module-level ``httpx`` seam of the Frontier adapter.
+
+    ``post`` is the INJECTABLE outbound dispatch. Tests replace it with a
+    deterministic ``httpx.post``-compatible mock
+    (``fp_mod.httpx.post = mock``); the default implementation performs the
+    POST through a dedicated per-call ``httpx.Client`` so the supervising
+    caller thread can ABORT the in-flight outbound call at the wall-clock
+    deadline (Phase30-fix DEF-020) by closing that client — closing the
+    connection interrupts the blocked request/body read instead of merely
+    discarding a still-running call.
+
+    The dedicated client is registered in the CURRENT call's outcome box
+    (``_ACTIVE_CALL`` thread-local, set by the worker) so the supervisor can
+    find it. All other attributes expose the real httpx vocabulary
+    (``TimeoutException`` / ``RequestError`` / ``Client`` / ``Response`` / ...)
+    so the adapter's typed except clauses and tests behave byte-identically.
+    """
+
+    def __init__(self) -> None:
+        self.post = self._default_outbound_post
+        self.Client = _httpx.Client
+        self.Response = _httpx.Response
+        self.TimeoutException = _httpx.TimeoutException
+        self.RequestError = _httpx.RequestError
+        self.ReadTimeout = _httpx.ReadTimeout
+        self.RemoteProtocolError = _httpx.RemoteProtocolError
+        self.ConnectError = _httpx.ConnectError
+        self.StreamClosed = _httpx.StreamClosed
+
+    @staticmethod
+    def _default_outbound_post(
+        url: str,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ):
+        client = _httpx.Client(timeout=timeout)
+        state = getattr(_ACTIVE_CALL, "box", None)
+        if state is not None:
+            state["abort_client"] = client
+        try:
+            return client.post(url, json=json, headers=headers, timeout=timeout)
+        finally:
+            if state is not None and state.get("abort_client") is client:
+                state["abort_client"] = None
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 - the call was already aborted
+                pass
+
+
+# The module-level seam (tests patch ``fp_mod.httpx.post`` exactly as before).
+httpx: _FrontierTransportSeam = _FrontierTransportSeam()
 
 
 class FrontierHttpError(ProviderError):
@@ -112,6 +255,11 @@ class FrontierProvider:
     ``model`` the user's validated per-attempt model (Phase 30 BYOK).
     The key is never logged, never embedded in an exception and never
     serialized into any DTO / capability response / case material.
+
+    ``clock`` is the monotonic wall-clock source for the Phase30-fix deadline
+    (defaults to ``RealClock``; tests inject a manual clock).
+    ``structured_output_mode`` is the SERVER-OWNED registry capability
+    (``"openai_json_schema"`` or ``None``) — never a browser value.
     """
 
     def __init__(
@@ -121,12 +269,35 @@ class FrontierProvider:
         model: str,
         timeout_seconds: float = DEFAULT_FRONTIER_TIMEOUT_SECONDS,
         sink: Any = None,  # CompletionSink | None (interface compatibility)
+        clock: Clock | None = None,
+        structured_output_mode: str | None = None,
     ) -> None:
         self._endpoint_url = str(endpoint_url)
         self._api_key = str(api_key)
         self._model = str(model)
         self._timeout_seconds = float(timeout_seconds)
+        if (
+            not math.isfinite(self._timeout_seconds)
+            or self._timeout_seconds <= 0
+        ):
+            # DEF-022 — defense-in-depth: a non-finite/non-positive adapter
+            # timeout would poison ``deadline``/``join`` (nan) or disable the
+            # wall-clock bound (inf). Settings already bound 5..300; this keeps
+            # the invariant at the adapter surface too.
+            raise ValueError(
+                "FrontierProvider timeout_seconds must be a finite positive "
+                "number"
+            )
         self._sink = sink
+        self._clock: Clock = clock if clock is not None else RealClock()
+        self._structured_output_mode = (
+            str(structured_output_mode) if structured_output_mode is not None else None
+        )
+        # Truthful per-call telemetry: the structured-output mechanism that was
+        # actually requested for the LAST call (``"openai_json_schema"`` when a
+        # native ``response_format`` was attached, else ``None``). The
+        # controller reads it to report ``structuredOutput`` truthfully.
+        self.last_structured_output: str | None = None
 
     # -- Provider protocol ---------------------------------------------------
 
@@ -136,58 +307,251 @@ class FrontierProvider:
             "messages": [{"role": "user", "content": self._prompt_for(request)}],
         }
         headers = {"Authorization": f"Bearer {self._api_key}"}
-        try:
-            timeout_seconds = float(
-                request.timeout_seconds
-                if request.timeout_seconds is not None
-                else self._timeout_seconds
+        timeout_seconds = float(
+            request.timeout_seconds
+            if request.timeout_seconds is not None
+            else self._timeout_seconds
+        )
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            # DEF-022 — the effective timeout is always finite and positive
+            # (GenerateRequest rejects non-finite/<=0 values; this is the
+            # belt-and-braces guard so nan/inf can never reach
+            # ``deadline``/``join``). No meaningful call may start.
+            raise FrontierHttpError(
+                "provider request timed out",
+                code=GenerationFailureCode.FRONTIER_TIMEOUT,
             )
-            response = httpx.post(
-                self._endpoint_url,
-                json=body,
-                headers=headers,
-                timeout=timeout_seconds,
-            )
-        except httpx.TimeoutException:
+        # Phase30-fix DEF-B — native structured output from the SERVER-OWNED
+        # stage schema only. The schema travels on the request (attached by
+        # ``pipeline.build_request`` from the canonical local contract — a
+        # parser-shaped stage-output schema, DEF-019); it is sent only when the
+        # trusted registry entry declared the matching adapter/protocol
+        # capability. The browser never influences this body. A negative case
+        # keeps the existing prompt-embedded fallback.
+        native_structured = (
+            self._structured_output_mode
+            == STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA
+            and isinstance(request.json_schema, dict)
+        )
+        if native_structured:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": request.schema_id or f"generation_{request.stage.value}",
+                    "schema": request.json_schema,
+                },
+            }
+        self.last_structured_output = (
+            _FRONTIER_RESPONSE_FORMAT_JSON_SCHEMA if native_structured else None
+        )
+
+        # Phase30-fix DEF-A — real wall-clock deadline around the ENTIRE
+        # outbound operation (connect / write / upstream / headers / body /
+        # decode). The supervising caller thread is what makes the TOTAL
+        # bounded; the worker's own per-phase httpx timeout is only a floor.
+        deadline = float(self._clock.now()) + timeout_seconds
+        # Outcome box (PRIVATE to this call): ``error``/``result`` are set only
+        # by the worker; ``done`` is the "every path completed" contract guard;
+        # ``abort_client`` is the dedicated client the supervisor closes at the
+        # deadline (DEF-020) or a test-registered abort handle.
+        box: dict[str, Any] = {"done": False, "result": None, "error": None}
+
+        def _run() -> None:
+            # Associate THIS call with the outbound seam (thread-local), so a
+            # real transport registers its dedicated client here and the
+            # supervisor can abort it; a test mock uses the same slot.
+            state = _ACTIVE_CALL
+            state.box = box
+            try:
+                try:
+                    response = httpx.post(
+                        self._endpoint_url,
+                        json=body,
+                        headers=headers,
+                        timeout=timeout_seconds,
+                    )
+                except httpx.TimeoutException:
+                    box["error"] = FrontierHttpError(
+                        f"provider request timed out after {timeout_seconds}s",
+                        code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                    )
+                    return
+                except httpx.RequestError as exc:
+                    # PD-SEC-06: str(exc) may embed the request URL — never
+                    # surface it.
+                    box["error"] = FrontierHttpError(
+                        f"provider request failed: {type(exc).__name__}",
+                        code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - DEF-018
+                    box["error"] = self._classify_transport_failure(
+                        exc, "provider request", deadline
+                    )
+                    return
+                if not (200 <= response.status_code < 300):
+                    # PD-SEC-06: the response body may carry provider/vendor
+                    # error content — reduce it to the sanitized status band
+                    # only.
+                    box["error"] = FrontierHttpError(
+                        f"provider failure: HTTP {response.status_code}",
+                        code=frontier_failure_code_for_status(response.status_code),
+                    )
+                    return
+                try:
+                    text = self._read_bounded(response, deadline)
+                except FrontierHttpError as exc:
+                    box["error"] = exc
+                    return
+                except Exception as exc:  # noqa: BLE001 - DEF-018
+                    # A mid-body/streaming transport failure
+                    # (httpx.ReadTimeout / RemoteProtocolError / ConnectError /
+                    # OSError ...) reduced to the canonical typed path.
+                    box["error"] = self._classify_transport_failure(
+                        exc, "provider response body read", deadline
+                    )
+                    return
+                if text is None:
+                    box["error"] = FrontierHttpError(
+                        "provider response exceeded the size cap",
+                        code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
+                    )
+                    return
+                box["result"] = ProviderResult(content=text)
+            except Exception as exc:  # noqa: BLE001 - absolute safety net
+                # DEF-018: NO exception may escape the supervised worker with
+                # the box incomplete; every conceivable failure lands as a
+                # typed result.
+                box["error"] = self._classify_transport_failure(
+                    exc,
+                    "provider request",
+                    deadline,
+                )
+            finally:
+                box["done"] = True
+                state.box = None
+
+        worker = threading.Thread(
+            target=_run,
+            name="frontier-provider-%s" % request.stage.value,
+            daemon=True,
+        )
+        worker.start()
+        while worker.is_alive():
+            remaining = deadline - float(self._clock.now())
+            if remaining <= 0:
+                # DEF-020: the wall-clock deadline expired while the outbound
+                # call was still in flight — ABORT the in-flight call (close
+                # the dedicated client so the blocked request/stream is
+                # interrupted and the worker terminates at/before the bound)
+                # instead of merely discarding a still-running call, then
+                # raise the canonical timeout.
+                self._abort_in_flight(box)
+                raise FrontierHttpError(
+                    f"provider request timed out after {timeout_seconds}s",
+                    code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                ) from None
+            worker.join(timeout=min(remaining, _WALL_CLOCK_POLL_QUANTUM_SECONDS))
+        # The worker finished. DEF-021: success is contractually returned only
+        # STRICTLY BEFORE the wall-clock deadline — a completion observed at or
+        # after the deadline (e.g. the worker died inside the final join window
+        # that began while remaining > 0) is classified as the canonical
+        # timeout, never a late success.
+        if float(self._clock.now()) >= deadline:
+            self._abort_in_flight(box)
             raise FrontierHttpError(
                 f"provider request timed out after {timeout_seconds}s",
                 code=GenerationFailureCode.FRONTIER_TIMEOUT,
             ) from None
-        except httpx.RequestError as exc:
-            # PD-SEC-06: str(exc) may embed the request URL — never surface it.
+        if box["error"] is not None:
+            raise box["error"]
+        if box["result"] is None:
+            # DEF-018 — the Provider protocol NEVER yields None: a worker that
+            # ended without a typed outcome (impossible after the safety net,
+            # kept as a belt-and-braces invariant) fails closed instead of
+            # returning None to the controller.
             raise FrontierHttpError(
-                f"provider request failed: {type(exc).__name__}",
+                "provider request failed: empty result",
                 code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
-            ) from None
-        if not (200 <= response.status_code < 300):
-            # PD-SEC-06: the response body may carry provider/vendor error
-            # content — reduce it to the sanitized status band only, and carry
-            # the normalized code so the controller can classify the attempt.
-            raise FrontierHttpError(
-                f"provider failure: HTTP {response.status_code}",
-                code=frontier_failure_code_for_status(response.status_code),
-            ) from None
-        text = self._read_bounded(response)
-        if text is None:
-            raise FrontierHttpError(
-                "provider response exceeded the size cap",
-                code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
-            ) from None
-        return ProviderResult(content=text)
+            )
+        return box["result"]
 
-    def _read_bounded(self, response: httpx.Response) -> str | None:
-        """Read at most ``MAX_FRONTIER_RESPONSE_BYTES`` bytes (PD-SEC-09).
+    def _classify_transport_failure(
+        self, exc: Exception, phase: str, deadline: float
+    ) -> FrontierHttpError:
+        """DEF-018 — reduce an outbound/body/streaming failure to the canonical
+        typed path: ``FRONTIER_TIMEOUT`` when the wall-clock deadline has been
+        reached, otherwise ``FRONTIER_PROVIDER_ERROR`` with a sanitized message
+        (the exception class name only — never ``str(exc)`` which may embed the
+        request URL). The deadline check reads the SAME injected clock the
+        supervisor uses, so manual/fake-clock tests stay deterministic.
+        """
+        if float(self._clock.now()) >= deadline:
+            return FrontierHttpError(
+                f"{phase} timed out",
+                code=GenerationFailureCode.FRONTIER_TIMEOUT,
+            )
+        return FrontierHttpError(
+            f"{phase} failed: {type(exc).__name__}",
+            code=GenerationFailureCode.FRONTIER_PROVIDER_ERROR,
+        )
+
+    @staticmethod
+    def _abort_in_flight(box: dict[str, Any]) -> None:
+        """DEF-020 — abort the in-flight outbound call (best effort).
+
+        The real outbound seam registers the call's dedicated ``httpx.Client``
+        in ``box["abort_client"]``; closing it from the supervising thread
+        interrupts the blocked request/body read. Test mocks register their own
+        abort handle in the same slot (same ``close()``-based contract). The
+        call is aborted only after the deadline; its result was structurally
+        discarded before this point.
+        """
+        client = box.get("abort_client")
+        box["abort_client"] = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 - abort is best-effort
+                pass
+
+    def _read_bounded(self, response: httpx.Response, deadline: float) -> str | None:
+        """Read at most ``MAX_FRONTIER_RESPONSE_BYTES`` bytes (PD-SEC-09) but
+        never past the wall-clock ``deadline`` (Phase30-fix DEF-A).
 
         An over-cap body is NOT buffered: reading stops, and the size-cap error
-        is returned (clean failure instead of unbounded memory use).
+        is returned (clean failure instead of unbounded memory use). When the
+        deadline passes mid-read, the wall-clock timeout error is raised so the
+        supervised worker exits promptly at the bound instead of dribbling on a
+        slow socket long past it.
+
+        DEF-018 — every mid-body/streaming transport exception (``httpx.ReadTimeout``,
+        ``httpx.RemoteProtocolError``, ``httpx.ConnectError``, ``OSError``, ...)
+        is reduced here to the canonical typed path: ``FRONTIER_TIMEOUT`` when
+        the wall-clock deadline has been reached, otherwise
+        ``FRONTIER_PROVIDER_ERROR`` with a sanitized message (the exception
+        class name only, never ``str(exc)``). No unhandled exception may escape
+        the supervised worker.
         """
         total = 0
         chunks: list[bytes] = []
-        for chunk in response.iter_bytes(65536):
-            total += len(chunk)
-            if total > MAX_FRONTIER_RESPONSE_BYTES:
-                return None
-            chunks.append(chunk)
+        try:
+            for chunk in response.iter_bytes(65536):
+                if float(self._clock.now()) >= deadline:
+                    raise FrontierHttpError(
+                        "provider request timed out",
+                        code=GenerationFailureCode.FRONTIER_TIMEOUT,
+                    )
+                total += len(chunk)
+                if total > MAX_FRONTIER_RESPONSE_BYTES:
+                    return None
+                chunks.append(chunk)
+        except FrontierHttpError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - DEF-018
+            raise self._classify_transport_failure(
+                exc, "provider response body read", deadline
+            ) from None
         return b"".join(chunks).decode("utf-8", errors="replace")
 
     # -- private --------------------------------------------------------------
