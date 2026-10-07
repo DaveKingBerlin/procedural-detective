@@ -120,6 +120,28 @@ describe("landing page", () => {
   });
 });
 
+describe("landing page — Phase 32 Load Case", () => {
+  it("presents a Load Case action with a .pdcase-capable native file picker", () => {
+    const html = renderHome();
+    expect(html).toContain(`data-testid="load-case"`);
+    expect(html).toMatch(/type="file"[^>]*accept="\.pdcase,application\/vnd\.procedural-detective\.case\+json,application\/json"/);
+    expect(html).not.toContain(`data-testid="load-case" href=`);
+  });
+
+  it("lists the three Phase 32 §1 landing actions", () => {
+    const html = renderHome();
+    expect(html).toContain(`data-testid="new-investigation"`);
+    expect(html).toContain(`data-testid="try-demo"`);
+    expect(html).toContain(`data-testid="load-case"`);
+  });
+
+  it("renders no load error and no busy state at rest", () => {
+    const html = renderHome();
+    expect(html).not.toContain(`data-testid="load-case-error"`);
+    expect(html).not.toContain(`data-testid="load-case-busy"`);
+  });
+});
+
 describe("landing page — Phase 21 F-03 read-only generation-mode display", () => {
   const renderWithCaps = (capabilities: GenerationCapabilitiesResponse | null): string =>
     renderToStaticMarkup(

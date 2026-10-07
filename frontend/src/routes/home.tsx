@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, useNavigate, useOutletContext } from "react-router";
 import type { BackendStatus } from "../hooks/useBackendStatus";
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
@@ -11,6 +12,9 @@ import {
   providerPathNoteFromCapabilities,
   providerQualifierFromCapabilities,
 } from "../journey/providerMode";
+import { loadSavegameFile } from "../savegame/loadCase";
+import type { LoadCaseFile } from "../savegame/loadCase";
+import { startReplay } from "../savegame/replaySession";
 
 /**
  * "/" — the public landing page (Phase 8 D, REQUIREMENTS 3.1).
@@ -69,6 +73,11 @@ export default function Home(overrides: HomeProps = {}) {
   const capabilities =
     overrides.capabilities !== undefined ? overrides.capabilities : fetchedCapabilities;
   const { state, message, readiness } = outletStatus;
+  // Phase 32 — `Load Case` intake state (bounded error copy only; the file
+  // picker itself is the hidden native input below).
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadBusy, setLoadBusy] = useState(false);
+  const [fileInputKey, setFileInputKey] = useState(0);
 
   const startDemo = () => {
     // Phase 28 — the random three-fixture Demo pool applies ONLY when the
@@ -84,6 +93,27 @@ export default function Home(overrides: HomeProps = {}) {
     if (demoCaseId !== undefined) params.demoCaseId = demoCaseId;
     setJourneyParams(params);
     navigate("/generating");
+  };
+
+  // Phase 32 — load an uploaded `.pdcase`: size-precheck -> strict parse ->
+  // fresh replay -> straight into the existing case player. Picker cancel is
+  // not an error (no onChange file). The file value is reset afterwards so
+  // the SAME file can be loaded repeatedly.
+  const handleLoadFile = (file: LoadCaseFile | null) => {
+    setLoadError(null);
+    if (file === null) return;
+    setLoadBusy(true);
+    void loadSavegameFile(file).then((outcome) => {
+      setLoadBusy(false);
+      if (outcome.ok) {
+        startReplay(outcome.definition);
+        setFileInputKey((key) => key + 1);
+        navigate("/scene");
+      } else {
+        setLoadError(outcome.message);
+        setFileInputKey((key) => key + 1);
+      }
+    });
   };
 
   return (
@@ -105,7 +135,47 @@ export default function Home(overrides: HomeProps = {}) {
         >
           {demoCtaLabel(capabilities)}
         </button>
+        {/* Phase 32 — Load Case: native file picker (accept .pdcase / the
+            canonical MIME / plain JSON), strict import, fresh replay. */}
+        <button
+          type="button"
+          className="landing-button"
+          data-testid="load-case"
+          onClick={() => {
+            const input = document.getElementById("pd-load-case-input");
+            if (input !== null && typeof (input as HTMLInputElement).click === "function") {
+              (input as HTMLInputElement).click();
+            }
+          }}
+        >
+          Load Case
+        </button>
+        <input
+          key={fileInputKey}
+          id="pd-load-case-input"
+          type="file"
+          accept=".pdcase,application/vnd.procedural-detective.case+json,application/json"
+          className="visually-hidden"
+          data-testid="load-case-input"
+          aria-label="Load a Procedural Detective savegame (.pdcase) file"
+          onChange={(event) => {
+            const file = event.target.files !== null ? event.target.files[0] : undefined;
+            handleLoadFile(file ?? null);
+          }}
+        />
       </div>
+      {/* Phase 32 — bounded load-error copy (Phase32 §26): cancel never
+          renders here, busy never blocks the picker. */}
+      {loadError !== null && (
+        <p className="landing-load-error" data-testid="load-case-error" role="alert">
+          {loadError}
+        </p>
+      )}
+      {loadBusy && (
+        <p className="landing-load-busy" data-testid="load-case-busy" role="status">
+          Loading the saved case…
+        </p>
+      )}
       {/* ADV-152 — honest app-level provider qualifier right below the primary
           CTA: the REQUIREMENTS §62 tagline stays verbatim, and this note makes
           the provider story unambiguous (Phase 18A: derived from the backend

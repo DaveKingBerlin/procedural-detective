@@ -4,6 +4,9 @@ import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvidenceReadResultDTO, InteractionResultDTO } from "../api/types";
+import { clearReplay, replayStorageNamespace, startReplay } from "../savegame/replaySession";
+import { parseSavegameV1, utf8ByteLength } from "../savegame/savegameV1";
+import canonical from "../savegame/fixtures/v1_demo_apartment.pdcase.json";
 import type { RenderOptions } from "../scene/renderInvestigation";
 import { makeBootstrap, makeForkWorldObject } from "../scene/testFixtures";
 
@@ -160,6 +163,9 @@ vi.mock("../scene/renderInvestigation", async (importOriginal) => {
 });
 
 import ScenePage from "./scene";
+
+/** Phase 32 — the canonical server export used for replay-mount tests. */
+const CANONICAL_TEXT: string = JSON.stringify(canonical);
 
 // React's test utilities flag the act(...) environment; without this every
 // act() call would also print "not configured to support act(...)" noise.
@@ -410,5 +416,76 @@ describe("Phase 19F — /scene accessibility fallback (universal inspectable but
     expect(toastText(container())).toBe("Nothing relevant was found on the Vase.");
     expect(container().querySelector('[data-testid^="discovered-entry-"]')).toBeNull();
     expect(container().querySelector('[data-testid="object-inspected-vase_01"]')).not.toBeNull();
+  });
+});
+
+describe("Phase 32 DEF-045 — replay notebook/pin restore uses the PER-FILE namespace", () => {
+  let mounted: Mounted | null = null;
+
+  beforeEach(() => {
+    holders.bootstrap = makeSceneBootstrap();
+    holders.lastOnPick = null;
+    holders.laptopClicks = 0;
+  });
+
+  afterEach(() => {
+    const root = mounted?.root;
+    mounted = null;
+    holders.lastOnPick = null;
+    if (root) act(() => root.unmount());
+    clearReplay();
+    window.localStorage.clear();
+  });
+
+  it("restores pins from the per-file namespace, never the static saved-replay key", async () => {
+    // A replay of the canonical fixture is active when the scene mounts.
+    const definition = parseSavegameV1(CANONICAL_TEXT, utf8ByteLength(CANONICAL_TEXT));
+    const namespace = replayStorageNamespace(definition);
+
+    // Decoy content under the OLD static shared key (what the pre-fix route
+    // would read when restoring pins during a replay).
+    window.localStorage.setItem(
+      "pd_hypothesis_v1:saved-replay",
+      JSON.stringify({ suspect: "michael_carter", motive: null, weapon: null, time: null }),
+    );
+    // The replay file's OWN per-file namespace carries its real pins.
+    window.localStorage.setItem(
+      `pd_hypothesis_v1:${namespace}`,
+      JSON.stringify({ suspect: "thomas_reed", motive: "cover_up_embezzlement", weapon: "kitchen_knife", time: "22:17" }),
+    );
+
+    startReplay(definition);
+    mounted = mountScene();
+    await flushAsync();
+    await waitForReady(mounted.container);
+
+    // The notebook opens with the PER-FILE pins ("thomas_reed"), not the
+    // static-key decoy ("michael_carter") — a different loaded file must
+    // never bleed its notes in.
+    const suspectSelect = mounted.container.querySelector(
+      '[data-testid="hypothesis-suspect-select"]',
+    ) as HTMLSelectElement | null;
+    expect(suspectSelect?.value).toBe("thomas_reed");
+    // The static namespace is never read nor modified by the route.
+    expect(window.localStorage.getItem("pd_hypothesis_v1:saved-replay")).toContain("michael_carter");
+  });
+
+  it("a replay boot touches NO live playthrough namespace", async () => {
+    const definition = parseSavegameV1(CANONICAL_TEXT, utf8ByteLength(CANONICAL_TEXT));
+    const livePins = JSON.stringify({ suspect: "michael_carter", motive: null, weapon: null, time: null });
+    window.localStorage.setItem("pd_hypothesis_v1:PT-test-0001", livePins);
+
+    startReplay(definition);
+    mounted = mountScene();
+    await flushAsync();
+    await waitForReady(mounted.container);
+
+    // The live namespace keeps its exact bytes — replay start/restore never
+    // writes into or clears a live playthrough's player notes.
+    expect(window.localStorage.getItem("pd_hypothesis_v1:PT-test-0001")).toBe(livePins);
+    // A pure replay boot persists NOTHING: no imported case/truth bytes, no
+    // per-file note keys (the player has not pinned/interviewed anything yet).
+    // The ONLY entry is the pre-seeded live playthrough namespace.
+    expect(Object.keys(window.localStorage).sort()).toEqual(["pd_hypothesis_v1:PT-test-0001"]);
   });
 });

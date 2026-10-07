@@ -10,6 +10,13 @@ import EvidencePanel from "../evidence/evidencePanel";
 import { evidencePreviewFor, type EvidencePreviewModel } from "../evidence/evidencePreview";
 import type { InvestigationSceneModel } from "../scene/buildInvestigationScene";
 import {
+  activeReplay,
+  clearReplay,
+  replayOrLivePlaythroughId,
+} from "../savegame/replaySession";
+import { buildReplayServices } from "../savegame/replayRuntime";
+import { REPLAY_PLAYTHROUGH_ID } from "../savegame/savegameV1";
+import {
   objectiveText,
   summarizeDiscovery,
   summaryFromSession,
@@ -97,7 +104,7 @@ export default function ScenePage() {
    */
   const [notebookOpen, setNotebookOpen] = useState(true);
   const [notebookRev, setNotebookRev] = useState(0);
-  const [pins, setPins] = useState<HypothesisPins>(() => loadHypothesis(getPlaythroughId() ?? ""));
+  const [pins, setPins] = useState<HypothesisPins>(() => loadHypothesis(replayOrLivePlaythroughId()));
   /**
    * Phase 23 — the witness whose interview panel is open (null = closed).
    * The panel is opened from the 3D ON_SCENE person pick, from the "Objects
@@ -113,6 +120,8 @@ export default function ScenePage() {
    * explicit React observation point for panel markers and notebook entries.
    */
   const [witnessRevision, setWitnessRevision] = useState(0);
+  /** Phase 32 — the active saved replay (null during a live playthrough). */
+  const replay = activeReplay() ?? undefined;
 
   const retry = () => {
     setRunId((n) => n + 1);
@@ -239,7 +248,7 @@ export default function ScenePage() {
     if (outcome.ok) {
       if (!outcome.cached) {
         setHasInteracted(true);
-        const playthroughId = getPlaythroughId();
+        const playthroughId = replayOrLivePlaythroughId();
         if (playthroughId) {
           saveWitnessStatements(
             playthroughId,
@@ -288,12 +297,17 @@ export default function ScenePage() {
   };
 
   useEffect(() => {
-    const token = getPlaythroughToken();
-    const playthroughId = getPlaythroughId();
-    if (!token || !playthroughId) {
+    const isReplay = replay !== undefined;
+    const token = isReplay ? "" : getPlaythroughToken();
+    const storedPlaythroughId = isReplay ? REPLAY_PLAYTHROUGH_ID : getPlaythroughId();
+    if (!isReplay && (token === null || token === "" || !storedPlaythroughId)) {
       setStatus({ status: "no-token" });
       return;
     }
+    // Non-null after the guard above: the replay synthetic id / empty token
+    // are valid "opaque" credentials for the in-memory services.
+    const playthroughId = storedPlaythroughId ?? REPLAY_PLAYTHROUGH_ID;
+    const sessionToken = token ?? "";
     const canvas = canvasRef.current;
     if (!canvas) {
       setStatus({
@@ -320,18 +334,26 @@ export default function ScenePage() {
     sceneHandleRef.current = null;
     // Phase 18C: the notebook reloads THIS playthrough's player pins (the
     // localStorage namespace is per-playthrough, so a different playthrough
-    // cannot bleed pins in).
-    setPins(loadHypothesis(playthroughId));
+    // cannot bleed pins in). Phase 32 (DEF-045 / ADV-32F-04): a saved-case
+    // replay must restore from the PER-FILE namespace, never the synthetic
+    // session id — `replayOrLivePlaythroughId()` resolves the per-file replay
+    // key while the replay is active and the live playthrough id otherwise.
+    setPins(loadHypothesis(replayOrLivePlaythroughId()));
     setNotebookOpen(true);
 
     // PD-SEC-01: interactObject is the ONLY discovery entry (the direct
     // evidence discover route is removed server-side).
     // Phase 23: interviewWitness powers the witness interview flow (optional
     // in the session — pre-23 backends simply render no witness UI).
-    const services = { getInvestigation, interactObject, readRecord, interviewWitness };
+    // Phase 32: a saved-case replay substitutes the SAME interface with
+    // in-memory services (zero network; synthetic id/empty token ignored).
+    const services =
+      replay !== undefined
+        ? buildReplayServices(replay.state)
+        : { getInvestigation, interactObject, readRecord, interviewWitness };
     const session = new InvestigationSession(
       services,
-      token,
+      sessionToken,
       (sceneCanvas, model) => {
         const result = createInvestigationScene(sceneCanvas, model, {
           onPick: (objectId) => {
@@ -376,9 +398,12 @@ export default function ScenePage() {
       if (outcome.ok) {
         // Neutral answers create no server knowledge row. Restore only the
         // bounded answers that this player already saw, after the authenticated
-        // bootstrap established the allowlisted witness identities.
+        // bootstrap established the allowlisted witness identities. Phase 32
+        // (DEF-045 / ADV-32F-04): a replay uses the PER-FILE namespace, never
+        // the static "saved-replay" id, so statements from another loaded case
+        // can never leak into this one.
         session.restoreAskedWitnessStatements(
-          loadWitnessStatements(playthroughId, session.witnessesSnapshot()),
+          loadWitnessStatements(replayOrLivePlaythroughId(), session.witnessesSnapshot()),
         );
         sessionRef.current = session;
         setStatus({ status: "ready", model: outcome.model });
@@ -511,7 +536,7 @@ export default function ScenePage() {
   /** Persist player-authored pins ONLY (namespaced localStorage per playthrough). */
   const handlePinsChanged = (next: HypothesisPins) => {
     setPins(next);
-    const playthroughId = getPlaythroughId();
+    const playthroughId = replayOrLivePlaythroughId();
     if (playthroughId) saveHypothesis(playthroughId, next);
   };
 
@@ -578,6 +603,28 @@ export default function ScenePage() {
   return (
     <section className="page scene">
       <h2>Investigation</h2>
+
+      {/* Phase 32 — a saved-case replay shows a subtle source label + a
+          Back to Main Menu action (Phase32 §36). Leaving the replay clears
+          only the in-memory replay; live server credentials stay untouched. */}
+      {replay !== undefined && (
+        <div className="replay-source-bar" data-testid="replay-source-bar">
+          <span className="replay-source-label" data-testid="replay-source-label">
+            Saved Case
+          </span>
+          <button
+            type="button"
+            className="replay-source-menu"
+            data-testid="replay-back-to-menu"
+            onClick={() => {
+              clearReplay();
+              void navigate("/");
+            }}
+          >
+            Back to Main Menu
+          </button>
+        </div>
+      )}
 
       {status.status === "no-token" && <NoTokenState />}
 

@@ -26,6 +26,18 @@ state-changing POST would violate the pinned contract for zero product value,
 so the documented behavior stands — a side-effect-bearing GET that performs
 the ACCUSED->REVEALED transition idempotently, with the very first read
 persisting the transition in the same store transaction. NO ENDPOINT CHANGE.
+
+Phase 32 addition:
+
+- ``GET /playthroughs/{playthrough_id}/savegame`` — the REVEAL-GATED export
+  of the portable ``.pdcase`` ``SavegameV1`` document (Phase32-SALC-R §5/§8;
+  ``app.services.savegame``). It requires the playthrough's own
+  playthroughAccessToken and is available ONLY from ``{ACCUSED, REVEALED}``
+  (else ``403 REVEAL_NOT_AVAILABLE`` — the SAME gate as reveal, so the
+  replay truth is never exportable before the truth was legitimately
+  revealed). The response body IS the allowlisted SavegameV1 JSON document
+  served with the canonical MIME type; no playthrough/creator token and no
+  internal payload material is ever included.
 """
 
 from __future__ import annotations
@@ -33,7 +45,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.api.v1.errors import http_error, map_service_error
 from app.auth import require_playthrough
@@ -47,6 +59,14 @@ from app.services.accusation import (
     AccusationService,
     AccusationValidationError,
     RevealNotAvailableError,
+)
+from app.services.savegame import (
+    SAVEGAME_MIME_TYPE,
+    SavegameService,
+    SavegameTooLargeError,
+    SavegameUnavailableError,
+    savegame_filename,
+    serialize_savegame_v1,
 )
 
 router = APIRouter(prefix="/playthroughs", tags=["playthroughs"])
@@ -242,3 +262,93 @@ def get_reveal(
     except Exception as exc:  # noqa: BLE001 - envelope everything sanitized
         raise map_service_error(exc) from None
     return RevealResponseDTO(**result)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 32 — REVEAL-GATED portable savegame export (SavegameV1 / .pdcase)
+# --------------------------------------------------------------------------- #
+
+
+def _savegame_service(request: Request) -> SavegameService:
+    """One SavegameService over the app's store + clock (read-only)."""
+    return SavegameService(
+        store=request.app.state.store,
+        clock=request.app.state.clock,
+    )
+
+
+def _translate_savegame_error(exc: Exception) -> HTTPException:
+    """Savegame service errors -> the shared sanitized envelope.
+
+    ``SavegameUnavailableError`` answers the SAME 403 REVEAL_NOT_AVAILABLE as
+    the reveal gate (the export is a reveal-gated projection); a missing
+    pinned version answers the generic 404; an over-bound projection and any
+    unknown error answer the sanitized 500 INTERNAL_ERROR (never leaking the
+    reason).
+    """
+    if isinstance(exc, SavegameUnavailableError):
+        return http_error(403, "REVEAL_NOT_AVAILABLE", "Reveal is not available yet")
+    if isinstance(exc, AccusationNotFoundError):
+        return http_error(404, "NOT_FOUND", "Not found")
+    if isinstance(exc, (SavegameTooLargeError, ValueError)):
+        return http_error(500, "INTERNAL_ERROR", "Internal server error")
+    return http_error(500, "INTERNAL_ERROR", "Internal server error")
+
+
+@router.get(
+    "/{playthrough_id}/savegame",
+    responses={
+        200: {
+            "description": "The portable SavegameV1 JSON document (.pdcase). "
+            "The body IS the allowlisted savegame; it contains NO server "
+            "secrets and NO internal CaseTruth object.",
+            "content": {
+                SAVEGAME_MIME_TYPE: {
+                    "schema": {"type": "object"},
+                }
+            },
+        },
+        403: {
+            "description": "REVEAL_NOT_AVAILABLE — the playthrough lifecycle "
+            "is not {ACCUSED, REVEALED} (the export is reveal-gated)."
+        },
+    },
+    summary="Export the portable .pdcase savegame (reveal-gated)",
+    description=(
+        "Requires the playthrough's own playthroughAccessToken. The export is "
+        "ONLY available once THE TRUTH has legitimately been revealed — the "
+        "playthrough lifecycle must be {ACCUSED, REVEALED} (else 403 "
+        "REVEAL_NOT_AVAILABLE, the SAME gate as the reveal endpoint; the "
+        "replay truth is never projectable pre-reveal). The response body is "
+        "the SavegameV1 JSON document served with the canonical MIME type "
+        "application/vnd.procedural-detective.case+json: metadata, the "
+        "player-safe public case + bootstrap projections, the full evidence "
+        "records and the explicit ReplayTruthV1 allowlist. STRICT ALLOWLIST: "
+        "no solver proof, no prompt, no provider/seed/model, no CaseTruth "
+        "serialization, no session/token material. Purely a read — never "
+        "mutates the payload or the database."
+    ),
+)
+def get_savegame(
+    playthrough_id: str,
+    request: Request,
+    row: Annotated[Playthrough, Depends(require_playthrough)] = None,
+) -> Response:
+    service = _savegame_service(request)
+    try:
+        document = service.get_export_dict(row)
+        text = serialize_savegame_v1(document)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - envelope everything sanitized
+        raise _translate_savegame_error(exc) from None
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="{savegame_filename(row.case_id)}"'
+        )
+    }
+    return Response(
+        content=text,
+        media_type=SAVEGAME_MIME_TYPE,
+        headers=headers,
+    )

@@ -19,6 +19,7 @@ import type {
   WitnessInterviewResponse,
   WitnessQuestionType,
 } from "./types";
+import { savegameFilenameFor } from "../savegame/exportV1";
 
 /**
  * Minimal request body for POST /api/v1/cases. The difficulty label is
@@ -440,6 +441,77 @@ export function getReveal(playthroughId: string, token: string): Promise<RevealR
     `/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/reveal`,
     token,
   );
+}
+
+/* ======================================================================
+ * Phase 32 — reveal-gated portable savegame export (`.pdcase`).
+ * ==================================================================== */
+
+/** The raw export payload of GET .../savegame: the server-owned allowlist
+ *  TEXT (byte-preserving for the download) + a suggested safe filename
+ *  (Content-Disposition, else a bounded default). */
+export interface SavegameExportResponse {
+  text: string;
+  suggestedFilename: string;
+}
+
+/**
+ * GET {base}/api/v1/playthroughs/{playthrough_id}/savegame
+ * (Bearer playthroughAccessToken) -> 200 the canonical SavegameV1 JSON text
+ * with the canonical MIME + an attachment Content-Disposition carrying the
+ * suggested filename. 403 REVEAL_NOT_AVAILABLE until the playthrough is
+ * ACCUSED/REVEALED (the SAME gate as the reveal endpoint).
+ *
+ * The text is returned EXACTLY as served (the client downloads the
+ * byte-preserving blob); the suggested filename is the endpoint's
+ * Content-Disposition value, falling back to a sanitized
+ * `procedural-detective-case-<caseId>.pdcase` default.
+ */
+export async function getSavegame(playthroughId: string, token: string): Promise<SavegameExportResponse> {
+  const response = await fetchWithTimeout(
+    apiUrl(`/api/v1/playthroughs/${encodeURIComponent(playthroughId)}/savegame`),
+    REQUEST_TIMEOUT_MS,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!response.ok) {
+    throw await toApiError(response);
+  }
+  const text = await response.text();
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  let suggestedFilename: string | null = null;
+  if (match !== null && match[1] !== "") {
+    suggestedFilename = match[1];
+  }
+  if (suggestedFilename === null) {
+    suggestedFilename = savegameFilenameFor(caseIdFromSavegameText(text));
+  }
+  return { text, suggestedFilename };
+}
+
+/**
+ * Best-effort `case.metadata.sourceCaseId` extraction for the fallback
+ * filename only. The savegame is server-owned at this point but still
+ * parsed defensively — any failure degrades to the neutral "case" base.
+ */
+function caseIdFromSavegameText(text: string): string {
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed === "object" && parsed !== null) {
+      const root = parsed as Record<string, unknown>;
+      const caseBlock = root.case;
+      if (typeof caseBlock === "object" && caseBlock !== null) {
+        const metadata = (caseBlock as Record<string, unknown>).metadata;
+        if (typeof metadata === "object" && metadata !== null) {
+          const sourceCaseId = (metadata as Record<string, unknown>).sourceCaseId;
+          if (typeof sourceCaseId === "string" && sourceCaseId !== "") return sourceCaseId;
+        }
+      }
+    }
+  } catch {
+    // fall through to the neutral default
+  }
+  return "case";
 }
 
 /* ======================================================================
