@@ -1,0 +1,1366 @@
+import type {
+  AccusationCandidatesDTO,
+  EvidenceRenderType,
+  WitnessListEntryDTO,
+  WorldObjectDTO,
+} from "../api/types";
+import {
+  ValidationError,
+  validateAccusationCandidates,
+  validateWitnessListEntry,
+  validateWorldObject,
+} from "../scene/validation";
+import { isWitnessQuestionType } from "../witness/witnessModel";
+import { SavegameTimeError, parseIso8601 } from "./savegameTime";
+
+/**
+ * SavegameV1 — the strict import pipeline for a portable `.pdcase` file
+ * (Phase 32, ADR-003).
+ *
+ * Every uploaded file is ATTACKER-CONTROLLED (Phase32 §18): the whole parse
+ * is `parse -> validate -> normalize`, typed errors only, and NO raw message
+ * ever surfaces to the UI (Phase32 §26). The exact document contract mirrors
+ * `backend/app/services/savegame.py::project_savegame_v1` + the canonical
+ * fixture `backend/tests/fixtures/savegame/v1_demo_apartment.pdcase.json`:
+ *
+ *   - size pre-check on the RAW text (reject > MAX_EXPORT_BYTES before any
+ *     expensive parse);
+ *   - JSON.parse (empty / primitive / invalid -> typed error);
+ *   - strict schema validation: `format` / `formatVersion` required, unknown
+ *     future versions FAIL CLOSED, required structure + types + enums +
+ *     counts + string/array bounds + asset ids + known ID sets +
+ *     `additionalProperties:false` at every object + duplicate-ID detection +
+ *     graph reference validity;
+ *   - dangerous keys (`__proto__`, `constructor`, `prototype`) are rejected;
+ *   - normalization builds brand-new typed objects (never a deep-merge of
+ *     imported JSON into global state) and freezes the result into an
+ *     immutable {@link SavedCaseDefinition}.
+ *
+ * Imported strings are NEVER mounted as HTML — the player UI renders them as
+ * escaped React text only (the same guarantee every existing trust-boundary
+ * parser relies on).
+ */
+
+// --------------------------------------------------------------------------- //
+// frozen format constants (mirror backend/app/services/savegame.py, ADR-003)
+// --------------------------------------------------------------------------- //
+
+/** The canonical JSON document type marker (Phase32 §8). */
+export const SAVEGAME_FORMAT = "procedural-detective-case";
+/** The ONLY supported format version; unknown versions fail closed on import. */
+export const SAVEGAME_FORMAT_VERSION = 1;
+/** Portable file extension (lowercase, no dot). */
+export const SAVEGAME_EXTENSION = ".pdcase";
+/** Preferred MIME type of the exported JSON document. */
+export const SAVEGAME_MIME_TYPE = "application/vnd.procedural-detective.case+json";
+/** Hard size bound of one document (ADR-003 §2): 5 MiB with headroom. */
+export const MAX_EXPORT_BYTES = 5 * 1024 * 1024;
+
+/** The closed `metadata.source` vocabulary (ADR-003 §1/§3). */
+export const SAVEGAME_SOURCES: readonly string[] = Object.freeze(["generated", "demo"]);
+
+/**
+ * The SYNTHETIC playthrough/case identity a saved-case replay presents to the
+ * shared player flows. Display-only: the imported `sourceCaseId` is NEVER used
+ * as an authority or lookup (Phase32 §22), and the flows treat these as opaque
+ * strings passed straight to the in-memory services, which ignore them.
+ */
+export const REPLAY_PLAYTHROUGH_ID = "saved-replay";
+export const REPLAY_CASE_ID = "saved-replay";
+
+/** The closed difficulty vocabulary of the export metadata. */
+export const SAVEGAME_DIFFICULTIES: readonly string[] = Object.freeze([
+  "easy",
+  "medium",
+  "hard",
+]);
+
+// --------------------------------------------------------------------------- //
+// structural bounds (Phase32 §19)
+// --------------------------------------------------------------------------- //
+
+export const MAX_ID_LENGTH = 256;
+export const MAX_SHORT_TEXT_LENGTH = 300;
+export const MAX_LONG_TEXT_LENGTH = 8000;
+export const MAX_TIME_TEXT_LENGTH = 64;
+export const MAX_NESTING_DEPTH = 6;
+
+export const MAX_PEOPLE = 32;
+export const MAX_MOTIVES = 32;
+export const MAX_OBJECTS = 64;
+export const MAX_LOCATIONS = 32;
+export const MAX_TRAVEL_RULES = 128;
+export const MAX_PUBLIC_EVIDENCE = 128;
+export const MAX_WORLD_OBJECTS = 64;
+export const MAX_WITNESSES = 32;
+export const MAX_CANDIDATES = 32;
+export const MAX_EVIDENCE_RECORDS = 128;
+export const MAX_WORLD_GRAPH_LOCATIONS = 32;
+export const MAX_WORLD_GRAPH_PLACEMENTS = 64;
+export const MAX_COMPOSITION_NOTES = 16;
+export const MAX_JSON_DEPTH = 6;
+export const MAX_CONTENT_ENTRIES = 128;
+export const MAX_CONTENT_EVENTS = 64;
+export const MAX_CONTENT_ROWS = 64;
+export const MAX_PERSON_IDS = 16;
+
+/** The closed evidence render-type universe (mirror of evidenceContent.ts). */
+export const SAVEGAME_RENDER_TYPES: readonly string[] = Object.freeze([
+  "GENERIC_TEXT",
+  "ACTIVITY_LOG",
+  "FORENSIC_COMPARISON",
+  "MESSAGE",
+  "DOCUMENT",
+  "BODY_OBSERVATION",
+  "TIMELINE",
+]);
+
+// --------------------------------------------------------------------------- //
+// typed error — ONE kind for the whole import pipeline, with a bounded UI
+// message (Phase32 §26). No raw parser/schema text is ever exposed.
+// --------------------------------------------------------------------------- //
+
+export type SavegameParseErrorKind =
+  | "too-large"
+  | "unreadable"
+  | "invalid"
+  | "unsupported-version";
+
+export class SavegameParseError extends Error {
+  readonly kind: SavegameParseErrorKind;
+  constructor(kind: SavegameParseErrorKind, message: string) {
+    super(message);
+    this.name = "SavegameParseError";
+    this.kind = kind;
+  }
+}
+
+/** The safe bounded message for one error kind (Phase32 §26 copy). */
+export function savegameErrorMessage(kind: SavegameParseErrorKind): string {
+  switch (kind) {
+    case "too-large":
+      return "This savegame is too large to load.";
+    case "unreadable":
+      return "The selected savegame could not be read.";
+    case "unsupported-version":
+      return "This savegame was created by a newer incompatible version.";
+    case "invalid":
+    default:
+      return "This file is not a valid Procedural Detective savegame.";
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// exact SavegameV1 type surface (mirror of backend/services/savegame.py)
+// --------------------------------------------------------------------------- //
+
+export interface SavegameLocationV1 {
+  locationId: string;
+  name: string;
+}
+
+export interface SavegameMetadataV1 {
+  title: string;
+  difficulty: string | null;
+  /** Closed source vocabulary: "generated" | "demo" (ADR-003 §1). */
+  source: string;
+  /** Display-only, NEVER authority/lookup (Phase32 §22). */
+  sourceCaseId: string;
+  environmentId: string | null;
+}
+
+/** One world-graph placement of the FULL public dossier (ADR-003 §3). */
+export interface SavegameWorldGraphPlacementV1 {
+  objectId: string;
+  assetId: string;
+  locationId: string;
+  anchor: string;
+  interaction: string;
+  evidenceId: string | null;
+}
+
+export interface SavegameWorldGraphLocationV1 {
+  locationId: string;
+  template: string;
+  rooms: string[];
+}
+
+export interface SavegamePersonV1 {
+  personId: string;
+  name: string;
+  role: string;
+  affordances: string[];
+}
+
+export interface SavegameMotiveV1 {
+  motiveId: string;
+  label: string;
+  affordances: string[];
+}
+
+export interface SavegameObjectV1 {
+  objectId: string;
+  assetId: string;
+  affordances: string[];
+  /** Optional in the CANONICAL document: the backend emits this key ONLY when
+   *  non-null (publication.py `_objects`); the normalized definition always
+   *  carries it (explicit null for consumers). */
+  subtype?: string | null;
+}
+
+export interface SavegamePublicEvidenceV1 {
+  id: string;
+  kind: string;
+  reliability: string;
+  title: string | null;
+  description: string | null;
+}
+
+export interface SavegameTravelRuleV1 {
+  fromLocationId: string;
+  toLocationId: string;
+  travelTimeSeconds: number;
+}
+
+export interface SavegameWorldGraphV1 {
+  locations: SavegameWorldGraphLocationV1[];
+  placements: SavegameWorldGraphPlacementV1[];
+}
+
+export interface SavegamePublicCaseSceneV1 {
+  locationId: string;
+  name: string;
+  environmentId: string;
+  environmentVersion: number;
+}
+
+/** The exact PublicCaseResponse allowlist (publication.public_case_dict_from_payload). */
+export interface SavegamePublicCaseV1 {
+  caseId: string;
+  caseVersion: number;
+  title: string;
+  scene: SavegamePublicCaseSceneV1 | null;
+  persons: SavegamePersonV1[];
+  motives: SavegameMotiveV1[];
+  objects: SavegameObjectV1[];
+  locations: SavegameLocationV1[];
+  travelRules: SavegameTravelRuleV1[];
+  evidence: SavegamePublicEvidenceV1[];
+  worldGraph: SavegameWorldGraphV1;
+  compositionNotes: string[];
+}
+
+export interface SavegameSceneV1 {
+  location: SavegameLocationV1;
+  environmentId: string | null;
+  environmentVersion: number | null;
+  /** FULL-knowledge world-object projection (the honest spoiler archive). */
+  worldObjects: WorldObjectDTO[];
+}
+
+export interface SavegameCandidatesV1 {
+  suspects: { id: string; name: string }[];
+  motives: { id: string; label: string }[];
+  weapons: { id: string; assetId: string; name: string }[];
+}
+
+/** One kind-allowlisted evidence-content payload (Phase 19G render contract). */
+export interface SavegameEvidenceContentV1 {
+  renderType: EvidenceRenderType | null;
+  summary?: string;
+  comparison?: string;
+  entries?: { time?: string | null; text: string }[];
+  events?: { time: string; personId?: string | null; action: string }[];
+  rows?: { date?: string; from?: string; to?: string; amount?: string; currency?: string; description?: string }[];
+  suspicious?: boolean;
+  toPersonIds?: string[];
+  fromPersonId?: string;
+  subject?: string;
+  body?: string;
+  timestamp?: string;
+  speakerName?: string;
+  statement?: string;
+  questionType?: string;
+  witnessId?: string;
+  subtype?: string;
+  locationId?: string;
+  cameraId?: string;
+}
+
+export interface SavegameEvidenceRecordV1 {
+  evidenceId: string;
+  kind: string;
+  reliability: string | null;
+  title: string;
+  description: string | null;
+  content: SavegameEvidenceContentV1;
+}
+
+/** ReplayTruthV1 — the explicit minimal solution DTO (ADR-003 §3). The
+ *  internal backend/domain `CaseTruth` object is NEVER serialized. */
+export interface ReplayTruthV1 {
+  murdererId: string;
+  motiveId: string;
+  weaponId: string;
+  /** The canonical full ISO-8601-with-offset crime timestamp. */
+  crimeTime: string;
+  accusationToleranceSeconds: number;
+  murdererName: string;
+  motiveLabel: string;
+  weaponName: string;
+}
+
+/** The exact top-level SavegameV1 document (ADR-003 §2/§3). */
+export interface SavegameV1Document {
+  format: string;
+  formatVersion: number;
+  exportedAt: string;
+  case: {
+    metadata: SavegameMetadataV1;
+    publicCase: SavegamePublicCaseV1;
+    scene: SavegameSceneV1;
+    candidates: SavegameCandidatesV1;
+    witnesses: WitnessListEntryDTO[];
+    evidence: SavegameEvidenceRecordV1[];
+    replayTruth: ReplayTruthV1;
+  };
+}
+
+/** The IMMUTABLE normalized case definition a replay consumes. Every array is
+ *  a frozen copy; imported JSON is never referenced by identity. */
+export interface SavedCaseDefinition {
+  readonly formatVersion: 1;
+  readonly exportedAt: string;
+  readonly metadata: SavegameMetadataV1;
+  readonly publicCase: SavegamePublicCaseV1;
+  readonly scene: SavegameSceneV1;
+  readonly candidates: AccusationCandidatesDTO;
+  readonly witnesses: readonly WitnessListEntryDTO[];
+  readonly evidence: readonly SavegameEvidenceRecordV1[];
+  readonly replayTruth: ReplayTruthV1;
+}
+
+// --------------------------------------------------------------------------- //
+// tiny strict helpers
+// --------------------------------------------------------------------------- //
+
+function invalid(where: string, detail: string): never {
+  throw new SavegameParseError("invalid", `${where}: ${detail}`);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const DANGEROUS_KEYS: readonly string[] = ["__proto__", "constructor", "prototype"];
+
+function assertNoDangerousKeys(record: Record<string, unknown>, where: string): void {
+  for (const key of DANGEROUS_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      invalid(where, `forbidden key "${key}"`);
+    }
+  }
+}
+
+/** Recursively scan a sub-document for the dangerous key set at ANY depth
+ *  (DEF-048 / ADV-32F-02): a hostile file may hide ``__proto__`` /
+ *  ``constructor`` / ``prototype`` inside a nested block (e.g. a generated
+ *  definition's ``parts``). Every other schema layer rejects these keys; the
+ *  ``generated`` sub-document is allowlist-parsed into a fresh typed object
+ *  (which drops unknown keys), so without this scan the dangerous key would be
+ *  silently discarded instead of fail-closed on import. */
+function assertNoDangerousKeysDeep(value: unknown, where: string): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      assertNoDangerousKeysDeep(entry, where);
+    }
+    return;
+  }
+  if (isPlainRecord(value)) {
+    assertNoDangerousKeys(value, where);
+    for (const key of Object.keys(value)) {
+      assertNoDangerousKeysDeep(value[key], where);
+    }
+  }
+}
+
+/** `additionalProperties:false` per object (ADR-003 §3): unknown keys are a
+ *  schema violation, never silently dropped. */
+function assertOnlyKeys(record: Record<string, unknown>, allowed: readonly string[], where: string): void {
+  assertNoDangerousKeys(record, where);
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key)) {
+      invalid(where, `unknown key "${key}"`);
+    }
+  }
+}
+
+function requireRecord(value: unknown, where: string): Record<string, unknown> {
+  if (!isPlainRecord(value)) {
+    invalid(where, "must be an object");
+  }
+  assertNoDangerousKeys(value, where);
+  return value;
+}
+
+function requireString(record: Record<string, unknown>, field: string, where: string): string {
+  const value = record[field];
+  if (typeof value !== "string" || value === "") {
+    invalid(`${where}.${field}`, "must be a non-empty string");
+  }
+  return value;
+}
+
+function requireNullableString(record: Record<string, unknown>, field: string, where: string): string | null {
+  const value = record[field];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") {
+    invalid(`${where}.${field}`, "must be a string or null");
+  }
+  return value;
+}
+
+function requireBoundedString(record: Record<string, unknown>, field: string, where: string, max: number): string {
+  const value = requireString(record, field, where);
+  if (value.length > max) {
+    invalid(`${where}.${field}`, `exceeds ${max} characters`);
+  }
+  return value;
+}
+
+function requireBoundedNullableString(
+  record: Record<string, unknown>,
+  field: string,
+  where: string,
+  max: number,
+): string | null {
+  const value = requireNullableString(record, field, where);
+  if (value !== null && value.length > max) {
+    invalid(`${where}.${field}`, `exceeds ${max} characters`);
+  }
+  return value;
+}
+
+function requireOptionalBoundedString(
+  record: Record<string, unknown>,
+  field: string,
+  where: string,
+  max: number,
+): string | undefined {
+  const value = record[field];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value === "") {
+    invalid(`${where}.${field}`, "must be a non-empty string");
+  }
+  if (value.length > max) {
+    invalid(`${where}.${field}`, `exceeds ${max} characters`);
+  }
+  return value;
+}
+
+function requireNonNegativeInteger(record: Record<string, unknown>, field: string, where: string): number {
+  const value = record[field];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    invalid(`${where}.${field}`, "must be a non-negative integer");
+  }
+  return value;
+}
+
+function requireBoundedInteger(
+  record: Record<string, unknown>,
+  field: string,
+  where: string,
+  min: number,
+  max: number,
+): number {
+  const value = record[field];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    invalid(`${where}.${field}`, `must be an integer within [${min}, ${max}]`);
+  }
+  return value;
+}
+
+function requireStringArray(record: Record<string, unknown>, field: string, where: string, maxCount: number): string[] {
+  const value = record[field];
+  if (!Array.isArray(value) || value.length > maxCount) {
+    invalid(`${where}.${field}`, `must be an array with at most ${maxCount} entries`);
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || entry === "") {
+      invalid(`${where}.${field}[${index}]`, "must be a non-empty string");
+    }
+    return entry;
+  });
+}
+
+/** Assert an array is present and bounded, RETURNING it narrowed so callers
+ *  can map/forEach without re-narrowing (the `invalid` helper never returns). */
+function requireArray(value: unknown, where: string, max: number): unknown[] {
+  if (!Array.isArray(value)) {
+    invalid(where, "must be an array");
+  }
+  if (value.length > max) {
+    invalid(where, `exceeds the maximum of ${max} entries`);
+  }
+  return value;
+}
+
+function requireEnum(record: Record<string, unknown>, field: string, where: string, closed: readonly string[]): string {
+  const value = requireString(record, field, where);
+  if (!closed.includes(value)) {
+    invalid(`${where}.${field}`, `must be one of ${closed.join(", ")}`);
+  }
+  return value;
+}
+
+// --------------------------------------------------------------------------- //
+// per-section strict validators
+// --------------------------------------------------------------------------- //
+
+function validateMetadata(raw: unknown): SavegameMetadataV1 {
+  const record = requireRecord(raw, "case.metadata");
+  assertOnlyKeys(record, ["title", "difficulty", "source", "sourceCaseId", "environmentId"], "case.metadata");
+  return {
+    title: requireBoundedString(record, "title", "case.metadata", MAX_SHORT_TEXT_LENGTH),
+    difficulty: (() => {
+      const value = requireBoundedNullableString(record, "difficulty", "case.metadata", MAX_SHORT_TEXT_LENGTH);
+      if (value !== null && !SAVEGAME_DIFFICULTIES.includes(value)) {
+        invalid("case.metadata.difficulty", `must be one of ${SAVEGAME_DIFFICULTIES.join(", ")} or null`);
+      }
+      return value;
+    })(),
+    source: requireEnum(record, "source", "case.metadata", SAVEGAME_SOURCES),
+    sourceCaseId: requireBoundedString(record, "sourceCaseId", "case.metadata", MAX_ID_LENGTH),
+    environmentId: requireBoundedNullableString(record, "environmentId", "case.metadata", MAX_ID_LENGTH),
+  };
+}
+
+function validatePublicCaseLocation(raw: unknown, where: string): SavegameLocationV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["locationId", "name"], where);
+  return {
+    locationId: requireBoundedString(record, "locationId", where, MAX_ID_LENGTH),
+    name: requireBoundedString(record, "name", where, MAX_SHORT_TEXT_LENGTH),
+  };
+}
+
+function validatePublicPerson(raw: unknown, where: string): SavegamePersonV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["personId", "name", "role", "affordances"], where);
+  return {
+    personId: requireBoundedString(record, "personId", where, MAX_ID_LENGTH),
+    name: requireBoundedString(record, "name", where, MAX_SHORT_TEXT_LENGTH),
+    role: requireBoundedString(record, "role", where, MAX_SHORT_TEXT_LENGTH),
+    affordances: requireStringArray(record, "affordances", where, 16),
+  };
+}
+
+function validatePublicMotive(raw: unknown, where: string): SavegameMotiveV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["motiveId", "label", "affordances"], where);
+  return {
+    motiveId: requireBoundedString(record, "motiveId", where, MAX_ID_LENGTH),
+    label: requireBoundedString(record, "label", where, MAX_LONG_TEXT_LENGTH),
+    affordances: requireStringArray(record, "affordances", where, 16),
+  };
+}
+
+function validatePublicObject(raw: unknown, where: string): SavegameObjectV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["objectId", "assetId", "affordances", "subtype"], where);
+  return {
+    objectId: requireBoundedString(record, "objectId", where, MAX_ID_LENGTH),
+    assetId: requireBoundedString(record, "assetId", where, MAX_ID_LENGTH),
+    affordances: requireStringArray(record, "affordances", where, 16),
+    subtype: requireBoundedNullableString(record, "subtype", where, MAX_SHORT_TEXT_LENGTH),
+  };
+}
+
+function validatePublicEvidence(raw: unknown, where: string): SavegamePublicEvidenceV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["id", "kind", "reliability", "title", "description"], where);
+  const reliability = requireString(record, "reliability", where);
+  if (!["high", "medium", "low"].includes(reliability)) {
+    invalid(`${where}.reliability`, "must be high, medium or low");
+  }
+  return {
+    id: requireBoundedString(record, "id", where, MAX_ID_LENGTH),
+    kind: requireBoundedString(record, "kind", where, MAX_SHORT_TEXT_LENGTH),
+    reliability,
+    title: requireBoundedNullableString(record, "title", where, MAX_LONG_TEXT_LENGTH),
+    description: requireBoundedNullableString(record, "description", where, MAX_LONG_TEXT_LENGTH),
+  };
+}
+
+function validateTravelRule(raw: unknown, where: string): SavegameTravelRuleV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["fromLocationId", "toLocationId", "travelTimeSeconds"], where);
+  return {
+    fromLocationId: requireBoundedString(record, "fromLocationId", where, MAX_ID_LENGTH),
+    toLocationId: requireBoundedString(record, "toLocationId", where, MAX_ID_LENGTH),
+    travelTimeSeconds: requireBoundedInteger(record, "travelTimeSeconds", where, 0, 3_600_000),
+  };
+}
+
+function validateWorldGraphLocation(raw: unknown, where: string): SavegameWorldGraphLocationV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["locationId", "template", "rooms"], where);
+  return {
+    locationId: requireBoundedString(record, "locationId", where, MAX_ID_LENGTH),
+    template: requireBoundedString(record, "template", where, MAX_SHORT_TEXT_LENGTH),
+    rooms: requireStringArray(record, "rooms", where, 16),
+  };
+}
+
+/** A string that MAY be empty (but must still be a string and bounded):
+ *  DEF-062 — decorative placements carry an empty published interaction. */
+function requireBoundedStringAllowEmpty(
+  record: Record<string, unknown>,
+  field: string,
+  where: string,
+  max: number,
+): string {
+  const value = record[field];
+  if (typeof value !== "string") {
+    invalid(`${where}.${field}`, "must be a string");
+  }
+  if (value.length > max) {
+    invalid(`${where}.${field}`, `exceeds ${max} characters`);
+  }
+  return value;
+}
+
+function validatePlacement(raw: unknown, where: string): SavegameWorldGraphPlacementV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["objectId", "assetId", "locationId", "anchor", "interaction", "evidenceId"], where);
+  return {
+    objectId: requireBoundedString(record, "objectId", where, MAX_ID_LENGTH),
+    assetId: requireBoundedString(record, "assetId", where, MAX_ID_LENGTH),
+    locationId: requireBoundedString(record, "locationId", where, MAX_ID_LENGTH),
+    anchor: requireBoundedString(record, "anchor", where, MAX_ID_LENGTH),
+    interaction: requireBoundedStringAllowEmpty(record, "interaction", where, MAX_SHORT_TEXT_LENGTH),
+    evidenceId: requireBoundedNullableString(record, "evidenceId", where, MAX_ID_LENGTH),
+  };
+}
+
+function validatePublicCase(raw: unknown, where: string): SavegamePublicCaseV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(
+    record,
+    [
+      "caseId",
+      "caseVersion",
+      "title",
+      "scene",
+      "persons",
+      "motives",
+      "objects",
+      "locations",
+      "travelRules",
+      "evidence",
+      "worldGraph",
+      "compositionNotes",
+    ],
+    where,
+  );
+
+  const personsRaw = requireArray(record.persons, `${where}.persons`, MAX_PEOPLE);
+  const persons = personsRaw.map((entry, index) => validatePublicPerson(entry, `${where}.persons[${index}]`));
+
+  const motivesRaw = requireArray(record.motives, `${where}.motives`, MAX_MOTIVES);
+  const motives = motivesRaw.map((entry, index) => validatePublicMotive(entry, `${where}.motives[${index}]`));
+
+  const objectsRaw = requireArray(record.objects, `${where}.objects`, MAX_OBJECTS);
+  const objects = objectsRaw.map((entry, index) => validatePublicObject(entry, `${where}.objects[${index}]`));
+
+  const locationsRaw = requireArray(record.locations, `${where}.locations`, MAX_LOCATIONS);
+  const locations = locationsRaw.map((entry, index) => validatePublicCaseLocation(entry, `${where}.locations[${index}]`));
+
+  const travelRaw = requireArray(record.travelRules, `${where}.travelRules`, MAX_TRAVEL_RULES);
+  const travelRules = travelRaw.map((entry, index) => validateTravelRule(entry, `${where}.travelRules[${index}]`));
+
+  const evidenceRaw = requireArray(record.evidence, `${where}.evidence`, MAX_PUBLIC_EVIDENCE);
+  const evidence = evidenceRaw.map((entry, index) => validatePublicEvidence(entry, `${where}.evidence[${index}]`));
+
+  const notesRaw = requireArray(record.compositionNotes, `${where}.compositionNotes`, MAX_COMPOSITION_NOTES);
+  const compositionNotes = notesRaw.map((entry, index) => {
+    if (typeof entry !== "string") {
+      invalid(`${where}.compositionNotes[${index}]`, "must be a string");
+    }
+    if (entry.length > MAX_LONG_TEXT_LENGTH) {
+      invalid(`${where}.compositionNotes[${index}]`, `exceeds ${MAX_LONG_TEXT_LENGTH} characters`);
+    }
+    return entry;
+  });
+
+  const sceneRaw = record.scene;
+  let scene: SavegamePublicCaseSceneV1 | null = null;
+  if (sceneRaw !== null) {
+    const sceneRecord = requireRecord(sceneRaw, `${where}.scene`);
+    assertOnlyKeys(sceneRecord, ["locationId", "name", "environmentId", "environmentVersion"], `${where}.scene`);
+    scene = {
+      locationId: requireBoundedString(sceneRecord, "locationId", `${where}.scene`, MAX_ID_LENGTH),
+      name: requireBoundedString(sceneRecord, "name", `${where}.scene`, MAX_SHORT_TEXT_LENGTH),
+      environmentId: requireBoundedString(sceneRecord, "environmentId", `${where}.scene`, MAX_ID_LENGTH),
+      environmentVersion: requireBoundedInteger(sceneRecord, "environmentVersion", `${where}.scene`, 1, 100_000),
+    };
+  }
+
+  const wgRaw = record.worldGraph;
+  const wgRecord = requireRecord(wgRaw, `${where}.worldGraph`);
+  assertOnlyKeys(wgRecord, ["locations", "placements"], `${where}.worldGraph`);
+  const wgLocationsRaw = requireArray(wgRecord.locations, `${where}.worldGraph.locations`, MAX_WORLD_GRAPH_LOCATIONS);
+  const wgLocations = wgLocationsRaw.map((entry, index) =>
+    validateWorldGraphLocation(entry, `${where}.worldGraph.locations[${index}]`),
+  );
+  const placementsRaw = requireArray(wgRecord.placements, `${where}.worldGraph.placements`, MAX_WORLD_GRAPH_PLACEMENTS);
+  const placements = placementsRaw.map((entry, index) =>
+    validatePlacement(entry, `${where}.worldGraph.placements[${index}]`),
+  );
+
+  return {
+    caseId: requireBoundedString(record, "caseId", where, MAX_ID_LENGTH),
+    caseVersion: requireNonNegativeInteger(record, "caseVersion", where),
+    title: requireBoundedString(record, "title", where, MAX_SHORT_TEXT_LENGTH),
+    scene,
+    persons,
+    motives,
+    objects,
+    locations,
+    travelRules,
+    evidence,
+    worldGraph: { locations: wgLocations, placements },
+    compositionNotes,
+  };
+}
+
+/** Strict-key gate + reuse of the existing typed WorldObjectDTO parser. The
+ *  saved world objects ARE the exact WorldObjectDTO wire shape. The nested
+ *  ``generated`` sub-document is DEEP-scanned for dangerous keys
+ *  (``__proto__`` / ``constructor`` / ``prototype``) BEFORE the shared parser
+ *  runs: the parser builds an allowlisted typed object and would silently drop
+ *  such a key, perfect defence-in-depth, but acceptance-with-drop is
+ *  inconsistent with the rest of the import (which REJECTS them). DEF-048 /
+ *  ADV-32F-02 — fail closed instead. */
+function validateWorldObjectStrict(raw: unknown, where: string): WorldObjectDTO {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(
+    record,
+    [
+      "objectId",
+      "assetId",
+      "assetType",
+      "subtype",
+      "locationId",
+      "anchor",
+      "interaction",
+      "evidenceId",
+      "discovered",
+      "read",
+      "generated",
+      "displayLabel",
+    ],
+    where,
+  );
+  for (const field of ["objectId", "assetId", "assetType", "locationId", "anchor"]) {
+    // Validate bounds up front (the shared parser drops nothing but does not
+    // bound these ids).
+    void requireBoundedString(record, field, where, MAX_ID_LENGTH);
+  }
+  if (record.generated !== undefined && record.generated !== null) {
+    assertNoDangerousKeysDeep(record.generated, `${where}.generated`);
+  }
+  try {
+    return validateWorldObject.validate(raw);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      invalid(where, error.message);
+    }
+    throw error;
+  }
+}
+
+function validateScene(raw: unknown, where: string): SavegameSceneV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["location", "environmentId", "environmentVersion", "worldObjects"], where);
+  const locationRaw = record.location;
+  const locationRecord = requireRecord(locationRaw, `${where}.location`);
+  assertOnlyKeys(locationRecord, ["locationId", "name"], `${where}.location`);
+  const location = {
+    locationId: requireBoundedString(locationRecord, "locationId", `${where}.location`, MAX_ID_LENGTH),
+    name: requireBoundedString(locationRecord, "name", `${where}.location`, MAX_SHORT_TEXT_LENGTH),
+  };
+  const worldObjectsRaw = requireArray(record.worldObjects, `${where}.worldObjects`, MAX_WORLD_OBJECTS);
+  const worldObjects = worldObjectsRaw.map((entry, index) =>
+    validateWorldObjectStrict(entry, `${where}.worldObjects[${index}]`),
+  );
+  return {
+    location,
+    environmentId: requireBoundedNullableString(record, "environmentId", where, MAX_ID_LENGTH),
+    environmentVersion: (() => {
+      const value = record.environmentVersion;
+      if (value === null || value === undefined) return null;
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 100_000) {
+        invalid(`${where}.environmentVersion`, "must be a positive integer or null");
+      }
+      return value;
+    })(),
+    worldObjects,
+  };
+}
+
+/** Strict candidates block: reuse the shared accusation-candidate parser
+ *  after bounding EVERY text field. The shared parser bounds only the ``id``
+ *  and requires non-empty strings for ``name``/``label``/``assetId``; those
+ *  values are rendered as React text by the accuse/reveal flows, so they are
+ *  capped here with the documented candidate-field bound
+ *  ``MAX_SHORT_TEXT_LENGTH`` (300) for every rendered candidate string —
+ *  suspects[].name, motives[].label and weapons[].name/.assetId — with the
+ *  frozen ``invalid`` rejection (DEF-047 / ADV-32F-01). Asset ids KEEP going
+ *  through the sibling trusted-asset bounds everywhere else in this file
+ *  (public objects/placements/world objects at ``MAX_ID_LENGTH``, generated
+ *  definitions at the shared parser's 128-char cap) — the candidate weapon
+ *  assetId is display/resolution data and shares the same 300-char cap as the
+ *  other rendered candidate strings per the regression contract. Strict
+ *  rejection per Phase32 §19 — an over-long candidate field is never accepted
+ *  into the normalized definition. */
+function validateCandidates(raw: unknown, where: string): SavegameCandidatesV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["suspects", "motives", "weapons"], where);
+  const textBounds: Record<string, { field: string; max: number }[]> = {
+    suspects: [{ field: "name", max: MAX_SHORT_TEXT_LENGTH }],
+    motives: [{ field: "label", max: MAX_SHORT_TEXT_LENGTH }],
+    weapons: [
+      { field: "name", max: MAX_SHORT_TEXT_LENGTH },
+      { field: "assetId", max: MAX_SHORT_TEXT_LENGTH },
+    ],
+  };
+  for (const listName of ["suspects", "motives", "weapons"]) {
+    const list = requireArray(record[listName], `${where}.${listName}`, MAX_CANDIDATES);
+    if (!Array.isArray(list)) continue;
+    list.forEach((entry, index) => {
+      const entryRecord = requireRecord(entry, `${where}.${listName}[${index}]`);
+      const at = `${where}.${listName}[${index}]`;
+      requireBoundedString(entryRecord, "id", at, MAX_ID_LENGTH);
+      for (const { field, max } of textBounds[listName]) {
+        requireBoundedString(entryRecord, field, at, max);
+      }
+    });
+  }
+  try {
+    const parsed = validateAccusationCandidates.validate(raw);
+    return {
+      suspects: parsed.suspects,
+      motives: parsed.motives,
+      weapons: parsed.weapons,
+    };
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      invalid(where, error.message);
+    }
+    throw error;
+  }
+}
+
+function validateWitnesses(raw: unknown, where: string): WitnessListEntryDTO[] {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["witnesses"], where);
+  const list = requireArray(record.witnesses, `${where}.witnesses`, MAX_WITNESSES);
+  return list.map((entry, index) => {
+    if (!isPlainRecord(entry)) {
+      invalid(`${where}.witnesses[${index}]`, "must be an object");
+    }
+    assertOnlyKeys(entry, ["witnessId", "displayName", "presence", "sceneObjectId"], `${where}.witnesses[${index}]`);
+    try {
+      return validateWitnessListEntry.validate(entry);
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        invalid(`${where}.witnesses[${index}]`, error.message);
+      }
+      throw error;
+    }
+  });
+}
+
+/** The max nesting depth of any content subtree (imported JSON is bounded:
+ *  Phase19G content is closed-shape, so this tripwire never fires on a valid
+ *  export — it stops a hostile deeply-nested blob before any processing). */
+function assertMaxDepth(value: unknown, depth: number, where: string): void {
+  if (depth > MAX_JSON_DEPTH) {
+    invalid(where, "exceeds the maximum nesting depth");
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 512) {
+      invalid(where, "array exceeds the maximum element count");
+    }
+    for (const entry of value) {
+      assertMaxDepth(entry, depth + 1, where);
+    }
+  } else if (isPlainRecord(value)) {
+    for (const key of Object.keys(value)) {
+      assertMaxDepth(value[key], depth + 1, where);
+    }
+  }
+}
+
+function validateEvidenceContent(raw: unknown, where: string): SavegameEvidenceContentV1 {
+  const record = requireRecord(raw, where);
+  assertNoDangerousKeys(record, where);
+  assertMaxDepth(record, 0, where);
+  const allowed = new Set<string>([
+    "renderType",
+    "summary",
+    "comparison",
+    "entries",
+    "events",
+    "rows",
+    "suspicious",
+    "toPersonIds",
+    "fromPersonId",
+    "subject",
+    "body",
+    "timestamp",
+    "speakerName",
+    "statement",
+    "questionType",
+    "witnessId",
+    "subtype",
+    "locationId",
+    "cameraId",
+  ]);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) {
+      invalid(`${where}`, `unknown content key "${key}"`);
+    }
+  }
+
+  const renderTypeValue = record.renderType;
+  if (renderTypeValue !== undefined && renderTypeValue !== null) {
+    if (typeof renderTypeValue !== "string" || !SAVEGAME_RENDER_TYPES.includes(renderTypeValue)) {
+      invalid(`${where}.renderType`, `must be one of ${SAVEGAME_RENDER_TYPES.join(", ")} or null`);
+    }
+  }
+
+  const content: SavegameEvidenceContentV1 = {
+    renderType: renderTypeValue === null ? null : (renderTypeValue as EvidenceRenderType),
+  };
+
+  const summary = requireOptionalBoundedString(record, "summary", where, MAX_LONG_TEXT_LENGTH);
+  if (summary !== undefined) content.summary = summary;
+  const comparison = requireOptionalBoundedString(record, "comparison", where, MAX_LONG_TEXT_LENGTH);
+  if (comparison !== undefined) content.comparison = comparison;
+  const speakerName = requireOptionalBoundedString(record, "speakerName", where, MAX_SHORT_TEXT_LENGTH);
+  if (speakerName !== undefined) content.speakerName = speakerName;
+  const statement = requireOptionalBoundedString(record, "statement", where, MAX_LONG_TEXT_LENGTH);
+  if (statement !== undefined) content.statement = statement;
+  const fromPersonId = requireOptionalBoundedString(record, "fromPersonId", where, MAX_ID_LENGTH);
+  if (fromPersonId !== undefined) content.fromPersonId = fromPersonId;
+  const subject = requireOptionalBoundedString(record, "subject", where, MAX_SHORT_TEXT_LENGTH);
+  if (subject !== undefined) content.subject = subject;
+  const body = requireOptionalBoundedString(record, "body", where, MAX_LONG_TEXT_LENGTH);
+  if (body !== undefined) content.body = body;
+  const timestamp = requireOptionalBoundedString(record, "timestamp", where, MAX_TIME_TEXT_LENGTH);
+  if (timestamp !== undefined) content.timestamp = timestamp;
+  const cameraId = requireOptionalBoundedString(record, "cameraId", where, MAX_ID_LENGTH);
+  if (cameraId !== undefined) content.cameraId = cameraId;
+  const subtype = requireOptionalBoundedString(record, "subtype", where, MAX_SHORT_TEXT_LENGTH);
+  if (subtype !== undefined) content.subtype = subtype;
+  const contentLocationId = requireOptionalBoundedString(record, "locationId", where, MAX_ID_LENGTH);
+  if (contentLocationId !== undefined) content.locationId = contentLocationId;
+  const witnessId = requireOptionalBoundedString(record, "witnessId", where, MAX_ID_LENGTH);
+  if (witnessId !== undefined) content.witnessId = witnessId;
+
+  const questionType = record.questionType;
+  if (questionType !== undefined && !isWitnessQuestionType(questionType)) {
+    invalid(`${where}.questionType`, "must be a closed witness question type");
+  }
+  if (questionType !== undefined) content.questionType = questionType;
+
+  if (record.suspicious !== undefined) {
+    if (typeof record.suspicious !== "boolean") {
+      invalid(`${where}.suspicious`, "must be a boolean");
+    }
+    content.suspicious = record.suspicious;
+  }
+
+  if (record.entries !== undefined) {
+    const entries = record.entries;
+    if (!Array.isArray(entries) || entries.length > MAX_CONTENT_ENTRIES) {
+      invalid(`${where}.entries`, `must be an array with at most ${MAX_CONTENT_ENTRIES} entries`);
+    }
+    content.entries = entries.map((entry, index) => {
+      const entryRecord = requireRecord(entry, `${where}.entries[${index}]`);
+      assertOnlyKeys(entryRecord, ["time", "text"], `${where}.entries[${index}]`);
+      const time = requireBoundedNullableString(entryRecord, "time", `${where}.entries[${index}]`, MAX_TIME_TEXT_LENGTH);
+      const text = requireBoundedString(entryRecord, "text", `${where}.entries[${index}]`, MAX_LONG_TEXT_LENGTH);
+      return { time, text };
+    });
+  }
+
+  if (record.events !== undefined) {
+    const events = record.events;
+    if (!Array.isArray(events) || events.length > MAX_CONTENT_EVENTS) {
+      invalid(`${where}.events`, `must be an array with at most ${MAX_CONTENT_EVENTS} entries`);
+    }
+    content.events = events.map((entry, index) => {
+      const entryRecord = requireRecord(entry, `${where}.events[${index}]`);
+      assertOnlyKeys(entryRecord, ["time", "personId", "action"], `${where}.events[${index}]`);
+      const time = requireBoundedString(entryRecord, "time", `${where}.events[${index}]`, MAX_TIME_TEXT_LENGTH);
+      const personId = requireBoundedNullableString(entryRecord, "personId", `${where}.events[${index}]`, MAX_ID_LENGTH);
+      const action = requireBoundedString(entryRecord, "action", `${where}.events[${index}]`, MAX_LONG_TEXT_LENGTH);
+      // DEF-049 / ADV-32F-03: mirror the backend's canonical event shape. The
+      // server projection OMITS a null ``personId`` key entirely (its
+      // ``_filter_list_of_mappings`` keeps only present+non-null keys), so
+      // CCTV-style events without a person carry NO ``personId`` key — never
+      // an explicit ``null``. Only a non-null person id is emitted, keeping a
+      // re-exported server save byte-identical (when ``exportedAt`` is pinned).
+      const normalizedEvent: { time: string; personId?: string; action: string } = { time, action };
+      if (personId !== null) normalizedEvent.personId = personId;
+      return normalizedEvent;
+    });
+  }
+
+  if (record.rows !== undefined) {
+    const rows = record.rows;
+    if (!Array.isArray(rows) || rows.length > MAX_CONTENT_ROWS) {
+      invalid(`${where}.rows`, `must be an array with at most ${MAX_CONTENT_ROWS} entries`);
+    }
+    const ROW_KEYS = ["date", "from", "to", "amount", "currency", "description"];
+    content.rows = rows.map((entry, index) => {
+      const entryRecord = requireRecord(entry, `${where}.rows[${index}]`);
+      assertOnlyKeys(entryRecord, ROW_KEYS, `${where}.rows[${index}]`);
+      const out: { date?: string; from?: string; to?: string; amount?: string; currency?: string; description?: string } = {};
+      for (const key of ROW_KEYS) {
+        const value = entryRecord[key];
+        if (value === undefined) continue;
+        if (typeof value !== "string" || value.length > MAX_LONG_TEXT_LENGTH) {
+          invalid(`${where}.rows[${index}].${key}`, "must be a bounded string");
+        }
+        (out as Record<string, string>)[key] = value;
+      }
+      return out;
+    });
+  }
+
+  if (record.toPersonIds !== undefined) {
+    const rawIds = record.toPersonIds;
+    if (!Array.isArray(rawIds) || rawIds.length > MAX_PERSON_IDS) {
+      invalid(`${where}.toPersonIds`, `must be an array with at most ${MAX_PERSON_IDS} entries`);
+    }
+    content.toPersonIds = rawIds.map((entry, index) => {
+      if (typeof entry !== "string" || entry === "" || entry.length > MAX_ID_LENGTH) {
+        invalid(`${where}.toPersonIds[${index}]`, "must be a bounded non-empty string");
+      }
+      return entry;
+    });
+  }
+
+  return content;
+}
+
+function validateEvidenceRecord(raw: unknown, where: string): SavegameEvidenceRecordV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(record, ["evidenceId", "kind", "reliability", "title", "description", "content"], where);
+  const reliability = requireBoundedNullableString(record, "reliability", where, MAX_SHORT_TEXT_LENGTH);
+  if (reliability !== null && !["high", "medium", "low"].includes(reliability)) {
+    invalid(`${where}.reliability`, "must be high, medium or low");
+  }
+  return {
+    evidenceId: requireBoundedString(record, "evidenceId", where, MAX_ID_LENGTH),
+    kind: requireBoundedString(record, "kind", where, MAX_SHORT_TEXT_LENGTH),
+    reliability,
+    title: requireBoundedString(record, "title", where, MAX_LONG_TEXT_LENGTH),
+    description: requireBoundedNullableString(record, "description", where, MAX_LONG_TEXT_LENGTH),
+    content: validateEvidenceContent(record.content, `${where}.content`),
+  };
+}
+
+function validateReplayTruth(raw: unknown, where: string): ReplayTruthV1 {
+  const record = requireRecord(raw, where);
+  assertOnlyKeys(
+    record,
+    [
+      "murdererId",
+      "motiveId",
+      "weaponId",
+      "crimeTime",
+      "accusationToleranceSeconds",
+      "murdererName",
+      "motiveLabel",
+      "weaponName",
+    ],
+    where,
+  );
+  const crimeTime = requireBoundedString(record, "crimeTime", where, MAX_TIME_TEXT_LENGTH);
+  try {
+    parseIso8601(crimeTime);
+  } catch (error) {
+    if (error instanceof SavegameTimeError) {
+      invalid(`${where}.crimeTime`, "must be a canonical ISO-8601-with-offset timestamp");
+    }
+    throw error;
+  }
+  return {
+    murdererId: requireBoundedString(record, "murdererId", where, MAX_ID_LENGTH),
+    motiveId: requireBoundedString(record, "motiveId", where, MAX_ID_LENGTH),
+    weaponId: requireBoundedString(record, "weaponId", where, MAX_ID_LENGTH),
+    crimeTime,
+    accusationToleranceSeconds: requireBoundedInteger(
+      record,
+      "accusationToleranceSeconds",
+      where,
+      0,
+      86_400,
+    ),
+    murdererName: requireBoundedString(record, "murdererName", where, MAX_SHORT_TEXT_LENGTH),
+    motiveLabel: requireBoundedString(record, "motiveLabel", where, MAX_LONG_TEXT_LENGTH),
+    weaponName: requireBoundedString(record, "weaponName", where, MAX_SHORT_TEXT_LENGTH),
+  };
+}
+
+// --------------------------------------------------------------------------- //
+// duplicate detection + graph reference validity
+// --------------------------------------------------------------------------- //
+
+function assertUniqueIds(ids: readonly string[], where: string): void {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) {
+      invalid(where, `duplicate id "${id}"`);
+    }
+    seen.add(id);
+  }
+}
+
+function validateReferences(pub: SavegamePublicCaseV1, scene: SavegameSceneV1, evidence: readonly SavegameEvidenceRecordV1[]): void {
+  const locationIds = new Set(pub.locations.map((location) => location.locationId));
+  const objectIds = new Set(pub.objects.map((obj) => obj.objectId));
+  const publicEvidenceIds = new Set(pub.evidence.map((entry) => entry.id));
+  const recordIds = new Set(evidence.map((record) => record.evidenceId));
+
+  assertUniqueIds(pub.persons.map((p) => p.personId), "case.publicCase.persons");
+  assertUniqueIds(pub.motives.map((m) => m.motiveId), "case.publicCase.motives");
+  assertUniqueIds(pub.objects.map((o) => o.objectId), "case.publicCase.objects");
+  assertUniqueIds(pub.locations.map((l) => l.locationId), "case.publicCase.locations");
+  assertUniqueIds([...publicEvidenceIds], "case.publicCase.evidence");
+  assertUniqueIds(pub.worldGraph.placements.map((p) => p.objectId), "case.publicCase.worldGraph.placements");
+
+  for (const rule of pub.travelRules) {
+    if (!locationIds.has(rule.fromLocationId) || !locationIds.has(rule.toLocationId)) {
+      invalid("case.publicCase.travelRules", "references a location that does not exist");
+    }
+  }
+  for (const placement of pub.worldGraph.placements) {
+    if (!objectIds.has(placement.objectId)) {
+      invalid("case.publicCase.worldGraph.placements", `object "${placement.objectId}" is not published`);
+    }
+    if (!locationIds.has(placement.locationId)) {
+      invalid("case.publicCase.worldGraph.placements", `location "${placement.locationId}" is not published`);
+    }
+    if (placement.evidenceId !== null && !publicEvidenceIds.has(placement.evidenceId)) {
+      invalid("case.publicCase.worldGraph.placements", `evidence "${placement.evidenceId}" is not published`);
+    }
+  }
+  for (const worldObject of scene.worldObjects) {
+    if (worldObject.evidenceId !== null && !recordIds.has(worldObject.evidenceId)) {
+      invalid("case.scene.worldObjects", `evidence "${worldObject.evidenceId}" has no read record`);
+    }
+    // The scene's world objects are one projection of the placements — every
+    // object must have a published placement too (identity integrity).
+    if (!pub.worldGraph.placements.some((placement) => placement.objectId === worldObject.objectId)) {
+      invalid("case.scene.worldObjects", `object "${worldObject.objectId}" has no world-graph placement`);
+    }
+  }
+  for (const record of evidence) {
+    if (!publicEvidenceIds.has(record.evidenceId)) {
+      invalid("case.evidence", `record "${record.evidenceId}" is not in the public case`);
+    }
+  }
+}
+
+function validateCandidatesAgainstPublic(
+  candidates: SavegameCandidatesV1,
+  pub: SavegamePublicCaseV1,
+): void {
+  const personIds = new Set(pub.persons.map((p) => p.personId));
+  const motiveIds = new Set(pub.motives.map((m) => m.motiveId));
+  const objectIds = new Set(pub.objects.map((o) => o.objectId));
+  assertUniqueIds(candidates.suspects.map((s) => s.id), "case.candidates.suspects");
+  assertUniqueIds(candidates.motives.map((m) => m.id), "case.candidates.motives");
+  assertUniqueIds(candidates.weapons.map((w) => w.id), "case.candidates.weapons");
+  for (const suspect of candidates.suspects) {
+    if (!personIds.has(suspect.id)) {
+      invalid("case.candidates.suspects", `suspect "${suspect.id}" is not a published person`);
+    }
+  }
+  for (const motive of candidates.motives) {
+    if (!motiveIds.has(motive.id)) {
+      invalid("case.candidates.motives", `motive "${motive.id}" is not published`);
+    }
+  }
+  for (const weapon of candidates.weapons) {
+    if (!objectIds.has(weapon.id)) {
+      invalid("case.candidates.weapons", `weapon "${weapon.id}" is not a published object`);
+    }
+  }
+}
+
+function validateReplayTruthAgainstCandidates(
+  truth: ReplayTruthV1,
+  candidates: SavegameCandidatesV1,
+): void {
+  if (!candidates.suspects.some((s) => s.id === truth.murdererId)) {
+    invalid("case.replayTruth", "murdererId is not a candidate");
+  }
+  if (!candidates.motives.some((m) => m.id === truth.motiveId)) {
+    invalid("case.replayTruth", "motiveId is not a candidate");
+  }
+  if (!candidates.weapons.some((w) => w.id === truth.weaponId)) {
+    invalid("case.replayTruth", "weaponId is not a candidate");
+  }
+}
+
+function assertUniqueWitnesses(witnesses: readonly WitnessListEntryDTO[]): void {
+  assertUniqueIds(witnesses.map((w) => w.witnessId), "case.witnesses");
+}
+
+// --------------------------------------------------------------------------- //
+// the import pipeline
+// --------------------------------------------------------------------------- //
+
+/** UTF-8 byte length of a string (the backend serializes UTF-8 and sizes the
+ *  export in bytes; the size precheck is performed BEFORE any JSON parse). */
+export function utf8ByteLength(text: string): number {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(text).length;
+  }
+  // Fallback for exotic hosts: count by code points (upper-bound-ish; never
+  // under-counts multi-byte characters in a way that could admit an oversized
+  // file — a real browser/Node always has TextEncoder).
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.codePointAt(index) ?? 0;
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code < 0x10000) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+}
+
+/**
+ * Parse the RAW text of a `.pdcase` file into an immutable
+ * {@link SavedCaseDefinition}. NEVER throws a raw exception: every failure is
+ * a typed {@link SavegameParseError} with a bounded UI message.
+ *
+ * @param text      the raw UTF-8 decoded file text
+ * @param byteLength the ACTUAL byte count of the uploaded file (the file
+ *                   picker's `File.size`); defaults to the text's own UTF-8
+ *                   length when omitted.
+ */
+export function parseSavegameV1(text: string, byteLength?: number): SavedCaseDefinition {
+  const bytes = byteLength !== undefined ? byteLength : utf8ByteLength(text);
+  if (bytes > MAX_EXPORT_BYTES) {
+    throw new SavegameParseError("too-large", "savegame exceeds the size bound");
+  }
+
+  let document: unknown;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    throw new SavegameParseError("invalid", "the document is not valid JSON");
+  }
+
+  return normalizeSavegameV1(document);
+}
+
+/** A small pure extractor used by the load-capable modules: parses an already
+ *  trusted `unknown` (e.g. from a test or a JSON import) — same schema. */
+export function normalizeSavegameV1(document: unknown): SavedCaseDefinition {
+  if (!isPlainRecord(document)) {
+    throw new SavegameParseError("invalid", "the savegame must be a JSON object");
+  }
+  assertNoDangerousKeys(document, "savegame");
+  assertOnlyKeys(document, ["format", "formatVersion", "exportedAt", "case"], "savegame");
+
+  const format = requireString(document, "format", "savegame");
+  if (format !== SAVEGAME_FORMAT) {
+    throw new SavegameParseError("invalid", "the document is not a Procedural Detective case save");
+  }
+  const formatVersion = document.formatVersion;
+  if (typeof formatVersion !== "number" || !Number.isInteger(formatVersion)) {
+    throw new SavegameParseError("invalid", "formatVersion must be an integer");
+  }
+  if (formatVersion !== SAVEGAME_FORMAT_VERSION) {
+    // Unknown future versions FAIL CLOSED (Phase32 §27).
+    throw new SavegameParseError("unsupported-version", "unsupported formatVersion");
+  }
+
+  const exportedAt = requireBoundedString(document, "exportedAt", "savegame", MAX_TIME_TEXT_LENGTH);
+  try {
+    parseIso8601(exportedAt);
+  } catch {
+    invalid("savegame.exportedAt", "must be an ISO-8601 timestamp");
+  }
+
+  const caseRaw = requireRecord(document.case, "savegame.case");
+  assertOnlyKeys(caseRaw, ["metadata", "publicCase", "scene", "candidates", "witnesses", "evidence", "replayTruth"], "savegame.case");
+
+  const metadata = validateMetadata(caseRaw.metadata);
+  const publicCase = validatePublicCase(caseRaw.publicCase, "savegame.case.publicCase");
+  const scene = validateScene(caseRaw.scene, "savegame.case.scene");
+  const candidates = validateCandidates(caseRaw.candidates, "savegame.case.candidates");
+  const witnesses = validateWitnesses({ witnesses: caseRaw.witnesses }, "savegame.case");
+  const evidenceRaw = requireArray(caseRaw.evidence, "savegame.case.evidence", MAX_EVIDENCE_RECORDS);
+  const evidence = evidenceRaw.map((entry, index) => validateEvidenceRecord(entry, `savegame.case.evidence[${index}]`));
+  const replayTruth = validateReplayTruth(caseRaw.replayTruth, "savegame.case.replayTruth");
+
+  // Cross-section integrity: duplicates + graph reference validity + truth
+  // membership, all fail-closed.
+  assertUniqueIds(scene.worldObjects.map((o) => o.objectId), "savegame.case.scene.worldObjects");
+  assertUniqueIds(evidence.map((r) => r.evidenceId), "savegame.case.evidence");
+  assertUniqueWitnesses(witnesses);
+  validateReferences(publicCase, scene, evidence);
+  validateCandidatesAgainstPublic(candidates, publicCase);
+  validateReplayTruthAgainstCandidates(replayTruth, candidates);
+
+  // The normalized definition is IMMUTABLE by construction AND at runtime:
+  // every array is a fresh frozen copy and no code path ever mutates it. The
+  // `Object.freeze` reads are typed `readonly` on the array fields while the
+  // DTO interfaces keep the player-friendly mutable shapes — the assertion
+  // documents that freeze as the canonical identity of this object.
+  const definition = Object.freeze({
+    formatVersion: SAVEGAME_FORMAT_VERSION,
+    exportedAt,
+    metadata: Object.freeze({ ...metadata }),
+    publicCase: Object.freeze({
+      ...publicCase,
+      persons: Object.freeze(publicCase.persons),
+      motives: Object.freeze(publicCase.motives),
+      objects: Object.freeze(publicCase.objects),
+      locations: Object.freeze(publicCase.locations),
+      travelRules: Object.freeze(publicCase.travelRules),
+      evidence: Object.freeze(publicCase.evidence),
+      compositionNotes: Object.freeze(publicCase.compositionNotes),
+      worldGraph: Object.freeze({
+        locations: Object.freeze(publicCase.worldGraph.locations),
+        placements: Object.freeze(publicCase.worldGraph.placements),
+      }),
+    }),
+    scene: Object.freeze({
+      location: Object.freeze({ ...scene.location }),
+      environmentId: scene.environmentId,
+      environmentVersion: scene.environmentVersion,
+      worldObjects: Object.freeze(scene.worldObjects),
+    }),
+    candidates: Object.freeze({
+      suspects: Object.freeze(candidates.suspects),
+      motives: Object.freeze(candidates.motives),
+      weapons: Object.freeze(candidates.weapons),
+    }),
+    witnesses: Object.freeze(witnesses),
+    evidence: Object.freeze(evidence),
+    replayTruth: Object.freeze({ ...replayTruth }),
+  }) as unknown as SavedCaseDefinition;
+  return definition;
+}

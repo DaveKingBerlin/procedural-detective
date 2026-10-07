@@ -8,6 +8,9 @@ import { AccusationFlow } from "../accusation/accusationFlow";
 import { loadHypothesis } from "../notebook/hypothesisStore";
 import { isAuthorisationFailure } from "../scene/investigationFlow";
 import { parseInvestigationBootstrap } from "../scene/validation";
+import { activeReplay, clearReplay, replayOrLivePlaythroughId } from "../savegame/replaySession";
+import { buildReplayServices } from "../savegame/replayRuntime";
+import { REPLAY_PLAYTHROUGH_ID } from "../savegame/savegameV1";
 
 type AccusePageStatus =
   | { status: "loading" }
@@ -38,18 +41,26 @@ export default function AccusationPage() {
     hasStoredCredential() ? { status: "loading" } : { status: "no-token" },
   );
   const [bootstrap, setBootstrap] = useState<InvestigationBootstrapResponse | null>(null);
+  /** Phase 32 — the active saved replay (null during a live playthrough). */
+  const replay = activeReplay() ?? undefined;
 
   useEffect(() => {
-    const token = getPlaythroughToken();
-    const playthroughId = getPlaythroughId();
-    if (!token || !playthroughId) {
+    const isReplay = replay !== undefined;
+    const token = isReplay ? "" : getPlaythroughToken();
+    const playthroughId = isReplay ? REPLAY_PLAYTHROUGH_ID : getPlaythroughId();
+    if (!isReplay && (token === null || token === "" || !playthroughId)) {
       setStatus({ status: "no-token" });
       return;
     }
     let cancelled = false;
     setBootstrap(null);
     setStatus({ status: "loading" });
-    void getInvestigation(playthroughId, token).then(
+    // Phase 32 — a saved replay serves the bootstrap from the in-memory
+    // runtime (zero network); the live path keeps the real API client.
+    const fetchBootstrap = isReplay
+      ? buildReplayServices(replay.state).getInvestigation
+      : getInvestigation;
+    void fetchBootstrap(playthroughId ?? "", token ?? "").then(
       (raw) => {
         if (cancelled) return;
         try {
@@ -82,17 +93,32 @@ export default function AccusationPage() {
 
   const flow = useMemo(() => {
     if (bootstrap === null) return null;
-    const token = getPlaythroughToken() ?? "";
-    const playthroughId = getPlaythroughId() ?? bootstrap.playthroughId;
+    const isReplay = replay !== undefined;
+    const token = isReplay ? "" : (getPlaythroughToken() ?? "");
+    const playthroughId = isReplay
+      ? REPLAY_PLAYTHROUGH_ID
+      : (replayOrLivePlaythroughId() || bootstrap.playthroughId);
     if (bootstrap.state !== "PLAYING") return null;
+    // Phase 32 — a saved replay executes the accusation against the
+    // in-memory runtime with the SAME lifecycle/validation semantics.
+    const services =
+      isReplay && replay !== undefined
+        ? (() => {
+            const replayServices = buildReplayServices(replay.state);
+            return {
+              submitAccusation: replayServices.submitAccusation,
+              getReveal: replayServices.getReveal,
+            };
+          })()
+        : { submitAccusation, getReveal };
     return new AccusationFlow(
-      { submitAccusation, getReveal },
+      services,
       token,
       { playthroughId },
       bootstrap.candidates,
       { onRevealAvailable: () => void navigate("/reveal") },
     );
-  }, [bootstrap, navigate]);
+  }, [bootstrap, replay, navigate]);
 
   // Re-render whenever the flow's state machine advances (subscribe pattern —
   // the flow itself is a pure object, safe to use with react-dom/server tests).
@@ -110,6 +136,25 @@ export default function AccusationPage() {
           Back to the investigation
         </Link>
       </p>
+
+      {replay !== undefined && (
+        <div className="replay-source-bar" data-testid="replay-source-bar">
+          <span className="replay-source-label" data-testid="replay-source-label">
+            Saved Case
+          </span>
+          <button
+            type="button"
+            className="replay-source-menu"
+            data-testid="replay-back-to-menu"
+            onClick={() => {
+              clearReplay();
+              void navigate("/");
+            }}
+          >
+            Back to Main Menu
+          </button>
+        </div>
+      )}
 
       {status.status === "no-token" && <NoTokenState />}
 
@@ -137,7 +182,7 @@ export default function AccusationPage() {
 
       {bootstrap !== null && bootstrap.state === "PLAYING" && flow !== null && (
         <HypothesisUseBlock
-          playthroughId={getPlaythroughId() ?? bootstrap.playthroughId}
+          playthroughId={replayOrLivePlaythroughId() || bootstrap.playthroughId}
           flow={flow}
         />
       )}
