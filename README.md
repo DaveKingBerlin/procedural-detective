@@ -373,7 +373,7 @@ Repository: <https://github.com/DaveKingBerlin/procedural-detective>
 
 ## Hosted demo
 
-*Hosted demo URL lands here after hosting is chosen.* The deployment is a
+**Live demo:** <https://detective.daves-web.de/>`r`n`r`nThe deployment is a
 single container — see `docs/DEPLOYMENT.md` for the guide.
 
 ## Demo video
