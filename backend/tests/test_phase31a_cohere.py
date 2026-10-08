@@ -254,7 +254,7 @@ def test_evidence_schema_fingerprint_is_stable_and_deterministic():
     assert fp1 == fp2
     assert fp1 is not None and fp3 is not None
     assert re.fullmatch(r"[0-9a-f]{64}", fp1), fp1
-    assert fp1.startswith("c9c675fef576d570"), fp1
+    assert fp1.startswith("a8e2040b69f49a7a"), fp1
 
     # Insertion-order independence: a schema built with keys in a DIFFERENT
     # order must fingerprint identically.
@@ -484,7 +484,12 @@ def test_schema_byte_length_recorded_safely_and_contents_not_logged(database_url
                         ), stage
                         assert event["responseFormatType"] == "openai_json_schema"
                 # The EVIDENCE_v1 canonical byte length is deterministic.
-                assert prompts.schema_byte_length_for_stage_output("evidence") == 1480
+                # Phase31B aligned the evidence contract (closed reliability
+                # enum, range-strengthened canonical timestamp grammar,
+                # structured teaching description, DEF-054/056 omit-never-null
+                # reference fields) — the pinned value moved from 1480 to
+                # 2844 (Phase31B round 1) to 4179 (DEF-054..056 round).
+                assert prompts.schema_byte_length_for_stage_output("evidence") == 4179
                 # §24.9 — schema CONTENTS are never logged.
                 log_text = log_buffer.getvalue()
                 for marker in (
@@ -1007,20 +1012,29 @@ def test_cohere_adapted_evidence_wire_has_required_key_per_object():
         "properties"]["propositions"]["items"]["properties"]["structured"]
     structured_adapted = adapted["properties"]["evidence"]["items"][
         "properties"]["propositions"]["items"]["properties"]["structured"]
-    assert structured_canonical == {
-        "type": "object", "additionalProperties": True
-    }
+    # Phase31B: the canonical open ``structured`` node now carries the
+    # proposition->structured teaching description (the open-object intent is
+    # preserved — ``additionalProperties`` stays set, no properties, no
+    # required — so the Cohere adapter still recognizes it as an open node).
+    assert structured_canonical["type"] == "object"
+    assert structured_canonical["additionalProperties"] is True
+    assert "properties" not in structured_canonical
+    assert structured_canonical["description"]
     assert structured_adapted["type"] == "object"
     assert structured_adapted["additionalProperties"] is True
     assert structured_adapted["properties"] == {"v": {"type": "string"}}
     assert structured_adapted["required"] == ["v"]
+    assert structured_adapted["description"] == structured_canonical["description"]
 
     # Canonical application schema/fingerprint/bytes UNCHANGED (the adapter
     # operates ONLY at the transport boundary).
     assert canonical == prompts.json_schema_for_stage_output("evidence")
     assert prompts.schema_fingerprint_for_stage_output("evidence") == canonical_fp
     assert prompts.canonical_schema_bytes(canonical) == canonical_bytes
-    assert prompts.schema_byte_length_for_stage_output("evidence") == 1480
+    # Phase31B: evidence telemetry bytes moved with the aligned contract
+    # (DEF-054/056 omit-never-null reference fields, range-strengthened
+    # timestamp grammar).
+    assert prompts.schema_byte_length_for_stage_output("evidence") == 4179
 
     # The adapted transport is deterministic and structurally a superset of
     # the canonical object graph (every canonical node still present).

@@ -35,10 +35,13 @@ Every test proves ONE regression property:
   1. ``affordances`` arrays in ``public_world`` and ``repair``
      (persons/motives/objects) carry ``items.type == "string"`` AND
      ``items.enum == sorted(AFFORDANCE_VOCABULARY)`` (closed + deterministic);
-  2. the change is SCOPED: the evidence stage-output schema/fingerprint are
-     BYTE-IDENTICAL (evidence has NO ``affordances`` anywhere; the pinned
-     fingerprint ``c9c675fe...c0c0`` + canonical byte length 1480 are the
-     before/after proof), and every NON-affordance list-of-strings shape
+  2. the change is SCOPED: the evidence stage-output schema is deterministic
+     w.r.t. this change (evidence has NO ``affordances`` anywhere, and the
+     fingerprint never moves BECAUSE of the affordance enum); the pinned
+     post-Phase31B fingerprint ``a8e2040b...`` + canonical byte length 4179
+     (Phase31B intentionally aligned the evidence contract — DEF-054..056 —
+     after this suite was written; see the module constant below) are the
+     scoping proof, and every NON-affordance list-of-strings shape
      (``rooms`` / ``tags`` / ``locationTokens`` / ``travelRules`` object
      arrays) stays plain;
   3. golden fixtures (valid tokens SUSPECT_ELIGIBLE / VISIBLE_CHARACTER /
@@ -105,13 +108,17 @@ _PROMPT = (
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
-# The exact pre-change fingerprint of the EVIDENCE_v1 stage-OUTPUT schema. The
-# evidence contract carries NO affordances anywhere, so this fingerprint and its
-# canonical byte length MUST stay byte-identical after the change — the
-# cryptographic proof that the derivation change is scoped to affordance arrays
-# only.
-EVIDENCE_FINGERPRINT_PREFIX = "c9c675fef576d570"  # c9c675fe...c0c0
-EVIDENCE_CANONICAL_BYTE_LENGTH = 1480
+# The exact post-Phase31B fingerprint of the EVIDENCE_v1 stage-OUTPUT schema.
+# The evidence contract carries NO affordances anywhere, so the affordance-enum
+# derivation NEVER moves this pin — the value below is determined only by the
+# Phase31B evidence alignment (closed reliability enum, range-strengthened
+# canonical timestamp grammar, structured teaching description, and the
+# DEF-054/056 omit-never-null reference fields), which moved the pin from the
+# pre-31B c9c675fe.../1480 to 60a36a3f.../2844 (Phase31B round 1) to
+# a8e2040b.../4179 (DEF-054..056 round). The assertion remains the proof the
+# affordance-enum work itself did not change evidence.
+EVIDENCE_FINGERPRINT_PREFIX = "a8e2040b69f49a7a"  # post-DEF-054..056 evidence
+EVIDENCE_CANONICAL_BYTE_LENGTH = 4179
 
 
 def _walk(node):
@@ -254,10 +261,10 @@ def test_affordance_vocabulary_enum_matches_the_documented_model_vocabulary():
 
 def test_evidence_schema_fingerprint_and_bytes_byte_identical():
     """The EVIDENCE_v1 stage-OUTPUT schema carries NO affordances anywhere, so
-    the derivation change leaves it BYTE-IDENTICAL: the pinned fingerprint
-    ``c9c675fe...c0c0`` and the canonical byte length 1480 are unchanged
-    (a cryptographic proof of scoping), and the schema has no ``affordances``
-    key at any depth."""
+    the affordance-enum derivation leaves it deterministic: the pinned
+    (post-DEF-054..056 Phase31B) fingerprint ``a8e2040b...`` and the canonical
+    byte length 4179 are the scoping proof, and the schema has no
+    ``affordances`` key at any depth."""
     assert (
         prompts.schema_fingerprint_for_stage_output("evidence").startswith(
             EVIDENCE_FINGERPRINT_PREFIX
@@ -448,11 +455,11 @@ def test_cohere_adapter_preserves_the_affordance_enum():
         adapted_node = _affordances_node(adapted, section)
         assert adapted_node == canonical_node, section  # byte-identical
         assert adapted_node["items"]["enum"] == expected_enum, section
-    # The unaffected evidence schema (no affordances) is unchanged by THIS fix:
-    # its canonical fingerprint is still the pinned c9c675fe...c0c0 value and
-    # it carries no affordances node at any depth. (The Cohere adapter DOES
-    # intentionally rewrite the open ``structured`` object per the proven
-    # Track-A fix — that is a separate, already-covered adaptation.)
+    # The unaffected evidence schema (no affordances) is deterministic w.r.t.
+    # THIS fix: its canonical fingerprint is still the pinned post-Phase31B
+    # value and it carries no affordances node at any depth. (The Cohere
+    # adapter DOES intentionally rewrite the open ``structured`` object per
+    # the proven Track-A fix — that is a separate, already-covered adaptation.)
     evidence = prompts.json_schema_for_stage_output("evidence")
     assert (
         prompts.schema_fingerprint(evidence).startswith(EVIDENCE_FINGERPRINT_PREFIX)
