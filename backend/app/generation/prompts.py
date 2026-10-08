@@ -76,6 +76,11 @@ from app.domain.time_interval import (
     epoch_to_iso,
     parse_iso8601,
 )
+from app.generation.safety import (
+    ANCHOR_ALLOWLIST,
+    INTERACTION_ALLOWLIST,
+    AssetRegistry,
+)
 from app.generation.schemas import (
     AFFORDANCE_VOCABULARY,
     MAX_SINGLE_TEXT_FIELD_CHARS,
@@ -1203,6 +1208,82 @@ _NO_INTERNALS = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# Phase33 RAD-2 — authoritative generation scope (model-facing vocabulary)
+# --------------------------------------------------------------------------- #
+#
+# Phase33 RAD-1 evidence: the real-content failures were overwhelmingly
+# "Missing trusted context" — the model never receives the *allowed* value
+# vocabularies (asset registry ids, anchor ids, interaction ids) and in the
+# locked-witness case receives only ambiguous guidance ("include the witness"
+# without binding it to the locked Witness value). The blocks below render the
+# AUTHORITATIVE allowed scalar vocabularies from the application-owned
+# registries (``AssetRegistry.ASSET_IDS`` / ``ANCHOR_ALLOWLIST`` /
+# ``INTERACTION_ALLOWLIST`` — the SAME constants the validators enforce) into
+# the model-facing stage/repair contexts. They are GUIDANCE ONLY: every
+# validator stays the sole acceptance authority and rejects out-of-scope
+# values exactly as before (byte-identical rejection semantics).
+
+
+def generation_scope_block() -> str:
+    """Deterministic, authoritative asset/anchor/interaction scope block.
+
+    Rendered from the frozen registries (never an invented id); same function
+    -> same bytes. Consumed by the REPAIR / PUBLIC_WORLD / WORLD_GRAPH prompt
+    contexts (``pipeline._stage_context``) and the REPAIR / WORLD_REQUIREMENTS
+    prompt templates.
+    """
+    return (
+        "AUTHORIZED GENERATION SCOPE (authoritative - keep every generated "
+        "reference inside this scope):\n"
+        "- assetId (objects and worldGraph.placements) MUST be a REGISTERED "
+        "asset id. Always reuse one of these guaranteed-valid ids: "
+        + ", ".join(sorted(AssetRegistry.ASSET_IDS))
+        + ".\n"
+        "- NEVER invent an asset id (e.g. 'PROP_SNEAKERS_01', 'prop_knife', "
+        "'knife'); an unregistered id is rejected with 'is not in the "
+        "AssetRegistry'.\n"
+        "- worldGraph.placements[].anchor MUST be one of the semantic anchor "
+        "ids: "
+        + ", ".join(sorted(ANCHOR_ALLOWLIST))
+        + ".\n"
+        "- anchors are object-scoped surface ids; NEVER a room, a coordinate "
+        "or an invented token (rejected: 'anchor ... is not in "
+        "ANCHOR_ALLOWLIST').\n"
+        "- worldGraph.placements[].interaction MUST be \"\" (decorative, not "
+        "interactable) or one of: "
+        + ", ".join(sorted(INTERACTION_ALLOWLIST))
+        + ".\n"
+        "The validators remain the sole acceptance authority: a value outside "
+        "this scope is rejected, never coerced."
+    )
+
+
+def locked_witness_contract_line() -> str:
+    """Bound a locked ``Witness:`` constraint to a realizeable person.
+
+    The persons rule already says 'include the witness' but never ties the
+    generated witness to the LOCKED value (Phase33 RAD-1 row: Ambiguous
+    guidance). This sentence states the match contract without relaxing the
+    lock and without exposing case truth (the locked value itself never
+    appears here - the templates render the locked constraints separately).
+    """
+    return (
+        "LOCKED WITNESS CONTRACT - when the locked constraints include "
+        "'witness', persons MUST include EXACTLY that witness person: a person "
+        "with role 'witness' whose personId or name matches the locked witness "
+        "value (matching ignores case, spaces, underscores and punctuation, so "
+        "'Rita Vale' == 'rita_vale' == 'RITA VALE'). A missing or renamed "
+        "witness is a TERMINAL validation failure and cannot be repaired."
+    )
+
+
+# Stable pre-rendered fragments (deterministic; rendered once at import).
+_AUTHORIZED_SCOPE_TEXT = generation_scope_block()
+_LOCKED_WITNESS_CONTRACT_TEXT = locked_witness_contract_line()
+_SCOPE_AND_WITNESS_TEXT = _AUTHORIZED_SCOPE_TEXT + "\n\n" + _LOCKED_WITNESS_CONTRACT_TEXT
+
+
 def _asset_spec_rules() -> str:
     return (
         "AssetSpec rules (MUST follow all of them):\n"
@@ -1316,6 +1397,12 @@ _CASE_FIELD_RULES = (
     "- persons: include the victim, the murderer, the witness and at least "
     "TWO RED-HERRING suspects (role 'suspect' with the SUSPECT_ELIGIBLE "
     "affordance) — a case with a single suspect is not a valid mystery.\n"
+    "- LOCKED WITNESS CONTRACT: when the locked constraints include 'witness', "
+    "the SAME person MUST appear in persons with role 'witness' AND a personId "
+    "or name that matches the locked witness value (matching ignores case, "
+    "spaces, underscores and punctuation, so 'Rita Vale' == 'rita_vale' == "
+    "'RITA VALE'); a missing or renamed witness is a TERMINAL failure that "
+    "cannot be repaired.\n"
     "- motives: include the LOCKED motive plus at least TWO additional "
     "MOTIVE_CANDIDATE red-herring motives with distinct plausible labels — "
     "the solver must be able to EXCLUDE every alternative motive, so a "
@@ -1450,6 +1537,12 @@ _WORLD_FIELD_RULES = (
     "list — never a person.\n"
     "- relations kind is one exact token from: on_desk, on_table, "
     "near_victim, inside_cabinet, floor_area, on_wall.\n"
+    "- SEMANTIC ANCHORS: the placer binds every placement to a REGISTERED "
+    "anchor id; valid anchor ids are: "
+    + ", ".join(sorted(ANCHOR_ALLOWLIST))
+    + ". NEVER invent an anchor, a coordinate or a room name — "
+    "cross-object/invented anchors are rejected ('anchor ... is not in "
+    "ANCHOR_ALLOWLIST').\n"
     "- unsafeUnsupported is an ARRAY of short diagnostic notes; every entry "
     "must be at most 120 characters, and the array should normally be [] "
     "(one or two short words at most, never long sentences or prose).\n"
@@ -1558,6 +1651,8 @@ WORLD_REQUIREMENTS_PROMPT_v1 = (
     "bounded objects, and bounded placement relations. NEVER output coordinates, "
     "raw transforms, JavaScript, Babylon code, shaders, event handlers, URLs or "
     "paths. The deterministic placer decides final placement.\n"
+    + _AUTHORIZED_SCOPE_TEXT
+    + "\n"
     + _NO_INTERNALS
 )
 
@@ -1620,6 +1715,8 @@ REPAIR_PROMPT_v1 = (
     + schema_contract("full_draft")
     + "\n\n__PREVIOUS_DRAFT__\n\n"
     "SANITIZED validation issues to fix:\n__ISSUES__\n\n"
+    + _SCOPE_AND_WITNESS_TEXT
+    + "\n\n"
     + _NO_INTERNALS
 )
 
@@ -2548,8 +2645,10 @@ __all__ = [
     "build_repair_prompt",
     "build_world_requirements_prompt",
     "canonical_schema_bytes",
+    "generation_scope_block",
     "json_schema_for_generation_stage",
     "json_schema_for_stage_output",
+    "locked_witness_contract_line",
     "schema_byte_length_for_stage_output",
     "schema_contract",
     "schema_contract_as_json_schema",
