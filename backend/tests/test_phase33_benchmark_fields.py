@@ -147,12 +147,19 @@ def test_enrich_result_populates_failure_category_and_publishable():
     assert rec2["publishable"] is False
     assert rec2["failureCategory"] == fb.FAILURE_CATEGORY_REGISTRY_ANCHOR_WITNESS
 
-    # VALID outcome but not yet published (hold-before-publish) -> publishable.
+    # DEF-062 — honest controller contract: ``generation.stage.validation_failed``
+    # is emitted ONLY when the outcome is NOT VALID and the publication gate
+    # publishes VALID cases within the SAME attempt, so there is NO telemetry
+    # path with ``outcome == "VALID"`` and ``published`` False. ``publishable``
+    # therefore derives from ``published`` for successful attempts: a
+    # not-published attempt with telemetry is NOT publishable (a synthetic
+    # "VALID but not yet published" event would describe an impossible
+    # controller state and is NOT treated as publishable).
     rec3 = _base_record(finalStatus="FAILED")
-    fb.enrich_result(rec3, _events_for(outcome="VALID"))
-    assert rec3["publishable"] is True
+    fb.enrich_result(rec3, _events_for(outcome="TERMINAL_FAILURE"))
+    assert rec3["publishable"] is False
 
-    # No telemetry -> fields stay None (never fabricated).
+    # No telemetry -> fields stay None (unknown, never fabricated).
     rec4 = _base_record()
     fb.enrich_result(rec4, [])
     assert rec4["failureCategory"] is None
@@ -258,7 +265,9 @@ def test_aggregate_cost_per_validated_case_never_misleading_zero():
 def test_aggregate_empty_keeps_new_fields_absent_not_fabricated():
     row = fb.aggregate_per_contestant(_contestant(), [])
     assert row["attempts"] == 0
-    assert row["publishable"] == 0
+    # DEF-062: with no executed attempt, the publishable TELEMETRY is unknown —
+    # the aggregate is NULL (rendered n/a), never a fabricated 0.
+    assert row["publishable"] is None
     assert row["publishableRate"] is None
     assert row["validatedPublishedCases"] == 0
     assert row["failureCategories"] == {}

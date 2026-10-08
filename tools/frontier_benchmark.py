@@ -243,6 +243,9 @@ _CONTRACT_SCHEMA_FAILURE_CODES = frozenset(
         "ACTIVITY_LOG_SCHEMA_INVALID",
         "ACTIVITY_LOG_PROVIDER_FAILED",
         "ASSET_SPEC_INVALID",
+        # The Phase-17 geometry-quality gate is a validated-document content
+        # contract (shape/geometry mismatch), the same class as ASSET_SPEC_INVALID.
+        "GEOMETRY_VALIDATION_FAILED",
     }
 )
 
@@ -253,6 +256,65 @@ _SOLVER_FAILURE_CODES = frozenset({"SOLVER_AMBIGUOUS"})
 # failure (resolved via the deterministic diagnostic scan below).
 _CONTENT_BUDGET_FAILURE_CODES = frozenset(
     {"REPAIR_BUDGET_EXHAUSTED", "REGENERATION_BUDGET_EXHAUSTED"}
+)
+
+# --------------------------------------------------------------------------- #
+# DEF-063 — app-owned diagnostic FRAGMENTS for the content-class scan.
+#
+# The scan matches ONLY full phrases the validators / composition gate /
+# pipeline actually emit — never bare keywords (``assetregistry``, ``solver``,
+# ``schema``, ``placement``, ``ambiguous``, ...) that a GENERATED value quoted
+# inside a diagnostic could re-route into the wrong closed class.
+# --------------------------------------------------------------------------- #
+
+# REGISTRY/ANCHOR/WITNESS — the three Phase33 content classes + the
+# composition-gate counterparts (DEF-059: cross-kit anchors and catalog-less
+# assets must classify here, not "other world"):
+#   safety.validate_asset_reference  -> "asset id 'X' is not in the AssetRegistry"
+#   safety.validate_world_graph      -> "anchor 'X' is not in ANCHOR_ALLOWLIST"
+#   constraints violations           -> "locked constraint: locked witness ..."
+#   placer.validate_placement        -> "unknown anchor 'X' in kit 'Y'"
+#   placer.validate_placement        -> "asset 'X' is not in the asset catalog"
+_REGISTRY_ANCHOR_WITNESS_FRAGMENTS = (
+    "is not in the assetregistry",
+    "is not in anchor_allowlist",
+    "locked witness",
+    "unknown anchor",
+    "is not in the asset catalog",
+)
+
+# OTHER WORLD — the composer's own ``world.<category>:`` prefix (closed
+# category set: environment-mismatch, evidence-interaction, invalid-placement,
+# object-count-bound, unreachable-evidence, unresolved-object) plus the
+# app-owned placement-interaction diagnostics.
+_WORLD_BUCKET_RE = re.compile(
+    r"world\.(?:environment-mismatch|evidence-interaction|invalid-placement|"
+    r"object-count-bound|unreachable-evidence|unresolved-object):"
+)
+_OTHER_WORLD_FRAGMENTS = (
+    "is not in interaction_allowlist",
+    "requires a non-empty interaction",
+    "duplicate objectid",
+)
+
+# SOLVER — the pipeline's and the report's own issue phrasings.
+_SOLVER_DIAGNOSTIC_FRAGMENTS = (
+    "solver failure:",
+    "dimension ambiguous",
+    "solution ambiguous",
+    "solution overconstrained",
+    "solver mismatch",
+)
+
+# CONTRACT/SCHEMA — the strict parser's own structural-issue phrasings.
+_CONTRACT_SCHEMA_DIAGNOSTIC_FRAGMENTS = (
+    "unknown top-level key",
+    "missing required key",
+    "must be a json",
+    "must be an integer",
+    "must be a boolean",
+    "must be an array",
+    "must be a string",
 )
 
 
@@ -266,10 +328,15 @@ def failure_category_for(
     semantic identifies the class), then the SANITIZED repair diagnostics
     (validator issue strings / closed validator codes) for content-class
     signals, and finally ``platform/unknown`` — an attempt is never classed
-    from raw provider text or guessed. The REGISTRY/ANCHOR/WITNESS class is
-    detected ONLY from the authoritative validator diagnostics
-    (``AssetRegistry`` / ``ANCHOR_ALLOWLIST`` / ``locked witness`` fragments),
-    exactly the three Phase33 content failure classes.
+    from raw provider text or guessed.
+
+    The REGISTRY/ANCHOR/WITNESS class is detected ONLY from the authoritative
+    validator and composition-gate diagnostics (``AssetRegistry`` /
+    ``ANCHOR_ALLOWLIST`` / ``locked witness`` / ``unknown anchor`` / ``not in
+    the asset catalog`` fragments — DEF-059), and every content class matches
+    deterministic app-owned diagnostic fragments rather than bare keywords, so
+    a generated value that merely QUOTES a trigger word (``solver``,
+    ``assetregistry``, ``schema``, ...) is never mis-attributed (DEF-063).
     """
     code = str(failure_code or "")
     text = " ".join(str(item) for item in diagnostics)
@@ -287,35 +354,18 @@ def failure_category_for(
         return FAILURE_CATEGORY_SOLVER
 
     # Content-class diagnostic scan (only the safe validator issue strings).
-    # Registry/anchor/witness is the most specific Phase33 signal first.
-    if (
-        "assetregistry" in lower
-        or "anchor_allowlist" in lower
-        or "locked witness" in lower
-    ):
+    # Registry/anchor/witness is the most specific Phase33 signal first, so a
+    # composer-wrapped composition diagnostic ('world.invalid-placement: ...
+    # unknown anchor ... in kit ...') still classifies registry/anchor/witness.
+    if any(fragment in lower for fragment in _REGISTRY_ANCHOR_WITNESS_FRAGMENTS):
         return FAILURE_CATEGORY_REGISTRY_ANCHOR_WITNESS
-    if (
-        "world.unresolved-object" in lower
-        or "placement" in lower
-        or "interaction" in lower
-        or "geometry" in lower
-        or "geometr" in lower
+    if _WORLD_BUCKET_RE.search(lower) or any(
+        fragment in lower for fragment in _OTHER_WORLD_FRAGMENTS
     ):
         return FAILURE_CATEGORY_OTHER_WORLD
-    if (
-        "solver" in lower
-        or "ambiguous" in lower
-        or "overconstrained" in lower
-        or "deduction" in lower
-    ):
+    if any(fragment in lower for fragment in _SOLVER_DIAGNOSTIC_FRAGMENTS):
         return FAILURE_CATEGORY_SOLVER
-    if (
-        "schema" in lower
-        or "parse" in lower
-        or "structured" in lower
-        or "unknown top-level" in lower
-        or "duplicate" in lower
-    ):
+    if any(fragment in lower for fragment in _CONTRACT_SCHEMA_DIAGNOSTIC_FRAGMENTS):
         return FAILURE_CATEGORY_CONTRACT_SCHEMA
     if code == "WORLD_ASSET_UNRESOLVED":
         # The app-owned precise marker for a required world object with no safe
@@ -1234,9 +1284,7 @@ def enrich_result(
     # Phase33 RAD-3 — per-attempt failure category + publishable flag,
     # derived deterministically from the canonical failureCode and the
     # app's own SANITIZED validator issue diagnostics (never raw provider
-    # payloads). ``publishable`` is True exactly when the attempt reached a
-    # validated state that the publication gate would accept (published OR
-    # full validation VALID).
+    # payloads).
     diagnostics: list[str] = []
     for event in attempt_events:
         if event.get("event") != "generation.stage.validation_failed":
@@ -1250,10 +1298,21 @@ def enrich_result(
     result["failureCategory"] = failure_category_for(
         result.get("failureCode"), diagnostics
     )
-    outcome = result.get("validationOutcome")
-    result["publishable"] = bool(
-        result.get("published") is True or outcome == "VALID"
-    )
+
+    # DEF-062: ``publishable`` is TRUE exactly for attempts that reached the
+    # published state. Per the controller contract a full VALID validation
+    # outcome is only ever observed together with publication (the publication
+    # gate follows full validation and publishes VALID cases within the SAME
+    # attempt; ``generation.stage.validation_failed`` is emitted only when the
+    # outcome is NOT VALID), so there is NO telemetry path with
+    # ``outcome == "VALID"`` and ``published`` False — ``publishable`` derives
+    # from ``published`` for successful attempts. When telemetry exists and
+    # the attempt did NOT publish it is NOT publishable; when telemetry is
+    # entirely absent the field stays None (unknown — never fabricated).
+    if result.get("published") is True:
+        result["publishable"] = True
+    else:
+        result["publishable"] = False if attempt_events else None
 
     # §18 total-generation timeout contract.
     violations: list[str] = detect_call_timeout_violations(attempt_events, tolerance_ms)
@@ -2080,12 +2139,20 @@ def aggregate_per_contestant(
     failed_n = n - published_n
     published_rate = round(published_n / n, 4) if n else None
     # Phase33 RAD-3 — publishable and the successful-case denominator.
-    # ``publishable`` is a per-attempt property (True when the attempt reached
-    # the validated state the publication gate would accept, even if the
-    # runner held it back); the cost denominator is the strict "VALIDATED
-    # published" count (a published case always passed full validation).
+    # DEF-062: ``publishable`` is a per-attempt truthy property only when the
+    # telemetry can truthfully provide it (published -> True, failed with
+    # telemetry -> False, no telemetry -> None/unknown). The aggregate
+    # ``publishable`` / ``publishableRate`` therefore stay NULL when NO
+    # executed attempt has a known publishable value — never a fabricated 0;
+    # the rate denominator is the count of attempts with a KNOWN value.
+    publishable_known_n = sum(1 for r in executed if r.get("publishable") is not None)
     publishable_n = sum(1 for r in executed if r.get("publishable") is True)
-    publishable_rate = round(publishable_n / n, 4) if n else None
+    aggregate_publishable = publishable_n if publishable_known_n else None
+    publishable_rate = (
+        round(publishable_n / publishable_known_n, 4)
+        if publishable_known_n
+        else None
+    )
     validated_published_n = sum(1 for r in executed if r["published"] is True)
 
     def _count(predicate: Callable[[dict[str, Any]], bool]) -> int:
@@ -2147,6 +2214,13 @@ def aggregate_per_contestant(
         category: 0 for category in FAILURE_CATEGORIES
     }
     for r in executed:
+        # DEF-061: only FAILED attempts are failure classes. A published
+        # attempt is a success, never ``platform/unknown`` (mirrors the
+        # ``failureCodes`` distribution, which counts only records that carry
+        # a failureCode). Unattributed failures (category None — no telemetry)
+        # are simply absent, never guessed.
+        if r.get("published") is True:
+            continue
         category = r.get("failureCategory")
         if category in failure_categories:
             failure_categories[category] += 1
@@ -2191,7 +2265,7 @@ def aggregate_per_contestant(
         "published": published_n,
         "failed": failed_n,
         "publishedRate": published_rate,
-        "publishable": publishable_n,
+        "publishable": aggregate_publishable,
         "publishableRate": publishable_rate,
         "validatedPublishedCases": validated_published_n,
         "failureCategories": failure_categories,
@@ -2887,11 +2961,17 @@ def build_report(
     lines.append("")
     lines.append(
         "`publishable` is the per-attempt property: the attempt reached the "
-        "validated state the publication gate would accept (published OR full "
-        "validation VALID). The successful-case DENOMINATOR for cost is the "
-        "strict `validatedPublishedCases` (actually published, hence fully "
-        "validated). Zero-success groups report cost per case as UNDEFINED — "
-        "never a misleading zero."
+        "published state. Per the controller contract a VALID validation "
+        "outcome is only ever observed together with publication (the "
+        "publication gate follows full validation and publishes VALID cases "
+        "within the SAME attempt), so for successful attempts `publishable` "
+        "derives from `published`; there is no telemetry path with "
+        "outcome=VALID and published=False. The successful-case DENOMINATOR "
+        "for cost is the strict `validatedPublishedCases` (actually published, "
+        "hence fully validated). When telemetry cannot truthfully provide a "
+        "value, `publishable` is NULL/`n/a` — never a fabricated 0. "
+        "Zero-success groups report cost per case as UNDEFINED — never a "
+        "misleading zero."
     )
     lines.append("")
     lines.append(
@@ -2901,7 +2981,8 @@ def build_report(
     lines.append("|---|---|---|---|---|---|")
     for row in per_contestant:
         lines.append(
-            f"| {row['contestantId']} | {row['publishable']} | "
+            f"| {row['contestantId']} | "
+            f"{row['publishable'] if row['publishable'] is not None else 'n/a'} | "
             f"{_fmt_rate(row['publishableRate'])} | "
             f"{row['validatedPublishedCases']} | "
             f"{row['costPerValidatedPublishedCase'] if row['costPerValidatedPublishedCase'] is not None else 'n/a'} | "
@@ -3456,19 +3537,23 @@ def _plan_summary_text(
     if base_url:
         lines.append(f"  base-url:            {base_url}")
     lines.append(f"  output-dir:          {output_dir}")
-    lines.append(
-        "  FUTURE PER-MODEL SCORECARD TEMPLATE (this block is a TEMPLATE — "
-        "a real run fills the numbers below; dry-run never fabricates scores):"
-    )
-    lines.append(
-        "    | contestant | attempts | publishable | published | rate | "
-        "top failure categories | cost per validated case |"
-    )
-    lines.append(
-        "    | <model-a>  | 20 | 18 | 18 | 90.00% | registry/anchor/witness:2 | "
-        "n/a (cost unavailable) |"
-    )
     if dry_run:
+        # DEF-065: the FUTURE PER-MODEL SCORECARD TEMPLATE (fabricated sample
+        # numbers) is emitted ONLY for dry-run plans — a REAL run prints its
+        # actual scorecard from the report sections, never sample-looking
+        # rows that could be mistaken for results.
+        lines.append(
+            "  FUTURE PER-MODEL SCORECARD TEMPLATE (this block is a TEMPLATE — "
+            "a real run fills the numbers below; dry-run never fabricates scores):"
+        )
+        lines.append(
+            "    | contestant | attempts | publishable | published | rate | "
+            "top failure categories | cost per validated case |"
+        )
+        lines.append(
+            "    | <model-a>  | 20 | 18 | 18 | 90.00% | registry/anchor/witness:2 | "
+            "n/a (cost unavailable) |"
+        )
         lines.append(
             "  DRY RUN: NO provider is contacted, NO paid call is made, "
             "NO artifact is written."
