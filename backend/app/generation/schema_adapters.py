@@ -3,13 +3,15 @@
 PROVEN ROOT CAUSE (``ADVERSARIAL_REVIEW.md`` — "Phase 31A — Live Dev-Box
 root-cause session", Track A): cohere/command-a-plus rejects the EVIDENCE_v1
 ``response_format`` schema with HTTP 400 (public ``FRONTIER_PROVIDER_ERROR``,
-internal ``safeProviderErrorClass=SCHEMA_REJECTED``, schema fingerprint
-``c9c675fe...c0c0``, canonical byte length 1480). The canonical evidence
-schema contains an OPEN object node — the evidence proposition ``structured``
-field: ``{"type": "object", "additionalProperties": true}`` with NO
-``required`` list. Cohere's official JSON-Schema structured-output contract
-requires EVERY object to declare at least one ``required`` property, and
-``additionalProperties`` alone does not enforce a constraint in its JSON mode.
+internal ``safeProviderErrorClass=SCHEMA_REJECTED``; the Phase31A-state
+fingerprint was ``c9c675fe...c0c0`` / canonical byte length 1480 — Phase31B
+since aligned the evidence contract, changing those diagnostic pins). The
+canonical evidence schema contains an OPEN object node — the evidence
+proposition ``structured`` field: ``{"type": "object",
+"additionalProperties": true}`` with NO ``required`` list. Cohere's official
+JSON-Schema structured-output contract requires EVERY object to declare at
+least one ``required`` property, and ``additionalProperties`` alone does not
+enforce a constraint in its JSON mode.
 Live minimization proves the smallest fix: giving the open node a
 ``properties`` entry plus a ``required`` list (e.g.
 ``{"type":"object","properties":{"v":{"type":"string"}},"required":["v"]}``)
@@ -79,6 +81,18 @@ _COHERE_MODEL_PREFIX = "cohere/"
 # full canonical validator stays the sole acceptance authority.
 OPEN_OBJECT_SYNTHETIC_PROPERTY = "v"
 
+# Phase31B — string-node keywords the Cohere-family JSON-Schema dialect is not
+# proven to accept (the same limitation class that rejected the open-object
+# node in Phase31A Track A). The CANONICAL schema may teach the model the
+# timestamp grammar / interaction bound via ``pattern``/``format``/``maxLength``;
+# the Cohere TRANSPORT representation strips those keywords (deterministic,
+# narrowly-scoped — only the three string keywords, only inside the Cohere
+# adapter). The STRICT parser remains the sole acceptance authority and the
+# canonical schema/fingerprint stay byte-identical.
+COHERE_TRANSPORT_STRIP_KEYS: frozenset[str] = frozenset(
+    {"pattern", "format", "maxLength"}
+)
+
 
 def _deep_copy(value: Any) -> Any:
     """Iterative/recursive-free deep copy of a small JSON-schema mapping
@@ -131,8 +145,12 @@ def _adapt_openai_json_schema(node: Any) -> Any:
 
     Builds a fresh copy of every container; primitives pass through by
     value. Open object nodes are rewritten by ``_adapt_open_object``; every
-    other node is copied unchanged — constraints (``enum``/``const``/
-    ``required``/bounds) and order-insensitive structure are preserved.
+    other node is copied unchanged — its remaining constraints
+    (``enum``/``const``/``required``/bounds) and order-insensitive structure
+    are preserved. Phase31B additionally strips the ISO-string teaching
+    keywords (``pattern``/``format``/``maxLength``) from the Cohere transport
+    representation — a documented provider-limitation fallback the STRICT
+    parser fully re-enforces.
     """
     if isinstance(node, dict):
         if _is_open_object(node):
@@ -140,6 +158,7 @@ def _adapt_openai_json_schema(node: Any) -> Any:
         return {
             key: _adapt_openai_json_schema(value)
             for key, value in node.items()
+            if key not in COHERE_TRANSPORT_STRIP_KEYS
         }
     if isinstance(node, list):
         return [_adapt_openai_json_schema(item) for item in node]
@@ -205,6 +224,7 @@ def adapt_schema_for_transport(
 
 __all__ = [
     "CLOSED_SCHEMA_ADAPTER_IDS",
+    "COHERE_TRANSPORT_STRIP_KEYS",
     "OPEN_OBJECT_SYNTHETIC_PROPERTY",
     "SCHEMA_ADAPTER_ID_COHERE_OPENAI_JSON_SCHEMA",
     "adapt_schema_for_transport",
