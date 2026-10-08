@@ -174,6 +174,159 @@ TIMEOUT_FAILURE_CODES = frozenset(
     }
 )
 
+# --------------------------------------------------------------------------- #
+# Phase33 RAD-3 — closed per-attempt failure categories
+# --------------------------------------------------------------------------- #
+# Deterministic classification of what went wrong per attempt. Derived ONLY
+# from the canonical ``failureCode`` and the SANITIZED repair diagnostics (the
+# app's own ``validatorIssueCodes`` — never raw provider payloads). A failed
+# attempt is always a member of the closed category taxonomy below; an attempt
+# with no derivable signal is ``platform/unknown`` (never fabricated).
+
+FAILURE_CATEGORY_CONTRACT_SCHEMA = "contract/schema"
+FAILURE_CATEGORY_REGISTRY_ANCHOR_WITNESS = "registry/anchor/witness"
+FAILURE_CATEGORY_OTHER_WORLD = "other world"
+FAILURE_CATEGORY_SOLVER = "solver"
+FAILURE_CATEGORY_PROVIDER_TRANSPORT = "provider-transport"
+FAILURE_CATEGORY_TIMEOUT = "timeout"
+FAILURE_CATEGORY_QUOTA = "quota"
+FAILURE_CATEGORY_PLATFORM_UNKNOWN = "platform/unknown"
+
+FAILURE_CATEGORIES: tuple[str, ...] = (
+    FAILURE_CATEGORY_CONTRACT_SCHEMA,
+    FAILURE_CATEGORY_REGISTRY_ANCHOR_WITNESS,
+    FAILURE_CATEGORY_OTHER_WORLD,
+    FAILURE_CATEGORY_SOLVER,
+    FAILURE_CATEGORY_PROVIDER_TRANSPORT,
+    FAILURE_CATEGORY_TIMEOUT,
+    FAILURE_CATEGORY_QUOTA,
+    FAILURE_CATEGORY_PLATFORM_UNKNOWN,
+)
+
+# Failure codes whose PRIMARY semantic is a quota/billing ceiling.
+_QUOTA_FAILURE_CODES = frozenset(
+    {
+        "PROVIDER_CALL_BUDGET_EXHAUSTED",
+        "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED",
+        "ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
+        "MAX_PROCEDURAL_ASSETS_EXCEEDED",
+        "MAX_FAILED_ASSETS_EXCEEDED",
+        "FRONTIER_RATE_LIMITED",
+    }
+)
+
+# Failure codes whose PRIMARY semantic is provider transport / availability
+# (the model or endpoint was never the content problem).
+_PROVIDER_TRANSPORT_FAILURE_CODES = frozenset(
+    {
+        "PROVIDER_UNAVAILABLE",
+        "PROVIDER_INVALID_RESPONSE",
+        "FRONTIER_AUTH_FAILED",
+        "FRONTIER_ENDPOINT_OR_MODEL_NOT_FOUND",
+        "FRONTIER_PROVIDER_ERROR",
+        "LOCAL_OLLAMA_UNAVAILABLE",
+        "LOCAL_MODEL_UNAVAILABLE",
+        "LOCAL_PROVIDER_INVALID_OUTPUT",
+        "BRIDGE_NOT_CONNECTED",
+        "BRIDGE_DISCONNECTED",
+        "BRIDGE_PAIRING_EXPIRED",
+        "BRIDGE_BUSY",
+        "BRIDGE_PROTOCOL_ERROR",
+    }
+)
+
+# Failure codes whose PRIMARY semantic is a contract/schema breach of the
+# structured-output document.
+_CONTRACT_SCHEMA_FAILURE_CODES = frozenset(
+    {
+        "STRUCTURED_OUTPUT_INVALID",
+        "ACTIVITY_LOG_SCHEMA_INVALID",
+        "ACTIVITY_LOG_PROVIDER_FAILED",
+        "ASSET_SPEC_INVALID",
+    }
+)
+
+# Solver-class codes (truth-independent deduction ambiguity/overconstraint).
+_SOLVER_FAILURE_CODES = frozenset({"SOLVER_AMBIGUOUS"})
+
+# Budget-exhaustion codes whose root cause depends on the underlying content
+# failure (resolved via the deterministic diagnostic scan below).
+_CONTENT_BUDGET_FAILURE_CODES = frozenset(
+    {"REPAIR_BUDGET_EXHAUSTED", "REGENERATION_BUDGET_EXHAUSTED"}
+)
+
+
+def failure_category_for(
+    failure_code: str | None,
+    diagnostics: Sequence[str] = (),
+) -> str:
+    """Deterministic closed failure-category for one attempt.
+
+    Order of authority: canonical ``failureCode`` first (a code whose primary
+    semantic identifies the class), then the SANITIZED repair diagnostics
+    (validator issue strings / closed validator codes) for content-class
+    signals, and finally ``platform/unknown`` — an attempt is never classed
+    from raw provider text or guessed. The REGISTRY/ANCHOR/WITNESS class is
+    detected ONLY from the authoritative validator diagnostics
+    (``AssetRegistry`` / ``ANCHOR_ALLOWLIST`` / ``locked witness`` fragments),
+    exactly the three Phase33 content failure classes.
+    """
+    code = str(failure_code or "")
+    text = " ".join(str(item) for item in diagnostics)
+    lower = text.casefold()
+
+    if code in TIMEOUT_FAILURE_CODES:
+        return FAILURE_CATEGORY_TIMEOUT
+    if code in _QUOTA_FAILURE_CODES:
+        return FAILURE_CATEGORY_QUOTA
+    if code in _PROVIDER_TRANSPORT_FAILURE_CODES:
+        return FAILURE_CATEGORY_PROVIDER_TRANSPORT
+    if code in _CONTRACT_SCHEMA_FAILURE_CODES:
+        return FAILURE_CATEGORY_CONTRACT_SCHEMA
+    if code in _SOLVER_FAILURE_CODES:
+        return FAILURE_CATEGORY_SOLVER
+
+    # Content-class diagnostic scan (only the safe validator issue strings).
+    # Registry/anchor/witness is the most specific Phase33 signal first.
+    if (
+        "assetregistry" in lower
+        or "anchor_allowlist" in lower
+        or "locked witness" in lower
+    ):
+        return FAILURE_CATEGORY_REGISTRY_ANCHOR_WITNESS
+    if (
+        "world.unresolved-object" in lower
+        or "placement" in lower
+        or "interaction" in lower
+        or "geometry" in lower
+        or "geometr" in lower
+    ):
+        return FAILURE_CATEGORY_OTHER_WORLD
+    if (
+        "solver" in lower
+        or "ambiguous" in lower
+        or "overconstrained" in lower
+        or "deduction" in lower
+    ):
+        return FAILURE_CATEGORY_SOLVER
+    if (
+        "schema" in lower
+        or "parse" in lower
+        or "structured" in lower
+        or "unknown top-level" in lower
+        or "duplicate" in lower
+    ):
+        return FAILURE_CATEGORY_CONTRACT_SCHEMA
+    if code == "WORLD_ASSET_UNRESOLVED":
+        # The app-owned precise marker for a required world object with no safe
+        # representation — an "other world" content class.
+        return FAILURE_CATEGORY_OTHER_WORLD
+    if code in _CONTENT_BUDGET_FAILURE_CODES or code in ("VALIDATION_FAILED", "PUBLICATION_FAILED"):
+        # A generic validation/budget failure with no content-class signal
+        # stays unknown rather than guessed.
+        return FAILURE_CATEGORY_PLATFORM_UNKNOWN
+    return FAILURE_CATEGORY_PLATFORM_UNKNOWN
+
 # Allowed contestant config fields (anything else is a forbidden override).
 ALLOWED_CONTESTANT_FIELDS = frozenset(
     {"id", "label", "provider", "model", "credential_env", "enabled", "tags"}
@@ -1078,6 +1231,30 @@ def enrich_result(
     if result.get("failureCode") is None and terminal_failure is not None:
         result["failureCode"] = terminal_failure
 
+    # Phase33 RAD-3 — per-attempt failure category + publishable flag,
+    # derived deterministically from the canonical failureCode and the
+    # app's own SANITIZED validator issue diagnostics (never raw provider
+    # payloads). ``publishable`` is True exactly when the attempt reached a
+    # validated state that the publication gate would accept (published OR
+    # full validation VALID).
+    diagnostics: list[str] = []
+    for event in attempt_events:
+        if event.get("event") != "generation.stage.validation_failed":
+            continue
+        issues = event.get("validatorIssueCodes")
+        if isinstance(issues, (list, tuple)):
+            diagnostics.extend(str(item) for item in issues if item is not None)
+        codes = event.get("validatorCodes")
+        if isinstance(codes, (list, tuple)):
+            diagnostics.extend(str(item) for item in codes if item is not None)
+    result["failureCategory"] = failure_category_for(
+        result.get("failureCode"), diagnostics
+    )
+    outcome = result.get("validationOutcome")
+    result["publishable"] = bool(
+        result.get("published") is True or outcome == "VALID"
+    )
+
     # §18 total-generation timeout contract.
     violations: list[str] = detect_call_timeout_violations(attempt_events, tolerance_ms)
     total_elapsed = result.get("serverReportedTotalElapsedMs") or result.get(
@@ -1374,7 +1551,9 @@ RESULT_FIELDS = (
     "generationAttemptId",
     "finalStatus",
     "published",
+    "publishable",
     "failureCode",
+    "failureCategory",
     "validationOutcome",
     "providerCallCount",
     "repairCount",
@@ -1432,7 +1611,9 @@ def _empty_result(
         "generationAttemptId": None,
         "finalStatus": final_status,
         "published": published,
+        "publishable": None,
         "failureCode": failure_code,
+        "failureCategory": None,
         "validationOutcome": None,
         "providerCallCount": None,
         "repairCount": None,
@@ -1898,6 +2079,14 @@ def aggregate_per_contestant(
     published_n = sum(1 for r in executed if r["published"] is True)
     failed_n = n - published_n
     published_rate = round(published_n / n, 4) if n else None
+    # Phase33 RAD-3 — publishable and the successful-case denominator.
+    # ``publishable`` is a per-attempt property (True when the attempt reached
+    # the validated state the publication gate would accept, even if the
+    # runner held it back); the cost denominator is the strict "VALIDATED
+    # published" count (a published case always passed full validation).
+    publishable_n = sum(1 for r in executed if r.get("publishable") is True)
+    publishable_rate = round(publishable_n / n, 4) if n else None
+    validated_published_n = sum(1 for r in executed if r["published"] is True)
 
     def _count(predicate: Callable[[dict[str, Any]], bool]) -> int:
         return sum(1 for r in executed if predicate(r))
@@ -1954,6 +2143,43 @@ def aggregate_per_contestant(
         if r.get("failureCode"):
             failure_codes[r["failureCode"]] = failure_codes.get(r["failureCode"], 0) + 1
 
+    failure_categories: dict[str, int] = {
+        category: 0 for category in FAILURE_CATEGORIES
+    }
+    for r in executed:
+        category = r.get("failureCategory")
+        if category in failure_categories:
+            failure_categories[category] += 1
+    failure_categories = {
+        key: value for key, value in failure_categories.items() if value
+    }
+
+    # Phase33 RAD-3 — truthful cost per validated published case. Zero-
+    # success groups are recorded as UNDEFINED (None + a bounded note), never
+    # as a misleading zero.
+    cost_values: list[float] = []
+    for r in executed:
+        value = r.get("calculatedCost")
+        if value is None:
+            value = r.get("providerReportedCost")
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            cost_values.append(float(value))
+    total_estimated_cost = round(sum(cost_values), 4) if cost_values else None
+    mean_cost_per_attempt = (
+        round(total_estimated_cost / n, 4)
+        if total_estimated_cost is not None and n
+        else None
+    )
+    if total_estimated_cost is None:
+        cost_per_case: float | None = None
+        cost_per_case_note = COST_SOURCE_UNAVAILABLE
+    elif validated_published_n > 0:
+        cost_per_case = round(total_estimated_cost / validated_published_n, 4)
+        cost_per_case_note = "estimated"
+    else:
+        cost_per_case = None
+        cost_per_case_note = "undefined: zero validated published cases"
+
     return {
         "contestantId": contestant.id,
         "label": contestant.label,
@@ -1965,6 +2191,14 @@ def aggregate_per_contestant(
         "published": published_n,
         "failed": failed_n,
         "publishedRate": published_rate,
+        "publishable": publishable_n,
+        "publishableRate": publishable_rate,
+        "validatedPublishedCases": validated_published_n,
+        "failureCategories": failure_categories,
+        "meanCostPerAttempt": mean_cost_per_attempt,
+        "totalEstimatedCost": total_estimated_cost,
+        "costPerValidatedPublishedCase": cost_per_case,
+        "costPerValidatedPublishedCaseNote": cost_per_case_note,
         "zeroRepairPublished": zero_repair,
         "zeroRepairRate": round(zero_repair / n, 4) if n else None,
         "repair1Published": repair1,
@@ -2354,12 +2588,15 @@ def _csv_cell(value: Any) -> str:
 def write_summary_csv(run_dir: Path, per_contestant: Sequence[dict[str, Any]]) -> None:
     header = [
         "contestantId", "label", "provider", "model", "attempts", "skipped",
-        "published", "failed", "publishedRate", "zeroRepairPublished",
+        "published", "failed", "publishedRate", "publishable", "publishableRate",
+        "validatedPublishedCases", "zeroRepairPublished",
         "zeroRepairRate", "repair1Published", "repair2Published",
         "repairExhausted", "timeoutFailures", "contractViolations",
+        "failureCategories",
         "medianMs", "p90Ms", "p95Ms", "meanMs",
         "avgProviderCalls", "avgRepairs", "avgRegenerations",
         "structuredOutputAttempts", "costSource",
+        "costPerValidatedPublishedCase", "costPerValidatedPublishedCaseNote",
     ]
     rows: list[list[str]] = [header]
     for row in per_contestant:
@@ -2375,6 +2612,9 @@ def write_summary_csv(run_dir: Path, per_contestant: Sequence[dict[str, Any]]) -
                 _csv_cell(row["published"]),
                 _csv_cell(row["failed"]),
                 _csv_cell(row["publishedRate"]),
+                _csv_cell(row["publishable"]),
+                _csv_cell(row["publishableRate"]),
+                _csv_cell(row["validatedPublishedCases"]),
                 _csv_cell(row["zeroRepairPublished"]),
                 _csv_cell(row["zeroRepairRate"]),
                 _csv_cell(row["repair1Published"]),
@@ -2382,6 +2622,11 @@ def write_summary_csv(run_dir: Path, per_contestant: Sequence[dict[str, Any]]) -
                 _csv_cell(row["repairExhausted"]),
                 _csv_cell(row["timeoutFailures"]),
                 _csv_cell(row["contractViolations"]),
+                _csv_cell(
+                    ", ".join(
+                        f"{key}={value}" for key, value in sorted((row.get("failureCategories") or {}).items())
+                    )
+                ),
                 _csv_cell(latency.get("median")),
                 _csv_cell(latency.get("p90")),
                 _csv_cell(latency.get("p95")),
@@ -2391,6 +2636,8 @@ def write_summary_csv(run_dir: Path, per_contestant: Sequence[dict[str, Any]]) -
                 _csv_cell(row["meanRegenerationCount"]),
                 _csv_cell(row["structuredOutputAttempts"]),
                 _csv_cell(row["cost"]["source"]),
+                _csv_cell(row["costPerValidatedPublishedCase"]),
+                _csv_cell(row["costPerValidatedPublishedCaseNote"]),
             ]
         )
     text = "\n".join(",".join(row) for row in rows) + "\n"
@@ -2636,7 +2883,67 @@ def build_report(
         "observability (null where telemetry is unavailable — never fabricated)."
     )
     lines.append("")
+    lines.append("## PUBLISHABLE / COST PER VALIDATED PUBLISHED CASE")
+    lines.append("")
+    lines.append(
+        "`publishable` is the per-attempt property: the attempt reached the "
+        "validated state the publication gate would accept (published OR full "
+        "validation VALID). The successful-case DENOMINATOR for cost is the "
+        "strict `validatedPublishedCases` (actually published, hence fully "
+        "validated). Zero-success groups report cost per case as UNDEFINED — "
+        "never a misleading zero."
+    )
+    lines.append("")
+    lines.append(
+        "| Contestant | Publishable | Publishable rate | Validated published | "
+        "Cost per validated case | Note |"
+    )
+    lines.append("|---|---|---|---|---|---|")
+    for row in per_contestant:
+        lines.append(
+            f"| {row['contestantId']} | {row['publishable']} | "
+            f"{_fmt_rate(row['publishableRate'])} | "
+            f"{row['validatedPublishedCases']} | "
+            f"{row['costPerValidatedPublishedCase'] if row['costPerValidatedPublishedCase'] is not None else 'n/a'} | "
+            f"{_markdown_clean(row['costPerValidatedPublishedCaseNote'])} |"
+        )
+    lines.append("")
+    lines.append(
+        "Cost figures are `null`/`n/a` unless truthfully derivable. The Phase "
+        "30 adapter does not currently surface OpenRouter usage, so every "
+        "contestant reports costSource=`unavailable`; no fabricated number is "
+        "ever written."
+    )
+    lines.append("")
     lines.append("## FAILURE DISTRIBUTION")
+    lines.append("")
+    lines.append(
+        "Per-attempt failure category (closed taxonomy: contract/schema, "
+        "registry/anchor/witness, other world, solver, provider-transport, "
+        "timeout, quota, platform/unknown). The category is derived "
+        "deterministically from the canonical failureCode + the app's sanitized "
+        "validator diagnostics; unclear attempts are `platform/unknown`, never "
+        "guessed."
+    )
+    lines.append("")
+    lines.append(
+        "| Contestant | contract/schema | registry/anchor/witness | other world | "
+        "solver | provider-transport | timeout | quota | platform/unknown |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|---|")
+    for row in per_contestant:
+        categories = row.get("failureCategories") or {}
+        lines.append(
+            f"| {row['contestantId']} | "
+            f"{categories.get('contract/schema', 0)} | "
+            f"{categories.get('registry/anchor/witness', 0)} | "
+            f"{categories.get('other world', 0)} | "
+            f"{categories.get('solver', 0)} | "
+            f"{categories.get('provider-transport', 0)} | "
+            f"{categories.get('timeout', 0)} | "
+            f"{categories.get('quota', 0)} | "
+            f"{categories.get('platform/unknown', 0)} |"
+        )
     lines.append("")
     for row in per_contestant:
         lines.append(f"### {row['contestantId']}")
@@ -3149,6 +3456,18 @@ def _plan_summary_text(
     if base_url:
         lines.append(f"  base-url:            {base_url}")
     lines.append(f"  output-dir:          {output_dir}")
+    lines.append(
+        "  FUTURE PER-MODEL SCORECARD TEMPLATE (this block is a TEMPLATE — "
+        "a real run fills the numbers below; dry-run never fabricates scores):"
+    )
+    lines.append(
+        "    | contestant | attempts | publishable | published | rate | "
+        "top failure categories | cost per validated case |"
+    )
+    lines.append(
+        "    | <model-a>  | 20 | 18 | 18 | 90.00% | registry/anchor/witness:2 | "
+        "n/a (cost unavailable) |"
+    )
     if dry_run:
         lines.append(
             "  DRY RUN: NO provider is contacted, NO paid call is made, "
@@ -3851,12 +4170,19 @@ def build_caveats(
         "providers may rate-limit (HTTP 429 recorded truthfully)",
         "structured-output support is provider/model specific",
         "cost/token fields are null unless truthfully derivable",
+        (
+            "per-attempt failureCategory is derived deterministically from the "
+            "canonical failureCode + the app's own sanitized validator "
+            "diagnostics; attempts without that signal are classified "
+            "platform/unknown, never guessed"
+        ),
     ]
     if not telemetry_present:
         caveats.append(
             "no structured telemetry was available for this run: "
-            "providerCallCount/repairCount/regenerationCount/structuredOutput and "
-            "the timeout-contract check stay null (they are never fabricated)"
+            "providerCallCount/repairCount/regenerationCount/structuredOutput, "
+            "failureCategory, publishable and the timeout-contract check stay "
+            "null (they are never fabricated)"
         )
     if driver == "http":
         caveats.append(
