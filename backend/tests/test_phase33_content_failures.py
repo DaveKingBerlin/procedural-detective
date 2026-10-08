@@ -306,7 +306,7 @@ def test_phase33_b_repair_context_missing_authoritative_anchor_vocabulary():
 
 
 # ---------------------------------------------------------------------------
-# CLASS C — locked-witness mismatch (terminal) 
+# CLASS C — locked-witness mismatch (terminal)
 # (Phase33.md RAD-1 row: Ambiguous guidance)
 # ---------------------------------------------------------------------------
 
