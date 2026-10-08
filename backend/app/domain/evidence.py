@@ -90,6 +90,13 @@ _TIME_REQUIRED_TYPES: frozenset[str] = frozenset(
     {PERSON_OBSERVED_AT_LOCATION}.union(_TIME_CONSTRAINING_TYPES)
 )
 
+# Public alias of the canonical time-required proposition-type set (DEF-054).
+# The STRICT parser / ``TypedProposition`` require ``observed_at`` for EXACTLY
+# these types. Exposed so the transport-schema builder and the Phase31B drift
+# guards can derive the teaching text from this ONE constant and can never
+# silently drift from the parser contract.
+TIME_REQUIRED_TYPES: frozenset[str] = _TIME_REQUIRED_TYPES
+
 
 class Reliability(Enum):
     """Public source-quality label (47A.4). High/medium/low only.
@@ -101,6 +108,16 @@ class Reliability(Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
+
+
+# The canonical public reliability vocabulary — the EXACT tokens the strict
+# generation parser enforces for generated evidence (``parser._RELIABILITY_VOCABULARY``).
+# Derived from the ``Reliability`` enum so the transport-schema builder
+# (``app.generation.prompts``) and the Phase31B schema/parser drift guards can
+# never carry a second hand-maintained copy (Phase31B §10/§16/§33).
+RELIABILITY_VOCABULARY: frozenset[str] = frozenset(
+    member.value for member in Reliability
+)
 
 
 def _reliability(value: Reliability | str) -> Reliability:

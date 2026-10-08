@@ -266,6 +266,57 @@ def parse_iso8601_to_epoch(timestamp: str) -> int:
     return parse_iso8601(timestamp)[0]
 
 
+def canonical_timestamp_schema_pattern() -> str:
+    """ECMA-262-safe, range-strengthened regex for the STRICT ISO grammar.
+
+    The transport JSON Schemas (``app.generation.prompts``) derive their
+    timestamp ``pattern`` from THIS ONE function — never a second copy. The
+    token grammar mirrors ``_ISO_RE`` (2-digit zero-padded fields, mandatory
+    ``T``, optional fraction, mandatory ``Z``/``z``/``±HH:MM``/``±HHMM`` zone)
+    and the NUMERIC RANGES mirror the STRICT parser's documented range checks
+    in ``parse_iso8601``:
+
+    - month 01..12, day 01..31, hour 00..23, minute 00..59;
+    - second 00..59 PLUS ``:60`` (the documented leap-second tolerance the
+      parser CLAMPS to 59 — the schema must never reject a value the parser
+      accepts);
+    - offset hour 00..23, offset minute 00..59 (``+24:00`` / ``+02:60`` are
+      rejected by BOTH the pattern and the parser).
+
+    DOCUMENTED RESIDUAL LIMITATION (schema weaker than the parser BY DESIGN,
+    phase §9/§49 — the STRICT parser stays the sole acceptance authority):
+
+    - year ``0000`` (rejected by the parser's datetime year range) is NOT
+      expressible without a lookahead, and the trusted provider JSON-Schema
+      regex subset is treated as lookahead-unavailable;
+    - impossible calendar dates (2026-02-30, 2026-04-31, 2026-02-29 in a
+      non-leap year, ...) cannot be expressed in a regex at all (day validity
+      depends on month/leap year); ``parse_iso8601`` rejects them via
+      ``datetime``.
+
+    ECMA-262 notes: named capture groups are never used; the pattern uses only
+    character classes, alternation, quantifiers and non-capturing groups —
+    the subset widely accepted by constrained-decoding regex engines.
+    """
+    year = r"[0-9]{4}"  # token grammar; year 0000 is the documented residual
+    month = r"(?:0[1-9]|1[0-2])"  # 01..12 (parse_iso8601 month range)
+    day = r"(?:0[1-9]|[12][0-9]|3[01])"  # 01..31 (parse_iso8601 day range)
+    hour = r"(?:[01][0-9]|2[0-3])"  # 00..23
+    minute = r"[0-5][0-9]"  # 00..59
+    second = r"(?:[0-5][0-9]|60)"  # 00..59 + :60 leap second (parser clamps)
+    frac = r"(?:\.(?:[0-9]+))?"  # optional; floored by the parser
+    zone = (
+        r"(?:Z|z|"  # Z / lowercase z
+        r"[+-](?:0[0-9]|1[0-9]|2[0-3])"  # ± offset hour 00..23
+        r":?[0-5][0-9])"  # optional ':' + offset minute 00..59
+    )
+    return (
+        r"^" + year + "-" + month + "-" + day + "T"
+        + hour + ":" + minute + ":" + second
+        + frac + zone + r"$"
+    )
+
+
 def assert_epoch_in_domain(epoch_seconds: int) -> None:
     """Reject ticks outside the solver time domain with a clean ValueError.
 

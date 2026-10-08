@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Iterable, Mapping
 
 from app.assets.catalog import CATEGORY_ALLOWLIST
@@ -63,9 +64,22 @@ from app.domain.activity_log import (
     activity_log_window_bounds,
     entity_leak_tokens,
 )
-from app.domain.evidence import PROPOSITION_TYPES
-from app.domain.time_interval import epoch_to_iso, parse_iso8601
-from app.generation.schemas import AFFORDANCE_VOCABULARY
+from app.domain.evidence import (
+    ALIBI_TIME_CLAIM,
+    FORENSIC_WEAPON_MATCH,
+    PROPOSITION_TYPES,
+    RELIABILITY_VOCABULARY,
+    TIME_REQUIRED_TYPES,
+)
+from app.domain.time_interval import (
+    canonical_timestamp_schema_pattern,
+    epoch_to_iso,
+    parse_iso8601,
+)
+from app.generation.schemas import (
+    AFFORDANCE_VOCABULARY,
+    MAX_SINGLE_TEXT_FIELD_CHARS,
+)
 from app.world.environment import ENVIRONMENT_IDS
 
 # --- schema-contract builder (deterministic, authoritative) ----------------
@@ -104,6 +118,153 @@ _PROPOSITION_TYPE_HINT_PREFIX = "use EXACTLY one of the proposition type tokens:
 # server-owned transport-schema STRENGTHENING only — the strict parser and all
 # validators are byte-identical and remain the sole acceptance authority.
 _AFFORDANCE_VOCABULARY_ENUM: tuple[str, ...] = tuple(sorted(AFFORDANCE_VOCABULARY))
+
+# --------------------------------------------------------------------------- #
+# Phase31B — canonical-source schema alignment.
+#
+# The STRICT parser stays the sole acceptance authority. The constants below
+# feed ONLY the transport-schema builder (and the prompt contract text) and
+# derive from the SAME canonical sources the parser/domain use, so the schema
+# grammar can never silently drift from the parser grammar (Phase31B §7/§33):
+#
+#   timestamp grammar  -> app.domain.time_interval._ISO_RE (via
+#                         ``canonical_timestamp_schema_pattern``)
+#   reliability tokens -> app.domain.evidence.Reliability enum (via
+#                         ``RELIABILITY_VOCABULARY``)
+#   proposition types  -> app.domain.evidence.PROPOSITION_TYPES
+# --------------------------------------------------------------------------- #
+
+_TIMESTAMP_CONTRACT_PREFIX = "canonical ISO-8601 timestamp"
+
+_CANONICAL_TIMESTAMP_HINT = (
+    _TIMESTAMP_CONTRACT_PREFIX
+    + ", EXACTLY YYYY-MM-DDTHH:MM:SS with a MANDATORY timezone offset "
+    + "(Z, z, +02:00, +0200, -05:30); fractional seconds are optional "
+    + "(e.g. 2026-09-11T21:18:00+02:00 or 2026-09-11T20:18:00Z or "
+    + "2026-09-11T20:18:00.500Z); the date AND the offset are REQUIRED — "
+    + "NEVER a time-only value like 20:15, NEVER a naive timestamp without "
+    + "an offset"
+)
+
+# The range-strengthened ECMA-262 timestamp pattern (DEF-053) — derived from
+# the single source ``app.domain.time_interval.canonical_timestamp_schema_pattern``:
+# month 01..12 / day 01..31 / hour 00..23 / minute 00..59 / second 00..59|60
+# (leap-second clamp) / offset hour 00..23 / offset minute 00..59. The residual
+# impossible families (year 0000, invalid calendar dates) are documented as
+# schema-weaker-than-parser in the derived descriptions and the drift tests.
+_CANONICAL_ISO_TIMESTAMP_PATTERN = canonical_timestamp_schema_pattern()
+
+# The canonical proposition -> structured-field contract the transport schema
+# teaches (the strict parser / ``TypedProposition`` stays the acceptance
+# authority). Every sentence is embedded in the evidence ``structured`` node
+# description AND the evidence prompt contract — ONE source, never a second
+# copy.
+_STRUCTURED_CONTRACT_TYPES: tuple[tuple[str, str], ...] = (
+    (
+        FORENSIC_WEAPON_MATCH,
+        '{"match": <real JSON boolean true|false>} (never a string, never '
+        "0/1, never an object)",
+    ),
+    (
+        ALIBI_TIME_CLAIM,
+        '{"claimedDeparture": <canonical ISO-8601 timestamp with offset, '
+        "e.g. 2026-09-11T21:18:00+02:00>}",
+    ),
+)
+
+# The required placement interaction hint (Phase31B §11): the STRICT parser
+# requires interaction as a string that MAY be empty ("decorative / not
+# interactable", DEF-062) bounded to the canonical per-field maximum.
+_INTERACTION_HINT = (
+    "interaction string [REQUIRED] — use the EMPTY string \"\" only for a "
+    "decorative / non-interactable placement; otherwise use a documented "
+    "interaction identifier such as inspect, read, collect, open, activate, "
+    "talk, view_record, add_to_evidence_board; maxLength "
+    + str(MAX_SINGLE_TEXT_FIELD_CHARS)
+    + " chars"
+)
+
+
+def structured_contract_sentence(ptype: str) -> str:
+    """The canonical structured-field contract sentence for a proposition type
+    (embedded in the transport-schema description; the parser stays the
+    acceptance authority). Empty for types with no required structured key.
+    """
+    for _ptype, sentence in _STRUCTURED_CONTRACT_TYPES:
+        if _ptype == ptype:
+            return f"{_ptype} -> {sentence}"
+    return ""
+
+
+def _structured_contract_hint() -> str:
+    """The deterministic evidence ``structured`` contract hint: teaches the
+    per-type structured keys while keeping the node an open JSON object (the
+    Cohere transport adapter's proven compatibility needs the open shape)."""
+    sentences = "; ".join(
+        structured_contract_sentence(ptype) for ptype, _ in _STRUCTURED_CONTRACT_TYPES
+    )
+    return (
+        "a JSON object holding ONLY extra typed fields that are not already "
+        "proposition-level keys (NEVER a JSON-encoded string). Canonical "
+        "type-specific structured contracts: "
+        + sentences
+        + ". Every OTHER proposition type keeps an empty object or only its "
+        "documented extra keys — never invent keys."
+    )
+
+
+# Marker for the evidence proposition REFERENCE fields (personId/locationId/
+# objectId/motiveId). DEF-056 (ADV-31B-04): the Phase31A evidence 400 named
+# the UNION subtree ``["string","null"]`` at exactly
+# ``#/properties/evidence/items/properties/propositions`` — these four
+# REQUIRED-nullable union nodes are the ONLY unions the evidence schema still
+# carried. They are converted to OPTIONAL non-null ``{"type":"string"}`` nodes
+# (the STRICT parser treats a missing key and a JSON null identically as
+# "absent"), taught as "omit, never emit JSON null". The parser still ACCEPTS
+# a JSON null for backward compatibility; the transport just stops teaching
+# it. This keeps the marker OUT of the case_people section (whose ``personId``
+# is a REQUIRED unique id with an unrelated hint text).
+_REFERENCE_FIELD_PREFIX = "[OMIT-IF-NONE] "
+
+
+def _reference_field_hint(owner_label: str, the: str) -> str:
+    """One canonical evidence reference-field contract hint (DEF-056).
+
+    ``owner_label`` is the object the field references (e.g. "person id");
+    ``the`` is the fill instruction for when this proposition names an owner
+    (e.g. "the locked person id when the fact names a person"). The parser
+    accepts an ABSENT key or a JSON ``null`` as "no relation"; the teaching
+    therefore says OMIT (never emit JSON null).
+    """
+    return (
+        _REFERENCE_FIELD_PREFIX
+        + owner_label
+        + " — fill with "
+        + the
+        + "; when the proposition names none, OMIT the key entirely. "
+        "The parser accepts a JSON null as absent for backward compatibility, "
+        "but never emit it — an omitted key is the canonical form"
+    )
+
+
+def observed_at_contract_hint() -> str:
+    """The canonical evidence ``observedAt`` contract hint (DEF-054/055).
+
+    REQUIRED for the parser's time-required proposition types (the canonical
+    ``TIME_REQUIRED_TYPES`` set) and OMITTED (never emitted as null) for every
+    other type. The set is interpolated from the domain constant, so the
+    schema teaching and the drift guards share ONE source. The hint starts
+    with the canonical timestamp marker, so the derived schema node carries
+    the range-strengthened timestamp pattern.
+    """
+    time_required = ", ".join(sorted(TIME_REQUIRED_TYPES))
+    return (
+        _CANONICAL_TIMESTAMP_HINT
+        + "; REQUIRED for the time-bearing proposition types ("
+        + time_required
+        + "); for every OTHER type OMIT the key ENTIRELY — never emit "
+        "observedAt: null"
+    )
 
 # The closed ``environmentHint`` enum (Phase 19 Fix A). The hint text carries
 # this exact ``enum <tokens>`` marker so the derived transport JSON Schema
@@ -280,25 +441,29 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
                                 "invented/lowercase/natural-language token, "
                                 "never a truth/final verdict declaration"
                             ),
-                            "personId": ("[REQUIRED] person id or null — "
-                                "ALWAYS present as a key; fill with the locked "
-                                "person id when the fact names a person"),
-                            "locationId": ("[REQUIRED] location id or null — "
-                                "ALWAYS present as a key; fill with the locked "
-                                "location id when the fact names a location"),
-                            "objectId": ("[REQUIRED] object id or null — "
-                                "ALWAYS present as a key; fill with the locked "
-                                "weapon/object id when the fact names an object"),
-                            "motiveId": ("[REQUIRED] motive id or null — "
-                                "ALWAYS present as a key; fill with the motive "
-                                "id when the fact names a motive"),
-                            "observedAt": "ISO-8601 timestamp or null",
-                            "uncertaintySeconds": "non-negative int",
-                            "structured": (
-                                "a JSON object (nested typed fields like "
-                                "personId/observedAt/locationId/objectId/match; "
-                                "NEVER a JSON-encoded string)"
+                            "personId": _reference_field_hint(
+                                "person id",
+                                "the locked person id when the fact names a "
+                                "person",
                             ),
+                            "locationId": _reference_field_hint(
+                                "location id",
+                                "the locked location id when the fact names a "
+                                "location",
+                            ),
+                            "objectId": _reference_field_hint(
+                                "object id",
+                                "the locked weapon/object id when the fact "
+                                "names an object",
+                            ),
+                            "motiveId": _reference_field_hint(
+                                "motive id",
+                                "the locked motive id when the fact names a "
+                                "motive",
+                            ),
+                            "observedAt": observed_at_contract_hint(),
+                            "uncertaintySeconds": "non-negative int",
+                            "structured": _structured_contract_hint(),
                         }
                     ],
                     "presentation": {"title": "string", "description": "string"},
@@ -339,7 +504,7 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
                 "weaponId": "object id",
                 "locationId": "location id",
                 "crimeTime": {
-                    "canonical": "ISO-8601 timestamp",
+                    "canonical": _CANONICAL_TIMESTAMP_HINT,
                     "accusationToleranceSeconds": "non-negative int",
                 },
             },
@@ -414,7 +579,7 @@ def _full_draft_contract() -> Mapping[str, Any]:
                     "assetId": "asset id",
                     "locationId": "location id",
                     "anchor": "anchor token",
-                    "interaction": "interaction string (or null)",
+                    "interaction": _INTERACTION_HINT,
                     "evidenceId": "evidence id or null",
                 }
             ],
@@ -643,15 +808,25 @@ def _hint_json_types(hint: str) -> tuple[str, ...]:
     the sole acceptance authority).
     """
     text = hint.casefold()
-    if "bool" in text:
-        return ("boolean",)
     # A declared nested JSON object (e.g. evidence ``structured`` — Phase17D A):
     # the transport schema must declare an OBJECT so Ollama's grammar forces a
     # real nested object and never a JSON-encoded string. The marker is the
     # explicit "JSON object" phrasing (never matches "physical object noun").
+    # Checked BEFORE the boolean marker because the Phase31B structured
+    # teaching text legitimately mentions "real JSON boolean" inside an object
+    # hint.
     if "json object" in text:
         return ("object",)
-    if "integer" in text or " int" in text or text.startswith("int"):
+    if "bool" in text:
+        return ("boolean",)
+    # Phase31B fix: the integer branch must not fire for the word
+    # "interaction" — ``text.startswith("int")`` AND a bare ``" int"`` check
+    # both match "... interaction ..." / "interaction string…", which
+    # mis-typed ``placements[].interaction`` as integer (the documented
+    # world-graph failure class). ``\bint\b`` matches the lone "non-negative
+    # int" / "… int" token and NEVER a longer identifier like "integer" or
+    # "interaction".
+    if "integer" in text or bool(re.search(r"\bint\b", text)):
         return ("integer",)
     if "number" in text:
         return ("number",)
@@ -753,6 +928,20 @@ def _contract_to_json_schema(
         # The strict evidence parser owns this vocabulary. Give Ollama's JSON
         # Schema grammar that exact enum instead of merely accepting a string.
         return {"type": "string", "enum": sorted(PROPOSITION_TYPES)}
+    if hint.startswith(_TIMESTAMP_CONTRACT_PREFIX):
+        # Phase31B (§8/§9): the canonical ISO-8601-with-offset grammar, derived
+        # from the SAME regex the strict parser uses (single source). ``format:
+        # date-time`` is the standardized annotation; ``pattern`` is the
+        # deterministic ECMA-262 token grammar (offsets/Z/fraction). A
+        # provider whose JSON-Schema dialect rejects/ignores either keyword
+        # receives a stripped transport copy via ``schema_adapters`` (Cohere);
+        # the STRICT parser stays the sole acceptance authority.
+        return {
+            "type": "string",
+            "format": "date-time",
+            "pattern": _CANONICAL_ISO_TIMESTAMP_PATTERN,
+            "description": hint,
+        }
     enum_tokens = _enum_token_list(hint)
     if enum_tokens:
         # Phase 19 Fix A: a contract hint carrying the ``enum a,b,c`` marker
@@ -772,14 +961,55 @@ def _contract_to_json_schema(
             },
             "required": ["x", "y", "z"],
         }
+    if hint.startswith(_REFERENCE_FIELD_PREFIX):
+        # DEF-056 (ADV-31B-04): the four evidence reference fields are OPTIONAL
+        # non-null strings. The STRICT parser treats a missing key and a JSON
+        # null identically as "absent", so the canonical transport never
+        # derived a union here (the previous ``["string","null"]`` nodes were
+        # the ONLY unions in the evidence propositions subtree — the exact
+        # subtree the Phase31A Cohere evidence 400 named). The hint still
+        # mentions "null" only to teach "never emit JSON null"; the TYPE is
+        # forced to a plain string so no union node can ever be derived.
+        return {"type": "string", "description": hint}
     types = _hint_json_types(hint)
     if types == ("object",):
         # A declared nested JSON object (Phase17D A): permissive open object —
         # the grammar admits any keys/values, so the strict parser stays the
         # sole acceptance authority (a closed property set would force the
-        # model to invent contradictory shapes).
-        return {"type": "object", "additionalProperties": True}
-    return {"type": list(types) if len(types) > 1 else types[0]}
+        # model to invent contradictory shapes). Phase31B adds the canonical
+        # proposition->structured teaching description; the node stays an OPEN
+        # object so the Cohere transport adapter (Phase31A) keeps accepting
+        # it unchanged.
+        return {
+            "type": "object",
+            "additionalProperties": True,
+            "description": hint,
+        }
+    schema_node: dict[str, Any] = {
+        "type": list(types) if len(types) > 1 else types[0]
+    }
+    if _field_key == "interaction":
+        # Phase31B (§11): the STRICT parser treats placements[].interaction as
+        # REQUIRED, string, empty-allowed and bounded to the canonical
+        # per-field maximum; the transport schema encodes exactly that (the
+        # hint carries the [REQUIRED] key marker -> the required list).
+        schema_node["maxLength"] = MAX_SINGLE_TEXT_FIELD_CHARS
+        schema_node["description"] = hint
+    if _field_key == "reliability":
+        # Phase31B (§10): the closed reliability vocabulary must derive from
+        # the SAME canonical constant the strict parser enforces
+        # (``app.domain.evidence.RELIABILITY_VOCABULARY``) — never a
+        # hand-maintained second copy. Live failure values HIGH/DEFINITIVE
+        # can no longer pass the transport grammar.
+        schema_node["enum"] = sorted(RELIABILITY_VOCABULARY)
+        schema_node["description"] = (
+            "reliability is ONE exact lowercase token from the canonical "
+            "vocabulary ("
+            + ", ".join(sorted(RELIABILITY_VOCABULARY))
+            + ") — NEVER an uppercase token (HIGH), NEVER a synonym "
+            "(DEFINITIVE)"
+        )
+    return schema_node
 
 
 def schema_contract_as_json_schema(stage: str) -> dict[str, Any]:
@@ -1107,6 +1337,15 @@ _CASE_FIELD_RULES = (
 )
 
 
+_EVIDENCE_TIME_REQUIRED_SENTENCE = (
+    "- These proposition types REQUIRE an observedAt timestamp (never null, "
+    "never omitted): "
+    + ", ".join(sorted(TIME_REQUIRED_TYPES))
+    + ". Every OTHER type keeps observedAt ABSENT — never emitted as null "
+    "(an omitted key, never a JSON null)."
+)
+
+
 _EVIDENCE_FIELD_RULES = (
     "\n\nFIELD RULES (strict):\n"
     "- The document has EXACTLY one top-level key: evidence (an array of "
@@ -1122,10 +1361,8 @@ _EVIDENCE_FIELD_RULES = (
     "- proposition type is one of the exact proposition type tokens listed in "
     "the schema - never an invented token, never a verdict or final-truth "
     "declaration, never a lowercase/natural-language label.\n"
-    "- These proposition types REQUIRE an observedAt timestamp (never null, "
-    "never absent): PERSON_OBSERVED_AT_LOCATION, VICTIM_LAST_SEEN_ALIVE_AT, "
-    "BODY_FIRST_FOUND_AT, NOISE_HEARD_AT, CRIME_SCENE_OBSERVATION_AT, "
-    "TIME_WINDOW_EXCLUSION. Every OTHER type keeps observedAt null or absent. "
+    + _EVIDENCE_TIME_REQUIRED_SENTENCE
+    + "\n"
     "For a time-requiring type, observedAt MUST be the proposition's OWN "
     "observedAt field (a sibling of type) — never inside structured, never "
     "renamed.\n"
