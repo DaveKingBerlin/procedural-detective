@@ -76,6 +76,11 @@ from app.domain.time_interval import (
     epoch_to_iso,
     parse_iso8601,
 )
+from app.generation.safety import (
+    ANCHOR_ALLOWLIST,
+    INTERACTION_ALLOWLIST,
+    AssetRegistry,
+)
 from app.generation.schemas import (
     AFFORDANCE_VOCABULARY,
     MAX_SINGLE_TEXT_FIELD_CHARS,
@@ -1203,6 +1208,226 @@ _NO_INTERNALS = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# Phase33 RAD-2 — authoritative generation scope (model-facing vocabulary)
+# --------------------------------------------------------------------------- #
+#
+# Phase33 RAD-1 evidence: the real-content failures were overwhelmingly
+# "Missing trusted context" — the model never receives the *allowed* value
+# vocabularies (asset registry + catalog ids, kit-scoped anchor ids,
+# interaction ids) and in the locked-witness case receives only ambiguous
+# guidance ("include the witness" without binding it to the locked Witness
+# value). The blocks below render the AUTHORITATIVE allowed scalar
+# vocabularies from the application-owned registries (``AssetRegistry.ASSET_IDS``,
+# the Asset Oracle catalog ``app.assets.catalog`` ``by_id`` keys, the
+# environment-kit manifests ``app.environments.manifests``, ``ANCHOR_ALLOWLIST``
+# and ``INTERACTION_ALLOWLIST``) into the model-facing stage/repair contexts.
+#
+# DEF-058 / DEF-060: ``safety.validate_asset_reference`` accepts the UNION of
+# the legacy registry AND the Oracle catalog (the Phase 10+ asset authority),
+# but the composition gate (``app.environments.placer.validate_placement``)
+# accepts ONLY catalog-backed ids. The effective guaranteed-valid asset scope
+# is therefore the catalog ``by_id`` keys (registry AND catalog), with the
+# catalog-less legacy ids listed separately as NOT composition-usable — the
+# block never again advertises an id the composition gate would reject.
+#
+# DEF-059: anchors are KIT/ENVIRONMENT-SCOPED — a placement is valid only when
+# its anchor exists in the case's OWN kit. The per-kit anchor vocabularies are
+# DERIVED from the environment manifests (never hardcoded per kit), so the kit
+# set can grow without this block going stale.
+#
+# They are GUIDANCE ONLY: every validator stays the sole acceptance authority
+# and rejects out-of-scope values exactly as before (byte-identical rejection
+# semantics).
+
+
+def _composition_asset_ids() -> tuple[str, ...]:
+    """Sorted catalog-backed asset ids — the composition-usable vocabulary.
+
+    The Asset Oracle catalog (``app.assets.catalog`` — the Phase 10+ asset
+    authority) owns the ids the composition gate accepts as real placeable
+    assets (``app.environments.placer.validate_placement`` checks
+    ``asset_id in catalog.by_id`` first). ``safety.validate_asset_reference``
+    accepts the UNION of ``AssetRegistry.ASSET_IDS`` and the catalog ``by_id``
+    keys; only the catalog-backed ids are composition-valid, so the
+    model-facing scope advertises exactly these as guaranteed-valid ids.
+    """
+    from app.assets.catalog import load_catalog_from_repo
+
+    return tuple(sorted(load_catalog_from_repo().by_id))
+
+
+def _registry_only_asset_ids() -> tuple[str, ...]:
+    """Sorted registry ids that are NOT catalog-backed (composition-unsafe).
+
+    These pass ``safety.validate_asset_reference`` (registered for the
+    reference validator) but the composition gate
+    (``app.environments.placer.validate_placement``) rejects them
+    ('asset ... is not in the asset catalog') — they are never advertised as
+    guaranteed-valid, only named so the model knows to avoid them.
+    """
+    catalog_backed = frozenset(_composition_asset_ids())
+    return tuple(
+        sorted(
+            asset_id
+            for asset_id in AssetRegistry.ASSET_IDS
+            if asset_id not in catalog_backed
+        )
+    )
+
+
+def _kit_anchor_table() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Deterministic per-kit anchor vocabulary (environment-manifest derived).
+
+    A placement is composition-valid only when its anchor exists in the
+    case's OWN kit (``app.environments.placer.validate_placement`` rejects a
+    cross-kit anchor: 'unknown anchor ... in kit ...'). This helper renders
+    the per-kit anchor vocabularies from the environment manifests —
+    intersected with the semantic ``ANCHOR_ALLOWLIST`` the world-graph
+    validator accepts — instead of a flat global list that hides the kit
+    scoping. Returns an empty tuple when the manifests cannot be loaded
+    (fail-soft: ``generation_scope_block`` then falls back to the global
+    allowlist plus explicit kit-scope language). Deterministic: kits are
+    sorted by environment id and anchors are sorted within each kit.
+    """
+    try:
+        from app.environments.manifests import load_all_environments
+
+        kits = load_all_environments()
+    except Exception:  # noqa: BLE001 - manifest unavailability must not break
+        # prompt import; the block still renders the global allowlist.
+        return ()
+    allowed = frozenset(ANCHOR_ALLOWLIST)
+    return tuple(
+        (
+            kit.environment_id,
+            tuple(
+                sorted(a.anchor_id for a in kit.anchors if a.anchor_id in allowed)
+            ),
+        )
+        for kit in sorted(kits, key=lambda kit: kit.environment_id)
+    )
+
+
+def generation_scope_block() -> str:
+    """Deterministic, authoritative asset/anchor/interaction scope block.
+
+    Rendered from the frozen registries AND the Asset Oracle catalog
+    (``app.assets.catalog``) AND the environment-kit manifests
+    (``app.environments.manifests``); never an invented id. Same function
+    -> same bytes. Consumed by the REPAIR / PUBLIC_WORLD / WORLD_GRAPH prompt
+    contexts (``pipeline._stage_context``) and the REPAIR / WORLD_REQUIREMENTS
+    prompt templates.
+
+    The advertised ASSET scope is composition-valid: an id is guaranteed only
+    when it is catalog-backed (``_composition_asset_ids``); the catalog-less
+    legacy ``AssetRegistry`` ids are listed separately as NOT composition-
+    usable (``_registry_only_asset_ids``). The ANCHOR scope is
+    kit/environment-scoped: the per-kit anchor vocabularies are derived from
+    the environment manifests (``_kit_anchor_table``), because a placement is
+    valid only when its anchor exists in the case's OWN kit.
+    """
+    guaranteed = _composition_asset_ids()
+    registry_only = _registry_only_asset_ids()
+    kit_table = _kit_anchor_table()
+    if kit_table:
+        anchor_block = (
+            "- worldGraph.placements[].anchor MUST be an anchor of the CASE'S "
+            "OWN environment kit — anchors are KIT/ENVIRONMENT-SCOPED, and a "
+            "placement is valid ONLY when the anchor exists in that kit (a "
+            "cross-kit anchor from a DIFFERENT kit fails composition: 'unknown "
+            "anchor ... in kit ...'). The per-kit anchor vocabularies (derived "
+            "from the app environment manifests; the global allowed union is "
+            "the sum of these kit vocabularies) are:\n"
+            + "\n".join(
+                f"      kit {kit_id!r}: {', '.join(anchor_ids)}"
+                for kit_id, anchor_ids in kit_table
+            )
+            + "\n"
+        )
+    else:
+        anchor_block = (
+            "- worldGraph.placements[].anchor MUST be one of the semantic "
+            "anchor ids: "
+            + ", ".join(sorted(ANCHOR_ALLOWLIST))
+            + ".\n"
+            "- anchors are KIT/ENVIRONMENT-SCOPED: a placement is valid ONLY "
+            "when the anchor exists in the case's own environment kit — a "
+            "cross-kit anchor fails composition ('unknown anchor ... in kit "
+            "...'). NEVER invent a coordinate, a room or an anchor token "
+            "(rejected: 'anchor ... is not in ANCHOR_ALLOWLIST').\n"
+        )
+    registry_only_block = (
+        f"- Legacy registry-only ids that ARE registered for the reference "
+        f"validator but are NOT in the asset catalog and are therefore "
+        f"REJECTED at composition ('asset ... is not in the asset catalog'), "
+        f"NEVER use them for objects or worldGraph.placements: "
+        f"{', '.join(registry_only)}.\n"
+        if registry_only
+        else ""
+    )
+    return (
+        "AUTHORIZED GENERATION SCOPE (authoritative - keep every generated "
+        "reference inside this scope):\n"
+        "- assetId (objects and worldGraph.placements) MUST be a REGISTERED "
+        "asset id. Always reuse one of these guaranteed-valid, "
+        "composition-usable ids: "
+        + ", ".join(guaranteed)
+        + ".\n"
+        "- NEVER invent an asset id (e.g. 'PROP_SNEAKERS_01', 'prop_knife', "
+        "'knife'); an unregistered id is rejected with 'is not in the "
+        "AssetRegistry'.\n"
+        + registry_only_block
+        + anchor_block
+        + "- worldGraph.placements[].interaction MUST be \"\" (decorative, not "
+        "interactable) or one of: "
+        + ", ".join(sorted(INTERACTION_ALLOWLIST))
+        + ".\n"
+        "The validators remain the sole acceptance authority: a value outside "
+        "this scope is rejected, never coerced."
+    )
+
+
+_IDENTITY_MATCH_CONTRACT = (
+    "matching is case-insensitive and keeps ONLY ASCII letters and digits "
+    "(spaces, underscores, punctuation AND non-ASCII/accented letters are "
+    "removed, so 'Rita Vale' == 'rita_vale' == 'RITA VALE'; an accented "
+    "spelling like 'Émily Reed' normalizes to 'milyreed', so write witness "
+    "names with plain ASCII letters only)"
+)
+
+
+def locked_witness_contract_line() -> str:
+    """Bound a locked ``Witness:`` constraint to a realizeable person.
+
+    The persons rule already says 'include the witness' but never ties the
+    generated witness to the LOCKED value (Phase33 RAD-1 row: Ambiguous
+    guidance). This sentence states the EXACT ``LockedConstraints`` match
+    semantics (``constraints.normalize_identity``: Unicode casefold + keep
+    ONLY ASCII letters/digits — case, spaces, underscores, punctuation AND
+    non-ASCII letters are all dropped) without relaxing the lock and without
+    exposing case truth. The locked value itself never appears here: the
+    CASE_TRUTH / CASE_PEOPLE template renders the locked constraint sheet
+    separately (its ``__LOCKED__`` slot), while the REPAIR template
+    intentionally has NO ``__LOCKED__`` slot — a locked-witness violation is
+    TERMINAL (never repairable), so REPAIR never runs for it and the locked
+    value reaches the model only through the sanitized validator issue text.
+    """
+    return (
+        "LOCKED WITNESS CONTRACT - when the locked constraints include "
+        "'witness', persons MUST include EXACTLY that witness person: a person "
+        "with role 'witness' whose personId or name matches the locked witness "
+        "value, where " + _IDENTITY_MATCH_CONTRACT + ". A missing or renamed "
+        "witness is a TERMINAL validation failure and cannot be repaired."
+    )
+
+
+# Stable pre-rendered fragments (deterministic; rendered once at import).
+_AUTHORIZED_SCOPE_TEXT = generation_scope_block()
+_LOCKED_WITNESS_CONTRACT_TEXT = locked_witness_contract_line()
+_SCOPE_AND_WITNESS_TEXT = _AUTHORIZED_SCOPE_TEXT + "\n\n" + _LOCKED_WITNESS_CONTRACT_TEXT
+
+
 def _asset_spec_rules() -> str:
     return (
         "AssetSpec rules (MUST follow all of them):\n"
@@ -1316,6 +1541,11 @@ _CASE_FIELD_RULES = (
     "- persons: include the victim, the murderer, the witness and at least "
     "TWO RED-HERRING suspects (role 'suspect' with the SUSPECT_ELIGIBLE "
     "affordance) — a case with a single suspect is not a valid mystery.\n"
+    "- LOCKED WITNESS CONTRACT: when the locked constraints include 'witness', "
+    "the SAME person MUST appear in persons with role 'witness' AND a personId "
+    "or name that matches the locked witness value, where " + _IDENTITY_MATCH_CONTRACT + "; "
+    "a missing or renamed witness is a TERMINAL failure that "
+    "cannot be repaired.\n"
     "- motives: include the LOCKED motive plus at least TWO additional "
     "MOTIVE_CANDIDATE red-herring motives with distinct plausible labels — "
     "the solver must be able to EXCLUDE every alternative motive, so a "
@@ -1450,6 +1680,12 @@ _WORLD_FIELD_RULES = (
     "list — never a person.\n"
     "- relations kind is one exact token from: on_desk, on_table, "
     "near_victim, inside_cabinet, floor_area, on_wall.\n"
+    "- SEMANTIC ANCHORS: the placer binds every placement to a REGISTERED "
+    "anchor id; valid anchor ids are: "
+    + ", ".join(sorted(ANCHOR_ALLOWLIST))
+    + ". NEVER invent an anchor, a coordinate or a room name — "
+    "cross-object/invented anchors are rejected ('anchor ... is not in "
+    "ANCHOR_ALLOWLIST').\n"
     "- unsafeUnsupported is an ARRAY of short diagnostic notes; every entry "
     "must be at most 120 characters, and the array should normally be [] "
     "(one or two short words at most, never long sentences or prose).\n"
@@ -1558,6 +1794,8 @@ WORLD_REQUIREMENTS_PROMPT_v1 = (
     "bounded objects, and bounded placement relations. NEVER output coordinates, "
     "raw transforms, JavaScript, Babylon code, shaders, event handlers, URLs or "
     "paths. The deterministic placer decides final placement.\n"
+    + _AUTHORIZED_SCOPE_TEXT
+    + "\n"
     + _NO_INTERNALS
 )
 
@@ -1620,6 +1858,8 @@ REPAIR_PROMPT_v1 = (
     + schema_contract("full_draft")
     + "\n\n__PREVIOUS_DRAFT__\n\n"
     "SANITIZED validation issues to fix:\n__ISSUES__\n\n"
+    + _SCOPE_AND_WITNESS_TEXT
+    + "\n\n"
     + _NO_INTERNALS
 )
 
@@ -2548,8 +2788,10 @@ __all__ = [
     "build_repair_prompt",
     "build_world_requirements_prompt",
     "canonical_schema_bytes",
+    "generation_scope_block",
     "json_schema_for_generation_stage",
     "json_schema_for_stage_output",
+    "locked_witness_contract_line",
     "schema_byte_length_for_stage_output",
     "schema_contract",
     "schema_contract_as_json_schema",

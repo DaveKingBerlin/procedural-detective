@@ -61,6 +61,22 @@ STAGE_ORDER: tuple[GenerationStage, ...] = (
 
 _FALLBACK_TITLE = "Untitled Case"
 
+# Phase33 RAD-2 — the stages whose model-facing context receives the
+# authoritative generation scope (asset/anchor/interaction registries and, for
+# the persons-bearing stages, the locked-witness contract). The scope is
+# rendered from the SAME application-owned registries the validators enforce;
+# it is guidance only — every rejection semantics stays byte-identical.
+_SCOPE_STAGES = frozenset(
+    {
+        GenerationStage.PUBLIC_WORLD,
+        GenerationStage.WORLD_GRAPH,
+        GenerationStage.REPAIR,
+    }
+)
+_WITNESS_SCOPE_STAGES = frozenset(
+    {GenerationStage.PUBLIC_WORLD, GenerationStage.REPAIR}
+)
+
 
 @dataclass
 class AttemptRecord:
@@ -375,36 +391,51 @@ def _world_graph_resolution_issues(draft: GeneratedDraft) -> tuple[str, ...]:
 def _stage_context(attempt: AttemptRecord, stage: GenerationStage) -> str:
     """Safe, deterministic textual projection of accumulated material.
 
-    Contains ONLY sanitized generated material + locked constraints — never a
-    CaseTruth object and never hidden solver internals.
+    Contains ONLY sanitized generated material + locked constraints + the
+    authoritative generation scope — never a CaseTruth object and never hidden
+    solver internals.
+
+    Phase33 RAD-2: the PUBLIC_WORLD / WORLD_GRAPH / REPAIR stage contexts also
+    carry the authoritative scope block (``prompts.generation_scope_block`` —
+    the registry-backed asset/anchor/interaction vocabularies) and the
+    persons-bearing stages carry the locked-witness contract line; both solve
+    the Phase33 RAD-1 "missing trusted context" / "ambiguous guidance" gaps
+    without changing a single validation semantics.
     """
     if stage is GenerationStage.REPAIR:
         material: Any = attempt.draft
         if material is None:
             material = dict(attempt.stage_outputs)
-        return safety.sanitize_for_repair(material)
-    material: dict[str, Any] = {"prompt": attempt.prompt}
-    if attempt.prompt_note:
-        material["promptNote"] = attempt.prompt_note
-    if attempt.locked is not None:
-        locked_fields = {
-            key: value for key, value in attempt.locked.locked_fields() if value is not None
-        }
-        if locked_fields:
-            material["lockedConstraints"] = locked_fields
-    if stage is not GenerationStage.CASE_TRUTH:
-        crime = attempt.stage_outputs.get(GenerationStage.CASE_TRUTH)
-        if crime is not None:
-            material["caseTruth"] = crime
-    if stage in (GenerationStage.EVIDENCE, GenerationStage.WORLD_GRAPH):
-        public_world = attempt.stage_outputs.get(GenerationStage.PUBLIC_WORLD)
-        if public_world is not None:
-            material["publicWorld"] = public_world
-    if stage is GenerationStage.WORLD_GRAPH:
-        evidence_set = attempt.stage_outputs.get(GenerationStage.EVIDENCE)
-        if evidence_set is not None:
-            material["evidence"] = evidence_set
-    return safety.sanitize_for_repair(material)
+        text = safety.sanitize_for_repair(material)
+    else:
+        material_context: dict[str, Any] = {"prompt": attempt.prompt}
+        if attempt.prompt_note:
+            material_context["promptNote"] = attempt.prompt_note
+        if attempt.locked is not None:
+            locked_fields = {
+                key: value for key, value in attempt.locked.locked_fields() if value is not None
+            }
+            if locked_fields:
+                material_context["lockedConstraints"] = locked_fields
+        if stage is not GenerationStage.CASE_TRUTH:
+            crime = attempt.stage_outputs.get(GenerationStage.CASE_TRUTH)
+            if crime is not None:
+                material_context["caseTruth"] = crime
+        if stage in (GenerationStage.EVIDENCE, GenerationStage.WORLD_GRAPH):
+            public_world = attempt.stage_outputs.get(GenerationStage.PUBLIC_WORLD)
+            if public_world is not None:
+                material_context["publicWorld"] = public_world
+        if stage is GenerationStage.WORLD_GRAPH:
+            evidence_set = attempt.stage_outputs.get(GenerationStage.EVIDENCE)
+            if evidence_set is not None:
+                material_context["evidence"] = evidence_set
+        text = safety.sanitize_for_repair(material_context)
+    if stage in _SCOPE_STAGES:
+        scope = prompts.generation_scope_block()
+        if stage in _WITNESS_SCOPE_STAGES:
+            scope += "\n\n" + prompts.locked_witness_contract_line()
+        text = f"{text}\n\n{scope}"
+    return text
 
 
 def build_request(
