@@ -1,0 +1,32 @@
+ADV-32F2 evidence — Phase32-Fix2 interaction bound RED->GREEN proof
+Date: 2026-10-10
+Branch: phase32-fix2/real-savegame
+HEAD: cf9077d1e2143135e30ebe2efced8ec9118d3df3
+
+RED pre-fix commit 8787435 (detached worktree + junctions to node_modules,
+new test files copied over pre-fix product code):
+
+  src/savegame/interactionContract.test.ts > scene.worldObjects[].interaction
+    contract > "rejects a world-object interaction over MAX_SHORT_TEXT_LENGTH
+    (301 chars) as BOUND_EXCEEDED (import-scoped bound)"
+    FAIL: Error: expected rejection (line 195) — pre-fix validator accepted
+    the 301-char worldObject interaction (shared parser type-checks only).
+
+  src/savegame/interactionContract.test.ts > frozen bounded UI message >
+    "worldObject interaction 301 keeps the frozen bounded copy ..."
+    FAIL: expected Error to be an instance of SavegameParseError.
+
+  Result: Test Files 1 failed, Tests 2 failed | 48 passed.
+  All other tests (empty-string acceptance, parity, round-trip, replay,
+  provider isolation, evidenceId matrix) passed on the PRE-FIX validator.
+
+GREEN at HEAD cf9077d:
+
+  Result: Test Files 2 passed, Tests 54 passed.
+
+NOTE: the newly committed fixture v1_real_interaction_shape.pdcase.json was
+GREEN at the pre-fix commit too (empty interaction + null evidenceIds were
+already accepted pre-fix); the RED->GREEN proof for this phase's production
+change (the 300 bound) is carried by the two 301-character mutation tests, not
+by the interaction-shape fixture itself. Observations recorded in
+ADVERSARIAL_REVIEW.md ADV-32F2-01/04/05.
