@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import canonical from "./fixtures/v1_demo_apartment.pdcase.json";
-import { MAX_EXPORT_BYTES, parseSavegameV1, utf8ByteLength } from "./savegameV1";
+import { MAX_EXPORT_BYTES, parseSavegameV1, savegameParseDiagnostic, utf8ByteLength } from "./savegameV1";
 import { savegameErrorMessage, SavegameParseError } from "./savegameV1";
 
 /**
@@ -419,5 +419,298 @@ describe("SavegameV1 — bounded load-error copy (Phase32 §26)", () => {
 
   it("suggests no raw parser text in the invalid-file message", () => {
     expect(savegameErrorMessage("invalid")).toBe("This file is not a valid Procedural Detective savegame.");
+  });
+});
+
+describe("SavegameV1 — nullable vs optional contract (Phase32-Fix §7/§17/§29)", () => {
+  const mutation = (mutate: (doc: any) => void): string => mutateDocument(mutate);
+
+  describe("CANONICAL nullable fields accept explicit null (PASS)", () => {
+    it("worldGraph.placements[].evidenceId = null", () => {
+      const text = mutation((doc) => {
+        for (const placement of doc.case.publicCase.worldGraph.placements) placement.evidenceId = null;
+      });
+      const definition = parseSavegameV1(text, utf8ByteLength(text));
+      for (const placement of definition.publicCase.worldGraph.placements) {
+        expect(placement.evidenceId).toBeNull();
+      }
+    });
+
+    it("scene.worldObjects[].evidenceId = null", () => {
+      const text = mutation((doc) => {
+        for (const worldObject of doc.case.scene.worldObjects) worldObject.evidenceId = null;
+      });
+      const definition = parseSavegameV1(text, utf8ByteLength(text));
+      for (const worldObject of definition.scene.worldObjects) {
+        expect(worldObject.evidenceId).toBeNull();
+      }
+    });
+
+    it("scene.worldObjects[].subtype = null", () => {
+      const text = mutation((doc) => {
+        for (const worldObject of doc.case.scene.worldObjects) worldObject.subtype = null;
+      });
+      const definition = parseSavegameV1(text, utf8ByteLength(text));
+      for (const worldObject of definition.scene.worldObjects) {
+        expect(worldObject.subtype).toBeNull();
+      }
+    });
+
+    it("witnesses[].sceneObjectId = null (REMOTE_STATEMENT)", () => {
+      const text = mutation((doc) => {
+        for (const witness of doc.case.witnesses) {
+          witness.presence = "REMOTE_STATEMENT";
+          witness.sceneObjectId = null;
+        }
+      });
+      const definition = parseSavegameV1(text, utf8ByteLength(text));
+      for (const witness of definition.witnesses) {
+        expect(witness.presence).toBe("REMOTE_STATEMENT");
+        expect(witness.sceneObjectId).toBeNull();
+      }
+    });
+
+    it("metadata.difficulty / metadata.environmentId / publicCase.scene / content events personId all accept null", () => {
+      const text = mutation((doc) => {
+        doc.case.metadata.difficulty = null;
+        doc.case.metadata.environmentId = null;
+        doc.case.publicCase.scene = null;
+      });
+      const definition = parseSavegameV1(text, utf8ByteLength(text));
+      expect(definition.metadata.difficulty).toBeNull();
+      expect(definition.metadata.environmentId).toBeNull();
+      expect(definition.publicCase.scene).toBeNull();
+    });
+  });
+
+  describe("CANONICAL optional fields accept omission (PASS)", () => {
+    it("publicCase.objects[].subtype omitted and worldObject generated/displayLabel omitted", () => {
+      const text = mutation((doc) => {
+        for (const obj of doc.case.publicCase.objects) delete obj.subtype;
+        for (const worldObject of doc.case.scene.worldObjects) {
+          delete worldObject.generated;
+          delete worldObject.displayLabel;
+        }
+      });
+      const definition = parseSavegameV1(text, utf8ByteLength(text));
+      // The normalized definition NORMALIZES an omitted nullable key to null
+      // (requireBoundedNullableString) — absent and null are equivalent under
+      // the canonical contract, and both are accepted.
+      for (const obj of definition.publicCase.objects) {
+        expect(obj.subtype).toBeNull();
+      }
+      for (const worldObject of definition.scene.worldObjects) {
+        expect(worldObject.generated).toBeNull();
+        expect(worldObject.displayLabel).toBeNull();
+      }
+    });
+
+    it("evidence content optional keys omitted", () => {
+      const text = mutation((doc) => {
+        const content = doc.case.evidence[0].content;
+        delete content.summary;
+        delete content.comparison;
+        delete content.entries;
+      });
+      const definition = parseSavegameV1(text, utf8ByteLength(text));
+      expect(definition.evidence[0].content.summary).toBeUndefined();
+    });
+  });
+
+  describe("REQUIRED non-null fields reject null (FAIL) — {} vs null vs value stay distinct", () => {
+    it("metadata.title: {} (absent) FAILS, null FAILS, value PASSES", () => {
+      const absent = mutation((doc) => void delete doc.case.metadata.title);
+      expect(kindOf(absent)).toBe("invalid");
+      const nulled = mutation((doc) => (doc.case.metadata.title = null));
+      expect(kindOf(nulled)).toBe("invalid");
+      // The three shapes are NOT equivalent for a required non-null field:
+      // only a real value survives validation.
+      const valued = mutation((doc) => (doc.case.metadata.title = "T"));
+      expect(parseSavegameV1(valued, utf8ByteLength(valued)).metadata.title).toBe("T");
+    });
+
+    it("placement.objectId: null FAILS", () => {
+      const text = mutation((doc) => (doc.case.publicCase.worldGraph.placements[0].objectId = null));
+      expect(kindOf(text)).toBe("invalid");
+    });
+
+    it("witness.witnessId: null FAILS", () => {
+      const text = mutation((doc) => (doc.case.witnesses[0].witnessId = null));
+      expect(kindOf(text)).toBe("invalid");
+    });
+
+    it("replayTruth.murdererId: null FAILS", () => {
+      const text = mutation((doc) => (doc.case.replayTruth.murdererId = null));
+      expect(kindOf(text)).toBe("invalid");
+    });
+  });
+
+  describe("WRONG primitive types are rejected (FAIL) — null is NOT accepted everywhere", () => {
+    it("sceneObjectId = 42 FAILS with a string|null diagnostic", () => {
+      const text = mutation((doc) => (doc.case.witnesses[0].sceneObjectId = 42));
+      expect(kindOf(text)).toBe("invalid");
+      try {
+        parseSavegameV1(text, utf8ByteLength(text));
+        throw new Error("expected rejection");
+      } catch (error) {
+        if (error instanceof SavegameParseError) {
+          expect(error.diagnostic?.path).toBe("savegame.case.witnesses[0].sceneObjectId");
+          expect(error.diagnostic?.reasonCode).toBe("TYPE_MISMATCH");
+          expect(error.diagnostic?.expected).toBe("string|null");
+          expect(error.diagnostic?.actualType).toBe("number");
+        } else {
+          throw error;
+        }
+      }
+    });
+
+    it("placement.evidenceId = 42 FAILS", () => {
+      const text = mutation((doc) => (doc.case.publicCase.worldGraph.placements[0].evidenceId = 42));
+      expect(kindOf(text)).toBe("invalid");
+    });
+
+    it("worldObject.subtype = 42 FAILS", () => {
+      const text = mutation((doc) => (doc.case.scene.worldObjects[0].subtype = 42));
+      expect(kindOf(text)).toBe("invalid");
+    });
+
+    it("worldObject.evidenceId = 42 FAILS", () => {
+      const text = mutation((doc) => (doc.case.scene.worldObjects[0].evidenceId = 42));
+      expect(kindOf(text)).toBe("invalid");
+    });
+
+    it("presence = 42 FAILS", () => {
+      const text = mutation((doc) => (doc.case.witnesses[0].presence = 42));
+      expect(kindOf(text)).toBe("invalid");
+    });
+  });
+});
+
+describe("SavegameV1 — Phase32-Fix §5 test/debug diagnostic shape", () => {
+  it("carries path / reasonCode / expected / actualType on a null-vs-string violation", () => {
+    const text = mutateDocument((doc) => (doc.case.metadata.title = null));
+    try {
+      parseSavegameV1(text, utf8ByteLength(text));
+      throw new Error("expected rejection");
+    } catch (error) {
+      if (error instanceof SavegameParseError) {
+        expect(error.diagnostic).toBeDefined();
+        expect(error.diagnostic!.path).toBe("case.metadata.title");
+        expect(error.diagnostic!.reasonCode).toBe("TYPE_MISMATCH");
+        expect(error.diagnostic!.expected).toBe("string");
+        expect(error.diagnostic!.actualType).toBe("null");
+      } else {
+        throw error;
+      }
+    }
+  });
+
+  it("derives a diagnostic from a message-only rejection (duplicate id)", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[1].objectId = doc.case.scene.worldObjects[0].objectId;
+    });
+    try {
+      parseSavegameV1(text, utf8ByteLength(text));
+      throw new Error("expected rejection");
+    } catch (error) {
+      if (error instanceof SavegameParseError) {
+        const diagnostic = savegameParseDiagnostic(error);
+        expect(diagnostic).not.toBeNull();
+        expect(diagnostic!.path).toContain("worldObjects");
+        expect(diagnostic!.reasonCode).toBe("DUPLICATE_ID");
+      } else {
+        throw error;
+      }
+    }
+  });
+
+  it("classifies unknown keys as UNKNOWN_KEY and enum violations as ENUM_MISMATCH", () => {
+    const unknownKey = mutateDocument((doc) => (doc.case.metadata.evil = "x"));
+    try {
+      parseSavegameV1(unknownKey, utf8ByteLength(unknownKey));
+      throw new Error("expected rejection");
+    } catch (error) {
+      if (error instanceof SavegameParseError) {
+        expect(savegameParseDiagnostic(error)!.reasonCode).toBe("UNKNOWN_KEY");
+      } else {
+        throw error;
+      }
+    }
+    const badEnum = mutateDocument((doc) => (doc.case.metadata.source = "alien"));
+    try {
+      parseSavegameV1(badEnum, utf8ByteLength(badEnum));
+      throw new Error("expected rejection");
+    } catch (error) {
+      if (error instanceof SavegameParseError) {
+        expect(savegameParseDiagnostic(error)!.reasonCode).toBe("ENUM_MISMATCH");
+      } else {
+        throw error;
+      }
+    }
+  });
+
+  it("the diagnostic is NEVER the production error message (frozen copy unchanged)", () => {
+    expect(savegameErrorMessage("invalid")).toBe("This file is not a valid Procedural Detective savegame.");
+    const text = mutateDocument((doc) => (doc.case.witnesses[0].sceneObjectId = null));
+    // A VALID nullable null must still parse (no regression from the helper).
+    expect(parseSavegameV1(text, utf8ByteLength(text)).witnesses[0].sceneObjectId).toBeNull();
+  });
+});
+
+describe("SavegameV1 — Phase32-Fix §16 security negatives remain rejected", () => {
+  it("rejects missing required solution fields (replayTruth)", () => {
+    for (const field of ["murdererId", "motiveId", "weaponId", "crimeTime", "accusationToleranceSeconds"]) {
+      expect(
+        kindOf(
+          mutateDocument((doc) => void delete doc.case.replayTruth[field]),
+        ),
+      ).toBe("invalid");
+    }
+  });
+
+  it("rejects a malformed replayTruth block", () => {
+    expect(kindOf(mutateDocument((doc) => (doc.case.replayTruth = null)))).toBe("invalid");
+    expect(kindOf(mutateDocument((doc) => (doc.case.replayTruth = "truth")))).toBe("invalid");
+    expect(kindOf(mutateDocument((doc) => (doc.case.replayTruth = [])))).toBe("invalid");
+    expect(kindOf(mutateDocument((doc) => (doc.case.replayTruth.crimeTime = "not a time")))).toBe("invalid");
+  });
+
+  it("rejects non-string / over-bound asset ids in placements and world objects", () => {
+    expect(
+      kindOf(mutateDocument((doc) => (doc.case.publicCase.worldGraph.placements[0].assetId = 42))),
+    ).toBe("invalid");
+    expect(
+      kindOf(
+        mutateDocument((doc) => {
+          doc.case.scene.worldObjects[0].assetId = "a".repeat(257);
+        }),
+      ),
+    ).toBe("invalid");
+    expect(
+      kindOf(mutateDocument((doc) => (doc.case.scene.worldObjects[0].assetId = ""))),
+    ).toBe("invalid");
+  });
+
+  it("rejects an out-of-vocabulary difficulty and environment version bound", () => {
+    expect(kindOf(mutateDocument((doc) => (doc.case.metadata.difficulty = "extreme")))).toBe("invalid");
+    expect(
+      kindOf(mutateDocument((doc) => (doc.case.publicCase.scene.environmentVersion = 1_000_001))),
+    ).toBe("invalid");
+  });
+
+  it("keeps javascript:/external URLs and HTML/script payloads as inert bounded strings (no fetch, no mount)", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[0].assetId = "javascript:alert(1)";
+      doc.case.metadata.sourceCaseId = "https://evil.example/x.png";
+      doc.case.evidence[0].content.summary = "<script>alert(1)</script>";
+    });
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    // The strings survive ONLY as literal typed fields — never fetched, never
+    // mounted as markup (the player UI renders them as escaped React text).
+    expect(definition.scene.worldObjects[0].assetId).toBe("javascript:alert(1)");
+    expect(definition.metadata.sourceCaseId).toBe("https://evil.example/x.png");
+    expect(definition.evidence[0].content.summary).toBe("<script>alert(1)</script>");
+    // No fetch ever happens during parse/validate/normalize.
+    expect((globalThis as Record<string, unknown>).__pdNoFetch).toBeUndefined();
   });
 });
