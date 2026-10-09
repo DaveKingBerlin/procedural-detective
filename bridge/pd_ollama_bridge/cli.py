@@ -51,6 +51,13 @@ from .bridge_config import (
 )
 from .config import Config, TokenStore
 from .ollama_client import OllamaClient
+from .tls import (
+    REASON_TLS_CERTIFICATE_EXPIRED,
+    REASON_TLS_CERTIFICATE_VERIFY_FAILED,
+    REASON_TLS_HOSTNAME_MISMATCH,
+    REASON_TLS_TRUST_STORE_UNAVAILABLE,
+    BridgeConnectionError,
+)
 from .urls import UrlValidationError, server_origin
 
 LOGGER = logging.getLogger("pd-ollama-bridge")
@@ -524,6 +531,33 @@ def _config_display(args: argparse.Namespace) -> int:
     return 0
 
 
+def _safe_connect_error_message(last_error: Any) -> str:
+    """Map the classified terminal connect failure onto a SAFE CLI message
+    (Phase 31CD §14): actionable, no cert chains, no tokens, no raw
+    exception texts. Non-classified failures keep the legacy generic line."""
+    if not isinstance(last_error, BridgeConnectionError):
+        return "error: could not establish a bridge session"
+    if last_error.reason_code == REASON_TLS_TRUST_STORE_UNAVAILABLE:
+        return (
+            "error: no usable CA trust store was found for secure WebSocket "
+            "verification."
+        )
+    if last_error.reason_code == REASON_TLS_HOSTNAME_MISMATCH:
+        return (
+            "error: TLS certificate verification failed for the bridge server "
+            "(the certificate does not match the server hostname)."
+        )
+    if last_error.reason_code in (
+        REASON_TLS_CERTIFICATE_VERIFY_FAILED,
+        REASON_TLS_CERTIFICATE_EXPIRED,
+    ):
+        return (
+            "error: TLS certificate verification failed for the bridge server. "
+            "The local Python trust store may be missing or outdated."
+        )
+    return "error: could not establish a bridge session"
+
+
 async def _connect(args: argparse.Namespace) -> int:
     try:
         plan = _resolve_connect_plan(args)
@@ -598,7 +632,7 @@ async def _connect(args: argparse.Namespace) -> int:
     finally:
         await ollama.aclose()
     if bridge.sessions_connected == 0:
-        print("error: could not establish a bridge session", file=sys.stderr)
+        print(_safe_connect_error_message(bridge.last_error), file=sys.stderr)
         return 1
     return 0
 
