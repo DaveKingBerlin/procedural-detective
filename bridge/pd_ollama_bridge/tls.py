@@ -17,13 +17,11 @@ Selection precedence for ``wss://`` (never weakens verification):
 
 Fail-closed (Phase 31CD §31): when neither a usable default nor the
 certifi bundle can be loaded, a ``TLSTrustStoreUnavailableError`` is raised —
-nothing ever continues with verification disabled (no ``CERT_NONE``.
- No
+nothing ever continues with verification disabled (no ``CERT_NONE``). No
 global mutation of the process environment is performed either (a
-per-connection ``ssl.SSLContext`` is passed to ``websockets.connect``..
+per-connection ``ssl.SSLContext`` is passed to ``websockets.connect``).
 
- The
-module also owns the closed vocabulary of classified connection failures
+The module also owns the closed vocabulary of classified connection failures
 (``reason_code`` + ``retryable``) so the bridge can surface safe, actionable
 TLS errors instead of collapsing them into a bare ``ConnectionError``
 (Phase 31CD §13/§14/§16).
@@ -60,15 +58,13 @@ TRUST_SOURCE_CERTIFI = "certifi"
 class BridgeConnectionError(ConnectionError):
     """A classified bridge connection failure with a safe ``reason_code``.
 
-
-
     Classes that can be reliably detected on the supported Python/websockets
-    stack (Phase 31CD §13) map to subclasses;; everything else stays
+    stack (Phase 31CD §13) map to subclasses; everything else stays
     ``CONNECTION_ERROR``. ``retryable`` tells ``run()`` whether the backoff
     reconnect loop can possibly repair the failure: deterministic TLS trust
-    failures are ``retryable=False`` (retry does not repair a trust failure)..
+    failures are ``retryable=False`` (retry does not repair a trust failure).
     Only the class name / reason code / safe fields are ever logged — never raw
-    exception messages that could echo URLs, certificate bodies or secrets..
+    exception messages that could echo URLs, certificate bodies or secrets.
     """
 
     reason_code: str = REASON_CONNECTION_ERROR
@@ -87,7 +83,7 @@ class BridgeConnectionError(ConnectionError):
 
 
 class TLSVerifyFailedError(BridgeConnectionError):
-    """Certificate verification failed (generic verify failure.."""
+    """Certificate verification failed (generic verify failure)."""
 
     reason_code: str = REASON_TLS_CERTIFICATE_VERIFY_FAILED
     retryable: bool = False
@@ -138,14 +134,12 @@ def _create_default_context(*args: Any, **kwargs: Any) -> ssl.SSLContext:
 def _context_has_cas(ctx: ssl.SSLContext) -> bool:
     """True when the context actually loaded at least one CA certificate.
 
-
     ``ssl.create_default_context()`` does not raise when the compiled-in default
-    CA file is missing on a platform — it silently builds a verification-off
-    empty store and every real ``wss://`` handshake then fails with atrusted
-    certificate error. "Usable" is therefore judged by REAL context
-    construction behavior (Phase 31CD §30), not by
-    ``get_default_verify_paths().cafile is not None``.。”
-"""
+    CA file is missing on a platform — it silently builds an empty store and
+    every real ``wss://`` handshake then fails with a certificate verification
+    error. "Usable" is therefore judged by REAL context construction behavior
+    (Phase 31CD §30), not by ``get_default_verify_paths().cafile is not None``.
+    """
     try:
         stats = ctx.cert_store_stats()
     except Exception:  # noqa: BLE001 - treat an unreadable store as unusable
@@ -161,7 +155,7 @@ def _certifi_cafile() -> str:
 
 
 def _env_trust_configured(env: Mapping[str, str]) -> bool:
-    """Explicit operator/env trust configuration present?(Phase 31CD §8)."""
+    """Explicit operator/env trust configuration present? (Phase 31CD §8)."""
     return bool((env.get("SSL_CERT_FILE") or "").strip()) or bool(
         (env.get("SSL_CERT_DIR") or "").strip()
     )
