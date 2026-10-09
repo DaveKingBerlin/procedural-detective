@@ -32,6 +32,14 @@ import { parseSavegameV1, utf8ByteLength } from "./savegameV1";
  *   - `discovered` / `read` — worldObjects-ONLY player-knowledge flags.
  *   - `generated` / `displayLabel` — worldObjects-ONLY asset blocks.
  *
+ * ABSENT-vs-NULL normalization (DEF-076 / ADV-32F2-03): the production
+ * validator treats an ABSENT optional `evidenceId` exactly like an explicit
+ * `null` (`requireBoundedNullableString` returns null for BOTH undefined and
+ * null), so `absent == null` is EQUAL for parity. `fixtureViews` mirrors that
+ * with `?? null` on BOTH projections — the coercion is coherent with the
+ * validator, not a masking of a drift. The null/absent equivalence is pinned
+ * by a dedicated test below; the validator behavior is NOT changed.
+ *
  * The guard is run over BOTH the canonical demo fixture and the new
  * sanitized real-interaction fixture (Phase32-Fix2 §14).
  */
@@ -83,8 +91,40 @@ function fixtureViews(doc: any): { placements: Map<string, PlacementView>; world
   return { placements, worldObjects };
 }
 
+/** The EXACT mirrored key set a placement projection must carry (DEF-076 /
+ *  ADV-32F2-03): objectId, assetId, locationId, anchor, interaction,
+ *  evidenceId — and NOTHING else. The intentionally-differing fields
+ *  (subtype / assetType / discovered / read / generated / displayLabel) are
+ *  worldObjects-ONLY and must never appear on a placement. */
+const MIRRORED_PLACEMENT_KEYS = [
+  "anchor",
+  "assetId",
+  "evidenceId",
+  "interaction",
+  "locationId",
+  "objectId",
+];
+
+/** Assert every placement in the document (raw SavegameV1 OR normalized
+ *  SavedCaseDefinition) carries EXACTLY the six mirrored keys. The normalized
+ *  projection is rebuilt by `validatePlacement` with exactly those six keys
+ *  (evidenceId normalized to null when absent), so the assertion holds for
+ *  both the raw fixture and the production-parsed definition. */
+function assertPlacementKeyset(doc: any): void {
+  const publicCase = doc.case?.publicCase ?? doc.publicCase;
+  for (const placement of publicCase.worldGraph.placements as Array<Record<string, unknown>>) {
+    expect(Object.keys(placement).sort()).toEqual(MIRRORED_PLACEMENT_KEYS);
+  }
+}
+
 function assertParity(doc: any): void {
   const { placements, worldObjects } = fixtureViews(doc);
+
+  // DEF-076 / ADV-32F2-03: the placement projection must be EXACTLY the
+  // mirrored key set — no worldObjects-only field may leak onto a placement.
+  // Previously asserted only for the canonical demo fixture; now enforced for
+  // EVERY fixture run through the parity guard (demo + real-interaction).
+  assertPlacementKeyset(doc);
 
   // Every world object has a placement (identity integrity — the production
   // validator enforces this too; the guard re-asserts it independently).
@@ -128,9 +168,12 @@ describe("Phase32-Fix2 §17 — projection parity guard", () => {
     expect(worldObject.subtype).toBe("sharp_weapon");
     expect(worldObject.discovered).toBe(true);
     expect(worldObject.read).toBe(true);
-    // The placement has NO subtype / assetType / discovered / read keys at all.
+    // The placement has NO subtype / assetType / discovered / read keys at all
+    // (the shared `assertPlacementKeyset` inside `assertParity` above already
+    // enforces the exact six-key set for EVERY placement; this explicit check
+    // documents the canonical kitchen_knife example for readers).
     const placement = demo.case.publicCase.worldGraph.placements.find((p: any) => p.objectId === "kitchen_knife");
-    expect(Object.keys(placement).sort()).toEqual(["anchor", "assetId", "evidenceId", "interaction", "locationId", "objectId"]);
+    expect(Object.keys(placement).sort()).toEqual(MIRRORED_PLACEMENT_KEYS);
   });
 
   it("canonical demo fixture survives the production parser with parity intact", () => {
@@ -152,6 +195,32 @@ describe("Phase32-Fix2 §17 — projection parity guard", () => {
   it("sanitized real-interaction fixture survives the production parser with parity intact", () => {
     const text = JSON.stringify(realInteraction);
     const definition = parseSavegameV1(text, utf8ByteLength(text));
+    assertParity(JSON.parse(JSON.stringify(definition)));
+  });
+
+  it("absent evidenceId on a placement is normalized to null (absent==null parity; validator unchanged)", () => {
+    // DEF-076 / ADV-32F2-03: `requireBoundedNullableString` treats an ABSENT
+    // optional `evidenceId` exactly like an explicit `null` (undefined -> null),
+    // so `absent == null` is EQUAL for parity. This test pins that the
+    // production parser STILL parses and normalizes to null when a placement
+    // omits the key entirely — the validator behavior is NOT changed, only the
+    // guard documents the equivalence.
+    const doc = JSON.parse(JSON.stringify(canonical)) as any;
+    const kitchenPlacement = doc.case.publicCase.worldGraph.placements.find((p: any) => p.objectId === "kitchen_knife");
+    const kitchenWorldObject = doc.case.scene.worldObjects.find((w: any) => w.objectId === "kitchen_knife");
+    // Sanity: the canonical demo carries a STRING evidenceId on both projections
+    // (kitchen_knife -> forensic_knife_match_01).
+    expect(kitchenPlacement.evidenceId).toBe("forensic_knife_match_01");
+    expect(kitchenWorldObject.evidenceId).toBe("forensic_knife_match_01");
+    // Drop the key from BOTH projections to keep the mirror coherent.
+    delete kitchenPlacement.evidenceId;
+    delete kitchenWorldObject.evidenceId;
+    const text = JSON.stringify(doc);
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    // The normalized placement carries an EXPLICIT null (not the raw absent).
+    const normalizedPlacement = definition.publicCase.worldGraph.placements.find((p) => p.objectId === "kitchen_knife")!;
+    expect(normalizedPlacement.evidenceId).toBeNull();
+    // And parity still holds on the normalized definition.
     assertParity(JSON.parse(JSON.stringify(definition)));
   });
 });
