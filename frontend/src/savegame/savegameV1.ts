@@ -980,6 +980,13 @@ function validateWorldObjectStrict(raw: unknown, where: string): WorldObjectDTO 
     // bound these ids).
     void requireBoundedString(record, field, where, MAX_ID_LENGTH);
   }
+  // Phase32-Fix2 §9/§11: `interaction` is the SAME canonical field as
+  // `publicCase.worldGraph.placements[].interaction` — REQUIRED string, empty
+  // string allowed (decorative, DEF-062), bounded at MAX_SHORT_TEXT_LENGTH.
+  // The shared live-game parser only checks it is a string (no length bound);
+  // the savegame-import path tightens the bound (import-scoped only) so an
+  // unbounded interaction can never enter the normalized archive (§22).
+  void requireBoundedStringAllowEmpty(record, "interaction", where, MAX_SHORT_TEXT_LENGTH);
   // DEF-068 / ADV-32F-10: the canonical world-object subtype is
   // `null | bounded non-empty string (max MAX_SHORT_TEXT_LENGTH)` — the exact
   // vocabulary the backend authors. The shared live-game parser accepts any
