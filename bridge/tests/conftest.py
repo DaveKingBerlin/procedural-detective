@@ -40,7 +40,17 @@ def _hermetic_event_loops():
 # WANTS an env value sets it itself with ``monkeypatch.setenv`` afterwards
 # (restored at teardown).
 _ENV_SCRUB_PREFIXES = ("PD_BRIDGE_",)
-_ENV_SCRUB_NAMES = {"LOCALAPPDATA", "USERPROFILE", "XDG_CONFIG_HOME", "HOME"}
+_ENV_SCRUB_NAMES = {
+    "LOCALAPPDATA",
+    "USERPROFILE",
+    "XDG_CONFIG_HOME",
+    "HOME",
+    # Phase 31CD — a stray host SSL_CERT_FILE/SSL_CERT_DIR could perturb
+    # the TLS trust-source branch tests; tests that WANT one set it themselves
+    # with ``monkeypatch.setenv`` after the scrub.
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+}
 
 
 @pytest.fixture(autouse=True)

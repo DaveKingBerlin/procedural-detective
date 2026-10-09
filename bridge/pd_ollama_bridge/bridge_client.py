@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import ssl
 import time
 from typing import Any, Callable, Optional
 
@@ -34,6 +33,14 @@ from websockets.exceptions import ConnectionClosed
 from . import protocol
 from .config import Config, TokenStore
 from .ollama_client import OllamaClient, OllamaClientError
+from .tls import (
+    REASON_CONNECTION_ERROR,
+    BridgeConnectionError,
+    TLSVerifyFailedError,
+    TLSTrustStoreUnavailableError,
+    build_client_ssl_context,
+    classify_connect_exception,
+)
 from .urls import server_origin
 
 LOGGER = logging.getLogger("pd-ollama-bridge")
@@ -81,6 +88,8 @@ class BridgeClient:
         self._on_reconnecting = on_reconnecting
         self._inflight: Optional[_Inflight] = None
         self._last_seen: float = 0.0
+        self._transport: str = "ws"
+        self.last_error: Optional[BridgeConnectionError] = None
         self.sessions_connected: int = 0
 
     async def run(self) -> None:
@@ -98,7 +107,36 @@ class BridgeClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - link drop, retry
+                if isinstance(exc, BridgeConnectionError) and not exc.retryable:
+                    # Deterministic TLS trust failures fail fast — retry cannot
+                    # repair a trust failure (Phase 31CD §15). Classified,
+                    # safe fields only; never raw exception texts.
+
+                    self.last_error = exc
+                    if isinstance(exc, TLSTrustStoreUnavailableError):
+                        event = "bridge.tls.trust_store_unavailable"
+                    elif isinstance(exc, TLSVerifyFailedError):
+                        event = "bridge.tls.verify_failed"
+                    else:
+                        event = "bridge.connection.failed"
+                    self.logger.error(
+                        "%s reasonCode=%s transport=%s trustSource=%s retryable=false",
+                        event,
+                        exc.reason_code,
+                        exc.transport,
+                        exc.trust_source or "none",
+                    )
+                    return
                 self.logger.warning("bridge: link dropped: %s", type(exc).__name__)
+                self.logger.info(
+                    "bridge.connection.failed reasonCode=%s transport=%s retryable=true",
+                    (
+                        exc.reason_code
+                        if isinstance(exc, BridgeConnectionError)
+                        else REASON_CONNECTION_ERROR
+                    ),
+                    self._transport,
+                )
             if stable:
                 consecutive = 0
             if consecutive >= self.config.max_reconnect_attempts:
@@ -129,13 +167,12 @@ class BridgeClient:
 
     async def _connect_once(self) -> Any:
         ws_url = self.config.server_ws_url
-        ssl_ctx = None
-        if ws_url.startswith("wss://"):
-            ssl_ctx = ssl.create_default_context()
+        tls = build_client_ssl_context(ws_url)
+        self._transport = "wss" if tls.ssl_context is not None else "ws"
         try:
             ws = await websockets.connect(
                 ws_url,
-                ssl=ssl_ctx,
+                ssl=tls.ssl_context,
                 max_size=self.config.max_message_bytes + 1024,
                 max_queue=32,
                 ping_interval=None,
@@ -145,8 +182,12 @@ class BridgeClient:
                 proxy=None,
                 user_agent_header="pd-ollama-bridge/1",
             )
-        except Exception as exc:  # noqa: BLE001 - retried by run()
-            raise ConnectionError(f"cannot connect to {self._display_host(ws_url)}") from exc
+        except Exception as exc:  # noqa: BLE001 - classified by run()
+            raise classify_connect_exception(
+                exc,
+                transport=self._transport,
+                trust_source=tls.trust_source,
+            ) from exc
         try:
             session_id, kind = await self._handshake(ws)
         except SessionRejected:
@@ -154,7 +195,11 @@ class BridgeClient:
             raise
         except Exception as exc:  # noqa: BLE001 - retried by run()
             await self._safe_close(ws, 1011, "handshake error")
-            raise ConnectionError("handshake failed") from exc
+            raise BridgeConnectionError(
+                "handshake failed",
+                transport=self._transport,
+                trust_source=tls.trust_source,
+            ) from exc
         self.logger.info("bridge: %s session %s bound", kind, session_id)
         self.sessions_connected += 1
         await self._maybe_call(self._on_connected, kind, self._display_host(ws_url))
