@@ -28,7 +28,7 @@ directory — they are another track's in-flight work.
 
 ## Install
 
-Requires Python ≥ 3.11 with `websockets` and `httpx`.
+Requires Python ≥ 3.11 with `websockets`, `httpx` and `certifi`.
 
 ```bash
 # from this directory
@@ -212,8 +212,32 @@ bound format.
 - TLS is enabled with default certificate + hostname validation. There is no
   `--insecure` / certificate-bypass flag.
 - `--lan` is an advanced opt-in for a non-loopback Ollama endpoint. Passing it
-  prints a loud warning; it is never enabled silently and never implied by a
+  prints a loud warning;it is never enabled silently and never implied by a
   remote server.
+
+## TLS trust-store handling
+
+`wss://` connections always run with **full certificate + hostname
+verification** — there is no certificate-bypass mode (`CERT_NONE` /
+`check_hostname=False` / `ssl=False` are never used). The bridge selects its
+CA trust source per connection, in this order:
+
+1. an explicit operator/env trust config (`SSL_CERT_FILE` / `SSL_CERT_DIR`) —
+   honoured exactly as OpenSSL already intends;, never overridden;
+2. the platform/Python default trust store, when it actually loads usable CA
+   certificates (Windows/Anaconda builds sometimes ship Python/OpenSSL with
+   **no usable default CA bundle** — ``ssl.get_default_verify_paths()`` then
+   shows ``cafile=None``/``capath=None``);
+3. a secure fallback to the bundled [`certifi`](https://pypi.org/project/certifi/)
+   roots, only when no usable default trust exists.
+
+When neither a usable default store nor the certifi bundle can be established,
+the bridge **fails closed** with an actionable error — it never continues
+unverified. The environment variable workaround
+(`$env:SSL_CERT_FILE = python -c "import certifi; print(certifi.where())"`)
+is **no longer required** for normal use; keep it only as a diagnostic
+fallback if you suspect your local trust setup is unusual. HTTP/`ws://`
+(loopback/dev-only) connections are unchanged: no TLS context is built.
 
 ## Security model
 
@@ -268,6 +292,8 @@ pd-ollama-bridge connect PD-NEW1-CODE
 | `configure` refuses a URL | Server must be `wss://`/`https://` (plain `ws://` is localhost-only); Ollama must be loopback unless `--lan` is also set |
 | `configure`/`config` report "malformed TOML" | Edit only with `configure` (or fix the TOML). Security-sensitive fields are never silently ignored |
 | "Ollama not reachable" | Start Ollama, verify the endpoint with `pd-ollama-bridge list-models` |
+| "TLS certificate verification failed for the bridge server" | The local Python trust store is missing or outdated; the bridge uses the platform default when usable and falls back to its bundled `certifi` roots automatically, so this usually means neither was usable. Check with `python -c "import ssl; print(ssl.get_default_verify_paths())"`;the `SSL_CERT_FILE` env workaround below is diagnostic-only |
+| "no usable CA trust store was found for secure WebSocket verification" | Fail-closed safety: neither the platform default nor the bundled `certifi` roots could be loaded. Install/update `certifi` (or set `SSL_CERT_FILE` to a trusted bundle as a diagnostic only) |
 | Config file path is a surprise | Run `pd-ollama-bridge config` — it prints the resolved path first |
 
 ## Privacy note
@@ -306,6 +332,7 @@ bridge/
     protocol.py        strict v1 protocol (mirrors the server's definition)
     bounded_json.py    depth/collection-bounded JSON parser
     urls.py            server WSS + loopback-only Ollama URL validation
+    tls.py            TLS trust-store selection + classified connection errors
     config.py          operator config + server-bound token file store
     bridge_config.py   bridge.toml (PG path/TOML/precedence) — Phase 27
     ollama_client.py   bounded local Ollama client (typed failures)
