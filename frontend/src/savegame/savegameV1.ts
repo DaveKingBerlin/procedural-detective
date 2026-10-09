@@ -126,12 +126,48 @@ export type SavegameParseErrorKind =
   | "invalid"
   | "unsupported-version";
 
+/** The test/debug-only diagnostic shape of ONE schema violation (Phase32-Fix
+ *  §5): ``path`` / ``reasonCode`` / ``expected`` / ``actualType``. It is NEVER
+ *  rendered by the production UI (``savegameErrorMessage`` stays the only
+ *  user-facing surface) and NEVER written to product telemetry — it exists so
+ *  a drift between exporter and validator is diagnosable from a unit test
+ *  without ever showing raw file contents or schema internals to a player. */
+export interface SavegameParseDiagnostic {
+  /** The exact dotted JSON path of the violating field (``""`` for
+   *  whole-document failures such as invalid JSON). */
+  path: string;
+  /** A closed machine-readable reason code (stable, deterministic). */
+  reasonCode: SavegameParseReasonCode;
+  /** The human-readable allowed type / vocabulary / bound of the field. */
+  expected: string;
+  /** The ``typeof``-style tag of the value actually present. */
+  actualType: string;
+}
+
+/** Closed diagnostic reason codes (Phase32-Fix §5); never user-facing. */
+export type SavegameParseReasonCode =
+  | "TYPE_MISMATCH"
+  | "BOUND_EXCEEDED"
+  | "COUNT_EXCEEDED"
+  | "UNKNOWN_KEY"
+  | "DUPLICATE_ID"
+  | "REFERENCE_MISMATCH"
+  | "ENUM_MISMATCH"
+  | "DEPTH_EXCEEDED"
+  | "NOT_OBJECT"
+  | "INVALID_JSON"
+  | "INVALID_TIME"
+  | "UNSUPPORTED_VERSION";
+
 export class SavegameParseError extends Error {
   readonly kind: SavegameParseErrorKind;
-  constructor(kind: SavegameParseErrorKind, message: string) {
+  /** Test/debug-only structured diagnosis (absent when unknown). */
+  readonly diagnostic?: SavegameParseDiagnostic;
+  constructor(kind: SavegameParseErrorKind, message: string, diagnostic?: SavegameParseDiagnostic) {
     super(message);
     this.name = "SavegameParseError";
     this.kind = kind;
+    if (diagnostic !== undefined) this.diagnostic = diagnostic;
   }
 }
 
@@ -344,8 +380,115 @@ export interface SavedCaseDefinition {
 // tiny strict helpers
 // --------------------------------------------------------------------------- //
 
-function invalid(where: string, detail: string): never {
-  throw new SavegameParseError("invalid", `${where}: ${detail}`);
+/** Stable reason-code classifier over the frozen internal detail strings.
+ *  Kept deterministic so tests can assert exact codes. */
+function reasonCodeOf(detail: string): SavegameParseReasonCode {
+  if (/^must be an array with at most|^exceeds the maximum of|^array exceeds the maximum element count/.test(detail)) {
+    return "COUNT_EXCEEDED";
+  }
+  if (/^exceeds /.test(detail)) return "BOUND_EXCEEDED";
+  if (/^unknown key "/.test(detail)) return "UNKNOWN_KEY";
+  if (/^duplicate id "/.test(detail)) return "DUPLICATE_ID";
+  if (/^must be one of /.test(detail)) return "ENUM_MISMATCH";
+  if (/^(is not a published|references |has no |is not in the public|has no world-graph)/.test(detail)) {
+    return "REFERENCE_MISMATCH";
+  }
+  if (/^exceeds the maximum nesting depth/.test(detail)) return "DEPTH_EXCEEDED";
+  if (/^must be an object$/.test(detail)) return "NOT_OBJECT";
+  if (/^must be a canonical ISO-8601-with-offset timestamp|^must be an ISO-8601 timestamp|^must be a bounded ISO-8601/.test(detail)) {
+    return "INVALID_TIME";
+  }
+  if (/^forbidden key /.test(detail)) return "UNKNOWN_KEY";
+  return "TYPE_MISMATCH";
+}
+
+/** The documented allowed-type phrase for a detail string (used to build the
+ *  §5 ``expected`` field when the throwing helper did not capture one). */
+function expectedOf(detail: string): string {
+  if (/^must be a non-empty string$/.test(detail)) return "string";
+  if (/^must be a string or null/.test(detail)) return "string|null";
+  if (/^must be a string$/.test(detail)) return "string";
+  if (/^must be a bounded string$/.test(detail)) return "bounded string";
+  if (/^must be a non-negative integer/.test(detail)) return "integer >= 0";
+  if (/^must be a positive integer or null/.test(detail)) return "integer|null";
+  if (/^must be an integer within \[/.test(detail)) return detail.replace(/^must be an integer within /, "");
+  if (/^must be an integer$/.test(detail)) return "integer";
+  if (/^must be a boolean/.test(detail)) return "boolean";
+  if (/^must be an array/.test(detail)) return "array";
+  if (/^must be an object$/.test(detail)) return "object";
+  if (/^must be one of /.test(detail)) return detail.replace(/^must be one of /, "");
+  if (/^must be a string, null, or absent/.test(detail)) return "string|null";
+  if (/^must be a bounded non-empty string or null\/absent/.test(detail)) return "string|null";
+  if (/^exceeds /.test(detail)) return "bounded value";
+  return "document";
+}
+
+/** The ``typeof``-style tag of an observed value (§5 ``actualType``). */
+export function observedType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "object") return "object";
+  return typeof value;
+}
+
+/** Extract the shared-parser field path from a wrapped {@link ValidationError}
+ *  message (shape ``"<root>.<field> must ..."``) so a savegame diagnostic can
+ *  name the exact field (e.g. ``savegame.case.witnesses[0].sceneObjectId``)
+ *  instead of stopping at the entry. Returns the entry path when the message
+ *  does not carry a field suffix. */
+function sharedParserFieldPath(where: string, message: string): string {
+  const match = /^[A-Za-z0-9_]+\.([A-Za-z0-9_.]+) must /.exec(message);
+  return match !== null ? `${where}.${match[1]}` : where;
+}
+
+/** The raw value of the shared-parser field named by a wrapped message, so the
+ *  diagnostic can report a real ``actualType``. */
+function sharedParserFieldValue(raw: Record<string, unknown>, message: string): unknown | undefined {
+  const match = /^[A-Za-z0-9_]+\.([A-Za-z0-9_]+) must /.exec(message);
+  if (match === null) return undefined;
+  return raw[match[1]];
+}
+
+function invalid(where: string, detail: string, actualValue?: unknown, expected?: string): never {
+  // Shared-parser messages carry a "<root>.<field> must ..." prefix; strip it
+  // for stable reason/expected classification (the stored message keeps the
+  // original bounded text — never user-facing).
+  const classified = detail.replace(/^[A-Za-z0-9_]+\.([A-Za-z0-9_.]+) must /, "must ");
+  const diagnostic: SavegameParseDiagnostic = {
+    path: where,
+    reasonCode: reasonCodeOf(classified),
+    expected: expected ?? expectedOf(classified),
+    actualType: actualValue !== undefined ? observedType(actualValue) : "unknown",
+  };
+  throw new SavegameParseError("invalid", `${where}: ${detail}`, diagnostic);
+}
+
+/** The §5 test/debug-only diagnostic of a thrown {@link SavegameParseError},
+ *  or ``null`` for errors that carry no structured path (e.g. too-large /
+ *  unreadable). NEVER render this in the product UI and never send it to
+ *  product telemetry — it is a unit-test diagnostic only. */
+export function savegameParseDiagnostic(error: SavegameParseError): SavegameParseDiagnostic | null {
+  if (error.diagnostic !== undefined) return error.diagnostic;
+  if (error.kind !== "invalid") return null;
+  const separator = error.message.indexOf(": ");
+  if (separator <= 0) {
+    // Whole-document failures (invalid JSON / not an object) have no path.
+    return {
+      path: "",
+      reasonCode: /^the document is not valid JSON$/.test(error.message)
+        ? "INVALID_JSON"
+        : /^the savegame must be a JSON object$/.test(error.message)
+          ? "NOT_OBJECT"
+          : /^unsupported formatVersion$/.test(error.message)
+            ? "UNSUPPORTED_VERSION"
+            : "TYPE_MISMATCH",
+      expected: expectedOf(error.message),
+      actualType: "unknown",
+    };
+  }
+  const path = error.message.slice(0, separator);
+  const detail = error.message.slice(separator + 2);
+  return { path, reasonCode: reasonCodeOf(detail), expected: expectedOf(detail), actualType: "unknown" };
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -406,7 +549,7 @@ function requireRecord(value: unknown, where: string): Record<string, unknown> {
 function requireString(record: Record<string, unknown>, field: string, where: string): string {
   const value = record[field];
   if (typeof value !== "string" || value === "") {
-    invalid(`${where}.${field}`, "must be a non-empty string");
+    invalid(`${where}.${field}`, "must be a non-empty string", value, "string");
   }
   return value;
 }
@@ -415,7 +558,7 @@ function requireNullableString(record: Record<string, unknown>, field: string, w
   const value = record[field];
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") {
-    invalid(`${where}.${field}`, "must be a string or null");
+    invalid(`${where}.${field}`, "must be a string or null", value, "string|null");
   }
   return value;
 }
@@ -450,10 +593,10 @@ function requireOptionalBoundedString(
   const value = record[field];
   if (value === undefined) return undefined;
   if (typeof value !== "string" || value === "") {
-    invalid(`${where}.${field}`, "must be a non-empty string");
+    invalid(`${where}.${field}`, "must be a non-empty string", value, "string");
   }
   if (value.length > max) {
-    invalid(`${where}.${field}`, `exceeds ${max} characters`);
+    invalid(`${where}.${field}`, `exceeds ${max} characters`, value, `string (<= ${max})`);
   }
   return value;
 }
@@ -461,7 +604,7 @@ function requireOptionalBoundedString(
 function requireNonNegativeInteger(record: Record<string, unknown>, field: string, where: string): number {
   const value = record[field];
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    invalid(`${where}.${field}`, "must be a non-negative integer");
+    invalid(`${where}.${field}`, "must be a non-negative integer", value, "integer >= 0");
   }
   return value;
 }
@@ -475,7 +618,7 @@ function requireBoundedInteger(
 ): number {
   const value = record[field];
   if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
-    invalid(`${where}.${field}`, `must be an integer within [${min}, ${max}]`);
+    invalid(`${where}.${field}`, `must be an integer within [${min}, ${max}]`, value, `integer in [${min}, ${max}]`);
   }
   return value;
 }
@@ -483,11 +626,11 @@ function requireBoundedInteger(
 function requireStringArray(record: Record<string, unknown>, field: string, where: string, maxCount: number): string[] {
   const value = record[field];
   if (!Array.isArray(value) || value.length > maxCount) {
-    invalid(`${where}.${field}`, `must be an array with at most ${maxCount} entries`);
+    invalid(`${where}.${field}`, `must be an array with at most ${maxCount} entries`, value, `array (<= ${maxCount})`);
   }
   return value.map((entry, index) => {
     if (typeof entry !== "string" || entry === "") {
-      invalid(`${where}.${field}[${index}]`, "must be a non-empty string");
+      invalid(`${where}.${field}[${index}]`, "must be a non-empty string", entry, "string");
     }
     return entry;
   });
@@ -497,10 +640,10 @@ function requireStringArray(record: Record<string, unknown>, field: string, wher
  *  can map/forEach without re-narrowing (the `invalid` helper never returns). */
 function requireArray(value: unknown, where: string, max: number): unknown[] {
   if (!Array.isArray(value)) {
-    invalid(where, "must be an array");
+    invalid(where, "must be an array", value, "array");
   }
   if (value.length > max) {
-    invalid(where, `exceeds the maximum of ${max} entries`);
+    invalid(where, `exceeds the maximum of ${max} entries`, value, `array (<= ${max})`);
   }
   return value;
 }
@@ -508,7 +651,7 @@ function requireArray(value: unknown, where: string, max: number): unknown[] {
 function requireEnum(record: Record<string, unknown>, field: string, where: string, closed: readonly string[]): string {
   const value = requireString(record, field, where);
   if (!closed.includes(value)) {
-    invalid(`${where}.${field}`, `must be one of ${closed.join(", ")}`);
+    invalid(`${where}.${field}`, `must be one of ${closed.join(", ")}`, value, `one of ${closed.join(", ")}`);
   }
   return value;
 }
@@ -622,10 +765,10 @@ function requireBoundedStringAllowEmpty(
 ): string {
   const value = record[field];
   if (typeof value !== "string") {
-    invalid(`${where}.${field}`, "must be a string");
+    invalid(`${where}.${field}`, "must be a string", value, "string");
   }
   if (value.length > max) {
-    invalid(`${where}.${field}`, `exceeds ${max} characters`);
+    invalid(`${where}.${field}`, `exceeds ${max} characters`, value, `string (<= ${max})`);
   }
   return value;
 }
@@ -774,7 +917,7 @@ function validateWorldObjectStrict(raw: unknown, where: string): WorldObjectDTO 
     return validateWorldObject.validate(raw);
   } catch (error) {
     if (error instanceof ValidationError) {
-      invalid(where, error.message);
+      invalid(sharedParserFieldPath(where, error.message), error.message, sharedParserFieldValue(record, error.message));
     }
     throw error;
   }
@@ -856,7 +999,7 @@ function validateCandidates(raw: unknown, where: string): SavegameCandidatesV1 {
     };
   } catch (error) {
     if (error instanceof ValidationError) {
-      invalid(where, error.message);
+      invalid(sharedParserFieldPath(where, error.message), error.message, sharedParserFieldValue(record, error.message));
     }
     throw error;
   }
@@ -875,7 +1018,11 @@ function validateWitnesses(raw: unknown, where: string): WitnessListEntryDTO[] {
       return validateWitnessListEntry.validate(entry);
     } catch (error) {
       if (error instanceof ValidationError) {
-        invalid(`${where}.witnesses[${index}]`, error.message);
+        invalid(
+          sharedParserFieldPath(`${where}.witnesses[${index}]`, error.message),
+          error.message,
+          sharedParserFieldValue(entry, error.message),
+        );
       }
       throw error;
     }
