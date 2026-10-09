@@ -391,6 +391,55 @@ def test_classify_expired() -> None:
     assert classified.retryable is False
 
 
+def test_classify_expired_word_in_cn_substring_is_generic() -> None:
+    # DEF-072: the word "expired" inside a certificate CN must NOT over-classify
+    # an unrelated verify failure as TLS_CERTIFICATE_EXPIRED.
+    exc = _VERIFY(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer "
+        "certificate for CN=my-expired-proxy.example"
+    )
+    classified = classify_connect_exception(exc, transport="wss")
+    assert isinstance(classified, TLSVerifyFailedError)
+    assert not isinstance(classified, TLSCertificateExpiredError)
+    assert classified.reason_code == REASON_TLS_CERTIFICATE_VERIFY_FAILED
+
+
+def test_classify_not_yet_valid_phrase_maps_to_expired() -> None:
+    # DEF-072: the stable OpenSSL clock-skew phrase maps to the expired family.
+    exc = _VERIFY(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+        "certificate is not yet valid"
+    )
+    classified = classify_connect_exception(exc, transport="wss")
+    assert isinstance(classified, TLSCertificateExpiredError)
+    assert classified.reason_code == REASON_TLS_CERTIFICATE_EXPIRED
+
+
+def test_classify_hostname_word_in_unrelated_message_is_generic() -> None:
+    # DEF-072: merely containing the word "hostname" (e.g. a deferred-check
+    # note) must NOT map to TLS_HOSTNAME_MISMATCH.
+    exc = _VERIFY(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer "
+        "certificate (hostname check deferred)"
+    )
+    classified = classify_connect_exception(exc, transport="wss")
+    assert isinstance(classified, TLSVerifyFailedError)
+    assert not isinstance(classified, TLSHostnameMismatchError)
+    assert classified.reason_code == REASON_TLS_CERTIFICATE_VERIFY_FAILED
+
+
+def test_classify_ip_address_mismatch_phrase_maps_to_hostname() -> None:
+    # DEF-072: the stable OpenSSL IP-address mismatch phrase maps to the
+    # hostname-mismatch family.
+    exc = _VERIFY(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: IP address "
+        "mismatch, certificate is not valid for '127.0.0.1'"
+    )
+    classified = classify_connect_exception(exc, transport="wss")
+    assert isinstance(classified, TLSHostnameMismatchError)
+    assert classified.reason_code == REASON_TLS_HOSTNAME_MISMATCH
+
+
 def test_classify_connection_refused() -> None:
     classified= classify_connect_exception(ConnectionRefusedError("refused"), transport="wss")
     assert isinstance(classified, ConnectionRefusedBridgeError)

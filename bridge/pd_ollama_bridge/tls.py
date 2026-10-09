@@ -269,31 +269,36 @@ def classify_connect_exception(
 ) -> BridgeConnectionError:
     """Map a raw transport exception onto the classified bridge vocabulary.
 
-
     Order matters: ``ssl.SSLCertVerificationError`` is an ``OSError``
     subclass, so it must be checked before the OSError-based generic cases.
 
-
     Only subtypes that can be reliably detected on the supported Python are
     implemented (Phase 31CD §13): hostname mismatch and expired are
-    recognized from the stable OpenSSL message text on Python 3.12; every
-    other verify failure maps to the generic ``TLS_CERTIFICATE_VERIFY_FAILED``。
-"""
+    recognized from the stable OpenSSL message phrases emitted on Python 3.12
+    (``hostname mismatch`` / ``doesn't match`` / ``not valid for`` /
+    ``IP address mismatch``; ``certificate has expired`` /
+    ``certificate is not yet valid``); every other verify failure maps to the
+    generic ``TLS_CERTIFICATE_VERIFY_FAILED``.
+    """
     if isinstance(exc, ssl.SSLCertVerificationError):
         message = str(exc) or ""
         lowered = message.lower()
         if (
-            "hostname" in lowered
+            "hostname mismatch" in lowered
             or "doesn't match" in lowered
             or "does not match" in lowered
             or "not valid for" in lowered
+            or "ip address mismatch" in lowered
         ):
             return TLSHostnameMismatchError(
                 "TLS hostname verification failed for the bridge server",
                 transport=transport,
                 trust_source=trust_source,
             )
-        if "expired" in lowered:
+        if (
+            "certificate has expired" in lowered
+            or "certificate is not yet valid" in lowered
+        ):
             return TLSCertificateExpiredError(
                 "TLS certificate verification failed for the bridge server",
                 transport=transport,
