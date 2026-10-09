@@ -7,7 +7,9 @@ Python/OpenSSL default trust path is missing or unusable (``cafile=None``).
 Selection precedence for ``wss://`` (never weakens verification):
 1. explicit operator/env trust config: ``SSL_CERT_FILE``/``SSL_CERT_DIR``
    are honoured by ``ssl.create_default_context()`` itself — certifi never
-   overrides an explicit trust choice;
+   overrides an explicit trust choice that actually yields usable CA
+   certificates (a stale/broken env path holding zero CAs is NOT labelled
+   ``environment``: the bridge falls through to the fallback below);
 2. usable Python/platform default trust when the loaded context actually holds
    CA certificates (judged by real context construction, not merely by
    ``get_default_verify_paths().cafile is not None`` — Phase 31CD §30);
@@ -182,22 +184,25 @@ def build_client_ssl_context(
 
     ``ws://``  -> ``BridgeTlsContext(None, "none")``  (TLS path unchanged).
     ``wss://`` -> a VERIFIED context, preserving ``check_hostname=True`` and
-    ``verify_mode=CERT_REQUIRED``;never ``CERT_NONE``. Explicit
+    ``verify_mode=CERT_REQUIRED``; never ``CERT_NONE``. Explicit
     ``SSL_CERT_FILE``/``SSL_CERT_DIR`` take precedence over certifi and are
-    honoured exactly as ``ssl.create_default_context()`` already does;; certifi
-    is used ONLY as a fallback when no usable default trust exists.,and the
+    honoured exactly as ``ssl.create_default_context()`` already does; certifi
+    is used ONLY as a fallback when no usable default trust exists, and the
     helper FAILS CLOSED (``TLSTrustStoreUnavailableError``) rather than ever
-    continuing unverified।
-"""
+    continuing unverified. An explicit env trust that yields a context with NO
+    usable CAs is never reported as trusted: it falls through to the default /
+    certifi fallback (or fails closed).
+    """
     if not isinstance(uri, str) or not uri.startswith("wss://"):
         return BridgeTlsContext(None, TRUST_SOURCE_NONE)
     env = os.environ if env is None else env
     transport = "wss"
 
+    default_ctx: Optional[ssl.SSLContext] = None
     if _env_trust_configured(env):
         # Explicit operator/env trust config: honor it; NEVER replace with certifi.
         try:
-            ctx = _create_default_context()
+            env_ctx = _create_default_context()
         except (OSError, ValueError) as exc:
             raise TLSTrustStoreUnavailableError(
                 "explicit SSL_CERT_FILE/SSL_CERT_DIR trust configuration "
@@ -205,13 +210,19 @@ def build_client_ssl_context(
                 transport=transport,
                 trust_source=TRUST_SOURCE_NONE,
             ) from exc
-        return BridgeTlsContext(ctx, TRUST_SOURCE_ENVIRONMENT)
+        # "Usable" is judged by real context construction (Phase 31CD §30): a
+        # stale/broken SSL_CERT_FILE/DIR silently builds an EMPTY verified
+        # context on some platforms, so never label that "environment" — fall
+        # through to the default/certifi fallback (or fail closed below).
+        if _context_has_cas(env_ctx):
+            return BridgeTlsContext(env_ctx, TRUST_SOURCE_ENVIRONMENT)
+        default_ctx = env_ctx
 
-
-    try:
-        default_ctx = _create_default_context()
-    except (OSError, ValueError):
-        default_ctx = None
+    if default_ctx is None:
+        try:
+            default_ctx = _create_default_context()
+        except (OSError, ValueError):
+            default_ctx = None
     if default_ctx is not None and _context_has_cas(default_ctx):
         return BridgeTlsContext(default_ctx, TRUST_SOURCE_DEFAULT)
 

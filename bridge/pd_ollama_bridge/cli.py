@@ -56,6 +56,7 @@ from .tls import (
     REASON_TLS_CERTIFICATE_VERIFY_FAILED,
     REASON_TLS_HOSTNAME_MISMATCH,
     REASON_TLS_TRUST_STORE_UNAVAILABLE,
+    TRUST_SOURCE_ENVIRONMENT,
     BridgeConnectionError,
 )
 from .urls import UrlValidationError, server_origin
@@ -551,6 +552,12 @@ def _safe_connect_error_message(last_error: Any) -> str:
         REASON_TLS_CERTIFICATE_VERIFY_FAILED,
         REASON_TLS_CERTIFICATE_EXPIRED,
     ):
+        if last_error.trust_source == TRUST_SOURCE_ENVIRONMENT:
+            return (
+                "error: TLS certificate verification failed for the bridge "
+                "server. The configured SSL_CERT_FILE/SSL_CERT_DIR trust store "
+                "was used and could not verify the bridge certificate."
+            )
         return (
             "error: TLS certificate verification failed for the bridge server. "
             "The local Python trust store may be missing or outdated."

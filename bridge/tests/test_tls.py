@@ -182,6 +182,62 @@ def test_ssl_cert_dir_honored_certifi_not_used(monkeypatch) -> None:
     assert called == []
 
 
+def test_env_valid_ca_file_honored_certifi_not_used(monkeypatch) -> None:
+    # DEF-070: a usable env trust store IS honored as trustSource=environment,
+    # and the certifi fallback is never consulted.
+    ctx = _Ctx(ca_count=3)
+    monkeypatch.setenv("SSL_CERT_FILE", "C:/env/cacert.pem")
+    monkeypatch.setattr(tls, "_create_default_context", lambda *_a, **_k: ctx)
+    called: list = []
+
+    def _no_certifi() -> str:
+        called.append("certifi")
+        return "C:/cacert.pem"
+
+    monkeypatch.setattr(tls, "_certifi_cafile", _no_certifi)
+    result = build_client_ssl_context("wss://server.example")
+    assert result.trust_source == tls.TRUST_SOURCE_ENVIRONMENT
+    assert result.ssl_context is ctx
+    assert called == [], "usable env trust must never be replaced by certifi"
+
+
+def test_env_broken_path_empty_store_falls_back_to_certifi(monkeypatch) -> None:
+    # DEF-070: a stale/broken SSL_CERT_FILE pointing at a path that yields a
+    # context with ZERO CAs must NOT be reported as trustSource=environment;
+    # the helper must fall through to the certifi fallback instead.
+    created: dict = {}
+    empty = _Ctx(ca_count=0)
+
+    def _create(*_a: object, cafile: str = "", **_k: object) -> object:
+        created["cafile"] = cafile
+        return empty
+
+    monkeypatch.setenv("SSL_CERT_FILE", "C:/does/not/exist.pem")
+    monkeypatch.setattr(tls, "_create_default_context", _create)
+    monkeypatch.setattr(tls, "_certifi_cafile", lambda: "C:/bundle/cacert.pem")
+    result = build_client_ssl_context("wss://server.example")
+    assert created["cafile"] == "C:/bundle/cacert.pem"
+    assert result.trust_source == tls.TRUST_SOURCE_CERTIFI
+    assert result.ssl_context is empty
+
+
+def test_env_broken_path_empty_store_fails_closed_without_certifi(monkeypatch) -> None:
+    # DEF-070 fail-closed leg: broken env path + unusable certifi -> raises
+    # TLSTrustStoreUnavailableError with trust_source=none, never environment.
+    monkeypatch.setenv("SSL_CERT_FILE", "C:/does/not/exist.pem")
+    monkeypatch.setattr(tls, "_create_default_context", lambda *_a, **_k: _Ctx(ca_count=0))
+
+    def _no_certifi() -> str:
+        raise ImportError("certifi unavailable")
+
+    monkeypatch.setattr(tls, "_certifi_cafile", _no_certifi)
+    with pytest.raises(TLSTrustStoreUnavailableError) as exc:
+        build_client_ssl_context("wss://server.example")
+    assert exc.value.reason_code == REASON_TLS_TRUST_STORE_UNAVAILABLE
+    assert exc.value.trust_source == tls.TRUST_SOURCE_NONE
+    assert exc.value.transport == "wss"
+
+
 # --------------------------------------------------------------------------- #
 # security invariants + certifi path construct (Phase 31CD §20/§23)
 # --------------------------------------------------------------------------- #
