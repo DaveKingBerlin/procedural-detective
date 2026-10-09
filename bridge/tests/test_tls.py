@@ -19,6 +19,7 @@ import asyncio
 import logging
 import socket
 import ssl
+from typing import Optional
 
 import pytest
 import websockets
@@ -299,16 +300,25 @@ def test_certifi_fallback_uses_certifi_bundle_real(monkeypatch) -> None:
     assert result.ssl_context.verify_mode == ssl.CERT_REQUIRED
 
 
-def test_regression_tls_verification_never_disabled(monkeypatch) -> None:
-    monkeypatch.setattr(tls, "_context_has_cas", lambda _c: False)
-    monkeypatch.setattr(tls, "_create_default_context", lambda *_a, **_k: _Ctx(ca_count=1))
-    monkeypatch.setattr(tls, "_certifi_cafile", lambda: "C:/cacert.pem")
-    result= build_client_ssl_context("wss://server.example")
-    ctx = result.ssl_context
+def _assert_full_verification(ctx: Optional[ssl.SSLContext]) -> None:
     assert ctx is not None
     assert ctx.verify_mode == ssl.CERT_REQUIRED
     assert ctx.verify_mode != ssl.CERT_NONE
     assert ctx.check_hostname is True
+
+
+def test_regression_tls_verification_never_disabled() -> None:
+    # DEF-073: build through the REAL ssl.create_default_context path with no
+    # seam mocks; the guard genuinely fails the moment a context disables
+    # verification (probed with an explicit CERT_NONE context below).
+    result = build_client_ssl_context("wss://server.example")
+    _assert_full_verification(result.ssl_context)
+
+    disabled = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    disabled.check_hostname = False
+    disabled.verify_mode = ssl.CERT_NONE
+    with pytest.raises(AssertionError):
+        _assert_full_verification(disabled)
 
 
 # --------------------------------------------------------------------------- #
