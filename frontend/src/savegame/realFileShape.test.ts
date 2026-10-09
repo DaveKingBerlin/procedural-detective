@@ -35,6 +35,20 @@ function realDefinition(): ReturnType<typeof parseSavegameV1> {
   return parseSavegameV1(REAL_TEXT, utf8ByteLength(REAL_TEXT));
 }
 
+/** A deterministic mutation of the real-file shape that exercises the
+ *  STRING-evidenceId branch of the nullable contract (DEF-069 / ADV-32F-11):
+ *  one placement AND its matching world object both carry the SAME published +
+ *  recorded evidence id. Every other placement/worldObject stays null, so the
+ *  all-null coverage of the base fixture is preserved. */
+function realTextWithStringEvidenceLinkage(): string {
+  const doc = JSON.parse(REAL_TEXT) as any;
+  // placement[0] objectId 'kitchen_knife' <-> worldObject[4] objectId
+  // 'kitchen_knife' — the same object, linked to the same evidence record.
+  doc.case.publicCase.worldGraph.placements[0].evidenceId = "forensic_knife_match_01";
+  doc.case.scene.worldObjects[4].evidenceId = "forensic_knife_match_01";
+  return JSON.stringify(doc);
+}
+
 const SOLVED = {
   murdererId: "thomas_reed",
   motiveId: "cover_up_embezzlement",
@@ -181,6 +195,27 @@ describe("Phase32-Fix §10/§18 — production round-trip over the real-file sha
     // And the reloaded save replays to the saved truth.
     state.submitAccusation({ ...SOLVED });
     expect(state.getReveal().truth.murdererName).toBe("Suspect C");
+  });
+
+  it("DEF-069 — a string evidenceId linkage round-trips through export -> validator (null coverage kept)", () => {
+    // The permanent drift guard must cover the STRING branch of the nullable
+    // contract too (ADV-32F-11): a future drift in the string-evidenceId
+    // acceptance path would otherwise be invisible to the real-file guard.
+    const text = realTextWithStringEvidenceLinkage();
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    expect(definition.publicCase.worldGraph.placements[0].evidenceId).toBe("forensic_knife_match_01");
+    expect(definition.scene.worldObjects[4].evidenceId).toBe("forensic_knife_match_01");
+    // The CENTRAL invariant (Phase32-Fix §10): exporter -> serialize -> parse
+    // -> production validator, now exercising the string-linkage branch.
+    const exported = serializeSavegameV1(reExportV1(definition, "2099-01-01T00:00:00Z"));
+    const parsedBack: unknown = JSON.parse(exported);
+    const reloaded = parseSavegameV1(JSON.stringify(parsedBack), utf8ByteLength(exported));
+    expect(reloaded.publicCase.worldGraph.placements[0].evidenceId).toBe("forensic_knife_match_01");
+    expect(reloaded.scene.worldObjects[4].evidenceId).toBe("forensic_knife_match_01");
+    // The all-null branch is NOT weakened: 8/9 placements and 8/9 world
+    // objects stay null through the round trip.
+    expect(reloaded.publicCase.worldGraph.placements.filter((p) => p.evidenceId === null).length).toBe(8);
+    expect(reloaded.scene.worldObjects.filter((w) => w.evidenceId === null).length).toBe(8);
   });
 
   it("zero provider / zero Bridge / zero generation quota on load + replay (§14)", async () => {

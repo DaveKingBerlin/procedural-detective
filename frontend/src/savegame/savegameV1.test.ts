@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import canonical from "./fixtures/v1_demo_apartment.pdcase.json";
-import { MAX_EXPORT_BYTES, parseSavegameV1, savegameParseDiagnostic, utf8ByteLength } from "./savegameV1";
+import {
+  MAX_EXPORT_BYTES,
+  parseSavegameV1,
+  savegameParseDiagnostic,
+  utf8ByteLength,
+  type SavegameParseDiagnostic,
+} from "./savegameV1";
 import { savegameErrorMessage, SavegameParseError } from "./savegameV1";
 
 /**
@@ -32,6 +38,20 @@ function kindOf(text: string): string | null {
     return null;
   } catch (error) {
     if (error instanceof SavegameParseError) return error.kind;
+    throw error;
+  }
+}
+
+/** Extract the §5 diagnostic of a rejected document (fails the test when the
+ *  document unexpectedly parses or the error carries no diagnostic). */
+function diagnosticOf(text: string): SavegameParseDiagnostic {
+  try {
+    parseSavegameV1(text, utf8ByteLength(text));
+    throw new Error("expected rejection");
+  } catch (error) {
+    if (error instanceof SavegameParseError && error.diagnostic !== undefined) {
+      return error.diagnostic;
+    }
     throw error;
   }
 }
@@ -654,6 +674,154 @@ describe("SavegameV1 — Phase32-Fix §5 test/debug diagnostic shape", () => {
     const text = mutateDocument((doc) => (doc.case.witnesses[0].sceneObjectId = null));
     // A VALID nullable null must still parse (no regression from the helper).
     expect(parseSavegameV1(text, utf8ByteLength(text)).witnesses[0].sceneObjectId).toBeNull();
+  });
+});
+
+describe("SavegameV1 — DEF-066 reason codes distinguish bound/empty-string from type errors", () => {
+  it("an empty-string non-nullable field is EMPTY_STRING (not TYPE_MISMATCH) with consistent actualType", () => {
+    const text = mutateDocument((doc) => (doc.case.metadata.title = ""));
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("case.metadata.title");
+    expect(diagnostic.reasonCode).toBe("EMPTY_STRING");
+    expect(diagnostic.expected).toBe("string");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("an out-of-range integer is BOUND_EXCEEDED (not TYPE_MISMATCH)", () => {
+    const text = mutateDocument((doc) => (doc.case.publicCase.travelRules[0].travelTimeSeconds = 9_999_999));
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.publicCase.travelRules[0].travelTimeSeconds");
+    expect(diagnostic.reasonCode).toBe("BOUND_EXCEEDED");
+    expect(diagnostic.expected).toBe("integer in [0, 3600000]");
+    expect(diagnostic.actualType).toBe("number");
+  });
+
+  it("an oversized string is BOUND_EXCEEDED", () => {
+    const text = mutateDocument((doc) => (doc.case.metadata.title = "z".repeat(301)));
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("case.metadata.title");
+    expect(diagnostic.reasonCode).toBe("BOUND_EXCEEDED");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("a wrong primitive type stays TYPE_MISMATCH (only genuine type errors)", () => {
+    const text = mutateDocument((doc) => (doc.case.metadata.title = 42));
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.reasonCode).toBe("TYPE_MISMATCH");
+    expect(diagnostic.expected).toBe("string");
+    expect(diagnostic.actualType).toBe("number");
+  });
+
+  it("enum mismatches stay ENUM_MISMATCH", () => {
+    const source = diagnosticOf(mutateDocument((doc) => (doc.case.metadata.source = "alien")));
+    expect(source.reasonCode).toBe("ENUM_MISMATCH");
+    const reliability = diagnosticOf(mutateDocument((doc) => (doc.case.evidence[0].reliability = "extreme")));
+    expect(reliability.reasonCode).toBe("ENUM_MISMATCH");
+    expect(reliability.path).toBe("savegame.case.evidence[0].reliability");
+  });
+
+  it("a duplicate id stays DUPLICATE_ID and now names the exact duplicate entry", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[1].objectId = doc.case.scene.worldObjects[0].objectId;
+    });
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[1]");
+    expect(diagnostic.reasonCode).toBe("DUPLICATE_ID");
+    expect(diagnostic.expected).toBe("a unique id");
+    expect(diagnostic.actualType).toBe("string");
+  });
+});
+
+describe("SavegameV1 — DEF-067 reference-integrity diagnostics pinpoint the offending field", () => {
+  it("placement -> unpublished location is REFERENCE_MISMATCH at the exact field", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.publicCase.worldGraph.placements[0].locationId = "ghost_location";
+    });
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.publicCase.worldGraph.placements[0].locationId");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+    expect(diagnostic.expected).toBe("a published location id");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("placement -> unpublished evidenceId is REFERENCE_MISMATCH at the exact field", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.publicCase.worldGraph.placements[0].evidenceId = "ghost_evidence";
+    });
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.publicCase.worldGraph.placements[0].evidenceId");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+    expect(diagnostic.expected).toBe("a published evidence id");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("worldObject -> evidenceId with no read record is REFERENCE_MISMATCH at the exact field", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[0].evidenceId = "ghost_record";
+    });
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[0].evidenceId");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+    expect(diagnostic.expected).toBe("an evidence id with a read record");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("worldObject without a world-graph placement is REFERENCE_MISMATCH at the exact field", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[0].objectId = "ghost_object";
+    });
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[0].objectId");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+    expect(diagnostic.expected).toBe("an object id with a world-graph placement");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("a truth id that is not a candidate is REFERENCE_MISMATCH at the exact field", () => {
+    const text = mutateDocument((doc) => (doc.case.replayTruth.murdererId = "not_a_suspect"));
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.replayTruth.murdererId");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+    expect(diagnostic.expected).toBe("a candidate suspect id");
+    expect(diagnostic.actualType).toBe("string");
+  });
+});
+
+describe("SavegameV1 — DEF-068 scene worldObject subtype import bound (backend ObjectSpec vocabulary)", () => {
+  it("null and a bounded non-empty string are accepted", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[0].subtype = null;
+      doc.case.scene.worldObjects[1].subtype = "door";
+    });
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    expect(definition.scene.worldObjects[0].subtype).toBeNull();
+    expect(definition.scene.worldObjects[1].subtype).toBe("door");
+  });
+
+  it("an empty-string subtype is rejected as EMPTY_STRING (never accepted at import)", () => {
+    const text = mutateDocument((doc) => (doc.case.scene.worldObjects[0].subtype = ""));
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[0].subtype");
+    expect(diagnostic.reasonCode).toBe("EMPTY_STRING");
+    expect(diagnostic.expected).toBe("string");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("an over-300-char subtype is rejected as BOUND_EXCEEDED", () => {
+    const text = mutateDocument((doc) => (doc.case.scene.worldObjects[0].subtype = "z".repeat(301)));
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[0].subtype");
+    expect(diagnostic.reasonCode).toBe("BOUND_EXCEEDED");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("a non-string subtype is rejected as TYPE_MISMATCH", () => {
+    const text = mutateDocument((doc) => (doc.case.scene.worldObjects[0].subtype = 42));
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[0].subtype");
+    expect(diagnostic.reasonCode).toBe("TYPE_MISMATCH");
+    expect(diagnostic.expected).toBe("string|null");
+    expect(diagnostic.actualType).toBe("number");
   });
 });
 
