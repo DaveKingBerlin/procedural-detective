@@ -100,6 +100,72 @@ describe("Phase 32 §31 — deterministic generated-case fixture round-trip", ()
   });
 });
 
+describe("Phase32-Fix §10/§18 — permanent same-version round-trip drift guard", () => {
+  it("exporter -> serialize -> JSON.parse -> production validator -> normalize -> fresh replay", () => {
+    // The CENTRAL invariant (Phase32-Fix §10/§36): a document produced by the
+    // REAL production exporter must always be accepted by the REAL production
+    // validator. Uses the actual production APIs only — a hand-shaped object
+    // is explicitly insufficient (Phase32-Fix §10).
+    const definition = parsed();
+    const exported = serializeSavegameV1(reExportV1(definition, "2099-01-01T00:00:00Z"));
+    const parsedBack: unknown = JSON.parse(exported); // a REAL JSON round-trip
+    const reloaded = parseSavegameV1(JSON.stringify(parsedBack), utf8ByteLength(exported));
+    expect(reloaded.metadata.title).toBe(definition.metadata.title);
+    expect(reloaded.publicCase.caseId).toBe(definition.publicCase.caseId);
+    expect(reloaded.replayTruth).toEqual(definition.replayTruth);
+    // Fresh replay state from the reloaded definition: THE TRUTH hidden.
+    const state = new FreshReplayState(reloaded);
+    const bootstrap = state.freshBootstrap();
+    expect(bootstrap.state).toBe("PLAYING");
+    expect(JSON.stringify(bootstrap)).not.toContain("replayTruth");
+    expect(bootstrap.playerKnowledge.discoveredEvidenceIds).toEqual([]);
+  });
+
+  it("§18 — EVERY emitted field of a full exported document is accepted by the current validator", () => {
+    // The exporter-contract drift guard: serialize the FULL document produced
+    // by the production exporter and prove the validator accepts every
+    // emitted field (no additionalProperties surprise, no type drift).
+    const definition = parsed();
+    const exported = serializeSavegameV1(reExportV1(definition, "2099-01-01T00:00:00Z"));
+    expect(() => parseSavegameV1(exported, utf8ByteLength(exported))).not.toThrow();
+    // The same must hold for the deterministic "generated"-source fixture.
+    const generatedText = generatedFixtureText();
+    const generatedDefinition = parseSavegameV1(generatedText, utf8ByteLength(generatedText));
+    const generatedExport = serializeSavegameV1(reExportV1(generatedDefinition, "2099-01-01T00:00:00Z"));
+    expect(() => parseSavegameV1(generatedExport, utf8ByteLength(generatedExport))).not.toThrow();
+  });
+
+  it("§29 — the same save can be loaded repeatedly, each time into a fresh replay", () => {
+    const definition = parsed();
+    const text = serializeSavegameV1(reExportV1(definition, "2099-01-01T00:00:00Z"));
+    // First load: investigate + accuse.
+    const first = new FreshReplayState(parseSavegameV1(text, utf8ByteLength(text)));
+    first.submitAccusation({ ...SOLVED });
+    expect(first.getReveal().result.overall).toBe("solved");
+    // Second load of the SAME bytes: a brand-new PLAYING replay, accusation
+    // reset, truth hidden — never the previous playthrough.
+    const second = new FreshReplayState(parseSavegameV1(text, utf8ByteLength(text)));
+    expect(second.freshBootstrap().state).toBe("PLAYING");
+    expect(second.lifecycleState()).toBe("PLAYING");
+    expect(second.knowledgeSnapshot().discoveredEvidenceIds).toEqual([]);
+    expect(() => second.getReveal()).toThrow();
+  });
+
+  it("a re-export after reveal still round-trips into a fresh replay (truth stays hidden)", () => {
+    const definition = parsed();
+    const state = new FreshReplayState(definition);
+    state.submitAccusation({ ...SOLVED });
+    expect(state.getReveal().result.overall).toBe("solved");
+    // Re-export the REVEALED definition and reload: the replay is fresh again.
+    const text = serializeSavegameV1(reExportV1(definition, "2099-01-01T00:00:00Z"));
+    const reloaded = parseSavegameV1(text, utf8ByteLength(text));
+    const again = new FreshReplayState(reloaded);
+    expect(again.freshBootstrap().state).toBe("PLAYING");
+    expect(JSON.stringify(again.freshBootstrap())).not.toContain("replayTruth");
+    expect(again.lifecycleState()).toBe("PLAYING");
+  });
+});
+
 describe("Phase 32 §15 — re-saving a loaded replay (clean fresh export)", () => {
   it("re-exports the normalized definition to a byte-stable, re-loadable save", () => {
     const definition = parsed();
