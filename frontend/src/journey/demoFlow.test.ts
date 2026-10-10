@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
 import {
+  admissionFallbackView,
   DEMO_FAILURE_MESSAGES,
   frontierFailureMessage,
   generationFailed,
+  mapAdmissionReason,
   mapDemoError,
   pollDelayMs,
   runDemo,
+  type AdmissionFailureView,
   type DemoFlowServices,
   type DemoProgress,
 } from "./demoFlow";
@@ -309,8 +312,20 @@ describe("runDemo — Phase 24 P0 reuse of a pre-existing anonymous session toke
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected failure");
+    // Phase 36 — `kind` stays "quota" for backward compatibility; the
+    // reason-aware recovery view travels in `admissionReason`. A legacy
+    // envelope WITHOUT a reasonCode maps to the conservative
+    // temporary-capacity GENERIC fallback (cache PRESERVED — never an
+    // assumed session exhaustion).
     expect(result.failure.kind).toBe("quota");
-    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.quota);
+    expect(result.failure.admissionReason).toBeDefined();
+    expect(result.failure.admissionReason!.status).toBe("temporary-capacity-limit");
+    expect(result.failure.admissionReason!.message).toBe(
+      admissionFallbackView().message,
+    );
+    expect(result.failure.admissionReason!.clearSessionCache).toBe(false);
+    expect(result.failure.admissionReason!.retryable).toBe(true);
+    expect(result.failure.message).toBe(admissionFallbackView().message);
     expect(services.createSession).not.toHaveBeenCalled();
   });
 
@@ -937,7 +952,7 @@ describe("generationFailed — Phase 22 BYO-Ollama bridge typed codes (§21)", (
 });
 
 describe("runDemo — quota / admission rejection", () => {
-  it("maps a 429 ADMISSION_DENIED on session creation to the quota failure", async () => {
+  it("maps a 429 ADMISSION_DENIED on session creation to the quota failure with the generic fallback view", async () => {
     const services = makeServices({
       createSession: vi.fn(async () => {
         throw new ApiError(429, "ADMISSION_DENIED", "quota window exhausted", null);
@@ -946,8 +961,12 @@ describe("runDemo — quota / admission rejection", () => {
     const result = await runDemo("prompt", { services, wait: NO_WAIT });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected failure");
+    // Legacy envelope (no reasonCode) -> conservative temporary-capacity
+    // fallback: cache PRESERVED, retryable. kind stays "quota" (backward
+    // compatible with the pre-Phase36 union).
     expect(result.failure.kind).toBe("quota");
-    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.quota);
+    expect(result.failure.admissionReason).toEqual(admissionFallbackView());
+    expect(result.failure.message).toBe(admissionFallbackView().message);
   });
 
   it("maps a 429 ADMISSION_DENIED on createCase to the quota failure", async () => {
@@ -960,6 +979,250 @@ describe("runDemo — quota / admission rejection", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected failure");
     expect(result.failure.kind).toBe("quota");
+    expect(result.failure.admissionReason).toEqual(admissionFallbackView());
+  });
+});
+
+describe("Phase 36 §13-§17/§29/§32 — reason-aware admission mapping", () => {
+  const EXPECTED_VIEWS: Record<
+    string,
+    Pick<AdmissionFailureView, "status" | "retryable" | "clearSessionCache">
+  > = {
+    SESSION_GENERATION_LIMIT: {
+      status: "session-generation-limit",
+      retryable: false,
+      clearSessionCache: true,
+    },
+    SESSION_EXPIRED_OR_INVALID: {
+      status: "session-generation-limit",
+      retryable: false,
+      clearSessionCache: true,
+    },
+    SESSION_CONCURRENCY_LIMIT: {
+      status: "session-concurrency-limit",
+      retryable: true,
+      clearSessionCache: false,
+    },
+    GLOBAL_CONCURRENCY_LIMIT: {
+      status: "global-concurrency-limit",
+      retryable: true,
+      clearSessionCache: false,
+    },
+    GLOBAL_GENERATION_WINDOW_LIMIT: {
+      status: "global-window-limit",
+      retryable: true,
+      clearSessionCache: false,
+    },
+    ANONYMOUS_SESSION_CAPACITY_LIMIT: {
+      status: "temporary-capacity-limit",
+      retryable: true,
+      clearSessionCache: false,
+    },
+  };
+
+  it.each(Object.keys(EXPECTED_VIEWS))(
+    "maps reasonCode %s to the exact reason-aware view (status/copy/retryable/cache-reset)",
+    (reasonCode) => {
+      const view = mapAdmissionReason(reasonCode);
+      const expected = EXPECTED_VIEWS[reasonCode];
+      expect(view.status).toBe(expected.status);
+      expect(view.retryable).toBe(expected.retryable);
+      // clearSessionCache is the ONLY input the route uses to decide
+      // resetAnonymousSessionCache() — the exhausted/expired reasons clear,
+      // every transient reason preserves.
+      expect(view.clearSessionCache).toBe(expected.clearSessionCache);
+      // Copy is never empty and never contains the raw wire token.
+      expect(view.heading.length).toBeGreaterThan(0);
+      expect(view.message.length).toBeGreaterThan(0);
+      expect(view.heading).not.toContain("ADMISSION_DENIED");
+      expect(view.message).not.toContain(reasonCode);
+    },
+  );
+
+  it("SESSION_GENERATION_LIMIT uses session-specific copy with Back-to-start-only recovery", () => {
+    const view = mapAdmissionReason("SESSION_GENERATION_LIMIT");
+    expect(view.heading).toBe("Generation limit reached");
+    expect(view.message).toContain("investigation session");
+    expect(view.message).toContain("Start a new investigation to continue.");
+    expect(view.retryable).toBe(false);
+    expect(view.clearSessionCache).toBe(true);
+  });
+
+  it("SESSION_EXPIRED_OR_INVALID is recoverable via a fresh journey AND clears the cache", () => {
+    const view = mapAdmissionReason("SESSION_EXPIRED_OR_INVALID");
+    expect(view.status).toBe("session-generation-limit");
+    expect(view.clearSessionCache).toBe(true);
+    expect(view.retryable).toBe(false);
+    expect(view.heading).toBe("Generation session unavailable");
+    expect(view.message).toContain("no longer available");
+    expect(view.message).toContain("Start a new investigation to continue.");
+  });
+
+  it("SESSION_CONCURRENCY_LIMIT explains the active generation and preserves the session", () => {
+    const view = mapAdmissionReason("SESSION_CONCURRENCY_LIMIT");
+    expect(view.status).toBe("session-concurrency-limit");
+    expect(view.heading).toBe("Generation already in progress");
+    expect(view.message).toContain("already running");
+    expect(view.retryable).toBe(true);
+    expect(view.clearSessionCache).toBe(false);
+  });
+
+  it("GLOBAL_CONCURRENCY_LIMIT is transient busy copy with a safe Try-again retry", () => {
+    const view = mapAdmissionReason("GLOBAL_CONCURRENCY_LIMIT");
+    expect(view.heading).toBe("Generation service is busy");
+    expect(view.message).toContain("try again");
+    expect(view.retryable).toBe(true);
+    expect(view.clearSessionCache).toBe(false);
+  });
+
+  it("GLOBAL_GENERATION_WINDOW_LIMIT is transient capacity copy with a safe Try-again retry", () => {
+    const view = mapAdmissionReason("GLOBAL_GENERATION_WINDOW_LIMIT");
+    expect(view.status).toBe("global-window-limit");
+    expect(view.message).toContain("try again");
+    expect(view.retryable).toBe(true);
+    expect(view.clearSessionCache).toBe(false);
+  });
+
+  it("ANONYMOUS_SESSION_CAPACITY_LIMIT is temporary capacity copy, cache PRESERVED", () => {
+    const view = mapAdmissionReason("ANONYMOUS_SESSION_CAPACITY_LIMIT");
+    expect(view.status).toBe("temporary-capacity-limit");
+    expect(view.message).toContain("temporarily unable to start a new session");
+    expect(view.retryable).toBe(true);
+    expect(view.clearSessionCache).toBe(false);
+  });
+
+  it("null / unknown / legacy reasonCode -> safe GENERIC temporary-capacity fallback, cache PRESERVED", () => {
+    for (const reasonCode of [null, undefined, "", "SOME_FUTURE_REASON", "ADMISSION_DENIED"]) {
+      const view = mapAdmissionReason(reasonCode);
+      expect(view).toEqual(admissionFallbackView());
+      expect(view.status).toBe("temporary-capacity-limit");
+      expect(view.message).toBe("Generation is temporarily unavailable. Please try again.");
+      expect(view.retryable).toBe(true);
+      expect(view.clearSessionCache).toBe(false);
+    }
+  });
+
+  it("a hostile prefix/substring variant never narrows into a reason bucket (§30 safe fallback)", () => {
+    for (const hostile of [
+      "SESSION_GENERATION_LIMIT_2",
+      "X_GLOBAL_CONCURRENCY_LIMIT",
+      "GLOBAL_GENERATION_WINDOW_LIMIT_NOW",
+      "SESSION_EXPIRED_OR_INVALID_PLEASE",
+      "ANONYMOUS_SESSION_CAPACITY_LIMIT_EXTRA",
+      "NOT_SESSION_CONCURRENCY_LIMIT",
+    ]) {
+      expect(mapAdmissionReason(hostile)).toEqual(admissionFallbackView());
+    }
+  });
+
+  it("admission mapping is PROVIDER-AGNOSTIC (§25/§38): the same reason maps identically regardless of journey shape/provider", async () => {
+    // The mapper itself takes only `reasonCode` — no provider input at all.
+    // The journey shapes (fake / ollama bridge / remote_client / frontier)
+    // all flow through the same runDemo -> mapDemoError -> mapAdmissionReason
+    // path; none of them can bias the admission view.
+    const reason = "GLOBAL_CONCURRENCY_LIMIT";
+    const expected = mapAdmissionReason(reason);
+
+    const shapes: Array<{ generation?: unknown; label: string }> = [
+      { label: "no selection" },
+      { label: "fake", generation: { generationProvider: "fake" } },
+      {
+        label: "ollama server",
+        generation: {
+          generationProvider: "ollama",
+          ollamaTransport: "server",
+          ollamaModel: "llama3.2:3b",
+        },
+      },
+      {
+        label: "bridge/remote_client",
+        generation: {
+          generationProvider: "ollama",
+          ollamaTransport: "bridge",
+          ollamaModel: "hermes3:8b",
+        },
+      },
+      {
+        label: "frontier BYOK",
+        generation: {
+          generationProvider: "frontier",
+          frontier: { provider: "openai", apiKey: "sk-test", model: "gpt-4o-mini" },
+        },
+      },
+    ];
+
+    for (const shape of shapes) {
+      const services = makeServices({
+        createCase: vi.fn(async () => {
+          throw new ApiError(
+            429,
+            "ADMISSION_DENIED",
+            "Generation capacity exhausted",
+            null,
+            reason,
+          );
+        }),
+      });
+      const result = await runDemo("prompt", {
+        services,
+        wait: NO_WAIT,
+        generation: shape.generation as never,
+      });
+      expect(result.ok, shape.label).toBe(false);
+      if (result.ok) throw new Error("expected failure");
+      expect(result.failure.kind, shape.label).toBe("quota");
+      expect(result.failure.admissionReason, shape.label).toEqual(expected);
+    }
+  });
+
+  it("TOO_MANY_REQUESTS (per-IP POST /cases budget) is a DISTINCT retryable — never an admission state (§18)", () => {
+    const failure = mapDemoError(new ApiError(429, "TOO_MANY_REQUESTS", "per-ip budget", null));
+    expect(failure.kind).toBe("retryable");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.tooManyRequests);
+    // No admission view: the route can never render a session/capacity screen
+    // for it, and the session cache is untouched by it.
+    expect(failure.admissionReason).toBeUndefined();
+    // Also proves it does not route into ADMISSION_DENIED handling even at
+    // the same HTTP status.
+    expect(mapAdmissionReason(null)).toEqual(admissionFallbackView());
+  });
+
+  it("mapDemoError forwards the backend reasonCode into the admission view for ADMISSION_DENIED", () => {
+    const failure = mapDemoError(
+      new ApiError(
+        429,
+        "ADMISSION_DENIED",
+        "Generation capacity exhausted",
+        null,
+        "GLOBAL_CONCURRENCY_LIMIT",
+      ),
+    );
+    expect(failure.kind).toBe("quota");
+    expect(failure.admissionReason).toEqual(mapAdmissionReason("GLOBAL_CONCURRENCY_LIMIT"));
+    expect(failure.message).toBe(mapAdmissionReason("GLOBAL_CONCURRENCY_LIMIT").message);
+  });
+
+  it("runDemo surfaces the full reason-aware view for EVERY backend reason code", async () => {
+    for (const reasonCode of Object.keys(EXPECTED_VIEWS)) {
+      const services = makeServices({
+        createCase: vi.fn(async () => {
+          throw new ApiError(
+            429,
+            "ADMISSION_DENIED",
+            "Generation capacity exhausted",
+            null,
+            reasonCode,
+          );
+        }),
+      });
+      const result = await runDemo("prompt", { services, wait: NO_WAIT });
+      expect(result.ok, reasonCode).toBe(false);
+      if (result.ok) throw new Error("expected failure");
+      expect(result.failure.kind, reasonCode).toBe("quota");
+      expect(result.failure.admissionReason, reasonCode).toEqual(
+        mapAdmissionReason(reasonCode),
+      );
+    }
   });
 });
 

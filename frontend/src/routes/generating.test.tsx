@@ -5,9 +5,8 @@ import {
   GenerationJourneyView,
   resolveJourneyMode,
   stageFromProgress,
-  SESSION_LIMIT_HEADING,
-  SESSION_LIMIT_RELOAD_LABEL,
 } from "./generating";
+import { mapAdmissionReason } from "../journey/demoFlow";
 import type { DemoProgress } from "../journey/demoFlow";
 import type { GenerationCapabilitiesResponse } from "../api/types";
 
@@ -22,9 +21,10 @@ import type { GenerationCapabilitiesResponse } from "../api/types";
  * inside the flow's progress snapshots (fed from `pd_generation_mode`) and
  * selects the Local-AI labels when local, the generic labels otherwise.
  *
- * Phase 24 F-2 — a session-window-DENIED run reaches a dedicated
- * "session-limit" recovery state (clear holder + reload guidance), NEVER the
- * generic Try-again error.
+ * Phase 36 — a 429 ADMISSION_DENIED run reaches a REASON-AWARE recovery
+ * screen (session-generation-limit / session-concurrency-limit /
+ * global-concurrency-limit / global-window-limit / temporary-capacity-limit)
+ * instead of the old generic "session-limit + Reload page" screen.
  */
 
 function render(view: Parameters<typeof GenerationJourneyView>[0]["view"]): string {
@@ -34,10 +34,15 @@ function render(view: Parameters<typeof GenerationJourneyView>[0]["view"]): stri
         view={view}
         onEnter={() => {}}
         onRetry={() => {}}
-        onReload={() => {}}
       />
     </MemoryRouter>,
   );
+}
+
+/** Render one reason-aware admission view as a string. */
+function renderAdmission(reasonCode: string | null | undefined): string {
+  const view = mapAdmissionReason(reasonCode);
+  return render({ status: view.status, admission: view });
 }
 
 describe("generation route — no session (hard refresh)", () => {
@@ -99,22 +104,90 @@ describe("generation route — failure states", () => {
     });
   }
 
-  it("a session-window-denied run renders the explicit session-limit recovery state (F-2): reload guidance, NO Try again", () => {
-    const html = render({ status: "session-limit" });
-    expect(html).toContain('data-testid="generation-session-limit"');
-    expect(html).toContain(SESSION_LIMIT_HEADING);
-    // (renderToStaticMarkup escapes the apostrophe, so the message body is
-    // asserted on its stable, punctuation-free fragments.)
-    expect(html).toContain("generation session has reached its limit");
-    expect(html).toContain("Reload the page to start a fresh session");
-    expect(html).toContain('data-testid="generation-session-limit-reload"');
-    expect(html).toContain(SESSION_LIMIT_RELOAD_LABEL);
-    // Deliberately NO "Try again": re-running would reuse the same exhausted
-    // session; recovery is a page reload (which starts a fresh session server-
-    // side-protected by the unchanged rate limits).
-    expect(html).not.toContain("Try again");
-    expect(html).not.toContain('data-testid="enter-investigation"');
+  it("session-generation-limit (SESSION_GENERATION_LIMIT) renders session-specific copy, NO Reload button, NO Try again, and Back to start", () => {
+    const html = renderAdmission("SESSION_GENERATION_LIMIT");
+    expect(html).toContain('data-testid="generation-admission-session-generation-limit"');
+    expect(html).toContain("Generation limit reached");
+    expect(html).toContain("investigation session has used its available generation attempts");
+    expect(html).toContain("Start a new investigation to continue");
+    // Phase 36 §22/§35 — NO reload affordance anywhere on the admission path.
+    expect(html).not.toContain("Reload page");
+    expect(html).not.toContain("window.location.reload");
+    expect(html).not.toContain('data-testid="generation-admission-retry"');
     expect(html).toContain('data-testid="generation-back-to-start"');
+    expect(html).not.toContain('data-testid="enter-investigation"');
+  });
+
+  it("SESSION_EXPIRED_OR_INVALID renders the same session-recovery status (fresh journey) with NO reload and NO auto-mint affordance", () => {
+    const html = renderAdmission("SESSION_EXPIRED_OR_INVALID");
+    expect(html).toContain('data-testid="generation-admission-session-generation-limit"');
+    expect(html).toContain("Start a new investigation to continue");
+    expect(html).not.toContain("Reload");
+    expect(html).not.toContain('data-testid="generation-admission-retry"');
+    expect(html).toContain('data-testid="generation-back-to-start"');
+  });
+
+  it("session-concurrency-limit (SESSION_CONCURRENCY_LIMIT) renders the already-running copy with a safe Try again and Back to start", () => {
+    const html = renderAdmission("SESSION_CONCURRENCY_LIMIT");
+    expect(html).toContain('data-testid="generation-admission-session-concurrency-limit"');
+    expect(html).toContain("Generation already in progress");
+    expect(html).toContain("Another case generation is already running for this session");
+    expect(html).toContain("Try again");
+    expect(html).toContain('data-testid="generation-admission-retry"');
+    expect(html).toContain('data-testid="generation-back-to-start"');
+    expect(html).not.toContain("Reload");
+  });
+
+  it("global-concurrency-limit (GLOBAL_CONCURRENCY_LIMIT) renders the busy copy with Try again + Back to start", () => {
+    const html = renderAdmission("GLOBAL_CONCURRENCY_LIMIT");
+    expect(html).toContain('data-testid="generation-admission-global-concurrency-limit"');
+    expect(html).toContain("Generation service is busy");
+    expect(html).toContain("try again shortly");
+    expect(html).toContain('data-testid="generation-admission-retry"');
+    expect(html).toContain('data-testid="generation-back-to-start"');
+    expect(html).not.toContain("Reload");
+  });
+
+  it("global-window-limit (GLOBAL_GENERATION_WINDOW_LIMIT) renders the temporary capacity copy with Try again + Back to start", () => {
+    const html = renderAdmission("GLOBAL_GENERATION_WINDOW_LIMIT");
+    expect(html).toContain('data-testid="generation-admission-global-window-limit"');
+    expect(html).toContain("temporarily exhausted");
+    expect(html).toContain("try again");
+    expect(html).toContain('data-testid="generation-admission-retry"');
+    expect(html).toContain('data-testid="generation-back-to-start"');
+    expect(html).not.toContain("Reload");
+  });
+
+  it("temporary-capacity-limit (ANONYMOUS_SESSION_CAPACITY_LIMIT) renders the new-session capacity copy with Try again + Back to start", () => {
+    const html = renderAdmission("ANONYMOUS_SESSION_CAPACITY_LIMIT");
+    expect(html).toContain('data-testid="generation-admission-temporary-capacity-limit"');
+    expect(html).toContain("temporarily unable to start a new session");
+    expect(html).toContain("Please try again later");
+    expect(html).toContain('data-testid="generation-admission-retry"');
+    expect(html).toContain('data-testid="generation-back-to-start"');
+    expect(html).not.toContain("Reload");
+  });
+
+  it("unknown/absent reasonCode renders the safe GENERIC temporary-capacity fallback (§30) — never a session-limit claim", () => {
+    const html = renderAdmission(null);
+    expect(html).toContain('data-testid="generation-admission-temporary-capacity-limit"');
+    expect(html).toContain("Generation is temporarily unavailable");
+    expect(html).toContain("Please try again");
+    expect(html).toContain('data-testid="generation-admission-retry"');
+    expect(html).toContain('data-testid="generation-back-to-start"');
+    // Never describes the session as exhausted.
+    expect(html).not.toContain("has reached its limit");
+    expect(html).not.toContain("Reload the page");
+    expect(html).not.toContain("Reload");
+  });
+
+  it("every admission recovery screen is accessible: heading, role=status, descriptive labels, keyboard-visible actions", () => {
+    const html = renderAdmission("GLOBAL_CONCURRENCY_LIMIT");
+    expect(html).toContain("<h2>"); // heading hierarchy
+    expect(html).toContain('role="status"'); // status announced via role
+    expect(html).toContain(">Try again</button>"); // real button (focusable)
+    expect(html).toContain("Back to start"); // descriptive link
+    expect(html).not.toContain('<div role="alert"'); // not an over-eager alert
   });
 
   it("never exposes prompts, diagnostics or provider details in any state", () => {

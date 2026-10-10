@@ -613,6 +613,78 @@ describe("Phase 8 journey endpoints", () => {
   });
 });
 
+describe("Phase 36 — reasonCode plumbing in the error envelope (admission reason parsing)", () => {
+  it("parses the reasonCode of a 429 ADMISSION_DENIED envelope into ApiError.reasonCode", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        {
+          error: {
+            code: "ADMISSION_DENIED",
+            reasonCode: "GLOBAL_CONCURRENCY_LIMIT",
+            message: "Generation capacity exhausted",
+            details: null,
+          },
+        },
+        429,
+      ),
+    );
+    const error = await createCase("anon-token", "A mystery").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(429);
+    expect(error.code).toBe("ADMISSION_DENIED");
+    expect(error.message).toBe("Generation capacity exhausted");
+    expect(error.reasonCode).toBe("GLOBAL_CONCURRENCY_LIMIT");
+  });
+
+  it("a legacy ADMISSION_DENIED envelope WITHOUT a reasonCode parses to reasonCode=null (byte-identical semantics)", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: "ADMISSION_DENIED", message: "quota", details: null } }, 429),
+    );
+    const error = await createCase("anon-token", "A mystery").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.code).toBe("ADMISSION_DENIED");
+    expect(error.reasonCode).toBeNull();
+  });
+
+  it("TOO_MANY_REQUESTS (the DISTINCT per-IP budget code) parses with reasonCode=null — never an admission reason", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { error: { code: "TOO_MANY_REQUESTS", message: "per-ip budget", details: null } },
+        429,
+      ),
+    );
+    const error = await createCase("anon-token", "A mystery").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(429);
+    expect(error.code).toBe("TOO_MANY_REQUESTS");
+    expect(error.reasonCode).toBeNull();
+  });
+
+  it("every NON-admission envelope keeps reasonCode=null (code/message/details semantics unchanged)", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: "NOT_READY", message: "pending", details: { db: true } } }, 503),
+    );
+    const error = await getReadiness().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    if (!(error instanceof ApiError)) throw new Error("expected ApiError");
+    expect(error.status).toBe(503);
+    expect(error.code).toBe("NOT_READY");
+    expect(error.message).toBe("pending");
+    expect(error.details).toEqual({ db: true });
+    expect(error.reasonCode).toBeNull();
+  });
+
+  it("the ApiError constructor defaults reasonCode to null (zero-cost, additive)", () => {
+    const error = new ApiError(429, "ADMISSION_DENIED", "quota", null);
+    expect(error.reasonCode).toBeNull();
+    const withReason = new ApiError(429, "ADMISSION_DENIED", "quota", null, "SESSION_CONCURRENCY_LIMIT");
+    expect(withReason.reasonCode).toBe("SESSION_CONCURRENCY_LIMIT");
+  });
+});
+
 describe("Phase 22 bridge endpoints (BYO-Ollama pairing + status)", () => {
   const ANON = "anon-session-token";
 
