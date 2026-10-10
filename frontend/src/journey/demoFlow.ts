@@ -35,6 +35,13 @@ import type {
  *    recovery screen; a legacy/no-reason envelope falls back to the
  *    conservative retryable temporary-capacity view without ever assuming
  *    session exhaustion)
+ *  - 401 SESSION_EXPIRED          -> { kind: "quota", admissionReason: <the
+ *    session-recovery view> } (Phase 36 DEF-082/ADV-36-01 — the auth
+ *    dependency rejects a genuinely expired/unknown anonymous session BEFORE
+ *    any admission layer, so a durable backend never emits the closed
+ *    SESSION_EXPIRED_OR_INVALID reason; the plain 401 is mapped to the SAME
+ *    dead-session recovery: clear the cache, Back to start only, NO auto-mint
+ *    while the screen is shown)
  *  - network/timeout/server error -> { kind: "retryable" }
  * plus a bounded-retry exhaustion -> retryable. The caller offers a Retry
  * action that simply re-runs runDemo.
@@ -165,6 +172,31 @@ export function admissionFallbackView(): AdmissionFailureView {
 }
 
 /**
+ * Phase 36 §10/§24 + DEF-082/ADV-36-01 — the SHARED session-recovery view for
+ * EVERY "the anonymous identity is gone" surface:
+ *
+ *  - the closed 429 reason `SESSION_EXPIRED_OR_INVALID` (mapAdmissionReason)
+ *  - the REAL durable `401 SESSION_EXPIRED` auth answer (mapDemoError) — the
+ *    auth dependency rejects an expired/unknown anonymous session BEFORE any
+ *    admission layer, so a durable deployment never reaches the 429.
+ *
+ * The identity is DEAD: clear the cache, tell the user to start a new
+ * investigation, and offer ONLY "Back to start". NO auto-mint while this
+ * screen is shown; a fresh identity is minted only on the NEXT explicit
+ * journey. The route shares ONE accurate recovery view for both surfaces.
+ */
+export function sessionExpiredView(): AdmissionFailureView {
+  return {
+    status: "session-generation-limit",
+    heading: "Generation session unavailable",
+    message:
+      "This investigation session is no longer available. Start a new investigation to continue.",
+    retryable: false,
+    clearSessionCache: true,
+  };
+}
+
+/**
  * Phase 36 §13-§17/§29/§32 — map the backend's CLOSED admission reasonCode to
  * the reason-aware recovery view. PURE and provider-agnostic: there is NO
  * provider branch (fake/ollama/bridge/frontier all flow through this exact
@@ -184,7 +216,9 @@ export function admissionFallbackView(): AdmissionFailureView {
  *
  * `TOO_MANY_REQUESTS` is a DISTINCT backend code (per-IP POST /cases budget)
  * and is NEVER routed in here — mapDemoError keeps its own accurate
- * retryable mapping for it (see below).
+ * retryable mapping for it (see below). The real durable expired-session
+ * answer `401 SESSION_EXPIRED` is also handled in mapDemoError (DEF-082) and
+ * maps to the SAME shared {@link sessionExpiredView} as this reason.
  */
 export function mapAdmissionReason(
   reasonCode: string | null | undefined,
@@ -207,24 +241,25 @@ export function mapAdmissionReason(
       // The session is gone (expired/unknown) rather than exhausted, but the
       // recovery is the SAME session-recovery status: clear the stale cache
       // and let the user start a fresh journey. Same status as generation
-      // limit so the route shares one accurate recovery view.
-      return {
-        status: "session-generation-limit",
-        heading: "Generation session unavailable",
-        message:
-          "This investigation session is no longer available. Start a new investigation to continue.",
-        retryable: false,
-        clearSessionCache: true,
-      };
+      // limit so the route shares one accurate recovery view. (NOTE
+      // DEF-082/ADV-36-01: a durable backend never emits this reason — the
+      // auth dependency answers 401 SESSION_EXPIRED first; mapDemoError maps
+      // that exact code to this SAME shared view via {@link sessionExpiredView}.)
+      return sessionExpiredView();
     case "SESSION_CONCURRENCY_LIMIT":
       // A generation is already active for this session. Do NOT clear the
-      // session (it is valid); explain the active generation. A safe SPA
-      // Retry may re-run the journey under the same preserved session.
+      // session (it is valid); explain the active generation. The denial
+      // surfaces at POST /cases with NO attempt handle, so there is nothing
+      // to navigate back to — the copy describes ONLY the actions that exist
+      // (wait, then Try again; or Back to start) (Phase 36 §14/§27,
+      // DEF-083/ADV-36-02). The safe SPA Retry re-runs the journey under the
+      // same preserved session — it may keep hitting the concurrency limit
+      // until the active attempt finishes (wait-and-retry semantics).
       return {
         status: "session-concurrency-limit",
         heading: "Generation already in progress",
         message:
-          "Another case generation is already running for this session. Return to the in-progress generation or try again.",
+          "Another case generation is already running for this session. Please wait for it to finish before starting another.",
         retryable: true,
         clearSessionCache: false,
       };
@@ -415,6 +450,23 @@ export function mapDemoError(error: unknown): DemoFlowFailure {
     // stays its own accurate retryable copy.
     if (error.status === 429 && error.code === "TOO_MANY_REQUESTS") {
       return { kind: "retryable", message: DEMO_FAILURE_MESSAGES.tooManyRequests };
+    }
+    // Phase 36 DEF-082/ADV-36-01 — the REAL durable expired-session path:
+    // the auth dependency rejects a genuinely expired/unknown anonymous
+    // session with `401 SESSION_EXPIRED` BEFORE any admission layer, so the
+    // closed 429 `SESSION_EXPIRED_OR_INVALID` reason is unreachable from a
+    // durable deployment. Map the EXACT 401 code to the SAME session-recovery
+    // view as that reason: the identity is dead (clearSessionCache), Back to
+    // start only (retryable=false), NO auto-mint while the screen is shown.
+    //
+    // `401 UNAUTHORIZED` is deliberately NOT routed here: the auth module
+    // answers it for an absent/malformed bearer on EVERY token class
+    // (session, creator, playthrough — genuinely distinct surfaces), so
+    // mapping it could break non-session auth errors. ONLY SESSION_EXPIRED is
+    // handled, exact-code equality only.
+    if (error.status === 401 && error.code === "SESSION_EXPIRED") {
+      const admissionReason = sessionExpiredView();
+      return { kind: "quota", message: admissionReason.message, admissionReason };
     }
     // Phase 25 — explicit-selection rejections. The backend rejects an
     // unknown provider id with INVALID_GENERATION_PROVIDER and an explicitly
