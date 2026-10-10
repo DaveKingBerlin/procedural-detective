@@ -15,10 +15,13 @@ Classification (deterministic, in this exact order — §32.2):
 4. world_issues non-empty (Phase 14: the WORld validation bucket —
    unresolved required object / environment mismatch / invalid placement /
    missing interaction path / unreachable required evidence) -> RECOVERABLE_REPAIR
-5. solver missing/incomplete OR any of the who/why/weapon dimensions not
+5. quality_issues non-empty (Phase35 case-quality bucket — public role truth
+   leak, victim/witness in suspect candidates, murderer not accuseable,
+   witness-statement completeness)         -> RECOVERABLE_REPAIR
+6. solver missing/incomplete OR any of the who/why/weapon dimensions not
    unique OR when ambiguous OR when overconstrained -> RECOVERABLE_REGENERATE
-6. truth mismatch (``validation.all_true`` False)   -> RECOVERABLE_REPAIR
-7. else                                    -> VALID
+7. truth mismatch (``validation.all_true`` False)   -> RECOVERABLE_REPAIR
+8. else                                    -> VALID
 """
 
 from __future__ import annotations
@@ -44,6 +47,12 @@ class ValidationReport:
     environment mismatches, invalid placements, missing evidence interaction
     paths and unreachable required evidence. A non-empty world bucket classifies
     RECOVERABLE_REPAIR (repair reruns the COMPLETE validation pipeline).
+
+    ``quality_issues`` is the Phase 35 CASE-QUALITY bucket: closed Phase35 issue
+    codes (``validate_case_quality`` — public role truth leak, victim/witness
+    in suspect candidates, murderer not accuseable, witness-statement
+    completeness). A non-empty quality bucket classifies RECOVERABLE_REPAIR
+    (the repair reruns the COMPLETE validation pipeline again).
     """
 
     structural_issues: tuple[str, ...] = ()
@@ -53,6 +62,7 @@ class ValidationReport:
     validation: AccusedSolutionValidation | None = None
     locked_violations: tuple[str, ...] = ()
     world_issues: tuple[str, ...] = ()
+    quality_issues: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "structural_issues", tuple(self.structural_issues))
@@ -60,6 +70,7 @@ class ValidationReport:
         object.__setattr__(self, "universe_issues", tuple(self.universe_issues))
         object.__setattr__(self, "locked_violations", tuple(self.locked_violations))
         object.__setattr__(self, "world_issues", tuple(self.world_issues))
+        object.__setattr__(self, "quality_issues", tuple(self.quality_issues))
         if self.validation is not None and not isinstance(
             self.validation, AccusedSolutionValidation
         ):
@@ -84,6 +95,17 @@ class ValidationReport:
         if self.world_issues:
             # Phase 14: the composed world is unplayable -> world repair reruns
             # the COMPLETE validation pipeline again (locked fields untouched).
+            return ValidationOutcome.RECOVERABLE_REPAIR
+        if self.quality_issues:
+            # Phase35: a hard generated-case quality failure (public role
+            # truth leak / candidate-role inconsistency / witness-statement
+            # incompleteness) is REPAIR-class — the targeted repair reruns the
+            # COMPLETE validation pipeline again. PUBLIC_ROLE_TRUTH_LEAK is
+            # also REPAIR-class (the full-draft repair can rewrite the public
+            # role without touching the canonical murderer truth); the
+            # publication-boundary guard in
+            # ``services.publication.public_case_dict_from_payload`` remains
+            # the defense-in-depth backstop.
             return ValidationOutcome.RECOVERABLE_REPAIR
         proof = self.solver_result
         if proof is None:
@@ -113,6 +135,7 @@ class ValidationReport:
         diagnostics += list(self.safety_issues)
         diagnostics += list(self.universe_issues)
         diagnostics += list(self.world_issues)
+        diagnostics += list(self.quality_issues)
         proof = self.solver_result
         if proof is not None:
             if proof.who is not None and not proof.who.unique:

@@ -86,6 +86,27 @@ class SerializationError(PublicationError):
     """The frozen payload could not be serialized (nothing is persisted)."""
 
 
+class PublicRoleTruthLeak(PublicationError):
+    """A stored payload's public person role is outside the CLOSED pre-reveal
+    vocabulary (``victim|suspect|witness|family|other``) — a pre-Phase35 row
+    carrying e.g. ``role=="murderer"``, a deleted ``role`` key, or any legacy
+    out-of-vocabulary token (DEF-078 / ADV-35-02).
+
+    The public DTO builder must NEVER emit such a role into a PRE-REVEAL DTO
+    (truth-isolation — a player reading ``role=="murderer"`` learns the killer
+    before THE TRUTH), so the projection FAILS TYPED instead of degrading to a
+    bare ``ValueError`` -> sanitized generic 500 with no actionable diagnosis.
+    ``reason`` is a SAFE fixed diagnostic fragment and ``role`` carries the
+    offending stored token SERVER-SIDE ONLY (it is NEVER echoed into an HTTP
+    message — the role value itself is the truth-bearing string).
+    """
+
+    def __init__(self, reason: str, role: object) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.role = role
+
+
 # --------------------------------------------------------------------------- #
 # deterministic plain-tree serializer
 # --------------------------------------------------------------------------- #
@@ -254,11 +275,32 @@ def public_case_dict_from_payload(
     def _persons() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for person in draft.get("persons") or ():
+            # Phase35 — PUBLIC-ROLE TRUTH-ISOLATION GUARD (defense-in-depth).
+            # The public DTO must NEVER emit a pre-reveal truth-bearing role:
+            # ``role == "murderer"`` or any other token OUTSIDE the closed
+            # public role vocabulary (``victim|suspect|witness|family|other``)
+            # is BLOCKED here — never silently renamed, never served. The
+            # Phase35 quality validator prevents such a payload from ever
+            # being published; this mapper is the READ-TIME backstop for a
+            # crafted/tampered ``published_versions`` row. DEF-078: the
+            # failure is TYPED (``PublicRoleTruthLeak``) so the API/export
+            # layers can surface an actionable non-500 diagnostic instead of
+            # a bare ``ValueError`` degrading to a generic sanitized 500.
+            from app.generation.case_quality import PUBLIC_ROLE_VOCABULARY
+
+            role = person.get("role")
+            if role not in PUBLIC_ROLE_VOCABULARY:
+                raise PublicRoleTruthLeak(
+                    "public person role is outside the closed pre-reveal "
+                    "vocabulary (victim|suspect|witness|family|other); "
+                    "refusing to project a truth-bearing public role",
+                    role,
+                )
             out.append(
                 {
                     "personId": person.get("person_id"),
                     "name": person.get("name"),
-                    "role": person.get("role"),
+                    "role": role,
                     "affordances": sorted(person.get("affordances") or ()),
                 }
             )
@@ -1168,6 +1210,7 @@ __all__ = [
     "PAYLOAD_SCHEMA_VERSION",
     "PublicationError",
     "PublicationService",
+    "PublicRoleTruthLeak",
     "SAFE_ASSET_TYPE_LABEL",
     "SerializationError",
     "derive_title_from_prompt",

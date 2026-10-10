@@ -60,6 +60,7 @@ from app.services.accusation import (
     AccusationValidationError,
     RevealNotAvailableError,
 )
+from app.services.publication import PublicRoleTruthLeak
 from app.services.savegame import (
     SAVEGAME_MIME_TYPE,
     SavegameService,
@@ -285,11 +286,31 @@ def _translate_savegame_error(exc: Exception) -> HTTPException:
     pinned version answers the generic 404; an over-bound projection and any
     unknown error answer the sanitized 500 INTERNAL_ERROR (never leaking the
     reason).
+
+    Phase35 DEF-078 — a ``PublicRoleTruthLeak`` inside the export projection
+    (a legacy stored payload whose person carries ``role="murderer"`` / a
+    deleted role key) answers the SAME typed 409 PUBLIC_ROLE_TRUTH_LEAK as the
+    read paths. Decision (documented): the completed-case savegame CANNOT
+    recover this row — the ``case.publicCase`` block is the EXACT pre-reveal
+    PublicCaseResponse allowance shape that the replay runtime re-renders
+    PRE-reveal, so emitting the truth-bearing role there would re-disclose the
+    killer to a fresh replay, and silently renaming it violates the closed
+    public-role contract. The 403 reveal gate runs FIRST (a pre-reveal export
+    never reaches the mapper), so the only export outcomes for such a legacy
+    row are 403 (still gated) or this typed 409 — never a bare 500.
     """
     if isinstance(exc, SavegameUnavailableError):
         return http_error(403, "REVEAL_NOT_AVAILABLE", "Reveal is not available yet")
     if isinstance(exc, AccusationNotFoundError):
         return http_error(404, "NOT_FOUND", "Not found")
+    if isinstance(exc, PublicRoleTruthLeak):
+        # SANITIZED: the offending role token (the truth-bearing string) and
+        # the person id are never echoed into the message.
+        return http_error(
+            409,
+            "PUBLIC_ROLE_TRUTH_LEAK",
+            "Stored case data violates the closed public-role contract",
+        )
     if isinstance(exc, (SavegameTooLargeError, ValueError)):
         return http_error(500, "INTERNAL_ERROR", "Internal server error")
     return http_error(500, "INTERNAL_ERROR", "Internal server error")

@@ -49,6 +49,7 @@ from app.services.investigation import (
     InvestigationNotFoundError,
     InvestigationStateError,
 )
+from app.services.publication import PublicRoleTruthLeak
 
 
 def http_error(status_code: int, code: str, message: str) -> HTTPException:
@@ -154,6 +155,20 @@ def map_service_error(exc: Exception) -> HTTPException:
             429,
             "PLAYTHROUGH_LIMIT_EXCEEDED",
             "Playthrough limit reached for this case",
+        )
+    if isinstance(exc, PublicRoleTruthLeak):
+        # Phase35 DEF-078 — a stored ``published_versions`` row carries a
+        # public person role OUTSIDE the closed pre-reveal vocabulary
+        # (e.g. a legacy ``role="murderer"`` or a deleted role key). The
+        # public DTO must NEVER emit that role, but a pre-Phase35 row must
+        # also never become a permanently silent generic 500 — answer a
+        # typed, NON-500, actionable envelope instead. The message is
+        # SANITIZED: the offending role token itself (the truth-bearing
+        # string) and the person id are NEVER echoed.
+        return http_error(
+            409,
+            "PUBLIC_ROLE_TRUTH_LEAK",
+            "Stored case data violates the closed public-role contract",
         )
     if isinstance(exc, InvestigationError):
         return http_error(500, "INTERNAL_ERROR", "Internal server error")

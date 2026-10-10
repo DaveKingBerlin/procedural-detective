@@ -41,7 +41,7 @@ from app.domain.public import (
 )
 from app.domain.solver import solve_case
 from app.domain.truth import CaseTruth, Crime, CrimeTime
-from app.generation import parser, prompt as prompt_mod, prompts, safety
+from app.generation import case_quality, parser, prompt as prompt_mod, prompts, safety
 from app.generation.budgets import BudgetTracker
 from app.generation.constraints import LockedConstraints
 from app.generation.provider import GenerateRequest, GenerationStage
@@ -401,6 +401,12 @@ def _stage_context(attempt: AttemptRecord, stage: GenerationStage) -> str:
     persons-bearing stages carry the locked-witness contract line; both solve
     the Phase33 RAD-1 "missing trusted context" / "ambiguous guidance" gaps
     without changing a single validation semantics.
+
+    Phase35 §37: the REPAIR stage additionally receives the bounded safe
+    CASE-QUALITY FIX CONTEXT — allowed person IDs + public roles, witness IDs,
+    suspect candidate IDs, the required witness-kind evidence vocabulary and
+    the SAFE quality issue codes from the report. Never CaseTruth/murderer
+    through public diagnostics; the canonical truth stays server-side.
     """
     if stage is GenerationStage.REPAIR:
         material: Any = attempt.draft
@@ -434,8 +440,83 @@ def _stage_context(attempt: AttemptRecord, stage: GenerationStage) -> str:
         scope = prompts.generation_scope_block()
         if stage in _WITNESS_SCOPE_STAGES:
             scope += "\n\n" + prompts.locked_witness_contract_line()
+        if stage is GenerationStage.REPAIR:
+            scope += "\n\n" + case_quality_repair_context(attempt)
         text = f"{text}\n\n{scope}"
     return text
+
+
+def case_quality_repair_context(attempt: AttemptRecord) -> str:
+    """Phase35 §37 — bounded safe CASE-QUALITY FIX CONTEXT for the REPAIR stage.
+
+    Only PUBLIC/derive-facing values (allowed person IDs + closed public roles,
+    witness IDs, suspect candidate IDs, the required witness-kind evidence
+    vocabulary and the CLOSED safe quality issue codes). NEVER CaseTruth /
+    murderer identity / statement text through public diagnostics — roles are
+    projected through ``PUBLIC_ROLE_VOCABULARY`` so a truth-bearing token
+    (e.g. ``"murderer"``) carried by a broken draft is masked as ``<invalid>``
+    instead of re-echoed (DEF-080). Deterministic and bounded; guidance only —
+    the validators stay the sole acceptance authority.
+    """
+    lines: list[str] = ["CASE QUALITY FIX CONTEXT (bounded, authoritative):"]
+    persons: tuple[Any, ...] = ()
+    public: PublicCase | None = None
+    try:
+        public, _evidence, _truth, _draft = assemble(attempt)
+    except Exception:  # noqa: BLE001 - context degrades safely
+        public = None
+    if public is not None:
+        persons = public.persons
+        person_ids = sorted(p.person_id for p in persons)
+        lines.append("- allowed person ids and their PUBLIC roles: " + ", ".join(
+            _public_role_label(p.person_id, p.role) for p in persons
+        ))
+        witness_ids = sorted(
+            p.person_id for p in persons if p.role == "witness"
+        )
+        candidates: Any = None
+        try:
+            candidates = derive_universes(public)
+        except Exception:  # noqa: BLE001
+            candidates = None
+        if witness_ids:
+            lines.append("- witness ids (each MUST have usable witness-statement "
+                         f"evidence): {', '.join(witness_ids)}")
+        if candidates is not None:
+            lines.append("- suspect candidate ids (the accuseable set): "
+                         + ", ".join(sorted(candidates.suspect_ids)))
+    lines.append(
+        "- required witness-kind evidence: an evidence item with kind "
+        "'witness_statement' whose statement is non-empty, whose speakerName "
+        "matches the witness name and whose WITNESS_CLAIMS proposition "
+        "references the witness personId (one per witness)."
+    )
+    report = getattr(attempt, "last_validation", None)
+    quality_codes = tuple(getattr(report, "quality_issues", ()) or ())
+    if quality_codes:
+        lines.append("- safe issue codes to fix: " + ", ".join(quality_codes))
+    lines.append(
+        "- Keep the canonical truth server-side: never stamp any public person "
+        "with the truth role token and never reveal the killer identity in a "
+        "public role/description."
+    )
+    return "\n".join(lines)
+
+
+def _public_role_label(person_id: str, role: Any) -> str:
+    """Person id + the CLOSED public-role token (DEF-080).
+
+    Roles are projected through ``PUBLIC_ROLE_VOCABULARY`` before the REPAIR
+    context prints them: only a member of the closed pre-reveal vocabulary
+    (``victim|suspect|witness|family|other``) is echoed; any other token
+    (e.g. a truth-bearing ``"murderer"`` carried by an out-of-vocabulary
+    public role in a quality-broken draft) is NEVER re-issued — the context
+    prints the person id + ``<invalid>`` instead, so the fix prompt never
+    re-echoes the killer's identity label.
+    """
+    if str(role) in case_quality.PUBLIC_ROLE_VOCABULARY:
+        return f"{person_id} ({role})"
+    return f"{person_id} (<invalid>)"
 
 
 def build_request(
@@ -622,6 +703,7 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
 
     # (c) candidate universes -----------------------------------------------
     universe_issues: list[str] = []
+    universes: Any = None
     if public is None:
         universe_issues.append("candidate universes unavailable: public case incomplete")
     else:
@@ -634,11 +716,24 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
             universe_issues.append("weapon universe is empty")
     universe_tuple = tuple(sorted(set(universe_issues)))
 
+    # (c-2) Phase35 case-quality invariants (public-role / candidate-role /
+    # murderer accusal / witness completeness). Runs AFTER the universe bucket
+    # and BEFORE the solver gate: quality failures classify REPAIR (report.py
+    # outcome branch) and the solver is skipped on a quality-broken draft so a
+    # MURDERER_NOT_SUSPECT_CANDIDATE code is not double-reported as a solver
+    # truth mismatch. ZERO provider calls; deterministic.
+    quality_issues: list[str] = []
+    if public is not None and truth is not None and universes is not None:
+        quality_issues.extend(
+            case_quality.validate_case_quality(public, truth, evidence, universes, draft)
+        )
+    quality_tuple = tuple(sorted(set(quality_issues)))
+
     # (d) solver + truth-aware comparison ------------------------------------
     solver_result: SolverProof | None = None
     validation = None
     if public is not None and truth is not None and not (
-        structural_tuple or safety_tuple or universe_tuple
+        structural_tuple or safety_tuple or universe_tuple or quality_tuple
     ):
         try:
             proof = solve_case(public, evidence)
@@ -675,6 +770,7 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
         solver_result=solver_result,
         validation=validation,
         locked_violations=locked_violations,
+        quality_issues=quality_tuple,
     )
     attempt.solver_proof = solver_result
     attempt.last_validation = report

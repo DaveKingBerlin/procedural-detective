@@ -733,14 +733,22 @@ describe("SavegameV1 — DEF-066 reason codes distinguish bound/empty-string fro
 });
 
 describe("SavegameV1 — DEF-067 reference-integrity diagnostics pinpoint the offending field", () => {
-  it("placement -> unpublished location is REFERENCE_MISMATCH at the exact field", () => {
+  it("placement -> location in NEITHER published nor world-graph set is REFERENCE_MISMATCH at the exact field", () => {
+    // Phase35 §17: a placement locationId must be a member of the UNION of
+    // `publicCase.locations` (published travel locations) and
+    // `publicCase.worldGraph.locations` (world-graph rooms). An id in neither
+    // set stays REJECTED fail-closed (the backend mirror
+    // `safety.py::validate_world_graph` / `pipeline.py` checks
+    // `placement.location_id in wg_locations`; the union is the canonical
+    // frontend rendering of the same rule for a document that also publishes
+    // the travel locations).
     const text = mutateDocument((doc) => {
       doc.case.publicCase.worldGraph.placements[0].locationId = "ghost_location";
     });
     const diagnostic = diagnosticOf(text);
     expect(diagnostic.path).toBe("savegame.case.publicCase.worldGraph.placements[0].locationId");
     expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
-    expect(diagnostic.expected).toBe("a published location id");
+    expect(diagnostic.expected).toBe("a published or world-graph location id");
     expect(diagnostic.actualType).toBe("string");
   });
 
@@ -789,6 +797,79 @@ describe("SavegameV1 — DEF-067 reference-integrity diagnostics pinpoint the of
     expect(diagnostic.path).toBe("savegame.case.replayTruth.murdererId");
     expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
     expect(diagnostic.expected).toBe("a candidate suspect id");
+    expect(diagnostic.actualType).toBe("string");
+  });
+});
+
+describe("SavegameV1 — Phase35 §17 world-graph ROOM placement/worldObject references", () => {
+  /** The canonical demo document with a world-graph ROOM (`office_reception`)
+   *  that is NOT a published travel location, and the kitchen_knife placement
+   *  + its world-object projection moved to that room. Mirrors the real
+   *  published generated fixture
+   *  (`procedural-detective-case-demo-hard-generate.ok.pdcase`), whose
+   *  placements/worldObjects reference `worldGraph.locations` rooms while its
+   *  `publicCase.locations` holds ONLY the travel hubs. */
+  function documentWithRoomPlacement(): string {
+    return mutateDocument((doc) => {
+      doc.case.publicCase.worldGraph.locations.push({
+        locationId: "office_reception",
+        template: "office_template",
+        rooms: ["office_reception"],
+      });
+      doc.case.publicCase.worldGraph.placements[0].locationId = "office_reception";
+      const worldObject = doc.case.scene.worldObjects.find((w: any) => w.objectId === "kitchen_knife");
+      worldObject.locationId = "office_reception";
+    });
+  }
+
+  it("placement whose locationId is a world-graph ROOM (not in publicCase.locations) is ACCEPTED", () => {
+    const text = documentWithRoomPlacement();
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    const placement = definition.publicCase.worldGraph.placements[0];
+    expect(placement.locationId).toBe("office_reception");
+    // The union rule proves itself non-degenerate: the room IS in the world
+    // graph and is NOT a published travel location.
+    expect(definition.publicCase.worldGraph.locations.some((l) => l.locationId === "office_reception")).toBe(true);
+    expect(definition.publicCase.locations.some((l) => l.locationId === "office_reception")).toBe(false);
+  });
+
+  it("scene.worldObjects[].locationId referencing the same world-graph ROOM is ACCEPTED (projection parity)", () => {
+    const text = documentWithRoomPlacement();
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    const worldObject = definition.scene.worldObjects.find((w) => w.objectId === "kitchen_knife");
+    expect(worldObject).toBeDefined();
+    expect(worldObject!.locationId).toBe("office_reception");
+    // Both projections keep the SAME room reference after normalization.
+    const placement = definition.publicCase.worldGraph.placements.find((p) => p.objectId === "kitchen_knife")!;
+    expect(placement.locationId).toBe(worldObject!.locationId);
+  });
+
+  it("worldObject locationId in NEITHER set is REFERENCE_MISMATCH at the exact field (non-vacuity)", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[4].locationId = "ghost_room";
+    });
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[4].locationId");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+    expect(diagnostic.expected).toBe("a published or world-graph location id");
+    expect(diagnostic.actualType).toBe("string");
+  });
+
+  it("travelRules referencing a world-graph ROOM stay REJECTED (published travel contract only)", () => {
+    const text = mutateDocument((doc) => {
+      doc.case.publicCase.worldGraph.locations.push({
+        locationId: "office_reception",
+        template: "office_template",
+        rooms: ["office_reception"],
+      });
+      doc.case.publicCase.travelRules[0].fromLocationId = "office_reception";
+    });
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.publicCase.travelRules[0].fromLocationId");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+    // travelRules keep requiring a PUBLISHED travel location — the room is
+    // correctly rejected even though the union ACCEPTS it for placements.
+    expect(diagnostic.expected).toBe("a published location id");
     expect(diagnostic.actualType).toBe("string");
   });
 });
