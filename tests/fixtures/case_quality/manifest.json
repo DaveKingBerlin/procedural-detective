@@ -1,0 +1,37 @@
+{
+  "formatVersion": 1,
+  "cases": [
+    {
+      "id": "demo-golden-01",
+      "file": "golden/demo/procedural-detective-case-CASE-iA2tcy7PkB1P.ok.pdcase",
+      "classification": "golden",
+      "source": "demo",
+      "bytes": 19254,
+      "sha256": "961f70cfce1b6a153cf61c5aec255079b1cc44864f201570902ff26d08227f7f"
+    },
+    {
+      "id": "demo-golden-02",
+      "file": "golden/demo/procedural-detective-case-CASE-Yw0tGvxleJab.ok.pdcase",
+      "classification": "golden",
+      "source": "demo",
+      "bytes": 18773,
+      "sha256": "a33c8713e8323161e2e841fe7078f0abe4a96e94c381dbff88df1e105c06d93c"
+    },
+    {
+      "id": "demo-golden-03",
+      "file": "golden/demo/procedural-detective-case-CASE-htbCd0X0mDkt.ok.pdcase",
+      "classification": "golden",
+      "source": "demo",
+      "bytes": 25086,
+      "sha256": "467a01f504debcaf6b853a340685d2a077b0588d928d5e5ca78cdc0c3cd95fc7"
+    },
+    {
+      "id": "ollama-negative-01",
+      "file": "negative/generated/procedural-detective-case-CASE-LZig0W97AIyW.nok.pdcase",
+      "classification": "negative",
+      "source": "generated",
+      "bytes": 32597,
+      "sha256": "bca0e864284a1b1f35048b5388ac90c5f66b2ffda492f2dedcddcea03ef8e907"
+    }
+  ]
+}
