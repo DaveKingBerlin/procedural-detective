@@ -34,6 +34,14 @@ Design rules:
   only calls ``_discover_grounding`` for ``statement.grounded``). A published
   case with an interviewable witness that can never provide a usable statement
   is a Phase35 primary-requirement defect (Phase35 §8) — a HARD quality gate.
+  GROUNDED-COVERAGE DEPTH (DEF-077): "answers NEUTRAL to all six questions
+  forever = defect", but the gate also requires a MINIMUM answer surface — an
+  attributed fact whose ONLY text is a ``title`` never certifies a witness
+  (the canonical grounding ``_time_anchors_of`` reads only statement +
+  description for clock tokens, so a bare title can ground at best a single
+  generic OBSERVATION and never TIME/LOCATION/… depth; the goldens' witnesses
+  ground 4/6). ``_usable_statement_text`` therefore accepts ONLY non-empty
+  ``statement``/``description`` — never a plain ``title``.
 
 Issue codes are CLOSED and safe (never statement text, never murderer names in
 diagnostics; the codes themselves are the repair guidance — §37 bounded
@@ -132,11 +140,15 @@ def _witness_ids(public: Any) -> frozenset[str]:
 def _usable_statement_text(presentation: Mapping[str, Any]) -> str:
     """The canonical 'usable statement text' of one witness-kind fact.
 
-    Mirrors ``app.domain.witness._fact_fallback_text`` (witness.py:505-513):
-    statement > description > title. Empty when none of the allowlisted text
-    fields carry content — the fact then has no usable answer surface.
+    Requires a non-empty ``statement`` or ``description`` (DEF-077): a bare
+    ``title`` is NOT an interview surface. The canonical TIME grounding
+    (``app.domain.witness._time_anchors_of``) and the fallback observation
+    text (``_fact_fallback_text``) read only statement/description for clock
+    tokens and text-mention grounding, so a title-only fact can never support
+    the grounded-coverage depth the goldens satisfy (4/6 questions). Empty
+    when the fact has no usable answer surface.
     """
-    for key in ("statement", "description", "title"):
+    for key in ("statement", "description"):
         value = presentation.get(key)
         if isinstance(value, str) and value.strip():
             return value
@@ -240,8 +252,9 @@ def _witness_complete_issues(
       discovery (witnesses.py:183-190) — a published interviewable witness with
       no usable statement.
     - ``WITNESS_STATEMENT_EMPTY``: attributed witness-kind facts exist but
-      NONE carry usable statement text (statement/description/title empty) —
-      the witness cannot ground a single OBSERVATION answer.
+      NONE carry usable statement text (a non-empty ``statement`` or
+      ``description`` — a bare ``title`` does NOT count, DEF-077) — the
+      witness cannot ground a single interview answer.
     - Per witness-kind fact the EXPLICIT identity tags must agree with the
       canonical attribution:
         ``WITNESS_STATEMENT_UNKNOWN_WITNESS``       a witnessId tag that is

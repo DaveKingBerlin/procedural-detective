@@ -5,6 +5,7 @@ input proves the validator is NOT vacuous (§27):
 
   witness statement removed        -> WITNESS_STATEMENT_MISSING
   statement text emptied           -> WITNESS_STATEMENT_EMPTY
+  title-only statement fact        -> WITNESS_STATEMENT_EMPTY (DEF-077)
   victim injected into candidates  -> VICTIM_IN_SUSPECT_CANDIDATES
   witness injected into candidates -> WITNESS_IN_SUSPECT_CANDIDATES
   murderer removed from candidates -> MURDERER_NOT_SUSPECT_CANDIDATE
@@ -153,6 +154,29 @@ def test_mutation_statement_emptied_triggers_empty():
             "statement": "",
             "description": "",
             "title": "",
+        },
+    )
+    codes = validate_case_quality(public, truth, mutated, universes)
+    assert WITNESS_STATEMENT_EMPTY in codes
+    assert WITNESS_STATEMENT_MISSING not in codes
+
+
+def test_mutation_title_only_statement_triggers_empty():
+    """DEF-077 — a witness whose ONLY attributed witness-kind fact carries
+    nothing but a non-empty ``title`` is NOT complete: the gate's usable
+    statement text requires a non-empty STATEMENT or DESCRIPTION (a bare
+    title can at best ground a single generic OBSERVATION and never the
+    TIME/LOCATION/… depth the goldens satisfy — 4/6 grounded questions)."""
+    public, truth, evidence, universes = _reload_canonical()
+    index, _entry = _by_id(evidence, "witness_statement_hugo_01")
+    mutated = _replace_evidence(
+        evidence,
+        index,
+        presentation={
+            "speakerName": "Hugo Brandt",
+            "statement": "",
+            "description": "",
+            "title": "Witness statement",
         },
     )
     codes = validate_case_quality(public, truth, mutated, universes)
