@@ -1419,7 +1419,28 @@ function assertUniqueIds(ids: readonly string[], where: string): void {
 }
 
 function validateReferences(pub: SavegamePublicCaseV1, scene: SavegameSceneV1, evidence: readonly SavegameEvidenceRecordV1[]): void {
-  const locationIds = new Set(pub.locations.map((location) => location.locationId));
+  // The PUBLISHED travel-location set (Phase35 §17 org decision): travel rules
+  // reference these ONLY — a rule that names a world-graph ROOM is a real
+  // travel-reference contract violation and stays rejected below.
+  const publishedLocationIds = new Set(pub.locations.map((location) => location.locationId));
+  // The WORLD-GRAPH ROOM set (the canonical placement namespace). Phase35:
+  // the backend generation validator treats membership in
+  // `publicCase.worldGraph.locations` as the AUTHORITATIVE placement
+  // reference (`backend/app/generation/safety.py::validate_world_graph`:
+  // `wg_locations = {loc.location_id for loc in wg.locations}` then
+  // `if placement.location_id not in wg_locations`; identical resolution
+  // rule in `backend/app/generation/pipeline.py::_world_graph_resolution_issues`).
+  // The generated case `procedural-detective-case-demo-hard-generate.ok.pdcase`
+  // publishes + exports room-level placement locationIds (office_mainroom,
+  // office_reception, …) and passed the ENTIRE deterministic backend chain —
+  // the frontend import MUST accept the UNION of the two canonical namespaces
+  // (publicCase.locations OR publicCase.worldGraph.locations). The golden demo
+  // cases degenerate onto the published set (worldGraph.locations ==
+  // publicCase.locations), which is why the older published-location-only rule
+  // never fired for them — it was DRIFTED, not canonical (Phase35 §43: a
+  // savegame-loader defect must not be hidden by over-restricting generation).
+  const worldGraphLocationIds = new Set(pub.worldGraph.locations.map((location) => location.locationId));
+  const placementLocationIds = new Set([...publishedLocationIds, ...worldGraphLocationIds]);
   const objectIds = new Set(pub.objects.map((obj) => obj.objectId));
   const publicEvidenceIds = new Set(pub.evidence.map((entry) => entry.id));
   const recordIds = new Set(evidence.map((record) => record.evidenceId));
@@ -1433,10 +1454,13 @@ function validateReferences(pub: SavegamePublicCaseV1, scene: SavegameSceneV1, e
 
   pub.travelRules.forEach((rule, index) => {
     const at = `savegame.case.publicCase.travelRules[${index}]`;
-    if (!locationIds.has(rule.fromLocationId)) {
+    // Travel rules are a REAL published-travel contract: they reference the
+    // published `publicCase.locations` ONLY (Phase35 §17 point 3). A rule that
+    // names a world-graph room is still rejected — unchanged behavior.
+    if (!publishedLocationIds.has(rule.fromLocationId)) {
       invalid(`${at}.fromLocationId`, "references a location that does not exist", rule.fromLocationId, "a published location id");
     }
-    if (!locationIds.has(rule.toLocationId)) {
+    if (!publishedLocationIds.has(rule.toLocationId)) {
       invalid(`${at}.toLocationId`, "references a location that does not exist", rule.toLocationId, "a published location id");
     }
   });
@@ -1445,8 +1469,18 @@ function validateReferences(pub: SavegamePublicCaseV1, scene: SavegameSceneV1, e
     if (!objectIds.has(placement.objectId)) {
       invalid(`${at}.objectId`, `object "${placement.objectId}" is not published`, placement.objectId, "a published object id");
     }
-    if (!locationIds.has(placement.locationId)) {
-      invalid(`${at}.locationId`, `location "${placement.locationId}" is not published`, placement.locationId, "a published location id");
+    // Phase35 §17 point 1: a placement location reference is canonical when it
+    // is a member of the UNION of published travel locations AND world-graph
+    // room locations (mirror of backend `safety.py`/`pipeline.py`, which only
+    // ever check `placement.location_id in wg_locations`). An id in NEITHER
+    // set is still rejected fail-closed.
+    if (!placementLocationIds.has(placement.locationId)) {
+      invalid(
+        `${at}.locationId`,
+        `location "${placement.locationId}" is not a published or world-graph location`,
+        placement.locationId,
+        "a published or world-graph location id",
+      );
     }
     if (placement.evidenceId !== null && !publicEvidenceIds.has(placement.evidenceId)) {
       invalid(`${at}.evidenceId`, `evidence "${placement.evidenceId}" is not published`, placement.evidenceId, "a published evidence id");
@@ -1461,6 +1495,21 @@ function validateReferences(pub: SavegamePublicCaseV1, scene: SavegameSceneV1, e
     // object must have a published placement too (identity integrity).
     if (!pub.worldGraph.placements.some((placement) => placement.objectId === worldObject.objectId)) {
       invalid(`${at}.objectId`, `object "${worldObject.objectId}" has no world-graph placement`, worldObject.objectId, "an object id with a world-graph placement");
+    }
+    // Phase35 §17 point 2 (parity): the world-object projection carries the
+    // SAME `locationId` vocabulary as its placement. The shared live-game
+    // parser (`frontend/src/scene/validation.ts::validateWorldObject`) only
+    // type-checks it, so the SAVEGAME-IMPORT path adds the same union
+    // membership check the placements get — its locationId must be a
+    // published travel location OR a world-graph room. Do NOT over-tighten
+    // beyond the union (no published-location-only requirement here).
+    if (!placementLocationIds.has(worldObject.locationId)) {
+      invalid(
+        `${at}.locationId`,
+        `location "${worldObject.locationId}" is not a published or world-graph location`,
+        worldObject.locationId,
+        "a published or world-graph location id",
+      );
     }
   });
   evidence.forEach((record, index) => {
