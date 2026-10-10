@@ -42,9 +42,18 @@ def test_openapi_contains_contract_paths_and_schemas(client):
     # FastAPI components factor nested models into their own schema entries.
     assert error_schema["properties"]["error"] == {"$ref": "#/components/schemas/ErrorBody"}
     error_body = components["ErrorBody"]
-    assert set(error_body["properties"].keys()) == {"code", "message", "details"}
+    assert set(error_body["properties"].keys()) == {
+        "code",
+        "message",
+        "details",
+        "reasonCode",
+    }
     ed = error_body["properties"]["details"]
     assert ed.get("anyOf") is not None or ed.get("type") in ("object", "null")
+    # DEF-085 — reasonCode is OPTIONAL (present only on 429 ADMISSION_DENIED
+    # envelopes): it must not be in the required list, and the required set
+    # stays the original {code, message}.
+    assert set(error_body.get("required", [])) == {"code", "message"}
 
     ready_schema = components["ReadinessResponse"]
     assert ready_schema["properties"]["database"]["default"] == "ok"

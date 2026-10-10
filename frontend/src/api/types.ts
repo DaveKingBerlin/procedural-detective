@@ -31,6 +31,16 @@ export interface ErrorEnvelope {
     code: string; // SCREAMING_SNAKE
     message: string;
     details: object | null;
+    /**
+     * Phase 36 — OPTIONAL CLOSED admission-denial reason token. The backend
+     * emits it ONLY inside 429 ADMISSION_DENIED envelopes (from
+     * AdmissionReasonCode in backend/app/generation/admission.py) and
+     * OMITS the key entirely for every other error (including per-IP
+     * TOO_MANY_REQUESTS, which is a DISTINCT code with no reason). Additive:
+     * legacy envelopes without the field keep the byte-identical pre-Phase36
+     * shape and parse to `reasonCode == null` on the client.
+     */
+    reasonCode?: string;
   };
 }
 

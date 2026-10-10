@@ -13,6 +13,8 @@ errors (AdmissionDenied, PromptError) into service-level exceptions.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import HTTPException
 
 from app.persistence.store import (
@@ -31,6 +33,8 @@ from app.persistence.store import (
 )
 from app.services.generation import (
     AdmissionDeniedError,
+    AdmissionReasonCode,
+    DEFAULT_ADMISSION_REASON_CODE,
     EnvironmentHintError,
     GenerationServiceError,
     IdentifierConflict,
@@ -52,18 +56,50 @@ from app.services.investigation import (
 from app.services.publication import PublicRoleTruthLeak
 
 
-def http_error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(
-        status_code=status_code,
-        detail={"code": code, "message": message, "details": None},
-    )
+def http_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    reasonCode: str | None = None,
+) -> HTTPException:
+    """Build the sanitized error envelope ``{"error": {code,message,details}}``.
+
+    ``reasonCode`` is Phase36's optional closed admission-reason token; it is
+    OMITTED (not null) whenever absent so every non-admission envelope stays
+    byte-identical to its pre-Phase36 shape (backward compatible for every
+    existing call site and every exact-body test).
+    """
+    detail: dict[str, Any] = {"code": code, "message": message, "details": None}
+    if reasonCode is not None:
+        detail["reasonCode"] = reasonCode
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 def map_service_error(exc: Exception) -> HTTPException:
     """Translate a service/store error into the envelope (never raw text)."""
     if isinstance(exc, AdmissionDeniedError):
         # SANITIZED: the denial reason may carry quota internals — never echo.
-        return http_error(429, "ADMISSION_DENIED", "Generation capacity exhausted")
+        # The ONLY admission detail surfaced is the CLOSED safe ``reasonCode``
+        # (Phase36 §10/§11); the message stays the sanitized generic.
+        #
+        # DEF-084 — the CLOSED vocabulary is enforced HERE at the sanitizing
+        # boundary: ``exc.reason_code`` must be a member of
+        # ``AdmissionReasonCode``. A defensive/legacy/out-of-tree raise that
+        # smuggled an arbitrary string must NEVER leak it into the public
+        # envelope — fall back to the conservative safe default
+        # (``DEFAULT_ADMISSION_REASON_CODE`` = GLOBAL_GENERATION_WINDOW_LIMIT,
+        # the retryable temporary-capacity fallback, Phase36 §30).
+        try:
+            reason_code = AdmissionReasonCode(exc.reason_code)
+        except (TypeError, ValueError):
+            reason_code = DEFAULT_ADMISSION_REASON_CODE
+        return http_error(
+            429,
+            "ADMISSION_DENIED",
+            "Generation capacity exhausted",
+            reasonCode=reason_code.value,
+        )
     if isinstance(exc, InvalidFrontierConfigError):
         # Phase 30 — an invalid/missing BYOK frontier provider/key/model, or a
         # frontier block on a non-frontier selection. NEVER echo the offending

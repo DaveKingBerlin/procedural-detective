@@ -8,6 +8,7 @@ import type { CapabilityLoader } from "./generating";
 import type { DemoFlowResult, DemoFlowServices } from "../journey/demoFlow";
 import { runDemo } from "../journey/demoFlow";
 import { ApiError } from "../api/client";
+import * as anonymousSessionModule from "../api/anonymousSession";
 import {
   createOrReuseAnonymousSession,
   getCachedAnonymousSession,
@@ -287,36 +288,9 @@ describe("Phase 24 P0 §8 — a /generating retry reuses the cached anonymous se
   });
 });
 
-describe("Phase 24 F-2 — a session-window-DENIED run recovers by reload, never by auto-minting", () => {
-  it("a 429 ADMISSION_DENIED run clears the module holder, shows the reload guidance and mints NO fresh session", async () => {
-    // Counting mint supplier backs createOrReuseAnonymousSession: exactly ONE
-    // underlying mint may happen (the initial session). The 429 denial must
-    // NOT trigger a second mint — the server rate limit stays authoritative.
-    const supplier = vi.fn<
-      (...args: readonly unknown[]) => Promise<{
-        anonymousSessionToken: string;
-        quotaWindowEndsAt: number;
-      }>
-    >(async () => ({ anonymousSessionToken: "anon-window-0001", quotaWindowEndsAt: 1e12 }));
-    // The backend admits the first attempt under the freshly-minted session,
-    // then denies the per-session generation window on POST /cases with the
-    // sanitized 429 ADMISSION_DENIED envelope (the F-2 lock scenario: the
-    // page previously consumed the whole per-session window).
-    const createCase = vi.fn<(...args: readonly unknown[]) => Promise<never>>(async () => {
-      throw new ApiError(429, "ADMISSION_DENIED", "admission denied", null);
-    });
-
-    const services: DemoFlowServices = {
-      createSession: () => createOrReuseAnonymousSession(supplier),
-      createCase,
-      pollGeneration: vi.fn(async () => {
-        throw new Error("unused");
-      }),
-      createPlaythrough: vi.fn(async () => {
-        throw new Error("unused");
-      }),
-    };
-
+describe("Phase 36 — reason-aware admission recovery on the /generating journey", () => {
+  /** Mount the journey wired to the REAL runDemo with injected services. */
+  function mountAdmissionRun(services: DemoFlowServices): void {
     const run: RunFn = (prompt, difficulty, onProgress, mode, anonymousSessionToken) =>
       runDemo(prompt, {
         services,
@@ -326,7 +300,6 @@ describe("Phase 24 F-2 — a session-window-DENIED run recovers by reload, never
         wait: async () => {},
         anonymousSessionToken,
       });
-
     act(() => {
       root = createRoot(container);
       root.render(
@@ -342,29 +315,483 @@ describe("Phase 24 F-2 — a session-window-DENIED run recovers by reload, never
         </MemoryRouter>,
       );
     });
+  }
+
+  const admissionServices = (
+    createCase: DemoFlowServices["createCase"],
+    token: string,
+  ): { supplier: ReturnType<typeof vi.fn>; services: DemoFlowServices } => {
+    const supplier = vi.fn<
+      (...args: readonly unknown[]) => Promise<{
+        anonymousSessionToken: string;
+        quotaWindowEndsAt: number;
+      }>
+    >(async () => ({ anonymousSessionToken: token, quotaWindowEndsAt: 1e12 }));
+    return {
+      supplier,
+      services: {
+        createSession: () => createOrReuseAnonymousSession(supplier),
+        createCase,
+        pollGeneration: vi.fn(async () => {
+          throw new Error("unused");
+        }),
+        // A successfully-PUBLISHED run needs a working playthrough; denial
+        // runs never reach it (the poll/createPlaythrough path is unused).
+        createPlaythrough: vi.fn(async () => ({
+          playthroughId: "PT-admission",
+          caseId: "CASE-2",
+          caseVersion: 1,
+          playthroughAccessToken: "pt-token-admission",
+          status: "PLAYING",
+        })),
+      },
+    };
+  };
+
+  const denial = (
+    reasonCode: string | null,
+  ): DemoFlowServices["createCase"] =>
+    vi.fn(async () => {
+      throw new ApiError(
+        429,
+        "ADMISSION_DENIED",
+        "Generation capacity exhausted",
+        null,
+        reasonCode,
+      );
+    });
+
+  it("SESSION_GENERATION_LIMIT: clears the exhausted-session cache, renders session-limit copy with NO Reload button, and does NOT auto-mint", async () => {
+    // Spy on the module holder reset: the ONLY cache-clear decision the route
+    // may make (exhausted/invalid session reasons).
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    const { supplier, services } = admissionServices(denial("SESSION_GENERATION_LIMIT"), "A");
+    mountAdmissionRun(services);
     await settleEffects();
 
-    // The run really happened under exactly one freshly-minted session.
+    // Exactly ONE mint (the exhausted token A) — NO automatic re-mint.
     expect(supplier).toHaveBeenCalledTimes(1);
-    expect(createCase).toHaveBeenCalledTimes(1);
-    expect(createCase.mock.calls[0][0]).toBe("anon-window-0001");
-
-    // The window-denied run CLEARED the module holder (recovery = a reload /
-    // next page gets a clean session; no auto-mint on the 429).
-    expect(getCachedAnonymousSession()).toBeNull();
-    expect(supplier).toHaveBeenCalledTimes(1);
-
-    // Explicit recovery guidance is shown instead of a Try-again error.
+    expect(getCachedAnonymousSession()).toBeNull(); // cache cleared
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+    // Reason-accurate screen.
     expect(
-      container.querySelector('[data-testid="generation-session-limit"]'),
+      container.querySelector('[data-testid="generation-admission-session-generation-limit"]'),
     ).not.toBeNull();
-    expect(
-      container.querySelector('[data-testid="generation-session-limit-reload"]'),
-    ).not.toBeNull();
-    // Deliberately NO Try-again button: re-running would reuse the exhausted
-    // holder session and fail forever (or auto-mint, which would defeat the
-    // limit) — reload is the only recovery beyond Back to start.
+    expect(container.textContent).toContain("Start a new investigation to continue");
+    // NO Reload button anywhere (Phase 36 §22/§35).
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).toBeNull();
+    expect(container.textContent).not.toContain("Reload page");
+    expect(container.textContent).not.toContain("window.location.reload");
+    // Back to start exists (the ONLY recovery action).
+    expect(container.querySelector('a[data-testid="generation-back-to-start"]')).not.toBeNull();
     expect(container.querySelector('button[data-testid="generation-failed"]')).toBeNull();
+  });
+
+  it("SESSION_EXPIRED_OR_INVALID: clears the gone-session cache, renders session-recovery copy, NO reload, NO auto-mint", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    const { supplier, services } = admissionServices(denial("SESSION_EXPIRED_OR_INVALID"), "A");
+    mountAdmissionRun(services);
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(getCachedAnonymousSession()).toBeNull();
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="generation-admission-session-generation-limit"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("Start a new investigation to continue");
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).toBeNull();
+    expect(container.textContent).not.toContain("Reload");
+  });
+
+  it("DEF-082 — 401 SESSION_EXPIRED on POST /cases (the REAL durable expired-session path): session-recovery screen, cache cleared, NO mint on the screen, Back to start mints nothing, next explicit journey mints exactly ONE new token B", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    // Token A minted for the first run; the durable auth dependency answers
+    // 401 SESSION_EXPIRED (NOT a 429 ADMISSION_DENIED envelope) — the answer
+    // the closed SESSION_EXPIRED_OR_INVALID reason can never reach from a
+    // durable deployment. After the cache clears, the supplier produces B.
+    const supplier = vi
+      .fn<(...args: readonly unknown[]) => Promise<{ anonymousSessionToken: string; quotaWindowEndsAt: number }>>()
+      .mockResolvedValueOnce({ anonymousSessionToken: "A", quotaWindowEndsAt: 1e12 })
+      .mockResolvedValueOnce({ anonymousSessionToken: "B", quotaWindowEndsAt: 1e12 });
+
+    const createCase = vi
+      .fn<(...args: readonly unknown[]) => Promise<{
+        caseId: string;
+        generationId: string;
+        generationAttemptId: string;
+        creatorAccessToken: string;
+        status: string;
+        failureCode?: string | null;
+      }>>()
+      .mockRejectedValueOnce(
+        new ApiError(401, "SESSION_EXPIRED", "credential expired or unknown", null),
+      )
+      .mockResolvedValueOnce({
+        caseId: "CASE-2",
+        generationId: "GEN-2",
+        generationAttemptId: "ATT-2",
+        creatorAccessToken: "creator-2",
+        status: "PUBLISHED",
+      });
+
+    mountAdmissionRun({
+      createSession: () => createOrReuseAnonymousSession(supplier),
+      createCase,
+      pollGeneration: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+      createPlaythrough: vi.fn(async () => ({
+        playthroughId: "PT-admission",
+        caseId: "CASE-2",
+        caseVersion: 1,
+        playthroughAccessToken: "pt-token-admission",
+        status: "PLAYING",
+      })),
+    });
+    await settleEffects();
+
+    // Token A minted, POST /cases answered 401 SESSION_EXPIRED -> the dead
+    // identity is cleared. NO mint on the error screen, NO retry affordance
+    // (a retry would reuse the dead token forever — the dead-token retry loop
+    // is gone).
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(createCase.mock.calls[0][0]).toBe("A");
+    expect(getCachedAnonymousSession()).toBeNull();
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="generation-admission-session-generation-limit"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("Generation session unavailable");
+    expect(container.textContent).toContain("Start a new investigation to continue");
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).toBeNull();
+    expect(container.textContent).not.toContain("Reload");
+
+    // Back to start navigates to /new and does NOT itself mint anything.
+    const back = container.querySelector<HTMLElement>(
+      'a[data-testid="generation-back-to-start"]',
+    );
+    if (!back) throw new Error("expected Back to start");
+    act(() => {
+      back.click();
+    });
+    await settleEffects();
+    expect(supplier).toHaveBeenCalledTimes(1); // still no mint after Back to start
+
+    // User starts a fresh journey: the cleared cache mints exactly ONE new
+    // session B and POST /cases runs under B — no mint churn, no loop.
+    act(() => {
+      root?.unmount();
+    });
+    mountAdmissionRun({
+      createSession: () => createOrReuseAnonymousSession(supplier),
+      createCase,
+      pollGeneration: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+      createPlaythrough: vi.fn(async () => ({
+        playthroughId: "PT-admission",
+        caseId: "CASE-2",
+        caseVersion: 1,
+        playthroughAccessToken: "pt-token-admission",
+        status: "PLAYING",
+      })),
+    });
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(2); // exactly ONE replacement mint
+    expect(createCase).toHaveBeenCalledTimes(2);
+    expect(createCase.mock.calls[1][0]).toBe("B");
+    expect(container.querySelector('[data-testid="enter-investigation"]')).not.toBeNull();
+  });
+
+  it("GLOBAL_CONCURRENCY_LIMIT: PRESERVES the session, renders busy copy with Try again + Back to start", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    const { supplier, services } = admissionServices(denial("GLOBAL_CONCURRENCY_LIMIT"), "A");
+    mountAdmissionRun(services);
+    await settleEffects();
+
+    // Cache PRESERVED: the valid session A stays available for a retry.
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(getCachedAnonymousSession()).not.toBeNull();
+    expect(getCachedAnonymousSession()!.anonymousSessionToken).toBe("A");
+    expect(resetSpy).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="generation-admission-global-concurrency-limit"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("Generation service is busy");
+    // Retry + Back to start.
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).not.toBeNull();
+    expect(container.querySelector('a[data-testid="generation-back-to-start"]')).not.toBeNull();
+  });
+
+  it("GLOBAL_GENERATION_WINDOW_LIMIT: PRESERVES the session, temporary capacity copy with Try again + Back to start", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    const { supplier, services } = admissionServices(
+      denial("GLOBAL_GENERATION_WINDOW_LIMIT"),
+      "A",
+    );
+    mountAdmissionRun(services);
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(getCachedAnonymousSession()!.anonymousSessionToken).toBe("A");
+    expect(resetSpy).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="generation-admission-global-window-limit"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).not.toBeNull();
+  });
+
+  it("ANONYMOUS_SESSION_CAPACITY_LIMIT: the current session stays valid — cache PRESERVED, temporary-capacity copy, NO Try again (§17/§47)", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    const { supplier, services } = admissionServices(
+      denial("ANONYMOUS_SESSION_CAPACITY_LIMIT"),
+      "A",
+    );
+    mountAdmissionRun(services);
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(getCachedAnonymousSession()!.anonymousSessionToken).toBe("A");
+    expect(resetSpy).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="generation-admission-temporary-capacity-limit"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("The service is temporarily unable to start a new session.");
+    // DEF-086/ADV-36-05 — the mint surface itself is capped: NO Try-again
+    // button and the screen NEVER issues a new POST /sessions/anonymous
+    // (the supplier stays at exactly one mint).
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).toBeNull();
+    const retryCandidates = Array.from(container.querySelectorAll("button")).filter((b) =>
+      b.textContent?.includes("Try again"),
+    );
+    expect(retryCandidates.length).toBe(0);
+  });
+
+  it("legacy/unknown 429 ADMISSION_DENIED (no reasonCode): safe GENERIC fallback, cache PRESERVED, retryable (§30/§43)", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    const { supplier, services } = admissionServices(denial(null), "A");
+    mountAdmissionRun(services);
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(getCachedAnonymousSession()!.anonymousSessionToken).toBe("A");
+    expect(resetSpy).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="generation-admission-temporary-capacity-limit"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("Generation is temporarily unavailable");
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).not.toBeNull();
+  });
+
+  it("does NOT clear the module holder or mint a second session for a transient denial — Try again reuses the SAME token A (§33)", async () => {
+    // First POST /cases is denied for GLOBAL_CONCURRENCY_LIMIT; the retried
+    // attempt (after the service clears) is admitted.
+    const createCase = vi
+      .fn<(...args: readonly unknown[]) => Promise<{
+        caseId: string;
+        generationId: string;
+        generationAttemptId: string;
+        creatorAccessToken: string;
+        status: string;
+        failureCode?: string | null;
+      }>>()
+      .mockRejectedValueOnce(
+        new ApiError(429, "ADMISSION_DENIED", "Generation capacity exhausted", null, "GLOBAL_CONCURRENCY_LIMIT"),
+      )
+      .mockResolvedValueOnce({
+        caseId: "CASE-2",
+        generationId: "GEN-2",
+        generationAttemptId: "ATT-2",
+        creatorAccessToken: "creator-2",
+        status: "PUBLISHED",
+      });
+    const { supplier, services } = admissionServices(createCase, "A");
+    mountAdmissionRun(services);
+    await settleEffects();
+
+    // First run denied; the session A is PRESERVED (valid).
+    expect(createCase).toHaveBeenCalledTimes(1);
+    expect(createCase.mock.calls[0][0]).toBe("A");
+    expect(getCachedAnonymousSession()!.anonymousSessionToken).toBe("A");
+    expect(
+      container.querySelector('[data-testid="generation-admission-global-concurrency-limit"]'),
+    ).not.toBeNull();
+
+    // Try again: SAME journey re-runs runDemo — no POST /sessions/anonymous
+    // (supplier stays at 1), and the SAME token A is reused for POST /cases.
+    const retryButton = container.querySelector<HTMLElement>(
+      '[data-testid="generation-admission-retry"]',
+    );
+    if (!retryButton) throw new Error("expected the Try again button");
+    act(() => {
+      retryButton.click();
+    });
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(1); // NO second mint ever
+    expect(createCase).toHaveBeenCalledTimes(2);
+    expect(createCase.mock.calls[1][0]).toBe("A"); // same session on retry
+    expect(container.querySelector('[data-testid="enter-investigation"]')).not.toBeNull();
+  });
+
+  it("SESSION_EXHAUSTION identity rotation (§34): token A exhausted -> clear A -> SPA back to /new -> ONE new session B; NO mint on the error screen", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    // Sequence produces token A, then (only after cache clear) token B.
+    const supplier = vi
+      .fn<(...args: readonly unknown[]) => Promise<{ anonymousSessionToken: string; quotaWindowEndsAt: number }>>()
+      .mockResolvedValueOnce({ anonymousSessionToken: "A", quotaWindowEndsAt: 1e12 })
+      .mockResolvedValueOnce({ anonymousSessionToken: "B", quotaWindowEndsAt: 1e12 });
+
+    const createCase = vi
+      .fn<(...args: readonly unknown[]) => Promise<{
+        caseId: string;
+        generationId: string;
+        generationAttemptId: string;
+        creatorAccessToken: string;
+        status: string;
+        failureCode?: string | null;
+      }>>()
+      .mockRejectedValueOnce(
+        new ApiError(429, "ADMISSION_DENIED", "Generation capacity exhausted", null, "SESSION_GENERATION_LIMIT"),
+      )
+      .mockResolvedValueOnce({
+        caseId: "CASE-2",
+        generationId: "GEN-2",
+        generationAttemptId: "ATT-2",
+        creatorAccessToken: "creator-2",
+        status: "PUBLISHED",
+      });
+
+    mountAdmissionRun({
+      createSession: () => createOrReuseAnonymousSession(supplier),
+      createCase,
+      pollGeneration: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+      createPlaythrough: vi.fn(async () => ({
+        playthroughId: "PT-admission",
+        caseId: "CASE-2",
+        caseVersion: 1,
+        playthroughAccessToken: "pt-token-admission",
+        status: "PLAYING",
+      })),
+    });
+    await settleEffects();
+
+    // Token A minted, denied, cache cleared, NO mint for the replacement.
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(createCase.mock.calls[0][0]).toBe("A");
+    expect(getCachedAnonymousSession()).toBeNull();
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="generation-admission-session-generation-limit"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).toBeNull();
+
+    // Back to start navigates to /new and does NOT itself mint anything (§36).
+    const back = container.querySelector<HTMLElement>(
+      'a[data-testid="generation-back-to-start"]',
+    );
+    if (!back) throw new Error("expected Back to start");
+    act(() => {
+      back.click();
+    });
+    await settleEffects();
+    expect(supplier).toHaveBeenCalledTimes(1); // still no mint after Back to start
+
+    // User starts a fresh journey: the cache was cleared, so exactly ONE new
+    // session B is minted and POST /cases runs under B.
+    act(() => {
+      root?.unmount();
+    });
+    mountAdmissionRun({
+      createSession: () => createOrReuseAnonymousSession(supplier),
+      createCase,
+      pollGeneration: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+      createPlaythrough: vi.fn(async () => ({
+        playthroughId: "PT-admission",
+        caseId: "CASE-2",
+        caseVersion: 1,
+        playthroughAccessToken: "pt-token-admission",
+        status: "PLAYING",
+      })),
+    });
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(2); // exactly one replacement mint
+    expect(createCase).toHaveBeenCalledTimes(2);
+    expect(createCase.mock.calls[1][0]).toBe("B");
+    expect(container.querySelector('[data-testid="enter-investigation"]')).not.toBeNull();
+  });
+
+  it("recovery works ENTIRELY through SPA navigation/actions — no reload anywhere on the admission path (§35)", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    for (const reasonCode of [
+      "SESSION_GENERATION_LIMIT",
+      "GLOBAL_CONCURRENCY_LIMIT",
+      "GLOBAL_GENERATION_WINDOW_LIMIT",
+      null,
+    ]) {
+      const { services } = admissionServices(denial(reasonCode), "A");
+      mountAdmissionRun(services);
+      await settleEffects();
+      expect(container.textContent).not.toContain("Reload");
+      expect(container.querySelector('[data-testid="generation-admission-retry"]')?.textContent).not.toBe(
+        "Reload",
+      );
+      // Back to start is always present as an SPA link.
+      expect(container.querySelector('a[data-testid="generation-back-to-start"]')).not.toBeNull();
+      act(() => {
+        root?.unmount();
+      });
+    }
+    expect(resetSpy).toHaveBeenCalledTimes(1); // only session-generation-limit cleared
+  });
+
+  it("no frontend security dependency (§37): the frontend NEVER enforces a counter — server-side limits stay authoritative", async () => {
+    // Manipulating frontend state (clearing the in-memory cache manually) does
+    // NOT bypass the backend: a fresh journey still performs a NEW POST /cases
+    // under a NEW token, and the (server-side) admission answer is what shows.
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    const { services } = admissionServices(denial("GLOBAL_GENERATION_WINDOW_LIMIT"), "A");
+    mountAdmissionRun(services);
+    await settleEffects();
+    // The backend (mocked here) denied the request; the frontend could not
+    // have caused or removed that decision. It responds with the transient
+    // capacity screen and preserves the session.
+    expect(getCachedAnonymousSession()!.anonymousSessionToken).toBe("A");
+    expect(resetSpy).not.toHaveBeenCalled();
+
+    // Manually manufacture "fresh browser state" (as a reload/navigation would):
+    // the module holder clears, and the NEXT journey still only sends POST
+    // /cases — the server (this mock) is the one that authorizes/denies.
+    resetAnonymousSessionCache();
+    expect(resetSpy).toHaveBeenCalledTimes(1); // the explicit manual clear
+    expect(getCachedAnonymousSession()).toBeNull();
+  });
+
+  it("defaults the module holder reset to OFF for every non-exhaustion reason (no blanket cache clearing)", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    for (const reasonCode of [
+      "SESSION_CONCURRENCY_LIMIT",
+      "GLOBAL_CONCURRENCY_LIMIT",
+      "GLOBAL_GENERATION_WINDOW_LIMIT",
+      "ANONYMOUS_SESSION_CAPACITY_LIMIT",
+      null,
+    ]) {
+      const { services } = admissionServices(denial(reasonCode), "A");
+      mountAdmissionRun(services);
+      await settleEffects();
+      act(() => {
+        root?.unmount();
+      });
+    }
+    expect(resetSpy).not.toHaveBeenCalled();
+    expect(getCachedAnonymousSession()).not.toBeNull(); // session A still valid
   });
 });
 

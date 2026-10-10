@@ -38,7 +38,10 @@ from app.auth.tokens import (
     issue_creator_access_token,
     verifier as token_verifier,
 )
-from app.generation.admission import AdmissionDenied
+from app.generation.admission import (
+    AdmissionDenied,
+    AdmissionReasonCode,
+)
 from app.generation.controller import GenerationController
 from app.generation.failure_codes import (
     GenerationFailureCode,
@@ -150,6 +153,17 @@ def _dev_trace(message: str) -> None:
         print(f"[PD-DEV-TRACE] {message}", flush=True)
 
 
+# Phase36 §30 — conservative safe fallback for an admission denial whose
+# exact closed reason is unknown/unmapped (a defensive-only default; every
+# real denial source sets its own precise code from the underlying
+# ``AdmissionDecision``). ``GLOBAL_GENERATION_WINDOW_LIMIT`` is the canonical
+# "temporary service capacity, retry later" state: it never claims session
+# exhaustion, never clears a session cache and never implies the user did
+# something wrong — exactly the bounded fallback the frontend must show for an
+# unknown admission reason.
+DEFAULT_ADMISSION_REASON_CODE = AdmissionReasonCode.GLOBAL_GENERATION_WINDOW_LIMIT
+
+
 class GenerationServiceError(Exception):
     """Base class for service-level domain errors."""
 
@@ -168,7 +182,33 @@ class AdmissionDeniedError(GenerationServiceError):
     Raised by the API-facing layer instead of the Phase 4
     ``app.generation.admission.AdmissionDenied`` so ``app.api`` never imports
     generation material (boundary contract in test_boundaries.py).
+
+    ``reason_code`` carries the CLOSED safe token from the underlying
+    ``AdmissionDecision`` (an ``AdmissionReasonCode`` member). It is the ONLY
+    admission detail that ever reaches the sanitized 429 envelope — the human
+    ``message`` string stays internal and is NEVER surfaced (Phase36
+    §10/§12).
     """
+
+    def __init__(
+        self,
+        message: str = "admission denied",
+        *,
+        reason_code: AdmissionReasonCode | str = DEFAULT_ADMISSION_REASON_CODE,
+    ) -> None:
+        # DEF-084 defense-in-depth: normalize ANY non-member value to the
+        # conservative default at construction so an out-of-tree raise can
+        # never smuggle an arbitrary string into the envelope. Lenient by
+        # design — never raises (the ``map_service_error`` membership check
+        # is the authoritative guard).
+        if isinstance(reason_code, AdmissionReasonCode):
+            self.reason_code = reason_code.value
+        else:
+            try:
+                self.reason_code = AdmissionReasonCode(reason_code).value
+            except (TypeError, ValueError):
+                self.reason_code = DEFAULT_ADMISSION_REASON_CODE.value
+        super().__init__(message)
 
 
 class PromptValidationError(GenerationServiceError):
@@ -739,8 +779,11 @@ class GenerationService:
         """
         try:
             session = self._admission.create_anonymous_quota_session()
-        except AdmissionDenied:
-            raise AdmissionDeniedError("anonymous session store at capacity") from None
+        except AdmissionDenied as exc:
+            raise AdmissionDeniedError(
+                "anonymous session store at capacity",
+                reason_code=exc.reason_code or DEFAULT_ADMISSION_REASON_CODE,
+            ) from None
         token = issue_anonymous_session_token()
         self._store.create_session(
             session_id=session.session_id,
@@ -965,7 +1008,13 @@ class GenerationService:
         self._last_world_requirements = world_reqs
         session_row = self._store.get_session(anonymous_quota_session_id)
         if session_row is None:
-            raise AdmissionDeniedError("unknown anonymous quota session")
+            # Durable equivalent of the admission controller's unknown-session
+            # denial: the quota session does not exist (or is unknown to the
+            # store) -> SESSION_EXPIRED_OR_INVALID (Phase36 §10).
+            raise AdmissionDeniedError(
+                "unknown anonymous quota session",
+                reason_code=AdmissionReasonCode.SESSION_EXPIRED_OR_INVALID,
+            )
         self._ensure_admission_ready(session_row)
 
         handle, record, now = self._run_generation(
@@ -1467,7 +1516,12 @@ class GenerationService:
             raise UnknownCaseError(f"case {case_id!r} does not exist")
         session_row = self._store.get_session(anonymous_quota_session_id)
         if session_row is None:
-            raise AdmissionDeniedError("unknown anonymous quota session")
+            # Same durable unknown-session denial as ``start_case_generation``
+            # (Phase36 §10: SESSION_EXPIRED_OR_INVALID).
+            raise AdmissionDeniedError(
+                "unknown anonymous quota session",
+                reason_code=AdmissionReasonCode.SESSION_EXPIRED_OR_INVALID,
+            )
         self._ensure_admission_ready(session_row)
 
         # Phase 14 — prompt-to-world for the re-publication (v2+): extract the
@@ -1644,10 +1698,15 @@ class GenerationService:
                 anonymous_quota_session_id=anonymous_quota_session_id,
                 creator_token=creator_token,
             )
-        except AdmissionDenied:
+        except AdmissionDenied as exc:
             # Translate the Phase 4 admission denial into the API-facing
-            # service error (the API layer must never import generation).
-            raise AdmissionDeniedError("generation admission denied") from None
+            # service error (the API layer must never import generation),
+            # carrying the CLOSED safe reason token from the underlying
+            # AdmissionDecision (Phase36 §12).
+            raise AdmissionDeniedError(
+                "generation admission denied",
+                reason_code=exc.reason_code or DEFAULT_ADMISSION_REASON_CODE,
+            ) from None
         record = controller.attempt(handle.attempt_id)
         if record is None:  # pragma: no cover - defensive
             raise GenerationServiceError("generation attempt record unavailable")
@@ -2425,8 +2484,10 @@ def _dev_remaining(record: Any) -> str:
 __all__ = [
     "AdmissionDenied",
     "AdmissionDeniedError",
+    "AdmissionReasonCode",
     "CaseStarted",
     "CreatedAnonymousSession",
+    "DEFAULT_ADMISSION_REASON_CODE",
     "EnvironmentHintError",
     "GenerationService",
     "GenerationServiceError",

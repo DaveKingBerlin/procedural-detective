@@ -177,13 +177,29 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: object | null;
+  /**
+   * Phase 36 — the OPTIONAL closed admission-denial reason token. Present
+   * ONLY when the 429 ADMISSION_DENIED envelope carried a `reasonCode`
+   * (the backend's closed AdmissionReasonCode vocabulary); `null` for every
+   * other envelope (including legacy no-code ADMISSION_DENIED and the
+   * DISTINCT per-IP TOO_MANY_REQUESTS). Non-admission semantics are
+   * byte-identical to the pre-Phase36 ApiError.
+   */
+  readonly reasonCode: string | null;
 
-  constructor(status: number, code: string, message: string, details: object | null) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    details: object | null,
+    reasonCode: string | null = null,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.details = details;
+    this.reasonCode = reasonCode;
   }
 }
 
@@ -213,17 +229,22 @@ async function toApiError(response: Response): Promise<ApiError> {
   let code = `HTTP_${status}`;
   let message = `Request failed with status ${status}`;
   let details: object | null = null;
+  let reasonCode: string | null = null;
   try {
     const body = (await response.json()) as Partial<ErrorEnvelope>;
     if (body && body.error && typeof body.error.code === "string") {
       code = body.error.code;
       message = typeof body.error.message === "string" ? body.error.message : message;
       details = body.error.details ?? null;
+      // Phase 36 — read the OPTIONAL closed admission-denial reason token.
+      // The backend omits it (or the envelope predates Phase 36), so legacy
+      // envelopes keep `reasonCode` null and stay byte-identical.
+      reasonCode = typeof body.error.reasonCode === "string" ? body.error.reasonCode : null;
     }
   } catch {
     // Body is not JSON (e.g. 502 from a proxy): keep the status-derived error.
   }
-  return new ApiError(status, code, message, details);
+  return new ApiError(status, code, message, details, reasonCode);
 }
 
 /**
