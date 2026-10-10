@@ -85,9 +85,20 @@ describe("Phase32-Fix2 §9/§11 — placements[].interaction contract", () => {
   const at = "savegame.case.publicCase.worldGraph.placements[0].interaction";
 
   it("accepts interaction=\"\" (decorative placement, DEF-062)", () => {
-    const text = mutateDocument((doc) => (doc.case.publicCase.worldGraph.placements[0].interaction = ""));
+    // DEF-075: interaction="" is ACCEPTED only for a decorative placement
+    // (evidenceId:null). apartment_laptop (placements[4]) is the interactive
+    // "read" placement in the canonical fixture; converting it to a decorative
+    // placement (interaction "" AND evidenceId null) proves the refined rule
+    // does NOT over-reject an empty-interaction placement without an evidence
+    // link. (vase_01 placements[3] is already "" + evidenceId:null — a no-op
+    // mutation — so this meaningful conversion is used instead.)
+    const text = mutateDocument((doc) => {
+      doc.case.publicCase.worldGraph.placements[4].interaction = "";
+      doc.case.publicCase.worldGraph.placements[4].evidenceId = null;
+    });
     const definition = parseSavegameV1(text, utf8ByteLength(text));
-    expect(definition.publicCase.worldGraph.placements[0].interaction).toBe("");
+    expect(definition.publicCase.worldGraph.placements[4].interaction).toBe("");
+    expect(definition.publicCase.worldGraph.placements[4].evidenceId).toBeNull();
   });
 
   it("accepts interaction=\"inspect\" and interaction=\"read\"", () => {
@@ -244,9 +255,96 @@ describe("Phase32-Fix2 §11 — evidenceId nullable/optional matrix", () => {
     expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
   });
 
-  it("worldObjects[].evidenceId = a recorded string ACCEPTED", () => {
-    const text = mutateDocument((doc) => (doc.case.scene.worldObjects[0].evidenceId = "forensic_knife_match_01"));
-    expect(parseSavegameV1(text, utf8ByteLength(text)).scene.worldObjects[0].evidenceId).toBe("forensic_knife_match_01");
+  it("worldObjects[].evidenceId = a recorded string ACCEPTED (interactive object)", () => {
+    // DEF-075: interaction="" is decorative-only. This mutation must run on an
+    // INTERACTIVE world object (kitchen_knife, worldObjects[4], interaction
+    // "inspect") — on the decorative-apartment_door worldObjects[0] it would be
+    // (correctly) rejected by the new cross-field rule. kitchen_knife already
+    // carries forensic_knife_match_01, so a DIFFERENT recorded read-record id is
+    // set to prove any recorded string is still accepted on an interactive
+    // object.
+    const text = mutateDocument((doc) => (doc.case.scene.worldObjects[4].evidenceId = "fingerprint_knife_01"));
+    expect(parseSavegameV1(text, utf8ByteLength(text)).scene.worldObjects[4].evidenceId).toBe("fingerprint_knife_01");
+  });
+});
+
+describe("Phase32-Fix2 DEF-075 — evidence-linked empty-interaction objects are REJECTED at import", () => {
+  it("placements[].interaction=\"\" + a non-empty evidenceId is REJECTED (REFERENCE_MISMATCH)", () => {
+    // The canonical fixture's placements[4] (apartment_laptop) is interactive
+    // (interaction "read", evidenceId "email_thomas_01"). Repoint the mutation
+    // to the DECORATIVE placement (placements[3] = vase_01, interaction already
+    // ""): giving the decorative intact "" interaction a NON-EMPTY evidenceId is
+    // the DEF-075 conflict. (evidenceId "forensic_knife_match_01" is a published
+    // id, so this can NOT be an accident of the reference check — the cross-field
+    // rule is the ONLY rejection.)
+    const text = mutateDocument((doc) => {
+      doc.case.publicCase.worldGraph.placements[3].interaction = "";
+      doc.case.publicCase.worldGraph.placements[3].evidenceId = "forensic_knife_match_01";
+    });
+    expect(kindOf(text)).toBe("invalid");
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.publicCase.worldGraph.placements[3]");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+  });
+
+  it("worldObjects[].interaction=\"\" + discovered:true is REJECTED (REFERENCE_MISMATCH)", () => {
+    // Canonical worldObjects[1] (apartment_lamp) is decorative (interaction "",
+    // evidenceId null, discovered false, read false). Flipping discovered:true on
+    // an empty-interaction world object is the DEF-075 conflict.
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[1].interaction = "";
+      doc.case.scene.worldObjects[1].discovered = true;
+    });
+    expect(kindOf(text)).toBe("invalid");
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[1]");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+  });
+
+  it("worldObjects[].interaction=\"\" + read:true is REJECTED (REFERENCE_MISMATCH)", () => {
+    // Flipping read:true on an empty-interaction world object is the DEF-075
+    // conflict (apartment_lamp = worldObjects[1]).
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[1].interaction = "";
+      doc.case.scene.worldObjects[1].read = true;
+    });
+    expect(kindOf(text)).toBe("invalid");
+    const diagnostic = diagnosticOf(text);
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[1]");
+    expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
+  });
+
+  it("worldObjects[].interaction=\"\" + evidenceId:null + discovered:false + read:false is ACCEPTED (decorative)", () => {
+    // A fully decorative world object (apartment_lamp = worldObjects[1]) with
+    // the exact all-null/false decorative shape stays ACCEPTED.
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[1].interaction = "";
+      doc.case.scene.worldObjects[1].evidenceId = null;
+      doc.case.scene.worldObjects[1].discovered = false;
+      doc.case.scene.worldObjects[1].read = false;
+    });
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    const worldObject = definition.scene.worldObjects[1];
+    expect(worldObject.interaction).toBe("");
+    expect(worldObject.evidenceId).toBeNull();
+    expect(worldObject.discovered).toBe(false);
+    expect(worldObject.read).toBe(false);
+  });
+
+  it("worldObjects[].interaction=\"inspect\" + evidenceId is ACCEPTED (interactive object)", () => {
+    // An INTERACTIVE world object (kitchen_knife = worldObjects[4]) with a
+    // non-empty interaction and its evidence link stays ACCEPTED (re-emphasized
+    // as-is from the canonical fixture).
+    const text = mutateDocument((doc) => {
+      doc.case.scene.worldObjects[4].interaction = "inspect";
+      doc.case.scene.worldObjects[4].evidenceId = "forensic_knife_match_01";
+      doc.case.scene.worldObjects[4].discovered = true;
+      doc.case.scene.worldObjects[4].read = true;
+    });
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    const worldObject = definition.scene.worldObjects[4];
+    expect(worldObject.interaction).toBe("inspect");
+    expect(worldObject.evidenceId).toBe("forensic_knife_match_01");
   });
 });
 

@@ -846,13 +846,34 @@ function requireBoundedStringAllowEmpty(
 function validatePlacement(raw: unknown, where: string): SavegameWorldGraphPlacementV1 {
   const record = requireRecord(raw, where);
   assertOnlyKeys(record, ["objectId", "assetId", "locationId", "anchor", "interaction", "evidenceId"], where);
+  const interaction = requireBoundedStringAllowEmpty(record, "interaction", where, MAX_SHORT_TEXT_LENGTH);
+  const evidenceId = requireBoundedNullableString(record, "evidenceId", where, MAX_ID_LENGTH);
+  // DEF-075 (Phase32-Fix2): an EMPTY interaction ("") is the DECORATIVE marker
+  // (DEF-062) — it can never carry an evidence link (mirror of the backend
+  // world-graph rule `safety.py::validate_world_graph`: an evidence-linked
+  // placement MUST have a non-empty interaction, otherwise the evidence is
+  // unreachable through any player interaction). Import-scoped TIGHTENING:
+  // interaction="" + a NON-EMPTY evidenceId fails closed. Empty-string
+  // evidenceId is NOT a trigger — it continues to the `.evidenceId`
+  // reference-integrity path below, so `placements[].evidenceId = ""` stays a
+  // `.evidenceId` REFERENCE_MISMATCH (unchanged). interaction="inspect"/"read"
+  // + evidenceId remains ACCEPTED; interaction="" + evidenceId:null remains
+  // ACCEPTED (decorative).
+  if (interaction === "" && typeof evidenceId === "string" && evidenceId.length > 0) {
+    invalid(
+      where,
+      "references an evidence id while the interaction is empty — empty interaction applies only to decorative objects (no evidence link)",
+      evidenceId,
+      "a decorative placement (interaction \"\", evidenceId null)",
+    );
+  }
   return {
     objectId: requireBoundedString(record, "objectId", where, MAX_ID_LENGTH),
     assetId: requireBoundedString(record, "assetId", where, MAX_ID_LENGTH),
     locationId: requireBoundedString(record, "locationId", where, MAX_ID_LENGTH),
     anchor: requireBoundedString(record, "anchor", where, MAX_ID_LENGTH),
-    interaction: requireBoundedStringAllowEmpty(record, "interaction", where, MAX_SHORT_TEXT_LENGTH),
-    evidenceId: requireBoundedNullableString(record, "evidenceId", where, MAX_ID_LENGTH),
+    interaction,
+    evidenceId,
   };
 }
 
@@ -987,6 +1008,40 @@ function validateWorldObjectStrict(raw: unknown, where: string): WorldObjectDTO 
   // the savegame-import path tightens the bound (import-scoped only) so an
   // unbounded interaction can never enter the normalized archive (§22).
   void requireBoundedStringAllowEmpty(record, "interaction", where, MAX_SHORT_TEXT_LENGTH);
+  // DEF-075 (Phase32-Fix2): an EMPTY interaction ("") is the DECORATIVE marker
+  // (DEF-062) — the world-object projection of a decorative object can never
+  // carry an evidence link OR a discovered/read spoiler state (the
+  // `safety.py::validate_world_graph` invariant: an evidence-linked object MUST
+  // have a non-empty interaction of `inspect`/`read`). Import-scoped
+  // TIGHTENING: interaction="" + (non-empty evidenceId | discovered | read) —
+  // the two projections (placement + world object) would describe different
+  // objects, so the archive fails closed. Empty-string evidenceId is NOT a
+  // trigger — it continues to the `.evidenceId` reference-integrity path, so
+  // `worldObjects[].evidenceId = ""` stays a `.evidenceId` REFERENCE_MISMATCH.
+  // interaction="inspect"/"read" + (evidenceId | discovered | read) remains
+  // ACCEPTED (interactive); interaction="" + evidenceId:null + discovered:false
+  // + read:false remains ACCEPTED (decorative, DEF-062).
+  const emptyInteractionEvidenceLink =
+    record.interaction === "" &&
+    ((typeof record.evidenceId === "string" && record.evidenceId.length > 0) ||
+      record.discovered === true ||
+      record.read === true);
+  if (emptyInteractionEvidenceLink) {
+    const offending =
+      typeof record.evidenceId === "string" && record.evidenceId.length > 0
+        ? record.evidenceId
+        : record.discovered === true
+          ? record.discovered
+          : record.read === true
+            ? record.read
+            : undefined;
+    invalid(
+      where,
+      "references an evidence id or opened state while the interaction is empty — empty interaction applies only to decorative objects (no evidence link)",
+      offending,
+      "a decorative world object (interaction \"\", evidenceId null, discovered false, read false)",
+    );
+  }
   // DEF-068 / ADV-32F-10: the canonical world-object subtype is
   // `null | bounded non-empty string (max MAX_SHORT_TEXT_LENGTH)` — the exact
   // vocabulary the backend authors. The shared live-game parser accepts any

@@ -756,11 +756,17 @@ describe("SavegameV1 — DEF-067 reference-integrity diagnostics pinpoint the of
   });
 
   it("worldObject -> evidenceId with no read record is REFERENCE_MISMATCH at the exact field", () => {
+    // DEF-075: interaction="" is decorative-only. The mutation must run on an
+    // INTERACTIVE world object (kitchen_knife, worldObjects[4], interaction
+    // "inspect") so the cross-field rule does NOT fire first and the `.evidenceId`
+    // reference-integrity path stays the meaningful assertion. (kitchen_knife
+    // already carries forensic_knife_match_01; mutating to ghost_record still
+    // exercises the reference check on an interactive object.)
     const text = mutateDocument((doc) => {
-      doc.case.scene.worldObjects[0].evidenceId = "ghost_record";
+      doc.case.scene.worldObjects[4].evidenceId = "ghost_record";
     });
     const diagnostic = diagnosticOf(text);
-    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[0].evidenceId");
+    expect(diagnostic.path).toBe("savegame.case.scene.worldObjects[4].evidenceId");
     expect(diagnostic.reasonCode).toBe("REFERENCE_MISMATCH");
     expect(diagnostic.expected).toBe("an evidence id with a read record");
     expect(diagnostic.actualType).toBe("string");
