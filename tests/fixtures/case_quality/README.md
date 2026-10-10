@@ -74,3 +74,14 @@ is used as model guidance.
 - `negative/generated/*.nok.pdcase`: **FAILS** with the confirmed issue codes
   (public role truth leak, victim/witness in suspect candidates, missing
   usable witness statement for the remote witness).
+
+## Generated frontend-dev fixture
+
+`generated/procedural-detective-case-demo-hard-generate.ok.pdcase` is a
+**deterministic driver-world generation export** (hermetic mock transport,
+source `generated`, pinned `exportedAt`). It is a post-reveal SavegameV1
+document produced by the real generation pipeline and passed through the
+production `project_savegame_v1` exporter. Frontend-dev can use it as a
+replay/runtime reference for a generated (non-demo) case. It is test/reference
+data only, never a runtime asset, and its full contents are never injected into
+provider prompts. It PASSES the hard case-quality validator.
