@@ -94,8 +94,19 @@ _STATUS_ERROR_CODES = {
 }
 
 
-def _error_body(code: str, message: str, details: Any) -> dict[str, Any]:
-    return {"error": {"code": code, "message": message, "details": details}}
+def _error_body(
+    code: str,
+    message: str,
+    details: Any,
+    reason_code: str | None = None,
+) -> dict[str, Any]:
+    error: dict[str, Any] = {"code": code, "message": message, "details": details}
+    if reason_code is not None:
+        # Phase36 — the only optional envelope field: the CLOSED safe
+        # admission reason token. Omitted (never null) when absent so every
+        # non-admission envelope stays byte-identical.
+        error["reasonCode"] = reason_code
+    return {"error": error}
 
 
 class RequestBodySizeMiddleware:
@@ -551,15 +562,17 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
     code = _STATUS_ERROR_CODES.get(exc.status_code, "HTTP_ERROR")
     message = "Request failed"
     details = None
+    reason_code = None
     if isinstance(exc.detail, dict):
         code = exc.detail.get("code", code)
         message = exc.detail.get("message", message)
         details = exc.detail.get("details")
+        reason_code = exc.detail.get("reasonCode")
     else:
         message = str(exc.detail) if exc.detail else message
     return JSONResponse(
         status_code=exc.status_code,
-        content=_error_body(code, message, details),
+        content=_error_body(code, message, details, reason_code),
     )
 
 

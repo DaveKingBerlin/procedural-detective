@@ -449,6 +449,9 @@ def test_adv229_route_level_capacity_denial_is_sanitized_429(database_url):
             assert last is not None and last.status_code == 429
             body = last.json()
             assert body["error"]["code"] == "ADMISSION_DENIED"
+            # Phase36: the session-store capacity denial surfaces its CLOSED
+            # reason (never the internal "at capacity" string).
+            assert body["error"]["reasonCode"] == "ANONYMOUS_SESSION_CAPACITY_LIMIT"
             assert_sanitized_error(last.text)
             flattened = json.dumps(body).lower()
             assert "at capacity" not in flattened

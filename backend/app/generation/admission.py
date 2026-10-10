@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 
 from app.generation.clock import Clock
 from app.generation.ids import IdSource
@@ -51,12 +52,38 @@ class AnonymousQuotaSession:
     quota_window_end: float
 
 
+class AdmissionReasonCode(str, Enum):
+    """CLOSED safe vocabulary of anonymous-quota admission denial reasons.
+
+    These SCREAMING_SNAKE tokens are the ONLY admission detail that may ever
+    reach the sanitized 429 ``ADMISSION_DENIED`` envelope (the ``reasonCode``
+    field). The controller sets exactly one member per denial; the human
+    ``AdmissionDecision.reason`` string is NEVER surfaced. Wire-safe and
+    bounded: no sessions, no IPs, no tokens, no quotas, no internal state.
+    """
+
+    ANONYMOUS_SESSION_CAPACITY_LIMIT = "ANONYMOUS_SESSION_CAPACITY_LIMIT"
+    SESSION_EXPIRED_OR_INVALID = "SESSION_EXPIRED_OR_INVALID"
+    SESSION_GENERATION_LIMIT = "SESSION_GENERATION_LIMIT"
+    SESSION_CONCURRENCY_LIMIT = "SESSION_CONCURRENCY_LIMIT"
+    GLOBAL_CONCURRENCY_LIMIT = "GLOBAL_CONCURRENCY_LIMIT"
+    GLOBAL_GENERATION_WINDOW_LIMIT = "GLOBAL_GENERATION_WINDOW_LIMIT"
+
+
 @dataclass(frozen=True)
 class AdmissionDecision:
-    """Result of one admission check (``admitted=True`` or a denial reason)."""
+    """Result of one admission check (``admitted=True`` or a denial reason).
+
+    ``reason`` is the internal human-only string (sanitized away at the API
+    boundary, never the wire); ``reason_code`` is the CLOSED safe machine
+    token from ``AdmissionReasonCode`` that IS allowed to travel to the
+    frontend (Phase36 §10/§12). ``reason_code`` is None only for the admitting
+    decision (no denial -> nothing to classify).
+    """
 
     admitted: bool
     reason: str | None = None
+    reason_code: AdmissionReasonCode | None = None
 
 
 class AdmissionDenied(Exception):
@@ -64,12 +91,14 @@ class AdmissionDenied(Exception):
 
     The controller propagates this out of ``start_generation`` so the caller
     sees a terminal user-safe error; rejected admission consumes no provider
-    call budget (REQUIREMENTS 32.10).
+    call budget (REQUIREMENTS 32.10). ``reason_code`` mirrors the closed safe
+    token from the decision so service callers never dig into the dataclass.
     """
 
     def __init__(self, decision: AdmissionDecision) -> None:
         self.decision = decision
         self.reason = decision.reason
+        self.reason_code = decision.reason_code
         super().__init__(decision.reason or "admission denied")
 
 
@@ -197,6 +226,7 @@ class AdmissionController:
                 AdmissionDecision(
                     False,
                     "admission denied: anonymous quota session store at capacity",
+                    AdmissionReasonCode.ANONYMOUS_SESSION_CAPACITY_LIMIT,
                 )
             )
         session = AnonymousQuotaSession(
@@ -248,13 +278,18 @@ class AdmissionController:
         state = self._sessions.get(session_id)
         if state is None:
             raise AdmissionDenied(
-                AdmissionDecision(False, "admission denied: unknown anonymous quota session")
+                AdmissionDecision(
+                    False,
+                    "admission denied: unknown anonymous quota session",
+                    AdmissionReasonCode.SESSION_EXPIRED_OR_INVALID,
+                )
             )
         if now >= state.session.quota_window_end:
             raise AdmissionDenied(
                 AdmissionDecision(
                     False,
                     "admission denied: anonymous quota session window expired",
+                    AdmissionReasonCode.SESSION_EXPIRED_OR_INVALID,
                 )
             )
         if state.generations_count >= self._max_session_window:
@@ -262,6 +297,7 @@ class AdmissionController:
                 AdmissionDecision(
                     False,
                     "admission denied: per-session generation window exhausted",
+                    AdmissionReasonCode.SESSION_GENERATION_LIMIT,
                 )
             )
         if state.active_concurrency >= self._max_session_concurrency:
@@ -269,6 +305,7 @@ class AdmissionController:
                 AdmissionDecision(
                     False,
                     "admission denied: per-session concurrency limit reached",
+                    AdmissionReasonCode.SESSION_CONCURRENCY_LIMIT,
                 )
             )
         if self._global_active >= self._max_global_concurrency:
@@ -276,6 +313,7 @@ class AdmissionController:
                 AdmissionDecision(
                     False,
                     "admission denied: global concurrency limit reached",
+                    AdmissionReasonCode.GLOBAL_CONCURRENCY_LIMIT,
                 )
             )
         # PD-SEC-02 global quota-window fix: when the current time has reached
@@ -294,6 +332,7 @@ class AdmissionController:
                 AdmissionDecision(
                     False,
                     "admission denied: global generation window exhausted",
+                    AdmissionReasonCode.GLOBAL_GENERATION_WINDOW_LIMIT,
                 )
             )
         # Reserve: session count++, global window count++, both concurrency++.

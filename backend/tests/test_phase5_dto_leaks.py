@@ -263,6 +263,9 @@ def test_admission_denied_answers_429_sanitized(store, database_url):
             assert res.status_code == 429
             body = res.json()
             assert body["error"]["code"] == "ADMISSION_DENIED"
+            # Phase36: the per-session window denial surfaces its CLOSED reason.
+            assert body["error"]["reasonCode"] == "SESSION_GENERATION_LIMIT"
+            assert body["error"]["message"] == "Generation capacity exhausted"
             assert_sanitized_error(res.text)
     finally:
         app.state.engine.dispose()
