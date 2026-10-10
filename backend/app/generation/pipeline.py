@@ -449,12 +449,14 @@ def _stage_context(attempt: AttemptRecord, stage: GenerationStage) -> str:
 def case_quality_repair_context(attempt: AttemptRecord) -> str:
     """Phase35 §37 — bounded safe CASE-QUALITY FIX CONTEXT for the REPAIR stage.
 
-    Only PUBLIC/derive-facing values (allowed person IDs + public roles,
+    Only PUBLIC/derive-facing values (allowed person IDs + closed public roles,
     witness IDs, suspect candidate IDs, the required witness-kind evidence
     vocabulary and the CLOSED safe quality issue codes). NEVER CaseTruth /
-    murderer identity / statement text through public diagnostics. Deterministic
-    and bounded; guidance only — the validators stay the sole acceptance
-    authority.
+    murderer identity / statement text through public diagnostics — roles are
+    projected through ``PUBLIC_ROLE_VOCABULARY`` so a truth-bearing token
+    (e.g. ``"murderer"``) carried by a broken draft is masked as ``<invalid>``
+    instead of re-echoed (DEF-080). Deterministic and bounded; guidance only —
+    the validators stay the sole acceptance authority.
     """
     lines: list[str] = ["CASE QUALITY FIX CONTEXT (bounded, authoritative):"]
     persons: tuple[Any, ...] = ()
@@ -467,7 +469,7 @@ def case_quality_repair_context(attempt: AttemptRecord) -> str:
         persons = public.persons
         person_ids = sorted(p.person_id for p in persons)
         lines.append("- allowed person ids and their PUBLIC roles: " + ", ".join(
-            f"{p.person_id} ({p.role})" for p in persons
+            _public_role_label(p.person_id, p.role) for p in persons
         ))
         witness_ids = sorted(
             p.person_id for p in persons if p.role == "witness"
@@ -494,10 +496,27 @@ def case_quality_repair_context(attempt: AttemptRecord) -> str:
     if quality_codes:
         lines.append("- safe issue codes to fix: " + ", ".join(quality_codes))
     lines.append(
-        "- Keep the canonical truth server-side: NEVER label any public person "
-        "'murderer' and never reveal the murderer in a public role/description."
+        "- Keep the canonical truth server-side: never stamp any public person "
+        "with the truth role token and never reveal the killer identity in a "
+        "public role/description."
     )
     return "\n".join(lines)
+
+
+def _public_role_label(person_id: str, role: Any) -> str:
+    """Person id + the CLOSED public-role token (DEF-080).
+
+    Roles are projected through ``PUBLIC_ROLE_VOCABULARY`` before the REPAIR
+    context prints them: only a member of the closed pre-reveal vocabulary
+    (``victim|suspect|witness|family|other``) is echoed; any other token
+    (e.g. a truth-bearing ``"murderer"`` carried by an out-of-vocabulary
+    public role in a quality-broken draft) is NEVER re-issued — the context
+    prints the person id + ``<invalid>`` instead, so the fix prompt never
+    re-echoes the killer's identity label.
+    """
+    if str(role) in case_quality.PUBLIC_ROLE_VOCABULARY:
+        return f"{person_id} ({role})"
+    return f"{person_id} (<invalid>)"
 
 
 def build_request(

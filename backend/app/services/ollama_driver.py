@@ -589,6 +589,53 @@ def _deduction_seed(attempt: Any, crime: Any, public: Any) -> str:
     return "\n".join(lines)
 
 
+def _driver_clock_token(canonical: str) -> str:
+    """The deterministic ``HH:MM`` clock token of the case's canonical time.
+
+    The witness-grounding model (``app.domain.witness._time_anchors_of``)
+    recognises a bare clock token inside allowlisted statement/description
+    text as a TIME anchor, so a driver witness statement that states the time
+    derived from the case's OWN canonical crime/window data grounds the TIME
+    interview question. Never a golden/truth sentence — purely the case's own
+    canonical clock (DEF-079).
+    """
+    import datetime
+
+    try:
+        dt = datetime.datetime.fromisoformat(canonical)
+    except (TypeError, ValueError):
+        return ""
+    return f"{dt.hour:02d}:{dt.minute:02d}"
+
+
+def _driver_scene_label(public: Any, scene_id: str) -> str:
+    """A deterministic public scene NAME for a driver witness statement.
+
+    Prefers the scene location's PUBLIC name; falls back to the public
+    location whose ``location_id`` equals the scene id, then to the first
+    public location name — only the case's OWN public tokens are ever used
+    (never a golden/truth label, never random text). LOCATION interview
+    grounding matches word tokens of the public location names inside the
+    statement text, so labelling the scene deterministically makes the
+    driver witnesses genuinely locatable (DEF-079).
+    """
+    scene_name = str(
+        getattr(getattr(public, "scene", None), "name", None) or ""
+    ).strip()
+    if scene_name:
+        return scene_name
+    for loc in (getattr(public, "locations", ()) or ()):
+        if str(getattr(loc, "location_id", "") or "") == str(scene_id):
+            name = str(getattr(loc, "name", "") or "").strip()
+            if name:
+                return name
+    for loc in (getattr(public, "locations", ()) or ()):
+        name = str(getattr(loc, "name", "") or "").strip()
+        if name:
+            return name
+    return ""
+
+
 def _evidence_gap_facts(
     attempt: Any, crime: Any, public: Any, evidence_spec: Any
 ) -> tuple[Any, tuple[Any, ...], tuple[str, ...]]:
@@ -898,10 +945,18 @@ def _evidence_gap_facts(
     # and the Phase35 case-quality validator ``WITNESS_STATEMENT_MISSING`` gate
     # require it). The fact is a ``witness_statement`` attributed to the witness
     # (WITNESS_CLAIMS proposition person_id + speakerName — both the canonical
-    # attribution signals of ``app.domain.witness.witness_attributed_to``) with
-    # a non-empty NEUTRAL statement text. WITNESS_CLAIMS is NOT consumed by any
-    # Phase 3 deduction rule (golden comment), so the solver signature is
-    # byte-identical; the fact is real discoverable player-visible evidence.
+    # attribution signals of ``app.domain.witness.witness_attributed_to``).
+    # WITNESS_CLAIMS is NOT consumed by any Phase 3 deduction rule (golden
+    # comment), so the solver signature is byte-identical; the fact is real
+    # discoverable player-visible evidence. DEF-079: the statement is NOT a
+    # byte-identical generic sentence — it carries a TIME anchor and the
+    # LOCATION derived deterministically from the case's OWN canonical crime
+    # time and public scene name (plus the witness's own name), so the local
+    # path produces genuinely interviewable witnesses (``project_witness_statement``
+    # grounds TIME + LOCATION + OBSERVATION, not only OBSERVATION). No golden
+    # names, no story copying, no random text; deterministic and bounded.
+    clock_token = _driver_clock_token(canonical)
+    scene_label = _driver_scene_label(public, scene_id)
     for witness in sorted(
         (
             p
@@ -919,6 +974,26 @@ def _evidence_gap_facts(
             continue
         from app.generation.schemas import EvidenceSpec as _CanonicalEvidenceSpec
 
+        if scene_label and clock_token:
+            statement = (
+                f"As {wname}, I was at the {scene_label} around {clock_token} "
+                "and noticed a few things that did not sit right."
+            )
+            description = (
+                f"{wname} was near the {scene_label} around {clock_token}."
+            )
+        elif clock_token:
+            statement = (
+                f"As {wname}, I was nearby around {clock_token} and noticed a "
+                "few things that did not sit right."
+            )
+            description = f"{wname} recounted the course of the evening."
+        else:
+            statement = (
+                "I was nearby during the evening and noticed a few "
+                "things that did not sit right."
+            )
+            description = f"{wname} recounted the course of the evening."
         extras.append(
             _CanonicalEvidenceSpec(
                 id=eid,
@@ -928,12 +1003,9 @@ def _evidence_gap_facts(
                 reliability="high",
                 presentation={
                     "title": "Witness statement",
-                    "description": f"{wname} recounted the course of the evening.",
+                    "description": description,
                     "speakerName": str(wname),
-                    "statement": (
-                        "I was nearby during the evening and noticed a few "
-                        "things that did not sit right."
-                    ),
+                    "statement": statement,
                 },
                 discoverable=True,
             )

@@ -69,6 +69,47 @@ def test_generated_savegame_export_has_source_generated_and_valid_shape():
     assert sg.serialize_savegame_v1(doc)
 
 
+def test_driver_witness_statement_grounds_time_observation_and_location():
+    """DEF-079 — the canonical driver-built witness statement is NOT a
+    byte-identical generic sentence: it carries a TIME anchor (the case's own
+    canonical clock) and the scene's public name, so
+    ``project_witness_statement`` grounds TIME + OBSERVATION (+ LOCATION) for
+    every generated witness instead of only the single generic OBSERVATION.
+    ``_hard_payload`` runs the REAL driver (mock transport, hermetic)."""
+    from app.domain import witness as witness_domain
+    from app.domain.witness import WitnessQuestionType
+
+    payload = _hard_payload()
+    draft = payload["draft"]
+    witnesses = [p for p in draft["persons"] if p["role"] == "witness"]
+    assert witnesses, "the hard driver world carries a witness"
+    for person in witnesses:
+        witness_view = {"person_id": person["person_id"], "name": person["name"]}
+        for question in (
+            WitnessQuestionType.OBSERVATION,
+            WitnessQuestionType.TIME,
+            WitnessQuestionType.LOCATION,
+        ):
+            projection = witness_domain.project_witness_statement(
+                payload, witness_view, question
+            )
+            assert projection.statement.grounded, (
+                person["person_id"],
+                question,
+            )
+    # The statement is case-specific, not the old fixed sentence.
+    statements = [
+        (e.get("presentation") or {}).get("statement")
+        for e in draft["evidence"]
+        if e.get("kind") == "witness_statement"
+        and (e.get("presentation") or {}).get("statement")
+    ]
+    assert statements, "driver world must carry a witness statement"
+    assert all(
+        "nearby during the evening" not in stmt and ":" in stmt for stmt in statements
+    )
+
+
 def test_committed_generated_fixture_is_valid_and_passes_quality():
     assert GENERATED_FIXTURE.is_file(), "generated corpus fixture missing"
     document = json.loads(GENERATED_FIXTURE.read_text(encoding="utf-8"))
