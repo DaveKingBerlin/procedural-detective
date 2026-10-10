@@ -6,7 +6,8 @@ import {
   resolveJourneyMode,
   stageFromProgress,
 } from "./generating";
-import { mapAdmissionReason } from "../journey/demoFlow";
+import { mapAdmissionReason, mapDemoError } from "../journey/demoFlow";
+import { ApiError } from "../api/client";
 import type { DemoProgress } from "../journey/demoFlow";
 import type { GenerationCapabilitiesResponse } from "../api/types";
 
@@ -132,6 +133,10 @@ describe("generation route — failure states", () => {
     expect(html).toContain('data-testid="generation-admission-session-concurrency-limit"');
     expect(html).toContain("Generation already in progress");
     expect(html).toContain("Another case generation is already running for this session");
+    // DEF-083/ADV-36-02 — no attempt handle exists to navigate back to, so the
+    // rendered copy must not promise a return to the active generation.
+    expect(html).not.toContain("Return to the in-progress generation");
+    expect(html).toContain("Please wait for it to finish before starting another.");
     expect(html).toContain("Try again");
     expect(html).toContain('data-testid="generation-admission-retry"');
     expect(html).toContain('data-testid="generation-back-to-start"');
@@ -158,14 +163,38 @@ describe("generation route — failure states", () => {
     expect(html).not.toContain("Reload");
   });
 
-  it("temporary-capacity-limit (ANONYMOUS_SESSION_CAPACITY_LIMIT) renders the new-session capacity copy with Try again + Back to start", () => {
+  it("temporary-capacity-limit (ANONYMOUS_SESSION_CAPACITY_LIMIT) renders the new-session capacity copy with Back to start and NO Try again (§17/§47)", () => {
     const html = renderAdmission("ANONYMOUS_SESSION_CAPACITY_LIMIT");
     expect(html).toContain('data-testid="generation-admission-temporary-capacity-limit"');
-    expect(html).toContain("temporarily unable to start a new session");
+    expect(html).toContain("The service is temporarily unable to start a new session.");
     expect(html).toContain("Please try again later");
-    expect(html).toContain('data-testid="generation-admission-retry"');
+    // DEF-086/ADV-36-05 — the mint surface itself is capped: NO Try-again
+    // button (a retry would re-invoke the exact mint the server just capped),
+    // no reload encouragement — Back to start only.
+    expect(html).not.toContain('data-testid="generation-admission-retry"');
+    expect(html).not.toContain(">Try again</button>");
     expect(html).toContain('data-testid="generation-back-to-start"');
     expect(html).not.toContain("Reload");
+  });
+
+  it("DEF-082 — a 401 SESSION_EXPIRED (the REAL durable expired-session answer) renders the session-recovery screen: NO Try again, NO reload, Back to start only", () => {
+    // The auth dependency rejects a genuinely expired/unknown anonymous session
+    // with 401 SESSION_EXPIRED BEFORE any admission layer — mapDemoError maps
+    // it to the SAME session-recovery view as SESSION_EXPIRED_OR_INVALID.
+    const failure = mapDemoError(
+      new ApiError(401, "SESSION_EXPIRED", "credential expired or unknown", null),
+    );
+    expect(failure.kind).toBe("quota");
+    const view = failure.admissionReason!;
+    const html = render({ status: view.status, admission: view });
+    expect(html).toContain('data-testid="generation-admission-session-generation-limit"');
+    expect(html).toContain("Generation session unavailable");
+    expect(html).toContain("Start a new investigation to continue");
+    // No dead-token retry loop: the dead token gets NO Try-again affordance.
+    expect(html).not.toContain('data-testid="generation-admission-retry"');
+    expect(html).not.toContain(">Try again</button>");
+    expect(html).not.toContain("Reload");
+    expect(html).toContain('data-testid="generation-back-to-start"');
   });
 
   it("unknown/absent reasonCode renders the safe GENERIC temporary-capacity fallback (§30) — never a session-limit claim", () => {

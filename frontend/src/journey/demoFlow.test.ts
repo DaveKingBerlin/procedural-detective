@@ -9,6 +9,7 @@ import {
   mapDemoError,
   pollDelayMs,
   runDemo,
+  sessionExpiredView,
   type AdmissionFailureView,
   type DemoFlowServices,
   type DemoProgress,
@@ -1015,7 +1016,10 @@ describe("Phase 36 §13-§17/§29/§32 — reason-aware admission mapping", () =
     },
     ANONYMOUS_SESSION_CAPACITY_LIMIT: {
       status: "temporary-capacity-limit",
-      retryable: true,
+      // DEF-086/ADV-36-05 — the mint/creation surface itself was capped, so a
+      // Try-again would only re-mint against the limit just enforced. NO
+      // retry affordance (Back to start only), cache PRESERVED.
+      retryable: false,
       clearSessionCache: false,
     },
   };
@@ -1065,6 +1069,12 @@ describe("Phase 36 §13-§17/§29/§32 — reason-aware admission mapping", () =
     expect(view.message).toContain("already running");
     expect(view.retryable).toBe(true);
     expect(view.clearSessionCache).toBe(false);
+    // DEF-083/ADV-36-02 — the copy must describe ONLY actions that exist. The
+    // denial surfaces at POST /cases with NO attempt handle, so the message
+    // must NOT promise a navigation back to the active attempt.
+    expect(view.message).not.toContain("Return to the in-progress generation");
+    expect(view.message).not.toContain("Return to");
+    expect(view.message).toContain("Please wait for it to finish before starting another.");
   });
 
   it("GLOBAL_CONCURRENCY_LIMIT is transient busy copy with a safe Try-again retry", () => {
@@ -1083,11 +1093,15 @@ describe("Phase 36 §13-§17/§29/§32 — reason-aware admission mapping", () =
     expect(view.clearSessionCache).toBe(false);
   });
 
-  it("ANONYMOUS_SESSION_CAPACITY_LIMIT is temporary capacity copy, cache PRESERVED", () => {
+  it("ANONYMOUS_SESSION_CAPACITY_LIMIT is temporary capacity copy, cache PRESERVED, NON-retryable (§17/§47)", () => {
     const view = mapAdmissionReason("ANONYMOUS_SESSION_CAPACITY_LIMIT");
     expect(view.status).toBe("temporary-capacity-limit");
-    expect(view.message).toContain("temporarily unable to start a new session");
-    expect(view.retryable).toBe(true);
+    expect(view.heading).toContain("temporarily unable to start a new session");
+    expect(view.message).toContain("Please try again later");
+    // DEF-086/ADV-36-05 — the capped surface is the mint/creation itself: a
+    // Try-again would re-mint against the very limit just enforced, so the
+    // screen must NOT invite one. Back to start only.
+    expect(view.retryable).toBe(false);
     expect(view.clearSessionCache).toBe(false);
   });
 
@@ -1185,6 +1199,59 @@ describe("Phase 36 §13-§17/§29/§32 — reason-aware admission mapping", () =
     // Also proves it does not route into ADMISSION_DENIED handling even at
     // the same HTTP status.
     expect(mapAdmissionReason(null)).toEqual(admissionFallbackView());
+  });
+
+  it("DEF-082 — a 401 SESSION_EXPIRED (the REAL durable expired-session answer) maps to the SAME session-recovery view as SESSION_EXPIRED_OR_INVALID", () => {
+    const failure = mapDemoError(
+      new ApiError(401, "SESSION_EXPIRED", "credential expired or unknown", null),
+    );
+    // `kind` stays "quota" so the route renders the reason-aware recovery view.
+    expect(failure.kind).toBe("quota");
+    expect(failure.admissionReason).toEqual(mapAdmissionReason("SESSION_EXPIRED_OR_INVALID"));
+    expect(failure.admissionReason).toEqual(sessionExpiredView());
+    expect(failure.admissionReason!.status).toBe("session-generation-limit");
+    expect(failure.admissionReason!.heading).toBe("Generation session unavailable");
+    expect(failure.admissionReason!.clearSessionCache).toBe(true);
+    // DEF-082 core: the dead token gets NO "Try again" affordance — a retry
+    // would only re-use the same dead token forever (the old dead-token retry
+    // loop). NO auto-mint: identity is minted only on the next explicit journey.
+    expect(failure.admissionReason!.retryable).toBe(false);
+    expect(failure.message).toBe(failure.admissionReason!.message);
+  });
+
+  it("DEF-082 — a REAL run with a 401 SESSION_EXPIRED on POST /cases surfaces the session-recovery quota view (no dead-token retry)", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => {
+        throw new ApiError(401, "SESSION_EXPIRED", "credential expired or unknown", null);
+      }),
+    });
+    const result = await runDemo("prompt", { services, wait: NO_WAIT });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.failure.kind).toBe("quota");
+    expect(result.failure.admissionReason).toEqual(sessionExpiredView());
+    expect(result.failure.admissionReason!.clearSessionCache).toBe(true);
+    expect(result.failure.admissionReason!.retryable).toBe(false);
+    // The identity is gone — a retry would reuse the dead token forever.
+    expect(result.failure.admissionReason!.heading).toBe("Generation session unavailable");
+  });
+
+  it("DEF-082 — 401 UNAUTHORIZED is a DISTINCT surface (absent/malformed bearer for every token class) and is NOT routed to the session-recovery view", () => {
+    // The auth dependency answers UNAUTHORIZED for absent/malformed headers on
+    // session/creator/playthrough credentials alike — mapping it to a
+    // dead-session recovery could break non-session auth errors. ONLY the
+    // exact-code SESSION_EXPIRED branch maps (DEF-082).
+    const failure = mapDemoError(new ApiError(401, "UNAUTHORIZED", "Request failed", null));
+    expect(failure.kind).toBe("retryable");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.generic);
+    expect(failure.admissionReason).toBeUndefined();
+    // A hostile/legacy prefix of the real code never narrows into the branch.
+    const hostile = mapDemoError(new ApiError(401, "SESSION_EXPIRED_AND_MORE", "x", null));
+    expect(hostile.kind).toBe("retryable");
+    expect(hostile.message).toBe(DEMO_FAILURE_MESSAGES.generic);
+    const wrongStatus = mapDemoError(new ApiError(400, "SESSION_EXPIRED", "x", null));
+    expect(wrongStatus.kind).toBe("retryable");
+    expect(wrongStatus.message).toBe(DEMO_FAILURE_MESSAGES.generic);
   });
 
   it("mapDemoError forwards the backend reasonCode into the admission view for ADMISSION_DENIED", () => {

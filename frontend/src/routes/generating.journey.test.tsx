@@ -404,6 +404,107 @@ describe("Phase 36 — reason-aware admission recovery on the /generating journe
     expect(container.textContent).not.toContain("Reload");
   });
 
+  it("DEF-082 — 401 SESSION_EXPIRED on POST /cases (the REAL durable expired-session path): session-recovery screen, cache cleared, NO mint on the screen, Back to start mints nothing, next explicit journey mints exactly ONE new token B", async () => {
+    const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
+    // Token A minted for the first run; the durable auth dependency answers
+    // 401 SESSION_EXPIRED (NOT a 429 ADMISSION_DENIED envelope) — the answer
+    // the closed SESSION_EXPIRED_OR_INVALID reason can never reach from a
+    // durable deployment. After the cache clears, the supplier produces B.
+    const supplier = vi
+      .fn<(...args: readonly unknown[]) => Promise<{ anonymousSessionToken: string; quotaWindowEndsAt: number }>>()
+      .mockResolvedValueOnce({ anonymousSessionToken: "A", quotaWindowEndsAt: 1e12 })
+      .mockResolvedValueOnce({ anonymousSessionToken: "B", quotaWindowEndsAt: 1e12 });
+
+    const createCase = vi
+      .fn<(...args: readonly unknown[]) => Promise<{
+        caseId: string;
+        generationId: string;
+        generationAttemptId: string;
+        creatorAccessToken: string;
+        status: string;
+        failureCode?: string | null;
+      }>>()
+      .mockRejectedValueOnce(
+        new ApiError(401, "SESSION_EXPIRED", "credential expired or unknown", null),
+      )
+      .mockResolvedValueOnce({
+        caseId: "CASE-2",
+        generationId: "GEN-2",
+        generationAttemptId: "ATT-2",
+        creatorAccessToken: "creator-2",
+        status: "PUBLISHED",
+      });
+
+    mountAdmissionRun({
+      createSession: () => createOrReuseAnonymousSession(supplier),
+      createCase,
+      pollGeneration: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+      createPlaythrough: vi.fn(async () => ({
+        playthroughId: "PT-admission",
+        caseId: "CASE-2",
+        caseVersion: 1,
+        playthroughAccessToken: "pt-token-admission",
+        status: "PLAYING",
+      })),
+    });
+    await settleEffects();
+
+    // Token A minted, POST /cases answered 401 SESSION_EXPIRED -> the dead
+    // identity is cleared. NO mint on the error screen, NO retry affordance
+    // (a retry would reuse the dead token forever — the dead-token retry loop
+    // is gone).
+    expect(supplier).toHaveBeenCalledTimes(1);
+    expect(createCase.mock.calls[0][0]).toBe("A");
+    expect(getCachedAnonymousSession()).toBeNull();
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="generation-admission-session-generation-limit"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("Generation session unavailable");
+    expect(container.textContent).toContain("Start a new investigation to continue");
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).toBeNull();
+    expect(container.textContent).not.toContain("Reload");
+
+    // Back to start navigates to /new and does NOT itself mint anything.
+    const back = container.querySelector<HTMLElement>(
+      'a[data-testid="generation-back-to-start"]',
+    );
+    if (!back) throw new Error("expected Back to start");
+    act(() => {
+      back.click();
+    });
+    await settleEffects();
+    expect(supplier).toHaveBeenCalledTimes(1); // still no mint after Back to start
+
+    // User starts a fresh journey: the cleared cache mints exactly ONE new
+    // session B and POST /cases runs under B — no mint churn, no loop.
+    act(() => {
+      root?.unmount();
+    });
+    mountAdmissionRun({
+      createSession: () => createOrReuseAnonymousSession(supplier),
+      createCase,
+      pollGeneration: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+      createPlaythrough: vi.fn(async () => ({
+        playthroughId: "PT-admission",
+        caseId: "CASE-2",
+        caseVersion: 1,
+        playthroughAccessToken: "pt-token-admission",
+        status: "PLAYING",
+      })),
+    });
+    await settleEffects();
+
+    expect(supplier).toHaveBeenCalledTimes(2); // exactly ONE replacement mint
+    expect(createCase).toHaveBeenCalledTimes(2);
+    expect(createCase.mock.calls[1][0]).toBe("B");
+    expect(container.querySelector('[data-testid="enter-investigation"]')).not.toBeNull();
+  });
+
   it("GLOBAL_CONCURRENCY_LIMIT: PRESERVES the session, renders busy copy with Try again + Back to start", async () => {
     const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
     const { supplier, services } = admissionServices(denial("GLOBAL_CONCURRENCY_LIMIT"), "A");
@@ -442,7 +543,7 @@ describe("Phase 36 — reason-aware admission recovery on the /generating journe
     expect(container.querySelector('[data-testid="generation-admission-retry"]')).not.toBeNull();
   });
 
-  it("ANONYMOUS_SESSION_CAPACITY_LIMIT: the current session stays valid — cache PRESERVED, temporary-capacity copy", async () => {
+  it("ANONYMOUS_SESSION_CAPACITY_LIMIT: the current session stays valid — cache PRESERVED, temporary-capacity copy, NO Try again (§17/§47)", async () => {
     const resetSpy = vi.spyOn(anonymousSessionModule, "resetAnonymousSessionCache");
     const { supplier, services } = admissionServices(
       denial("ANONYMOUS_SESSION_CAPACITY_LIMIT"),
@@ -457,7 +558,15 @@ describe("Phase 36 — reason-aware admission recovery on the /generating journe
     expect(
       container.querySelector('[data-testid="generation-admission-temporary-capacity-limit"]'),
     ).not.toBeNull();
-    expect(container.textContent).toContain("temporarily unable to start a new session");
+    expect(container.textContent).toContain("The service is temporarily unable to start a new session.");
+    // DEF-086/ADV-36-05 — the mint surface itself is capped: NO Try-again
+    // button and the screen NEVER issues a new POST /sessions/anonymous
+    // (the supplier stays at exactly one mint).
+    expect(container.querySelector('[data-testid="generation-admission-retry"]')).toBeNull();
+    const retryCandidates = Array.from(container.querySelectorAll("button")).filter((b) =>
+      b.textContent?.includes("Try again"),
+    );
+    expect(retryCandidates.length).toBe(0);
   });
 
   it("legacy/unknown 429 ADMISSION_DENIED (no reasonCode): safe GENERIC fallback, cache PRESERVED, retryable (§30/§43)", async () => {
