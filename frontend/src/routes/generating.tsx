@@ -71,17 +71,19 @@ import { stageInfoFromPhase, type StageInfo } from "../journey/generationProgres
  * (Phase 36 §13-§17/§29): the backend's closed `reasonCode` selects a
  * recovery screen that either clears an exhausted-session cache
  * (SESSION_GENERATION_LIMIT / SESSION_EXPIRED_OR_INVALID -> "Back to start",
- * no auto-mint, no reload) or PRESERVES a still-valid session and offers
- * "Try again" (session/global concurrency, global window, anonymous-session
- * capacity, unknown/legacy fallback -> the retry reuses the SAME valid
- * session; no new anonymous session is minted). The REAL durable
- * expired-session answer `401 SESSION_EXPIRED` (the auth dependency, before
- * any admission layer) is mapped by runDemo to the SAME session-recovery
- * view (DEF-082) and reaches this exact "Back to start" path. The
- * reload-based recovery of Phase 24 F-2 is REMOVED: a browser reload is not
- * a quota/session reset (Phase 36 §6/§7/§22). A hard refresh (no journey
- * context) shows a friendly "start again" state. No prompts, diagnostics or
- * provider details are ever shown.
+ * no auto-mint, no reload), PRESERVES a still-valid session and offers
+ * "Try again" (session/global concurrency, global window, unknown/legacy
+ * fallback -> the retry reuses the SAME valid session; no new anonymous
+ * session is minted), or PRESERVES the session but offers only "Back to
+ * start" (ANONYMOUS_SESSION_CAPACITY_LIMIT -> a retry would re-mint against
+ * the very limit just enforced, DEF-086). The REAL durable expired-session
+ * answer `401 SESSION_EXPIRED` (the auth dependency, before any admission
+ * layer) is mapped by runDemo to the SAME session-recovery view (DEF-082)
+ * and reaches this exact "Back to start" path. The reload-based recovery of
+ * Phase 24 F-2 is REMOVED: a browser reload is not a quota/session reset
+ * (Phase 36 §6/§7/§22). A hard refresh (no journey context) shows a friendly
+ * "start again" state. No prompts, diagnostics or provider details are ever
+ * shown.
  */
 
 const DEMO_SERVICES: DemoFlowServices = {
@@ -327,9 +329,11 @@ export function GenerationJourney({
           // (clearSessionCache — set exactly for SESSION_GENERATION_LIMIT /
           // SESSION_EXPIRED_OR_INVALID and the REAL durable 401 SESSION_EXPIRED
           // path mapped by mapDemoError, DEF-082). Every transient denial
-          // (session/global concurrency, global window, anonymous-session
-          // capacity, unknown/legacy fallback) PRESERVES the cache so an
-          // explicit "Try again" reuses the same valid session. NO auto-mint,
+          // (session/global concurrency, global window, unknown/legacy
+          // fallback) PRESERVES the cache so an explicit "Try again" reuses
+          // the same valid session. ANONYMOUS_SESSION_CAPACITY_LIMIT also
+          // PRESERVES the cache but renders WITHOUT a Try-again (its retry
+          // would re-mint the capped surface, DEF-086). NO auto-mint,
           // NO auto-retry loop, NO reload — the server stays authoritative.
           const admission =
             result.failure.admissionReason ?? admissionFallbackView();

@@ -214,7 +214,7 @@ export function sessionExpiredView(): AdmissionFailureView {
  *   ANONYMOUS_SESSION_CAPACITY_LIMIT   -> transient session capacity (preserve)
  *   SESSION_EXPIRED_OR_INVALID         -> gone session (clear cache)
  *
- * `TOO_MANY_REQUESTS` is a DISTINCT backend code (per-IP POST /cases budget)
+ * `TOO_MANY_REQUESTS` is a DISTINCT backend code (per-IP/global budgets)
  * and is NEVER routed in here — mapDemoError keeps its own accurate
  * retryable mapping for it (see below). The real durable expired-session
  * answer `401 SESSION_EXPIRED` is also handled in mapDemoError (DEF-082) and
@@ -282,13 +282,17 @@ export function mapAdmissionReason(
       };
     case "ANONYMOUS_SESSION_CAPACITY_LIMIT":
       // New-session creation is capped — the CURRENT session (if any) is
-      // still valid, so the cache is preserved and the user may retry.
+      // still valid, so the cache is preserved. The denial came from the
+      // mint/creation surface itself, so a Try-again would only re-mint
+      // against the very limit just enforced (Phase 36 §15/§17/§47 — no
+      // session-creation-loop encouragement). NON-retryable: ONLY "Back to
+      // start", and the screen NEVER issues POST /sessions/anonymous
+      // (DEF-086/ADV-36-05).
       return {
         status: "temporary-capacity-limit",
-        heading: "Service is temporarily unavailable",
-        message:
-          "The service is temporarily unable to start a new session. Please try again later.",
-        retryable: true,
+        heading: "The service is temporarily unable to start a new session.",
+        message: "Please try again later.",
+        retryable: false,
         clearSessionCache: false,
       };
     default:
@@ -334,11 +338,16 @@ export const DEMO_FAILURE_MESSAGES = Object.freeze({
   // with consumers of the frozen map and is never surfaced by mapDemoError
   // anymore.
   quota: "Too many cases are being generated right now. Wait a few moments, then try again.",
-  // Phase 36 §18 — the per-IP POST /cases budget (429 TOO_MANY_REQUESTS, a
-  // DISTINCT code from ADMISSION_DENIED). Its own accurate retryable copy;
-  // it is never routed into an admission/session state.
+  // Phase 36 §18 — the per-IP/budget 429 TOO_MANY_REQUESTS code (DISTINCT
+  // from ADMISSION_DENIED). It is emitted by FOUR journey surfaces — POST
+  // /cases per-IP generation budget, POST /sessions/anonymous mint budget,
+  // POST /playthroughs creation budget and bridge pairing — so the copy is
+  // STEP-AGNOSTIC and never claims a specific step ("generation requests"
+  // would be false after a successful generation that then hit the
+  // playthrough-creation budget) (DEF-087/ADV-36-06). Never routed into an
+  // admission/session state; the retry semantics stay unchanged.
   tooManyRequests:
-    "Too many generation requests from this location. Please wait before trying again.",
+    "Too many requests from this location. Please wait a moment before trying again.",
   network: "The case service could not be reached. Check your connection, then try again.",
   server: "The case service reported a temporary problem. Please try again.",
   tooSlow: "Generation is taking longer than expected. Please try again.",
@@ -444,10 +453,10 @@ export function mapDemoError(error: unknown): DemoFlowFailure {
         admissionReason,
       };
     }
-    // Phase 36 §18 — 429 TOO_MANY_REQUESTS is the per-IP POST /cases budget,
-    // a DISTINCT code from ADMISSION_DENIED. It is NEVER an admission state
+    // Phase 36 §18 — 429 TOO_MANY_REQUESTS is the per-IP budget code, a
+    // DISTINCT code from ADMISSION_DENIED. It is NEVER an admission state
     // (no reasonCode, no session-cache decision, no session-limit screen) and
-    // stays its own accurate retryable copy.
+    // stays its own accurate retryable copy (DEF-087/ADV-36-06).
     if (error.status === 429 && error.code === "TOO_MANY_REQUESTS") {
       return { kind: "retryable", message: DEMO_FAILURE_MESSAGES.tooManyRequests };
     }
