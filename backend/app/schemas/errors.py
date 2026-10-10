@@ -13,6 +13,14 @@ class ErrorBody(BaseModel):
     details: Optional[dict[str, Any]] = Field(
         default=None, description="Optional structured diagnostic detail."
     )
+    reasonCode: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional CLOSED admission-denial reason token (Phase36 §10). "
+            "Present ONLY on 429 ADMISSION_DENIED envelopes; omitted on every "
+            "other error so non-admission envelopes stay byte-identical."
+        ),
+    )
 
 
 class ErrorResponse(BaseModel):
