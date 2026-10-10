@@ -1,0 +1,1312 @@
+{
+ "case": {
+  "candidates": {
+   "motives": [
+    {
+     "id": "cover_up_embezzlement",
+     "label": "Cover up the €240,000 embezzlement"
+    },
+    {
+     "id": "revenge_for_affair",
+     "label": "Revenge for a suspected affair"
+    },
+    {
+     "id": "robbery_gone_wrong",
+     "label": "Robbery gone wrong"
+    }
+   ],
+   "suspects": [
+    {
+     "id": "anna_karlsson",
+     "name": "Suspect A"
+    },
+    {
+     "id": "michael_carter",
+     "name": "Suspect B"
+    },
+    {
+     "id": "thomas_reed",
+     "name": "Suspect C"
+    }
+   ],
+   "weapons": [
+    {
+     "assetId": "PROP_KITCHEN_KNIFE_01",
+     "id": "kitchen_knife",
+     "name": "Weapon A"
+    },
+    {
+     "assetId": "PROP_LETTER_OPENER_01",
+     "id": "letter_opener",
+     "name": "Weapon B"
+    },
+    {
+     "assetId": "PROP_SCISSORS_01",
+     "id": "scissors",
+     "name": "Weapon C"
+    }
+   ]
+  },
+  "evidence": [
+   {
+    "content": {
+     "entries": [
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:15:10+02:00"
+      }
+     ],
+     "renderType": "TIMELINE",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "last_seen_01",
+    "kind": "witness_observation",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "entries": [
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:18:31+02:00"
+      }
+     ],
+     "renderType": "TIMELINE",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "body_found_01",
+    "kind": "witness_observation",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "entries": [
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:16:50+02:00"
+      }
+     ],
+     "renderType": "TIMELINE",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "noise_heard_01",
+    "kind": "witness_observation",
+    "reliability": "medium",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "entries": [
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:31:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:34:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:37:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:40:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:43:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:46:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:49:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:52:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:55:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:58:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:01:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:04:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:07:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:10:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:13:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:16:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:19:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:22:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:25:40+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:28:40+02:00"
+      }
+     ],
+     "events": [
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:31:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:34:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:37:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:40:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:43:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:46:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:49:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:52:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:55:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:58:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:01:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:04:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:07:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:10:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:13:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:16:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:19:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:22:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:25:40+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:28:40+02:00"
+      }
+     ],
+     "renderType": "ACTIVITY_LOG",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "cctv_thomas_scene_01",
+    "kind": "cctv_observation",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "renderType": "BODY_OBSERVATION",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "alibi_claim_thomas_01",
+    "kind": "suspect_statement",
+    "reliability": "low",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "entries": [
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:30:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:33:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:36:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:39:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:42:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:45:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:48:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:51:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:54:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:57:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:00:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:03:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:06:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:09:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:12:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:15:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:18:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:21:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:24:00+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:27:00+02:00"
+      }
+     ],
+     "events": [
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:30:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:33:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:36:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:39:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:42:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:45:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:48:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:51:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:54:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:57:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:00:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:03:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:06:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:09:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:12:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:15:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:18:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:21:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:24:00+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:27:00+02:00"
+      }
+     ],
+     "renderType": "ACTIVITY_LOG",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "cctv_michael_office_01",
+    "kind": "cctv_observation",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "entries": [
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:29:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:32:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:35:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:38:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:41:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:44:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:47:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:50:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:53:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:56:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:59:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:02:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:05:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:08:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:11:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:14:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:17:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:20:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:23:30+02:00"
+      },
+      {
+       "text": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:26:30+02:00"
+      }
+     ],
+     "events": [
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:29:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:32:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:35:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:38:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:41:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:44:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:47:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:50:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:53:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:56:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T21:59:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:02:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:05:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:08:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:11:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:14:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:17:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:20:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:23:30+02:00"
+      },
+      {
+       "action": "Redacted description for the saved case fixture.",
+       "time": "2026-09-11T22:26:30+02:00"
+      }
+     ],
+     "renderType": "ACTIVITY_LOG",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "cctv_anna_bar_01",
+    "kind": "cctv_observation",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "renderType": "DOCUMENT",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "motive_audit_01",
+    "kind": "financial",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "renderType": "DOCUMENT",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "motive_no_affair_01",
+    "kind": "digital",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "comparison": "Redacted description for the saved case fixture.",
+     "renderType": "FORENSIC_COMPARISON",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "motive_no_robbery_01",
+    "kind": "physical",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "comparison": "Redacted description for the saved case fixture.",
+     "renderType": "FORENSIC_COMPARISON",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "forensic_knife_match_01",
+    "kind": "forensic",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "comparison": "Redacted description for the saved case fixture.",
+     "renderType": "FORENSIC_COMPARISON",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "fingerprint_knife_01",
+    "kind": "forensic",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "comparison": "Redacted description for the saved case fixture.",
+     "renderType": "FORENSIC_COMPARISON",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "forensic_letter_opener_01",
+    "kind": "forensic",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "comparison": "Redacted description for the saved case fixture.",
+     "renderType": "FORENSIC_COMPARISON",
+     "summary": "Redacted description for the saved case fixture."
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "forensic_scissors_01",
+    "kind": "forensic",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "body": "Redacted description for the saved case fixture.",
+     "fromPersonId": "thomas_reed",
+     "renderType": "MESSAGE",
+     "subject": "Subject line",
+     "summary": "Redacted description for the saved case fixture.",
+     "timestamp": "2026-09-11T21:04:00+02:00",
+     "toPersonIds": [
+      "sarah_miller"
+     ]
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "email_thomas_01",
+    "kind": "email",
+    "reliability": "high",
+    "title": "Redacted description for the saved case fixture."
+   },
+   {
+    "content": {
+     "questionType": "OBSERVATION",
+     "renderType": "BODY_OBSERVATION",
+     "speakerName": "Witness",
+     "statement": "I did not notice anything unusual.",
+     "summary": "Redacted description for the saved case fixture.",
+     "witnessId": "emily_reed"
+    },
+    "description": "Redacted description for the saved case fixture.",
+    "evidenceId": "witness_statement_emily_01",
+    "kind": "witness_statement",
+    "reliability": "medium",
+    "title": "Redacted description for the saved case fixture."
+   }
+  ],
+  "metadata": {
+   "difficulty": "medium",
+   "environmentId": "apartment",
+   "source": "generated",
+   "sourceCaseId": "CASE-SanitizedInteraction01",
+   "title": "Victim: N. A. Adair"
+  },
+  "publicCase": {
+   "caseId": "CASE-DqHMXBPUvcAS",
+   "caseVersion": 1,
+   "compositionNotes": [],
+   "evidence": [
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "last_seen_01",
+     "kind": "witness_observation",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "body_found_01",
+     "kind": "witness_observation",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "noise_heard_01",
+     "kind": "witness_observation",
+     "reliability": "medium",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "cctv_thomas_scene_01",
+     "kind": "cctv_observation",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "alibi_claim_thomas_01",
+     "kind": "suspect_statement",
+     "reliability": "low",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "cctv_michael_office_01",
+     "kind": "cctv_observation",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "cctv_anna_bar_01",
+     "kind": "cctv_observation",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "motive_audit_01",
+     "kind": "financial",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "motive_no_affair_01",
+     "kind": "digital",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "motive_no_robbery_01",
+     "kind": "physical",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "forensic_knife_match_01",
+     "kind": "forensic",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "fingerprint_knife_01",
+     "kind": "forensic",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "forensic_letter_opener_01",
+     "kind": "forensic",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "forensic_scissors_01",
+     "kind": "forensic",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "email_thomas_01",
+     "kind": "email",
+     "reliability": "high",
+     "title": "Redacted description for the saved case fixture."
+    },
+    {
+     "description": "Redacted description for the saved case fixture.",
+     "id": "witness_statement_emily_01",
+     "kind": "witness_statement",
+     "reliability": "medium",
+     "title": "Redacted description for the saved case fixture."
+    }
+   ],
+   "locations": [
+    {
+     "locationId": "miller_apartment_kitchen",
+     "name": "Location"
+    },
+    {
+     "locationId": "miller_consulting_office",
+     "name": "Location"
+    },
+    {
+     "locationId": "harbor_view_bar",
+     "name": "Location"
+    }
+   ],
+   "motives": [
+    {
+     "affordances": [
+      "MOTIVE_CANDIDATE"
+     ],
+     "label": "Motive candidate",
+     "motiveId": "cover_up_embezzlement"
+    },
+    {
+     "affordances": [
+      "MOTIVE_CANDIDATE"
+     ],
+     "label": "Motive candidate",
+     "motiveId": "revenge_for_affair"
+    },
+    {
+     "affordances": [
+      "MOTIVE_CANDIDATE"
+     ],
+     "label": "Motive candidate",
+     "motiveId": "robbery_gone_wrong"
+    },
+    {
+     "affordances": [],
+     "label": "Motive candidate",
+     "motiveId": "inheritance_early"
+    }
+   ],
+   "objects": [
+    {
+     "affordances": [
+      "INSPECTABLE",
+      "POTENTIAL_SHARP_WEAPON",
+      "POTENTIAL_WEAPON"
+     ],
+     "assetId": "PROP_KITCHEN_KNIFE_01",
+     "objectId": "kitchen_knife",
+     "subtype": "sharp_weapon"
+    },
+    {
+     "affordances": [
+      "INSPECTABLE",
+      "POTENTIAL_SHARP_WEAPON",
+      "POTENTIAL_WEAPON"
+     ],
+     "assetId": "PROP_LETTER_OPENER_01",
+     "objectId": "letter_opener",
+     "subtype": "sharp_weapon"
+    },
+    {
+     "affordances": [
+      "INSPECTABLE",
+      "POTENTIAL_SHARP_WEAPON",
+      "POTENTIAL_WEAPON"
+     ],
+     "assetId": "PROP_SCISSORS_01",
+     "objectId": "scissors",
+     "subtype": "sharp_weapon"
+    },
+    {
+     "affordances": [
+      "INSPECTABLE"
+     ],
+     "assetId": "PROP_VASE_01",
+     "objectId": "vase_01"
+    },
+    {
+     "affordances": [
+      "INSPECTABLE"
+     ],
+     "assetId": "PROP_LAPTOP_01",
+     "objectId": "apartment_laptop",
+     "subtype": "electronics"
+    },
+    {
+     "affordances": [
+      "INSPECTABLE"
+     ],
+     "assetId": "PROP_TABLE_01",
+     "objectId": "apartment_table",
+     "subtype": "furniture"
+    },
+    {
+     "affordances": [
+      "INSPECTABLE"
+     ],
+     "assetId": "DOOR_APARTMENT_01",
+     "objectId": "apartment_door",
+     "subtype": "door"
+    },
+    {
+     "affordances": [
+      "INSPECTABLE"
+     ],
+     "assetId": "PROP_LAMP_01",
+     "objectId": "apartment_lamp",
+     "subtype": "light"
+    },
+    {
+     "affordances": [
+      "INSPECTABLE"
+     ],
+     "assetId": "PROP_BODY_PLACEHOLDER_01",
+     "objectId": "victim_body_placeholder",
+     "subtype": "victim_body"
+    }
+   ],
+   "persons": [
+    {
+     "affordances": [
+      "VISIBLE_CHARACTER"
+     ],
+     "name": "Victim",
+     "personId": "sarah_miller",
+     "role": "victim"
+    },
+    {
+     "affordances": [
+      "SUSPECT_ELIGIBLE",
+      "VISIBLE_CHARACTER"
+     ],
+     "name": "Suspect C",
+     "personId": "thomas_reed",
+     "role": "suspect"
+    },
+    {
+     "affordances": [
+      "SUSPECT_ELIGIBLE",
+      "VISIBLE_CHARACTER"
+     ],
+     "name": "Suspect B",
+     "personId": "michael_carter",
+     "role": "suspect"
+    },
+    {
+     "affordances": [
+      "SUSPECT_ELIGIBLE",
+      "VISIBLE_CHARACTER"
+     ],
+     "name": "Suspect A",
+     "personId": "anna_karlsson",
+     "role": "suspect"
+    },
+    {
+     "affordances": [
+      "VISIBLE_CHARACTER"
+     ],
+     "name": "Witness",
+     "personId": "emily_reed",
+     "role": "witness"
+    },
+    {
+     "affordances": [
+      "VISIBLE_CHARACTER"
+     ],
+     "name": "Person david_kim",
+     "personId": "david_kim",
+     "role": "family"
+    }
+   ],
+   "scene": {
+    "environmentId": "apartment",
+    "environmentVersion": 1,
+    "locationId": "miller_apartment_kitchen",
+    "name": "Crime Scene - Room"
+   },
+   "title": "Victim: N. A. Adair",
+   "travelRules": [
+    {
+     "fromLocationId": "miller_consulting_office",
+     "toLocationId": "miller_apartment_kitchen",
+     "travelTimeSeconds": 1200
+    },
+    {
+     "fromLocationId": "harbor_view_bar",
+     "toLocationId": "miller_apartment_kitchen",
+     "travelTimeSeconds": 2700
+    }
+   ],
+   "worldGraph": {
+    "locations": [
+     {
+      "locationId": "miller_apartment_kitchen",
+      "rooms": [
+       "kitchen"
+      ],
+      "template": "kitchen_template"
+     },
+     {
+      "locationId": "miller_consulting_office",
+      "rooms": [
+       "office"
+      ],
+      "template": "office_template"
+     },
+     {
+      "locationId": "harbor_view_bar",
+      "rooms": [
+       "bar"
+      ],
+      "template": "bar_template"
+     }
+    ],
+    "placements": [
+     {
+      "anchor": "kitchen_counter",
+      "assetId": "PROP_KITCHEN_KNIFE_01",
+      "evidenceId": null,
+      "interaction": "inspect",
+      "locationId": "miller_apartment_kitchen",
+      "objectId": "kitchen_knife"
+     },
+     {
+      "anchor": "office_desk_01",
+      "assetId": "PROP_LETTER_OPENER_01",
+      "evidenceId": null,
+      "interaction": "inspect",
+      "locationId": "miller_consulting_office",
+      "objectId": "letter_opener"
+     },
+     {
+      "anchor": "bedside_table",
+      "assetId": "PROP_SCISSORS_01",
+      "evidenceId": null,
+      "interaction": "inspect",
+      "locationId": "miller_consulting_office",
+      "objectId": "scissors"
+     },
+     {
+      "anchor": "dining_table",
+      "assetId": "PROP_VASE_01",
+      "evidenceId": null,
+      "interaction": "",
+      "locationId": "miller_apartment_kitchen",
+      "objectId": "vase_01"
+     },
+     {
+      "anchor": "desk_main",
+      "assetId": "PROP_LAPTOP_01",
+      "evidenceId": null,
+      "interaction": "read",
+      "locationId": "miller_apartment_kitchen",
+      "objectId": "apartment_laptop"
+     },
+     {
+      "anchor": "dining_table",
+      "assetId": "PROP_TABLE_01",
+      "evidenceId": null,
+      "interaction": "",
+      "locationId": "miller_apartment_kitchen",
+      "objectId": "apartment_table"
+     },
+     {
+      "anchor": "hall_wall_01",
+      "assetId": "DOOR_APARTMENT_01",
+      "evidenceId": null,
+      "interaction": "",
+      "locationId": "miller_apartment_kitchen",
+      "objectId": "apartment_door"
+     },
+     {
+      "anchor": "shelf_01",
+      "assetId": "PROP_LAMP_01",
+      "evidenceId": null,
+      "interaction": "",
+      "locationId": "miller_apartment_kitchen",
+      "objectId": "apartment_lamp"
+     },
+     {
+      "anchor": "floor_body_position",
+      "assetId": "PROP_BODY_PLACEHOLDER_01",
+      "evidenceId": null,
+      "interaction": "",
+      "locationId": "miller_apartment_kitchen",
+      "objectId": "victim_body_placeholder"
+     }
+    ]
+   }
+  },
+  "replayTruth": {
+   "accusationToleranceSeconds": 300,
+   "crimeTime": "2026-09-11T22:17:00+02:00",
+   "motiveId": "cover_up_embezzlement",
+   "motiveLabel": "Motive candidate",
+   "murdererId": "thomas_reed",
+   "murdererName": "Suspect C",
+   "weaponId": "kitchen_knife",
+   "weaponName": "Weapon A"
+  },
+  "scene": {
+   "environmentId": "apartment",
+   "environmentVersion": 1,
+   "location": {
+    "locationId": "miller_apartment_kitchen",
+    "name": "Crime Scene - Room"
+   },
+   "worldObjects": [
+    {
+     "anchor": "hall_wall_01",
+     "assetId": "DOOR_APARTMENT_01",
+     "assetType": "door",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "",
+     "locationId": "miller_apartment_kitchen",
+     "objectId": "apartment_door",
+     "read": false,
+     "subtype": "door"
+    },
+    {
+     "anchor": "shelf_01",
+     "assetId": "PROP_LAMP_01",
+     "assetType": "light",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "",
+     "locationId": "miller_apartment_kitchen",
+     "objectId": "apartment_lamp",
+     "read": false,
+     "subtype": "light"
+    },
+    {
+     "anchor": "desk_main",
+     "assetId": "PROP_LAPTOP_01",
+     "assetType": "electronics",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "read",
+     "locationId": "miller_apartment_kitchen",
+     "objectId": "apartment_laptop",
+     "read": false,
+     "subtype": "electronics"
+    },
+    {
+     "anchor": "dining_table",
+     "assetId": "PROP_TABLE_01",
+     "assetType": "furniture",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "",
+     "locationId": "miller_apartment_kitchen",
+     "objectId": "apartment_table",
+     "read": false,
+     "subtype": "furniture"
+    },
+    {
+     "anchor": "kitchen_counter",
+     "assetId": "PROP_KITCHEN_KNIFE_01",
+     "assetType": "sharp_weapon",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "inspect",
+     "locationId": "miller_apartment_kitchen",
+     "objectId": "kitchen_knife",
+     "read": false,
+     "subtype": "sharp_weapon"
+    },
+    {
+     "anchor": "office_desk_01",
+     "assetId": "PROP_LETTER_OPENER_01",
+     "assetType": "sharp_weapon",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "inspect",
+     "locationId": "miller_consulting_office",
+     "objectId": "letter_opener",
+     "read": false,
+     "subtype": "sharp_weapon"
+    },
+    {
+     "anchor": "bedside_table",
+     "assetId": "PROP_SCISSORS_01",
+     "assetType": "sharp_weapon",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "inspect",
+     "locationId": "miller_consulting_office",
+     "objectId": "scissors",
+     "read": false,
+     "subtype": "sharp_weapon"
+    },
+    {
+     "anchor": "dining_table",
+     "assetId": "PROP_VASE_01",
+     "assetType": "prop",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "",
+     "locationId": "miller_apartment_kitchen",
+     "objectId": "vase_01",
+     "read": false,
+     "subtype": null
+    },
+    {
+     "anchor": "floor_body_position",
+     "assetId": "PROP_BODY_PLACEHOLDER_01",
+     "assetType": "victim_body",
+     "discovered": false,
+     "evidenceId": null,
+     "interaction": "",
+     "locationId": "miller_apartment_kitchen",
+     "objectId": "victim_body_placeholder",
+     "read": false,
+     "subtype": "victim_body"
+    }
+   ]
+  },
+  "witnesses": [
+   {
+    "displayName": "Witness",
+    "presence": "REMOTE_STATEMENT",
+    "sceneObjectId": null,
+    "witnessId": "emily_reed"
+   }
+  ]
+ },
+ "exportedAt": "2026-10-09T18:15:10Z",
+ "format": "procedural-detective-case",
+ "formatVersion": 1
+}
