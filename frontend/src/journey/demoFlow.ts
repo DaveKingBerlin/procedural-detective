@@ -28,7 +28,13 @@ import type {
  *
  * Failure handling (each with a distinct, safe, player-facing message):
  *  - generation FAILED            -> { kind: "failed" }
- *  - 429 ADMISSION_DENIED quota   -> { kind: "quota" }
+ *  - 429 ADMISSION_DENIED quota   -> { kind: "quota", admissionReason: <view> }
+ *    (Phase 36 — the view is reason-aware: an exhausted session, an expired
+ *    session, session concurrency, global concurrency, the global rolling
+ *    window and anonymous-session capacity each map to their own
+ *    recovery screen; a legacy/no-reason envelope falls back to the
+ *    conservative retryable temporary-capacity view without ever assuming
+ *    session exhaustion)
  *  - network/timeout/server error -> { kind: "retryable" }
  * plus a bounded-retry exhaustion -> retryable. The caller offers a Retry
  * action that simply re-runs runDemo.
@@ -86,9 +92,174 @@ export type DemoFailureKind =
   | "retryable"
   | "safetyLimit";
 
+/**
+ * Phase 36 §29 — the CLOSED reason-aware admission-denial view surface.
+ *
+ * On a 429 ADMISSION_DENIED the journey no longer reduces the denial to a
+ * single generic `kind:"quota"` screen. The backend's closed `reasonCode`
+ * (backend/app/generation/admission.py::AdmissionReasonCode) selects the
+ * player-facing recovery view through {@link mapAdmissionReason}; the route
+ * renders by `status` and acts on `clearSessionCache` / `retryable` only.
+ *
+ * DECISION (documented, Phase36 §8/§29): `DemoFlowFailure` KEEPS
+ * `kind:"quota"` and GAINS a nullable `admissionReason` field alongside it,
+ * so every old `kind:"quota"` consumer keeps compiling and the generating
+ * route renders by the reason-aware view. The status vocabulary mirrors the
+ * phase's conceptual union; exact names are the repository-style
+ * kebab-case statuses used by the route.
+ */
+export type AdmissionFailureStatus =
+  | "session-generation-limit"
+  | "session-concurrency-limit"
+  | "global-concurrency-limit"
+  | "global-window-limit"
+  | "temporary-capacity-limit";
+
+/** One fully-resolved admission-denial recovery view (pure data — no DOM). */
+export interface AdmissionFailureView {
+  status: AdmissionFailureStatus;
+  heading: string;
+  message: string;
+  /**
+   * true -> the recovery screen may offer a "Try again" action that re-runs
+   * the journey with the SAME (valid, preserved) anonymous session. false ->
+   * only "Back to start" (a fresh session is only ever minted on the NEXT
+   * explicit user journey start — never on the error screen).
+   */
+  retryable: boolean;
+  /**
+   * true -> the anonymous-session cache MUST be cleared (the session identity
+   * is exhausted/gone). false -> the cache is PRESERVED (the current session
+   * stays valid for a retry). This is the ONLY input the route uses to decide
+   * whether to call resetAnonymousSessionCache().
+   */
+  clearSessionCache: boolean;
+}
+
 export interface DemoFlowFailure {
   kind: DemoFailureKind;
   message: string;
+  /**
+   * Phase 36 — present ONLY for `kind:"quota"` (ADMISSION_DENIED): the
+   * reason-aware recovery view. null/absent for every other failure and for
+   * a legacy ADMISSION_DENIED envelope without a reasonCode. Backward
+   * compatible: every pre-36 consumer of `{kind,message}` stays intact.
+   */
+  admissionReason?: AdmissionFailureView | null;
+}
+
+/**
+ * Phase 36 §30 — conservative fallback when the backend sends NO usable
+ * reason (absent/unknown/legacy reasonCode). GENERIC temporary-capacity: the
+ * session cache is PRESERVED (we never assume session exhaustion from an
+ * unknown denial) and the user may retry with the same valid session.
+ */
+export function admissionFallbackView(): AdmissionFailureView {
+  return {
+    status: "temporary-capacity-limit",
+    heading: "Generation is temporarily unavailable",
+    message: "Generation is temporarily unavailable. Please try again.",
+    retryable: true,
+    clearSessionCache: false,
+  };
+}
+
+/**
+ * Phase 36 §13-§17/§29/§32 — map the backend's CLOSED admission reasonCode to
+ * the reason-aware recovery view. PURE and provider-agnostic: there is NO
+ * provider branch (fake/ollama/bridge/frontier all flow through this exact
+ * mapping), and the mapper never touches the session cache itself — it only
+ * reports whether the caller should clear it.
+ *
+ * EXACT-STRING matching only (repo rule): a hostile/legacy prefix or substring
+ * variant of a real code can never narrow into a reason bucket — it falls to
+ * the safe generic fallback. The backend's vocabulary (admission.py):
+ *
+ *   SESSION_GENERATION_LIMIT           -> exhausted session (clear cache)
+ *   SESSION_CONCURRENCY_LIMIT          -> already-running attempt (preserve)
+ *   GLOBAL_CONCURRENCY_LIMIT           -> transient busy (preserve)
+ *   GLOBAL_GENERATION_WINDOW_LIMIT     -> transient window cap (preserve)
+ *   ANONYMOUS_SESSION_CAPACITY_LIMIT   -> transient session capacity (preserve)
+ *   SESSION_EXPIRED_OR_INVALID         -> gone session (clear cache)
+ *
+ * `TOO_MANY_REQUESTS` is a DISTINCT backend code (per-IP POST /cases budget)
+ * and is NEVER routed in here — mapDemoError keeps its own accurate
+ * retryable mapping for it (see below).
+ */
+export function mapAdmissionReason(
+  reasonCode: string | null | undefined,
+): AdmissionFailureView {
+  switch (reasonCode) {
+    case "SESSION_GENERATION_LIMIT":
+      // The CURRENT session has exhausted its per-session generation budget —
+      // clear the cache, tell the user to start a new investigation. Recovery
+      // is "Back to start" only, and a fresh session is minted ONLY when the
+      // user explicitly starts that next journey (never on this screen).
+      return {
+        status: "session-generation-limit",
+        heading: "Generation limit reached",
+        message:
+          "This investigation session has used its available generation attempts. Start a new investigation to continue.",
+        retryable: false,
+        clearSessionCache: true,
+      };
+    case "SESSION_EXPIRED_OR_INVALID":
+      // The session is gone (expired/unknown) rather than exhausted, but the
+      // recovery is the SAME session-recovery status: clear the stale cache
+      // and let the user start a fresh journey. Same status as generation
+      // limit so the route shares one accurate recovery view.
+      return {
+        status: "session-generation-limit",
+        heading: "Generation session unavailable",
+        message:
+          "This investigation session is no longer available. Start a new investigation to continue.",
+        retryable: false,
+        clearSessionCache: true,
+      };
+    case "SESSION_CONCURRENCY_LIMIT":
+      // A generation is already active for this session. Do NOT clear the
+      // session (it is valid); explain the active generation. A safe SPA
+      // Retry may re-run the journey under the same preserved session.
+      return {
+        status: "session-concurrency-limit",
+        heading: "Generation already in progress",
+        message:
+          "Another case generation is already running for this session. Return to the in-progress generation or try again.",
+        retryable: true,
+        clearSessionCache: false,
+      };
+    case "GLOBAL_CONCURRENCY_LIMIT":
+      return {
+        status: "global-concurrency-limit",
+        heading: "Generation service is busy",
+        message:
+          "The service is currently generating other cases. Please try again shortly.",
+        retryable: true,
+        clearSessionCache: false,
+      };
+    case "GLOBAL_GENERATION_WINDOW_LIMIT":
+      return {
+        status: "global-window-limit",
+        heading: "Generation capacity is temporarily exhausted",
+        message: "Please try again shortly.",
+        retryable: true,
+        clearSessionCache: false,
+      };
+    case "ANONYMOUS_SESSION_CAPACITY_LIMIT":
+      // New-session creation is capped — the CURRENT session (if any) is
+      // still valid, so the cache is preserved and the user may retry.
+      return {
+        status: "temporary-capacity-limit",
+        heading: "Service is temporarily unavailable",
+        message:
+          "The service is temporarily unable to start a new session. Please try again later.",
+        retryable: true,
+        clearSessionCache: false,
+      };
+    default:
+      // null / absent / unknown / legacy reasonCode -> safe generic fallback.
+      return admissionFallbackView();
+  }
 }
 
 export type DemoFlowResult =
@@ -122,7 +293,17 @@ export const DEMO_FAILURE_MESSAGES = Object.freeze({
   deadline: "Generation exceeded its time budget. Please try again.",
   providerTimeout: "The AI provider took too long to respond. Please try again.",
   providerUnavailable: "The AI generation service is currently unavailable. Please try again.",
+  // LEGACY (Phase 36): pre-reason-aware generic ADMISSION_DENIED copy. The
+  // reason-aware path (mapAdmissionReason) now provides the per-reason copy
+  // for `kind:"quota"`; this key is retained ONLY for backward compatibility
+  // with consumers of the frozen map and is never surfaced by mapDemoError
+  // anymore.
   quota: "Too many cases are being generated right now. Wait a few moments, then try again.",
+  // Phase 36 §18 — the per-IP POST /cases budget (429 TOO_MANY_REQUESTS, a
+  // DISTINCT code from ADMISSION_DENIED). Its own accurate retryable copy;
+  // it is never routed into an admission/session state.
+  tooManyRequests:
+    "Too many generation requests from this location. Please wait before trying again.",
   network: "The case service could not be reached. Check your connection, then try again.",
   server: "The case service reported a temporary problem. Please try again.",
   tooSlow: "Generation is taking longer than expected. Please try again.",
@@ -218,7 +399,22 @@ export interface RunDemoOptions {
 export function mapDemoError(error: unknown): DemoFlowFailure {
   if (error instanceof ApiError) {
     if (error.status === 429 && error.code === "ADMISSION_DENIED") {
-      return { kind: "quota", message: DEMO_FAILURE_MESSAGES.quota };
+      // Phase 36 — reason-aware admission mapping. `kind` stays "quota" so
+      // every pre-36 consumer keeps compiling; the reason-aware recovery view
+      // travels in `admissionReason`. The route renders by that view.
+      const admissionReason = mapAdmissionReason(error.reasonCode);
+      return {
+        kind: "quota",
+        message: admissionReason.message,
+        admissionReason,
+      };
+    }
+    // Phase 36 §18 — 429 TOO_MANY_REQUESTS is the per-IP POST /cases budget,
+    // a DISTINCT code from ADMISSION_DENIED. It is NEVER an admission state
+    // (no reasonCode, no session-cache decision, no session-limit screen) and
+    // stays its own accurate retryable copy.
+    if (error.status === 429 && error.code === "TOO_MANY_REQUESTS") {
+      return { kind: "retryable", message: DEMO_FAILURE_MESSAGES.tooManyRequests };
     }
     // Phase 25 — explicit-selection rejections. The backend rejects an
     // unknown provider id with INVALID_GENERATION_PROVIDER and an explicitly
