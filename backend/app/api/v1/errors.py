@@ -33,6 +33,8 @@ from app.persistence.store import (
 )
 from app.services.generation import (
     AdmissionDeniedError,
+    AdmissionReasonCode,
+    DEFAULT_ADMISSION_REASON_CODE,
     EnvironmentHintError,
     GenerationServiceError,
     IdentifierConflict,
@@ -80,11 +82,23 @@ def map_service_error(exc: Exception) -> HTTPException:
         # SANITIZED: the denial reason may carry quota internals — never echo.
         # The ONLY admission detail surfaced is the CLOSED safe ``reasonCode``
         # (Phase36 §10/§11); the message stays the sanitized generic.
+        #
+        # DEF-084 — the CLOSED vocabulary is enforced HERE at the sanitizing
+        # boundary: ``exc.reason_code`` must be a member of
+        # ``AdmissionReasonCode``. A defensive/legacy/out-of-tree raise that
+        # smuggled an arbitrary string must NEVER leak it into the public
+        # envelope — fall back to the conservative safe default
+        # (``DEFAULT_ADMISSION_REASON_CODE`` = GLOBAL_GENERATION_WINDOW_LIMIT,
+        # the retryable temporary-capacity fallback, Phase36 §30).
+        try:
+            reason_code = AdmissionReasonCode(exc.reason_code)
+        except (TypeError, ValueError):
+            reason_code = DEFAULT_ADMISSION_REASON_CODE
         return http_error(
             429,
             "ADMISSION_DENIED",
             "Generation capacity exhausted",
-            reasonCode=exc.reason_code,
+            reasonCode=reason_code.value,
         )
     if isinstance(exc, InvalidFrontierConfigError):
         # Phase 30 — an invalid/missing BYOK frontier provider/key/model, or a

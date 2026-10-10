@@ -196,11 +196,18 @@ class AdmissionDeniedError(GenerationServiceError):
         *,
         reason_code: AdmissionReasonCode | str = DEFAULT_ADMISSION_REASON_CODE,
     ) -> None:
-        self.reason_code = (
-            reason_code.value
-            if isinstance(reason_code, AdmissionReasonCode)
-            else str(reason_code)
-        )
+        # DEF-084 defense-in-depth: normalize ANY non-member value to the
+        # conservative default at construction so an out-of-tree raise can
+        # never smuggle an arbitrary string into the envelope. Lenient by
+        # design — never raises (the ``map_service_error`` membership check
+        # is the authoritative guard).
+        if isinstance(reason_code, AdmissionReasonCode):
+            self.reason_code = reason_code.value
+        else:
+            try:
+                self.reason_code = AdmissionReasonCode(reason_code).value
+            except (TypeError, ValueError):
+                self.reason_code = DEFAULT_ADMISSION_REASON_CODE.value
         super().__init__(message)
 
 

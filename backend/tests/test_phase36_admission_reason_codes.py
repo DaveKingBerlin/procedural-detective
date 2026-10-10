@@ -627,6 +627,38 @@ def test_map_service_error_unknown_reason_falls_back_conservative():
     )
 
 
+def test_map_service_error_enforces_closed_reason_vocabulary():
+    """DEF-084 — the CLOSED reasonCode vocabulary is enforced at the API
+    boundary: an out-of-vocabulary string is sanitized to the conservative
+    default (GLOBAL_GENERATION_WINDOW_LIMIT) and NEVER reaches the envelope,
+    while a real enum member is preserved exactly."""
+    from app.api.v1.errors import map_service_error
+    from app.services.generation import AdmissionDeniedError
+
+    # A defensive/legacy/out-of-tree raise with a NON-closed token.
+    exc = AdmissionDeniedError("x", reason_code="NOT_A_CLOSED_TOKEN")
+    http_exc = map_service_error(exc)
+    assert http_exc.status_code == 429
+    assert http_exc.detail["code"] == "ADMISSION_DENIED"
+    assert http_exc.detail["reasonCode"] == "GLOBAL_GENERATION_WINDOW_LIMIT"
+    assert "NOT_A_CLOSED_TOKEN" not in repr(http_exc.detail)
+
+    # The map_service_error guard is AUTHORITATIVE even when the error was
+    # mutated after construction (bypassing __init__ normalization).
+    mutated = AdmissionDeniedError("x")
+    mutated.reason_code = "NOT_A_CLOSED_TOKEN"
+    http_mutated = map_service_error(mutated)
+    assert http_mutated.detail["reasonCode"] == "GLOBAL_GENERATION_WINDOW_LIMIT"
+    assert "NOT_A_CLOSED_TOKEN" not in repr(http_mutated.detail)
+
+    # A normal enum member is preserved exactly.
+    ok = AdmissionDeniedError(
+        "x", reason_code=AdmissionReasonCode.SESSION_GENERATION_LIMIT
+    )
+    http_ok = map_service_error(ok)
+    assert http_ok.detail["reasonCode"] == "SESSION_GENERATION_LIMIT"
+
+
 def test_api_session_generation_limit_envelope(store, database_url):
     """POST /cases beyond the per-session window answers the FULL sanitized
     envelope with the exact SESSION_GENERATION_LIMIT reasonCode and no secret
