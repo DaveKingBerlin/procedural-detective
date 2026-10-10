@@ -890,6 +890,56 @@ def _evidence_gap_facts(
     )
     notes.append(f"d_ev_fp: canonical OBJECT_CONTAINS_FINGERPRINT on {weapon_id} for {murderer_id}")
 
+    # Phase35 witness completeness — the DRIVER is the earliest authoritative
+    # layer for local-model generation (it OWNS the complete evidence algebra;
+    # the model's raw evidence propositions are never copied). Every public
+    # role=='witness' person must be interviewable with a usable canonical
+    # witness statement (goldens each carry exactly this pattern; Phase35 §8/§36
+    # and the Phase35 case-quality validator ``WITNESS_STATEMENT_MISSING`` gate
+    # require it). The fact is a ``witness_statement`` attributed to the witness
+    # (WITNESS_CLAIMS proposition person_id + speakerName — both the canonical
+    # attribution signals of ``app.domain.witness.witness_attributed_to``) with
+    # a non-empty NEUTRAL statement text. WITNESS_CLAIMS is NOT consumed by any
+    # Phase 3 deduction rule (golden comment), so the solver signature is
+    # byte-identical; the fact is real discoverable player-visible evidence.
+    for witness in sorted(
+        (
+            p
+            for p in (getattr(public, "persons", ()) or ())
+            if getattr(p, "role", None) == "witness"
+        ),
+        key=lambda p: str(getattr(p, "person_id", "") or ""),
+    ):
+        wid = getattr(witness, "person_id", None)
+        wname = getattr(witness, "name", "") or wid or "witness"
+        if not wid:
+            continue
+        eid = f"d_ev_witness_{normalize_identity(wid) or 'witness'}"
+        if any(str(getattr(e, "id", "")) == eid for e in extras):
+            continue
+        from app.generation.schemas import EvidenceSpec as _CanonicalEvidenceSpec
+
+        extras.append(
+            _CanonicalEvidenceSpec(
+                id=eid,
+                kind="witness_statement",
+                propositions=(_canonical_prop("WITNESS_CLAIMS", person_id=wid),),
+                source_ref={"kind": "record", "sourceId": f"record_{eid}"},
+                reliability="high",
+                presentation={
+                    "title": "Witness statement",
+                    "description": f"{wname} recounted the course of the evening.",
+                    "speakerName": str(wname),
+                    "statement": (
+                        "I was nearby during the evening and noticed a few "
+                        "things that did not sit right."
+                    ),
+                },
+                discoverable=True,
+            )
+        )
+        notes.append(f"{eid}: canonical witness statement for {wid}")
+
     if travel_notes:
         notes.append("; ".join(travel_notes))
     notes.append(

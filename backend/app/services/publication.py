@@ -254,11 +254,28 @@ def public_case_dict_from_payload(
     def _persons() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for person in draft.get("persons") or ():
+            # Phase35 — PUBLIC-ROLE TRUTH-ISOLATION GUARD (defense-in-depth).
+            # The public DTO must NEVER emit a pre-reveal truth-bearing role:
+            # ``role == "murderer"`` or any other token OUTSIDE the closed
+            # public role vocabulary (``victim|suspect|witness|family|other``)
+            # is BLOCKED here (raise) — never silently renamed, never served.
+            # The Phase35 quality validator prevents such a payload from ever
+            # being published; this mapper is the READ-TIME backstop for a
+            # crafted/tampered ``published_versions`` row.
+            from app.generation.case_quality import PUBLIC_ROLE_VOCABULARY
+
+            role = person.get("role")
+            if role not in PUBLIC_ROLE_VOCABULARY:
+                raise ValueError(
+                    "public person role is outside the closed pre-reveal "
+                    "vocabulary (victim|suspect|witness|family|other); "
+                    "refusing to project a truth-bearing public role"
+                )
             out.append(
                 {
                     "personId": person.get("person_id"),
                     "name": person.get("name"),
-                    "role": person.get("role"),
+                    "role": role,
                     "affordances": sorted(person.get("affordances") or ()),
                 }
             )
