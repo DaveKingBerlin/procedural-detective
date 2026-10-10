@@ -1199,7 +1199,42 @@ def schema_byte_length_for_stage_output(stage_value: str) -> int | None:
     return len(canonical_schema_bytes(schema))
 
 
-# --- shared template fragments ---------------------------------------------
+# --------------------------------------------------------------------------- #
+# Phase35 — compact CASE QUALITY RULES (provider-neutral, Ollama-friendly).
+# --------------------------------------------------------------------------- #
+# The deterministic Phase35 quality contract (phase35-Fix-GCQ.md §21) rendered
+# for every persons/evidence-bearing stage. It is SHORT on purpose (local
+# Ollama models must not be crowded out) and provider-neutral (the same block
+# travels to Ollama and Frontier). It mirrors exactly the deterministic rules
+# in ``app.generation.case_quality`` — guidance only; the deterministic
+# validator stays the sole acceptance authority. Never a full golden savegame.
+CASE_QUALITY_RULES = (
+    "CASE QUALITY RULES (deterministic, validated after every pass):\n"
+    "- The victim must never appear in suspect candidates (give the victim "
+    "ONLY the VISIBLE_CHARACTER affordance, never SUSPECT_ELIGIBLE).\n"
+    "- Witnesses must never appear in suspect candidates (witnesses keep ONLY "
+    "the VISIBLE_CHARACTER affordance, never SUSPECT_ELIGIBLE).\n"
+    "- The true murderer must remain publicly an ordinary suspect before "
+    "reveal: public person role is ONE exact token of "
+    "victim|suspect|witness|family|other — NEVER 'murderer', NEVER a truth "
+    "label.\n"
+    "- The murderer must be one of the accuseable suspect candidates (give "
+    "the murderer SUSPECT_ELIGIBLE exactly like every other suspect).\n"
+    "- Every playable witness must have usable statement content: for each "
+    "role 'witness' person provide at least one evidence item of kind "
+    "witness_statement (with a non-empty statement, a speakerName that matches "
+    "the witness name, and a WITNESS_CLAIMS proposition referencing that "
+    "witness personId).\n"
+    "- Every referenced person/evidence/weapon/motive/object/location ID must "
+    "resolve to a declared value.\n"
+    "- Do not expose THE TRUTH in public role labels or public descriptions.\n"
+    "- Produce only fields allowed by the requested schema."
+)
+
+
+# --------------------------------------------------------------------------- #
+# shared template fragments
+# --------------------------------------------------------------------------- #
 
 _NO_INTERNALS = (
     "NEVER output hidden truth, solver proof, secrets, credentials, database "
@@ -1710,6 +1745,7 @@ CASE_PEOPLE_PROMPT_v1 = (
     "Return ONLY the JSON object for this stage with this EXACT schema:\n"
     + schema_contract("case_people")
     + _CASE_FIELD_RULES
+    + "\n\n" + CASE_QUALITY_RULES
     + "\n\nSanitized user prompt:\n__PROMPT__\n\n"
     "LOCKED user constraints (MUST be respected EXACTLY - never change a "
     "locked value):\n__LOCKED__\n\n"
@@ -1769,6 +1805,7 @@ EVIDENCE_PROMPT_v1 = (
     "Return ONLY the JSON object for this stage with this EXACT schema:\n"
     + schema_contract("evidence")
     + _EVIDENCE_FIELD_RULES
+    + "\n\n" + CASE_QUALITY_RULES
     + _EVIDENCE_DEDUCTION_CONTRACT
     + "\n\nSanitized user prompt:\n__PROMPT__\n\n"
     "LOCKED user constraints:\n__LOCKED__\n\n"
@@ -1858,6 +1895,7 @@ REPAIR_PROMPT_v1 = (
     + schema_contract("full_draft")
     + "\n\n__PREVIOUS_DRAFT__\n\n"
     "SANITIZED validation issues to fix:\n__ISSUES__\n\n"
+    + "\n\n" + CASE_QUALITY_RULES
     + _SCOPE_AND_WITNESS_TEXT
     + "\n\n"
     + _NO_INTERNALS
@@ -2772,6 +2810,7 @@ __all__ = [
     "ASSET_SPEC_PROMPT_v1",
     "ASSET_SPEC_REPAIR_PROMPT_v1",
     "CASE_PEOPLE_PROMPT_v1",
+    "CASE_QUALITY_RULES",
     "CONTRACT_KEYS",
     "EVIDENCE_PROMPT_v1",
     "REPAIR_PROMPT_v1",
