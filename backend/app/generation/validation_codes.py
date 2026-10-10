@@ -22,7 +22,13 @@ Severity ordering (documented; low -> high) used by ``repair_effectiveness``
     VALIDATION_FAILED                3   generic validator failure
     WORLD_ASSET_UNRESOLVED           4   required world asset unresolved
     SOLVER_AMBIGUOUS                 5   solver/regeneration-class ambiguity
+    PHASE35_QUALITY                  5   case-quality content defect
+        (VICTIM_IN_SUSPECT_CANDIDATES / WITNESS_IN_SUSPECT_CANDIDATES /
+        MURDERER_NOT_SUSPECT_CANDIDATE / WITNESS_STATEMENT_*)
     ASSET_SPEC_INVALID               6   asset-spec semantic failure
+    PUBLIC_ROLE_TRUTH_LEAK           7   pre-reveal public truth-isolation
+                                        violation (same tier as activity-log
+                                        truth leak)
     ACTIVITY_LOG_*                   7   activity-log validator family
 
 Repair-effectiveness classification (Phase31A §14, deterministic):
@@ -44,6 +50,24 @@ from typing import Mapping, Sequence
 # emitted by ``validation_failure_codes`` is drawn from here.
 VALIDATOR_CODE_GENERIC = "VALIDATION_FAILED"
 
+# Phase35 — the closed case-quality validator-code tokens. They are the SAME
+# closed tokens ``app.generation.case_quality`` emits, registered here so the
+# quality bucket contributes them to validator-code telemetry (and so
+# ``_add_closed_tokens`` can pick them up from safe issue texts).
+QUALITY_VALIDATOR_CODES: frozenset[str] = frozenset(
+    {
+        "PUBLIC_ROLE_TRUTH_LEAK",
+        "VICTIM_IN_SUSPECT_CANDIDATES",
+        "WITNESS_IN_SUSPECT_CANDIDATES",
+        "MURDERER_NOT_SUSPECT_CANDIDATE",
+        "WITNESS_STATEMENT_MISSING",
+        "WITNESS_STATEMENT_EMPTY",
+        "WITNESS_STATEMENT_UNKNOWN_WITNESS",
+        "WITNESS_STATEMENT_WITNESS_ID_MISMATCH",
+        "WITNESS_STATEMENT_SPEAKER_MISMATCH",
+    }
+)
+
 VALIDATOR_CODE_VOCABULARY: frozenset[str] = frozenset(
     {
         "STRUCTURED_OUTPUT_INVALID",
@@ -61,7 +85,7 @@ VALIDATOR_CODE_VOCABULARY: frozenset[str] = frozenset(
         "ACTIVITY_LOG_DIRECT_TRUTH_LEAK",
         "ACTIVITY_LOG_ENTITY_LEAK",
     }
-)
+) | QUALITY_VALIDATOR_CODES
 
 # Ordered severity (low -> high). The documented ordering in the module
 # docstring; every closed code has a value so ``repair_effectiveness`` is a
@@ -82,6 +106,19 @@ _VALIDATOR_CODE_SEVERITY: Mapping[str, int] = {
     "ACTIVITY_LOG_TIME_WINDOW_INVALID": 7,
     "ACTIVITY_LOG_DIRECT_TRUTH_LEAK": 7,
     "ACTIVITY_LOG_ENTITY_LEAK": 7,
+    # Phase35 case-quality repairs: provider-content defects that a full-draft
+    # targeted repair can fix (role rewrite / candidate affordance / witness
+    # statement). PUBLIC_ROLE_TRUTH_LEAK is a truth-isolation violation on the
+    # same severity tier as the activity-log truth leak.
+    "VICTIM_IN_SUSPECT_CANDIDATES": 5,
+    "WITNESS_IN_SUSPECT_CANDIDATES": 5,
+    "MURDERER_NOT_SUSPECT_CANDIDATE": 5,
+    "WITNESS_STATEMENT_MISSING": 5,
+    "WITNESS_STATEMENT_EMPTY": 5,
+    "WITNESS_STATEMENT_UNKNOWN_WITNESS": 5,
+    "WITNESS_STATEMENT_WITNESS_ID_MISMATCH": 5,
+    "WITNESS_STATEMENT_SPEAKER_MISMATCH": 5,
+    "PUBLIC_ROLE_TRUTH_LEAK": 7,
 }
 
 _DEFAULT_SEVERITY = 0  # unknown/foreign codes: lowest possible severity
@@ -116,6 +153,8 @@ def validation_failure_codes(report: object) -> tuple[str, ...]:
     Bucket mapping (mirrors ``controller._validation_failure_code``):
     - structural issues             -> STRUCTURED_OUTPUT_INVALID
     - safety / universe / locked    -> VALIDATION_FAILED
+    - quality_issues                -> their exact closed Phase35 tokens (the
+      quality codes ARE the closed vocabulary members) + VALIDATION_FAILED
     - ``world.unresolved-object``   -> WORLD_ASSET_UNRESOLVED
     - non-unique / ambiguous solver -> SOLVER_AMBIGUOUS
     - incomplete solver / truth mismatch -> VALIDATION_FAILED
@@ -127,6 +166,7 @@ def validation_failure_codes(report: object) -> tuple[str, ...]:
     universe = tuple(getattr(report, "universe_issues", ()) or ())
     world = tuple(getattr(report, "world_issues", ()) or ())
     locked = tuple(getattr(report, "locked_violations", ()) or ())
+    quality = tuple(getattr(report, "quality_issues", ()) or ())
     diagnostics = tuple(getattr(report, "repair_diagnostics", ()) or ())
 
     codes: set[str] = set()
@@ -135,6 +175,7 @@ def validation_failure_codes(report: object) -> tuple[str, ...]:
     _add_closed_tokens(codes, universe)
     _add_closed_tokens(codes, world)
     _add_closed_tokens(codes, locked)
+    _add_closed_tokens(codes, quality)
     _add_closed_tokens(codes, diagnostics)
 
     if structural:
@@ -146,6 +187,9 @@ def validation_failure_codes(report: object) -> tuple[str, ...]:
     if world:
         codes.add(VALIDATOR_CODE_GENERIC)
     if locked:
+        codes.add(VALIDATOR_CODE_GENERIC)
+    if quality:
+        codes.update(QUALITY_VALIDATOR_CODES & set(quality))
         codes.add(VALIDATOR_CODE_GENERIC)
 
     proof = getattr(report, "solver_result", None)
@@ -242,6 +286,7 @@ def repair_effectiveness(before: Sequence[str], after: Sequence[str]) -> str:
 
 
 __all__ = [
+    "QUALITY_VALIDATOR_CODES",
     "VALIDATOR_CODE_GENERIC",
     "VALIDATOR_CODE_VOCABULARY",
     "failure_set_delta",
