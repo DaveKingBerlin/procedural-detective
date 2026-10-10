@@ -21,7 +21,10 @@ import {
 import { toCreateCaseGeneration } from "../journey/generationProvider";
 import { loadGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import {
+  admissionFallbackView,
   runDemo,
+  type AdmissionFailureStatus,
+  type AdmissionFailureView,
   type DemoFlowResult,
   type DemoFlowServices,
   type DemoProgress,
@@ -64,9 +67,16 @@ import { stageInfoFromPhase, type StageInfo } from "../journey/generationProgres
  * (reuse playthroughToken.ts) and navigates to /scene (automatic after a
  * short beat, or immediately via "Enter investigation"). On FAILED / network
  * errors the page shows a clear safe message with a Retry action and a
- * Back-to-start link. A quota-denied run (backend 429 ADMISSION_DENIED) shows
- * the Phase 24 F-2 session-limit recovery state instead (clear holder + reload
- * guidance — never an auto-mint). A hard refresh (no journey context) shows a
+ * Back-to-start link. A 429 ADMISSION_DENIED run is handled REASON-AWARE
+ * (Phase 36 §13-§17/§29): the backend's closed `reasonCode` selects a
+ * recovery screen that either clears an exhausted-session cache
+ * (SESSION_GENERATION_LIMIT / SESSION_EXPIRED_OR_INVALID -> "Back to start",
+ * no auto-mint, no reload) or PRESERVES a still-valid session and offers
+ * "Try again" (session/global concurrency, global window, anonymous-session
+ * capacity, unknown/legacy fallback -> the retry reuses the SAME valid
+ * session; no new anonymous session is minted). The reload-based recovery
+ * of Phase 24 F-2 is REMOVED: a browser reload is not a quota/session reset
+ * (Phase 36 §6/§7/§22). A hard refresh (no journey context) shows a
  * friendly "start again" state. No prompts, diagnostics or provider details
  * are ever shown.
  */
@@ -76,30 +86,19 @@ const DEMO_SERVICES: DemoFlowServices = {
   // lifetime (the module-level in-memory holder), so a retry / re-run no
   // longer creates a second session (churn fix); combined with the journey
   // context token this keeps the bridge-pairing session identity stable.
+  //
+  // Phase 36 — the holder is cleared ONLY when the denial reason PROVES the
+  // session identity is exhausted/invalid (SESSION_GENERATION_LIMIT /
+  // SESSION_EXPIRED_OR_INVALID — the decision travels in the
+  // AdmissionFailureView.clearSessionCache flag). Transient denials
+  // (concurrency / global window / anonymous-session capacity / unknown
+  // fallback) PRESERVE the holder so an explicit "Try again" reuses the
+  // SAME valid session — never a second anonymous identity.
   createSession: createOrReuseAnonymousSession,
   createCase,
   pollGeneration: getGenerationProgress,
   createPlaythrough,
 };
-
-/**
- * Phase 24 F-2 — frozen recovery copy for a session-window-DENIED run.
- *
- * The backend sanitizes EVERY admission denial to the same safe 429
- * ADMISSION_DENIED envelope (per-session window exhausted, global window
- * exhausted, unknown/expired session) — no internal gate is ever revealed.
- * Under the P0 one-session-per-page holder a per-session window denial would
- * pin the page into "generation window exhausted" forever (every retry reuses
- * the same exhausted session). Recovery is therefore EXPLICIT: clear the
- * module holder and tell the user to reload the page, which starts a fresh
- * session — while the server-side per-IP generation budget stays untouched
- * (a fresh session still consumes it). NO auto-mint happens on the denial: the
- * server rate limit stays authoritative.
- */
-export const SESSION_LIMIT_HEADING = "Generation limit reached";
-export const SESSION_LIMIT_MESSAGE =
-  "This page's generation session has reached its limit. Reload the page to start a fresh session.";
-export const SESSION_LIMIT_RELOAD_LABEL = "Reload page";
 
 /** Injectable live capability probe (real route: GET /generation-capabilities). */
 export type CapabilityLoader = () => Promise<GenerationCapabilitiesResponse>;
@@ -226,12 +225,6 @@ export interface GenerationJourneyProps {
    */
   loadCapabilities?: CapabilityLoader;
   /**
-   * Phase 24 F-2 — recovery action for a session-window-DENIED run (defaults
-   * to a full page reload, which gives the next page a clean session without
-   * ever auto-minting).
-   */
-  onReload?: () => void;
-  /**
    * Phase 28 §17 — the "Back to start" action: leaves/ends the current demo
    * journey and resets the per-session demo-case holder (the NEXT "Try Demo
    * Case" may then roll a fresh fixture; a refresh of an ACTIVE demo never
@@ -240,24 +233,25 @@ export interface GenerationJourneyProps {
   onBackToStart?: () => void;
 }
 
-type JourneyView =
+/**
+ * Phase 36 §29 — the reason-aware JourneyView. A 429 ADMISSION_DENIED run is
+ * rendered by the closed admission status selected in demoFlow.ts
+ * (mapAdmissionReason); the route never invented a generic session-limit
+ * state anymore. `no-session` / `running` / `done` / generic `error` are
+ * untouched.
+ */
+export type JourneyView =
   | { status: "no-session" }
   | { status: "running"; stage: StageInfo }
   | { status: "done"; result: Extract<DemoFlowResult, { ok: true }> }
   | { status: "error"; kind: string; message: string }
-  | { status: "session-limit" };
-
-/** Phase 24 F-2 — recovery action for a session-denied run (a page reload). */
-const reloadPage = (): void => {
-  window.location.reload();
-};
+  | { status: AdmissionFailureStatus; admission: AdmissionFailureView };
 
 export function GenerationJourney({
   params,
   run,
   onSuccess,
   loadCapabilities = DEFAULT_CAPABILITY_LOADER,
-  onReload = reloadPage,
   onBackToStart = clearSessionDemoCaseId,
 }: GenerationJourneyProps) {
   const [view, setView] = useState<JourneyView>(() =>
@@ -323,16 +317,22 @@ export function GenerationJourney({
         if (result.ok) {
           setView({ status: "done", result });
         } else if (result.failure.kind === "quota") {
-          // Phase 24 F-2 — a session-window-DENIED run (the backend's sanitized
-          // 429 ADMISSION_DENIED on POST /cases). Under the P0 one-session-per-
-          // page holder a retry would reuse the SAME exhausted session and fail
-          // forever; recover EXPLICITLY instead: clear the in-memory holder (a
-          // RELOAD / next page then mints a clean session under the unchanged
-          // server-side per-IP budget) and present the recover-by-reload state.
-          // No auto-mint happens here — the server rate limit stays
-          // authoritative.
-          resetAnonymousSessionCache();
-          setView({ status: "session-limit" });
+          // Phase 36 — a 429 ADMISSION_DENIED run is REASON-AWARE. The
+          // failure carries the closed recovery view (mapAdmissionReason in
+          // demoFlow.ts): clear the anonymous-session cache ONLY when the
+          // denial PROVES the current session identity is exhausted/invalid
+          // (clearSessionCache — set exactly for SESSION_GENERATION_LIMIT /
+          // SESSION_EXPIRED_OR_INVALID). Every transient denial
+          // (session/global concurrency, global window, anonymous-session
+          // capacity, unknown/legacy fallback) PRESERVES the cache so an
+          // explicit "Try again" reuses the same valid session. NO auto-mint,
+          // NO auto-retry loop, NO reload — the server stays authoritative.
+          const admission =
+            result.failure.admissionReason ?? admissionFallbackView();
+          if (admission.clearSessionCache) {
+            resetAnonymousSessionCache();
+          }
+          setView({ status: admission.status, admission });
         } else {
           setView({ status: "error", kind: result.failure.kind, message: result.failure.message });
         }
@@ -360,18 +360,13 @@ export function GenerationJourney({
     if (view.status === "done") onSuccess(view.result);
   };
 
-  return <GenerationJourneyView view={view} onEnter={enter} onRetry={retry} onReload={onReload} onBackToStart={onBackToStart} />;
+  return <GenerationJourneyView view={view} onEnter={enter} onRetry={retry} onBackToStart={onBackToStart} />;
 }
 
 export interface GenerationJourneyViewProps {
   view: JourneyView;
   onEnter: () => void;
   onRetry: () => void;
-  /**
-   * Phase 24 F-2 — recovery action for the session-limit state (a page
-   * reload by default; the parent injects it so the renderer stays pure).
-   */
-  onReload: () => void;
   /**
    * Phase 28 §17 — the "Back to start" action (also resets the per-session
    * demo-case holder when the real route leaves the current demo). The pure
@@ -388,7 +383,6 @@ export function GenerationJourneyView({
   view,
   onEnter,
   onRetry,
-  onReload,
   onBackToStart = () => {},
 }: GenerationJourneyViewProps) {
   if (view.status === "no-session") {
@@ -409,28 +403,41 @@ export function GenerationJourneyView({
     );
   }
 
-  if (view.status === "session-limit") {
-    // Phase 24 F-2 — session-window-denied recovery: a page reload is the
-    // recovery (a fresh page starts a clean session under the unchanged
-    // server-side rate limit). This is the ONLY action besides Back to start —
-    // deliberately NO "Try again" that would re-run the same exhausted session.
+  const admissionView =
+    view.status === "session-generation-limit" ||
+    view.status === "session-concurrency-limit" ||
+    view.status === "global-concurrency-limit" ||
+    view.status === "global-window-limit" ||
+    view.status === "temporary-capacity-limit"
+      ? view.admission
+      : null;
+
+  if (admissionView !== null) {
+    // Phase 36 §29-§30 — reason-aware admission recovery. Every denial is a
+    // normal SPA state: "Back to start" navigates to /new (no mint), and —
+    // when retryable — "Try again" re-runs the journey with the SAME
+    // (preserved) anonymous session token. There is deliberately NO "Reload
+    // page" / window.location.reload() anymore — a reload is not a
+    // quota/session reset (Phase 36 §6/§7/§22).
     return (
       <section className="page generating">
-        <h2>{SESSION_LIMIT_HEADING}</h2>
+        <h2>{admissionView.heading}</h2>
         <div
-          className="generation-state generation-state--session-limit"
-          data-testid="generation-session-limit"
+          className={`generation-state generation-state--admission generation-state--${admissionView.status}`}
+          data-testid={`generation-admission-${admissionView.status}`}
           role="status"
         >
-          <p className="generation-error-message">{SESSION_LIMIT_MESSAGE}</p>
+          <p className="generation-error-message">{admissionView.message}</p>
           <div className="generation-actions">
-            <button
-              type="button"
-              data-testid="generation-session-limit-reload"
-              onClick={onReload}
-            >
-              {SESSION_LIMIT_RELOAD_LABEL}
-            </button>
+            {admissionView.retryable ? (
+              <button
+                type="button"
+                data-testid="generation-admission-retry"
+                onClick={onRetry}
+              >
+                Try again
+              </button>
+            ) : null}
             {/* Phase 28 — wrap so the synthetic event never reaches the
                 demo-holder reset (its storage parameter). */}
             <Link to="/new" data-testid="generation-back-to-start" onClick={() => onBackToStart()}>
@@ -484,30 +491,42 @@ export function GenerationJourneyView({
     );
   }
 
+  if (view.status === "running") {
+    return (
+      <section className="page generating">
+        <h2>Generating case</h2>
+        <div className="generation-state" data-testid="generation-progress" role="status">
+          <p className="generation-stage-label" data-testid="generation-stage-label">
+            {view.stage.label}
+          </p>
+          <div
+            className="generation-progress-track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={view.stage.progress}
+            aria-label={`Generation progress: ${view.stage.label}`}
+          >
+            <div
+              className="generation-progress-fill"
+              data-testid="generation-progress"
+              style={{ width: `${view.stage.progress}%` }}
+            />
+          </div>
+          <p className="generation-progress-note" data-testid="generation-progress-note">
+            Building the case from your prompt…
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  // Exhaustive guard: every JourneyView status returns above.
   return (
     <section className="page generating">
       <h2>Generating case</h2>
-      <div className="generation-state" data-testid="generation-progress" role="status">
-        <p className="generation-stage-label" data-testid="generation-stage-label">
-          {view.stage.label}
-        </p>
-        <div
-          className="generation-progress-track"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={view.stage.progress}
-          aria-label={`Generation progress: ${view.stage.label}`}
-        >
-          <div
-            className="generation-progress-fill"
-            data-testid="generation-progress"
-            style={{ width: `${view.stage.progress}%` }}
-          />
-        </div>
-        <p className="generation-progress-note" data-testid="generation-progress-note">
-          Building the case from your prompt…
-        </p>
+      <div className="generation-state" data-testid="generation-no-session" role="status">
+        <p>No generation is in progress on this page.</p>
       </div>
     </section>
   );
