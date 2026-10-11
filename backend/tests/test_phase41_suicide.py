@@ -122,6 +122,64 @@ def test_suicide_theory_wins_on_suicide_truth(phase5_app):
     assert "murderer" not in {k.casefold() for k in body["truth"].keys()}
 
 
+# --------------------------------------------------------------------------- #
+# FIX-1/2 (ADV-41-02/03) — the SUICIDE accusation echo + reveal echo carry
+# ``resolutionType`` and NEVER the ``""`` murderer sentinel (the strict
+# frontend parser rejects both the missing resolution type and the empty id).
+# --------------------------------------------------------------------------- #
+
+
+def test_fix1_suicide_accusation_echo_carries_resolution_type(phase5_app):
+    """FIX-1 (ADV-41-02): a SUICIDE accusation echo carries
+    ``resolutionType:"SUICIDE"`` and ``murdererId:null`` — the strict
+    frontend parser requires the closed token to accept a null murderer."""
+    case = _suicide_case(phase5_app)
+    with client(phase5_app) as c:
+        res = make_accusation(c, case["pt_id"], case["pt_token"], suicide_body(case["payload"]))
+        assert res.status_code == 200, res.text
+        echo = res.json()["accusation"]
+    assert echo["resolutionType"] == "SUICIDE"
+    assert echo["murdererId"] is None
+    assert echo["motiveId"] == case["payload"]["truth"]["crime"]["motive_id"]
+    assert echo["weaponId"] == case["payload"]["truth"]["crime"]["weapon_id"]
+
+
+def test_fix2_suicide_reveal_player_accusation_echoes_null_murderer(phase5_app):
+    """FIX-2 (ADV-41-03): the reveal's ``player.accusation`` for a SUICIDE
+    accusation echoes ``murdererId:null`` + ``resolutionType:"SUICIDE"`` —
+    NEVER the stored ``""`` sentinel (the strict frontend reveal parser
+    rejects an empty string)."""
+    case = _suicide_case(phase5_app)
+    with client(phase5_app) as c:
+        make_accusation(c, case["pt_id"], case["pt_token"], suicide_body(case["payload"]))
+        reveal = c.get(
+            f"/api/v1/playthroughs/{case['pt_id']}/reveal", headers=auth(case["pt_token"])
+        )
+        assert reveal.status_code == 200, reveal.text
+        echo = reveal.json()["player"]["accusation"]
+    assert echo["resolutionType"] == "SUICIDE"
+    assert echo["murdererId"] is None
+    assert echo["motiveId"] == case["payload"]["truth"]["crime"]["motive_id"]
+    assert echo["weaponId"] == case["payload"]["truth"]["crime"]["weapon_id"]
+
+
+def test_fix2_suicide_reveal_is_idempotent_and_never_emits_empty_murderer(phase5_app):
+    """FIX-2 idempotence: a repeated reveal echoes the SAME null-murderer
+    accusation (never ``""``, never a ``"None"`` string) byte-for-byte."""
+    case = _suicide_case(phase5_app)
+    with client(phase5_app) as c:
+        make_accusation(c, case["pt_id"], case["pt_token"], suicide_body(case["payload"]))
+        first = c.get(
+            f"/api/v1/playthroughs/{case['pt_id']}/reveal", headers=auth(case["pt_token"])
+        ).json()["player"]["accusation"]
+        again = c.get(
+            f"/api/v1/playthroughs/{case['pt_id']}/reveal", headers=auth(case["pt_token"])
+        ).json()["player"]["accusation"]
+    assert first == again
+    assert first["murdererId"] is None
+    assert '"murdererId":"' not in json.dumps(first)
+
+
 def test_homicide_theory_is_incorrect_on_suicide_truth(phase5_app):
     case = _suicide_case(phase5_app)
     body = homicide_body(case["payload"], murderer_id="thomas_reed")
@@ -438,7 +496,16 @@ def test_evidence_gap_facts_produce_suicide_evidence_without_murderer():
     assert "d_ev_presence" not in ids
     assert "d_ev_alibi" not in ids
     assert "d_ev_fp" not in ids
-    assert "d_ev_motive_link" not in ids
+    # FIX-6 (§15/§19): the suicide motive IS deterministically linked — but to
+    # the VICTIM (the self-inflicted subject), never a murderer trace — so the
+    # WHY solver can certify the locked motive uniquely and the case publishes.
+    assert "d_ev_motive_link" in ids
+    motive_link = next(f for f in spec.evidence if f.id == "d_ev_motive_link")
+    assert any(
+        p.type == "MOTIVE_LINKED_TO_PERSON"
+        and p.person_id == "sarah_miller"
+        for p in motive_link.propositions
+    )
     # Every red-herring suspect receives an opportunity exclusion (driver id
     # normalization strips separators).
     assert "d_ev_opp_thomasreed" in ids

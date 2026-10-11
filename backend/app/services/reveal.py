@@ -749,6 +749,38 @@ def _witness_deceptions_of(
     return out
 
 
+def _accusation_echo_of(accusation_row: Any) -> dict[str, Any]:
+    """The player-safe accusation echo of the reveal DTO (Phase7 E).
+
+    ADV-41-03 (FIX-2): the reveal's ``player.accusation`` is derived from the
+    STORED accusation semantics — a SUICIDE theory persists the documented
+    ``""`` sentinel in the NOT-NULL ``murderer_id`` column (the API contract
+    is ``null``, the row keeps the sentinel). The echo therefore:
+
+    - emits ``murdererId: null`` for a SUICIDE accusation (NEVER the ``""``
+      sentinel — the strict frontend reveal parser rejects an empty string)
+      and includes ``resolutionType:"SUICIDE"``;
+    - emits the non-null id and OMITS ``resolutionType`` for a
+      HOMICIDE/legacy accusation (byte-compatible with the frozen shape).
+
+    Suicide is determined from the accusation ROW alone (``murderer_id == ""``
+    — the immutable row's documented sentinel for a submitted null) — the
+    player's own theory, NEVER the hidden truth (a wrong HOMICIDE theory on a
+    suicide case still echoes its submitted person). Idempotent: repeat
+    reveals assemble the byte-identical echo from the immutable row.
+    """
+    is_suicide = getattr(accusation_row, "murderer_id", None) == ""
+    echo: dict[str, Any] = {
+        "murdererId": None if is_suicide else str(accusation_row.murderer_id),
+        "motiveId": str(accusation_row.motive_id),
+        "weaponId": str(accusation_row.weapon_id),
+        "crimeTime": str(accusation_row.crime_time),
+    }
+    if is_suicide:
+        echo["resolutionType"] = "SUICIDE"
+    return echo
+
+
 def reveal_dto_of(
     payload: Mapping[str, Any],
     playthrough: Any,
@@ -780,12 +812,7 @@ def reveal_dto_of(
         "status": "REVEALED",
         "truth": truth,
         "player": {
-            "accusation": {
-                "murdererId": str(accusation_row.murderer_id),
-                "motiveId": str(accusation_row.motive_id),
-                "weaponId": str(accusation_row.weapon_id),
-                "crimeTime": str(accusation_row.crime_time),
-            }
+            "accusation": _accusation_echo_of(accusation_row)
         },
         "result": {
             "murdererCorrect": bool(evaluation.get("murdererCorrect")),

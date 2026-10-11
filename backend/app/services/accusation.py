@@ -381,17 +381,24 @@ class AccusationService:
         except DuplicateAccusation:
             raise AccusationConflictError("an accusation was already submitted") from None
         echoed_murderer = None if resolution == "SUICIDE" else row.murderer_id
+        # ADV-41-02 (FIX-1): a SUICIDE echo carries the closed
+        # ``resolutionType:"SUICIDE"`` token (the strict frontend parser
+        # requires it to accept a null murderer); a legacy/HOMICIDE echo OMITS
+        # the key so every historical exact-echo test stays byte-identical.
+        accusation_echo: dict[str, Any] = {
+            "murdererId": echoed_murderer,
+            "motiveId": row.motive_id,
+            "weaponId": row.weapon_id,
+            "crimeTime": row.crime_time,
+        }
+        if resolution == "SUICIDE":
+            accusation_echo["resolutionType"] = "SUICIDE"
         return {
             "playthroughId": row.playthrough_id,
             "caseId": row.case_id,
             "caseVersion": row.case_version,
             "status": "ACCUSED",
-            "accusation": {
-                "murdererId": echoed_murderer,
-                "motiveId": row.motive_id,
-                "weaponId": row.weapon_id,
-                "crimeTime": row.crime_time,
-            },
+            "accusation": accusation_echo,
         }
 
     def get_reveal(self, playthrough: Any) -> dict[str, Any]:

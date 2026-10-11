@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 # Bounded id/text lengths of the frozen accusation contract (Phase7 B).
 ACCUSATION_ID_MIN = 1
@@ -115,16 +115,46 @@ class AccusationRequest(BaseModel):
 class AccusationEchoDTO(BaseModel):
     """The submitted — never corrected — accusation value object.
 
-    Phase41: ``murdererId`` is nullable (null for a SUICIDE theory). The echo
-    intentionally keeps the frozen four keys (a SUICIDE theory is identified
-    by its null ``murdererId``) so every historical exact-echo test stays
-    byte-identical for homicide bodies.
+    Phase41: ``murdererId`` is nullable (null for a SUICIDE theory) and
+    ``resolutionType`` is an OPTIONAL additive key. The echo deliberately
+    keeps the frozen four keys (a SUICIDE theory is identified by its null
+    ``murdererId``) so every historical exact-echo test stays byte-identical
+    for homicide bodies.
+
+    ADV-41-02 (FIX-1): the strict frontend accusation parser treats a
+    MISSING ``resolutionType`` as a legacy HOMICIDE echo and therefore
+    REJECTS a null ``murdererId``. A SUICIDE echo must carry the closed
+    ``resolutionType:"SUICIDE"`` token; a legacy/HOMICIDE echo must OMIT the
+    key entirely (byte-identical — the exact-echo tests assert the key set).
+    The model serializer drops ``resolutionType`` whenever it is ``None`` so a
+    homicide echo never serializes ``"resolutionType":null``.
     """
 
     murdererId: str | None
     motiveId: str
     weaponId: str
     crimeTime: str
+    resolutionType: Literal["HOMICIDE", "SUICIDE"] | None = Field(
+        default=None,
+        description="The closed resolution token of the echoed theory. "
+        "Present ONLY on a SUICIDE echo (``\"SUICIDE\"``); omitted (never "
+        "null) on legacy/HOMICIDE echoes.",
+    )
+
+    @model_serializer(mode="wrap")
+    def _serialize_drop_none_resolution(self, handler):
+        """Omit ``resolutionType`` from the serialized echo when ``None``.
+
+        ADV-41-02: a legacy/HOMICIDE echo must be BYTE-IDENTICAL to the
+        pre-Phase-41 shape (the exact-echo tests assert
+        ``{"murdererId","motiveId","weaponId","crimeTime"}`` exactly), so a
+        ``None`` resolution type can never serialize as
+        ``"resolutionType":null``.
+        """
+        data = handler(self)
+        if data.get("resolutionType") is None:
+            data.pop("resolutionType", None)
+        return data
 
 
 class AccusationResponseDTO(BaseModel):
