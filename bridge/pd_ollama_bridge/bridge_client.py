@@ -32,7 +32,12 @@ from websockets.exceptions import ConnectionClosed
 
 from . import protocol
 from .config import Config, TokenStore
-from .ollama_client import OllamaClient, OllamaClientError
+from .ollama_client import (
+    OLLAMA_HTTP_MIN_TIMEOUT_MS,
+    OLLAMA_HTTP_READ_RESERVE_MS,
+    OllamaClient,
+    OllamaClientError,
+)
 from .tls import (
     REASON_CONNECTION_ERROR,
     BridgeConnectionError,
@@ -71,10 +76,27 @@ def _effective_job_timeout_seconds(timeout_ms: int) -> float:
     small single-layer Ollama-HTTP read reserve in
     ``ollama_client._effective_timeout_ms`` (one owner), which guarantees the
     bridge still has time to cancel Ollama, serialize and send the FAILED frame
-    before this outer wait fires (§22). A tiny floor keeps degenerate tiny
-    server budgets usable without changing the accounting.
+    before this outer wait fires (§22).
+
+    DEF-096 (ADV-38-03) — the OUTER floor is DERIVED as the inner read floor
+    PLUS the documented reserve:
+
+        outer_floor_ms = OLLAMA_HTTP_MIN_TIMEOUT_MS + OLLAMA_HTTP_READ_RESERVE_MS
+                       = 300 + 250 = 550
+
+    so the two floors can never collide. The single documented reserve is
+    therefore preserved across the WHOLE budget range: for tiny server budgets
+    (``timeoutMs <= 550``) ``inner_effective <= 300 < outer_floor`` leaves a
+    real 250ms delivery window, and for larger budgets the inner read subtracts
+    exactly the same reserve. The inner read is ALWAYS strictly shorter than
+    the outer wait, so the OLLAMA_HTTP_TIMEOUT-vs-BRIDGE_JOB_TIMEOUT
+    classification stays deterministic (never a scheduler race) and the FAILED
+    frame always has its 250ms delivery window.
     """
-    return max(0.3, int(timeout_ms) / 1000.0)
+    return max(
+        (OLLAMA_HTTP_MIN_TIMEOUT_MS + OLLAMA_HTTP_READ_RESERVE_MS) / 1000.0,
+        int(timeout_ms) / 1000.0,
+    )
 
 
 class BridgeClient:

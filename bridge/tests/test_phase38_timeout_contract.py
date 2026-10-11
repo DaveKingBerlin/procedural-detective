@@ -108,7 +108,12 @@ def test_real_shape_sequence_ends_with_documented_numbers():
 
 def test_tiny_server_budgets_keep_the_documented_floor():
     assert _effective_timeout_ms(400) == max(OLLAMA_HTTP_MIN_TIMEOUT_MS, 400 - OLLAMA_HTTP_READ_RESERVE_MS)
-    assert _effective_job_timeout_seconds(1) == pytest.approx(0.3, abs=0.0001)
+    # DEF-096 — the outer floor is DERIVED as inner floor + reserve (550ms),
+    # never a magic constant that can collide with the inner floor again.
+    assert _effective_job_timeout_seconds(1) == pytest.approx(
+        (OLLAMA_HTTP_MIN_TIMEOUT_MS + OLLAMA_HTTP_READ_RESERVE_MS) / 1000.0,
+        abs=0.0001,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -117,13 +122,48 @@ def test_tiny_server_budgets_keep_the_documented_floor():
 
 
 def test_derivations_are_total_and_monotonic():
+    outer_floor = (OLLAMA_HTTP_MIN_TIMEOUT_MS + OLLAMA_HTTP_READ_RESERVE_MS) / 1000.0
     for ms in range(300, 10_000, 97):
         assert _effective_timeout_ms(ms) >= OLLAMA_HTTP_MIN_TIMEOUT_MS
         assert _effective_timeout_ms(ms) <= ms
+        # the outer wait NEVER drops below the server budget and NEVER drops
+        # below the derived outer floor (the only documented floor).
+        assert _effective_job_timeout_seconds(ms) == pytest.approx(
+            max(outer_floor, ms / 1000.0), abs=1e-9
+        )
         assert _effective_job_timeout_seconds(ms) >= 0.3
-        assert _effective_job_timeout_seconds(ms) <= ms / 1000.0 + 1e-9
     # the inner read is always strictly short enough for the outer wait window.
     assert _effective_timeout_ms(10_000) < 10_000
+
+
+def test_single_reserve_preserved_across_the_whole_budget_range():
+    """DEF-096 (ADV-38-03) — the single documented 250ms reserve survives the
+    floors: for EVERY reachable server budget the inner read is strictly below
+    the outer wait by EXACTLY the documented reserve, so the §22 delivery
+    guarantee (cancel -> serialize -> deliver before the outer wait) holds and
+    the OLLAMA_HTTP_TIMEOUT-vs-BRIDGE_JOB_TIMEOUT source is deterministic."""
+    for ms in (100, 200, 250, 300, 400, 500, 550, 6181, 10_000):
+        inner_ms = _effective_timeout_ms(ms)
+        outer_ms = int(_effective_job_timeout_seconds(ms) * 1000)
+        # the reserve never erases: the inner read is ALWAYS strictly shorter.
+        assert outer_ms > inner_ms, f"zero/negative reserve at timeoutMs={ms}"
+        assert outer_ms - inner_ms >= OLLAMA_HTTP_READ_RESERVE_MS, (ms, inner_ms, outer_ms)
+
+
+def test_boundary_budgets_follow_the_documented_contract():
+    """DEF-096 boundary regressions — timeoutMs 300/400/500 prove the effective
+    values follow ``inner = max(floor, timeoutMs - reserve)`` and
+    ``outer = max(floor, timeoutMs)`` with the derived 550ms outer floor."""
+    expected = [
+        (300, 300, 550),
+        (400, 300, 550),  # inner floor holds (400 - 250 = 150 < 300)
+        (500, 300, 550),  # inner floor holds (500 - 250 = 250 < 300)
+        (600, 350, 600),  # above the floors the single reserve applies again
+    ]
+    for ms, inner_expected, outer_expected in expected:
+        assert _effective_timeout_ms(ms) == inner_expected, (ms, _effective_timeout_ms(ms))
+        assert _effective_job_timeout_seconds(ms) == pytest.approx(outer_expected / 1000.0, abs=0.0001)
+        assert outer_expected - inner_expected >= OLLAMA_HTTP_READ_RESERVE_MS
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +215,36 @@ def test_ollama_http_timeout_classified_closed_source(caplog):
         # inner HTTP read = 1000 - 250 = 750ms; outer wait = 1.0s. The inner
         # fires first (single documented reserve).
         await conn.send(job_frame(job_id=JOB, timeout_ms=1_000))
+        result = await conn.recv_json(timeout=5.0)
+        assert result["jobId"] == JOB
+        assert result["status"] == "FAILED"
+        assert result["failureCode"] == "LOCAL_PROVIDER_TIMEOUT"
+        assert mock.cancelled >= 1
+
+    captured = asyncio.run(
+        _run_harness(
+            scenario,
+            mock=mock,
+            config_kwargs={"connect_timeout_seconds": 1.0},
+        )
+    )
+    assert _has_logged(captured, "LOCAL_PROVIDER_TIMEOUT", "OLLAMA_HTTP_TIMEOUT")
+
+
+def test_boundary_budget_delivers_failed_frame_with_reserve(caplog):
+    """DEF-096 (ADV-38-03) boundary — a server job budget of 300ms was the
+    exact degeneracy where the old floors collided (inner 300ms == outer
+    300ms, zero reserve, scheduler race). With the derived outer floor the
+    inner read (300ms) fires strictly before the outer wait (550ms), so the
+    FAILED frame is DELIVERED (the §22 delivery guarantee holds) and the
+    closed timeoutSource is deterministically OLLAMA_HTTP_TIMEOUT."""
+    mock = MockOllama(hang=True)
+
+    async def scenario(conn, server):
+        await conn.recv_json()
+        await conn.send(pairing_accepted_with_token(token=TEST_TOKEN))
+        # inner HTTP read floor = 300ms; outer wait = 550ms (300 + 250).
+        await conn.send(job_frame(job_id=JOB, timeout_ms=300))
         result = await conn.recv_json(timeout=5.0)
         assert result["jobId"] == JOB
         assert result["status"] == "FAILED"
