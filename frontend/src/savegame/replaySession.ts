@@ -56,6 +56,18 @@ export function activeReplay(): ActiveReplay | null {
   return active;
 }
 
+/**
+ * True while a saved-case replay is the ACTIVE session (the player routes are
+ * playing a loaded `.pdcase`). Replay-scoped player-progress behavior branches
+ * on this flag: a replay runs a FRESH investigation on every load, so its
+ * transient interview progress is EPHEMERAL (in-memory only, never persisted
+ * into the per-file localStorage namespace), while live playthroughs keep
+ * persisting their player-known state under their `PT-*` namespaces.
+ */
+export function isReplayActive(): boolean {
+  return active !== null;
+}
+
 /** Leave the replay (return to the main menu). Never touches live credentials. */
 export function clearReplay(): void {
   active = null;

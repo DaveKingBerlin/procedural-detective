@@ -12,6 +12,7 @@ import type { InvestigationSceneModel } from "../scene/buildInvestigationScene";
 import {
   activeReplay,
   clearReplay,
+  isReplayActive,
   replayOrLivePlaythroughId,
 } from "../savegame/replaySession";
 import { buildReplayServices } from "../savegame/replayRuntime";
@@ -248,13 +249,22 @@ export default function ScenePage() {
     if (outcome.ok) {
       if (!outcome.cached) {
         setHasInteracted(true);
-        const playthroughId = replayOrLivePlaythroughId();
-        if (playthroughId) {
-          saveWitnessStatements(
-            playthroughId,
-            session.witnessesSnapshot(),
-            session.askedWitnessStatementsSnapshot(),
-          );
+        // Phase 39 — a SAVED REPLAY's witness-interview progress is EPHEMERAL:
+        // it lives ONLY in the in-memory InvestigationSession (which survives
+        // route navigation within the current replay) and is NEVER written to
+        // the per-file replay namespace, so re-loading the same `.pdcase`
+        // always starts a fresh interview with zero answered questions
+        // (§10/§40). Live playthroughs keep persisting the bounded player-known
+        // cache to their `PT-*` namespace exactly as before.
+        if (!isReplayActive()) {
+          const playthroughId = replayOrLivePlaythroughId();
+          if (playthroughId) {
+            saveWitnessStatements(
+              playthroughId,
+              session.witnessesSnapshot(),
+              session.askedWitnessStatementsSnapshot(),
+            );
+          }
         }
         // `askWitness` has just appended to its asked-statement cache. Force
         // the route to re-read that cache even when this neutral answer did
@@ -402,9 +412,27 @@ export default function ScenePage() {
         // (DEF-045 / ADV-32F-04): a replay uses the PER-FILE namespace, never
         // the static "saved-replay" id, so statements from another loaded case
         // can never leak into this one.
-        session.restoreAskedWitnessStatements(
-          loadWitnessStatements(replayOrLivePlaythroughId(), session.witnessesSnapshot()),
-        );
+        //
+        // Phase 39 — a SAVED REPLAY NEVER restores witness statements from
+        // storage: the `.pdcase` proves the case can give answers, never that
+        // THIS player already asked them (§4/§26). Every load of the same file
+        // starts a fresh investigation with empty interview progress (§10/§40).
+        //
+        // Phase 39 (DEF-099) — a full-route remount WITHIN the same replay
+        // (/scene -> /accuse -> /scene) rebuilds `InvestigationSession`, whose
+        // asked cache is per-instance. So the rebuild rehydrates its asked set
+        // from the PER-REPLAY in-memory state (`FreshReplayState.askedStatements`
+        // — which survives remounts but starts empty on every fresh
+        // `startReplay`), never from localStorage. Live playthroughs keep the
+        // PT-* storage restore below (§39 parity: live remembers across a full
+        // remount/reload via its own cache, replay remembers within the replay).
+        if (replay !== undefined) {
+          session.restoreAskedWitnessStatements(replay.state.askedWitnessStatementsSnapshot());
+        } else {
+          session.restoreAskedWitnessStatements(
+            loadWitnessStatements(replayOrLivePlaythroughId(), session.witnessesSnapshot()),
+          );
+        }
         sessionRef.current = session;
         setStatus({ status: "ready", model: outcome.model });
         setSceneStatus("ready");
