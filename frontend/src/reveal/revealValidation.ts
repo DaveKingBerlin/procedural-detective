@@ -3,6 +3,7 @@ import type {
   ResolutionType,
   RevealExplanationDimensionsDTO,
   RevealResponse,
+  WitnessDeceptionDTO,
 } from "../api/types";
 import { ValidationError } from "../scene/validation";
 
@@ -140,6 +141,47 @@ function parseOptionalPointList(value: unknown): ExplanationPointDTO[] | null {
   return points;
 }
 
+/**
+ * Phase 41 — the OPTIONAL post-reveal `truth.witnessDeceptions` block. The
+ * current backend ALWAYS emits this block (`[]` when no witness lied); an
+ * older/pre-41 server omits it. Absent/null => undefined (never fatal); a
+ * present block is parsed STRICTLY and malformed entries throw (fail closed —
+ * the same trust-boundary posture as every other required reveal array).
+ */
+function parseWitnessDeceptions(value: unknown, where: string): WitnessDeceptionDTO[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new ValidationError(`${where} must be an array.`);
+  }
+  return value.map((entry, index) => {
+    const at = `${where}[${index}]`;
+    if (!isRecord(entry)) {
+      throw new ValidationError(`${at} must be an object.`);
+    }
+    // Allowlist the exact three keys — an unknown key (e.g. a smuggled
+    // truthfulness marker) fails closed instead of surviving a drop.
+    for (const key of Object.keys(entry)) {
+      if (key !== "witnessId" && key !== "witnessName" && key !== "deceptionReason") {
+        throw new ValidationError(`${at}.${key} is not an allowed key.`);
+      }
+    }
+    const deceptionReasonRaw = entry.deceptionReason;
+    let deceptionReason: string | null;
+    if (deceptionReasonRaw === undefined || deceptionReasonRaw === null) {
+      deceptionReason = null;
+    } else if (typeof deceptionReasonRaw === "string") {
+      deceptionReason = deceptionReasonRaw;
+    } else {
+      throw new ValidationError(`${at}.deceptionReason must be a string or null.`);
+    }
+    return {
+      witnessId: requireString(entry, "witnessId", at),
+      witnessName: requireString(entry, "witnessName", at),
+      deceptionReason,
+    };
+  });
+}
+
 function parseOptionalDimensions(raw: unknown): RevealExplanationDimensionsDTO | null {
   if (!isRecord(raw)) return null;
   const who = parseOptionalPointList(raw.who);
@@ -175,6 +217,8 @@ export function parseRevealResponse(raw: unknown): RevealResponse {
   const resolutionType = resolutionTypeRaw as ResolutionType;
   const murdererId = parseNullableTruthId(truthRaw, "murdererId", resolutionType, "reveal.truth");
   const murdererName = parseNullableTruthId(truthRaw, "murdererName", resolutionType, "reveal.truth");
+  // Phase 41 (ADV-41-04) — OPTIONAL post-reveal deceptive-witness block.
+  const witnessDeceptions = parseWitnessDeceptions(truthRaw.witnessDeceptions, "reveal.truth.witnessDeceptions");
 
   const playerRaw = raw.player;
   if (!isRecord(playerRaw)) {
@@ -227,6 +271,7 @@ export function parseRevealResponse(raw: unknown): RevealResponse {
       weaponId: requireString(truthRaw, "weaponId", "reveal.truth"),
       weaponName: requireString(truthRaw, "weaponName", "reveal.truth"),
       crimeTime: requireString(truthRaw, "crimeTime", "reveal.truth"),
+      ...(witnessDeceptions !== undefined ? { witnessDeceptions } : {}),
     },
     player: { accusation: parseAccusation(playerRaw.accusation) },
     result: {

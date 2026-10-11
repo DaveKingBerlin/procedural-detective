@@ -358,6 +358,18 @@ export interface SavegameEvidenceRecordV1 {
   content: SavegameEvidenceContentV1;
 }
 
+/** Phase 41 — ONE deceived (lying) witness of the hidden truth, revealed ONLY
+ *  in the replay reveal (post-reveal only, mirror of the backend
+ *  `WitnessDeceptionDTO`). `witnessId` + the PUBLIC `witnessName` + an OPTIONAL
+ *  bounded-nullable `deceptionReason`. Only witnesses with a hidden DECEPTIVE
+ *  entry appear; truthful witnesses never appear and `TRUTHFUL` is never
+ *  emitted. */
+export interface WitnessDeceptionV1 {
+  witnessId: string;
+  witnessName: string;
+  deceptionReason: string | null;
+}
+
 /** ReplayTruthV1 — the explicit minimal solution DTO (ADR-003 §3). The
  *  internal backend/domain `CaseTruth` object is NEVER serialized.
  *
@@ -382,6 +394,10 @@ export interface ReplayTruthV1 {
   murdererName: string | null;
   motiveLabel: string;
   weaponName: string;
+  /** Phase 41 — OPTIONAL post-reveal deceptive-witness list (ADV-41-04). The
+   *  key is present ONLY when a case hides a lying witness; absent stays
+   *  byte-identical for legacy / deception-free exports. */
+  witnessDeceptions?: WitnessDeceptionV1[];
 }
 
 /** The exact top-level SavegameV1 document (ADR-003 §2/§3). */
@@ -1448,6 +1464,7 @@ function validateReplayTruth(raw: unknown, where: string): ReplayTruthV1 {
       "murdererName",
       "motiveLabel",
       "weaponName",
+      "witnessDeceptions",
     ],
     where,
   );
@@ -1480,6 +1497,26 @@ function validateReplayTruth(raw: unknown, where: string): ReplayTruthV1 {
   const murdererName = isSuicide
     ? requireBoundedNullableString(record, "murdererName", where, MAX_SHORT_TEXT_LENGTH)
     : requireBoundedString(record, "murdererName", where, MAX_SHORT_TEXT_LENGTH);
+  // Phase 41 (ADV-41-04) — OPTIONAL post-reveal deceptive-witness list. Absent
+  // => omitted (legacy byte-identical); present => every entry is STRICTLY
+  // validated (`{witnessId, witnessName, deceptionReason?}`) and preserved
+  // through a re-export. Malformed entries fail closed exactly like every
+  // other attacker-controlled block of the archive.
+  let witnessDeceptions: WitnessDeceptionV1[] | undefined;
+  const witnessDeceptionsRaw = record.witnessDeceptions;
+  if (witnessDeceptionsRaw !== undefined) {
+    const list = requireArray(witnessDeceptionsRaw, `${where}.witnessDeceptions`, MAX_WITNESSES);
+    witnessDeceptions = list.map((entry, index) => {
+      const at = `${where}.witnessDeceptions[${index}]`;
+      const entryRecord = requireRecord(entry, at);
+      assertOnlyKeys(entryRecord, ["witnessId", "witnessName", "deceptionReason"], at);
+      return {
+        witnessId: requireBoundedString(entryRecord, "witnessId", at, MAX_ID_LENGTH),
+        witnessName: requireBoundedString(entryRecord, "witnessName", at, MAX_SHORT_TEXT_LENGTH),
+        deceptionReason: requireBoundedNullableString(entryRecord, "deceptionReason", at, MAX_SHORT_TEXT_LENGTH),
+      };
+    });
+  }
   return {
     ...(resolutionType !== undefined ? { resolutionType } : {}),
     murdererId,
@@ -1496,6 +1533,7 @@ function validateReplayTruth(raw: unknown, where: string): ReplayTruthV1 {
     murdererName,
     motiveLabel: requireBoundedString(record, "motiveLabel", where, MAX_LONG_TEXT_LENGTH),
     weaponName: requireBoundedString(record, "weaponName", where, MAX_SHORT_TEXT_LENGTH),
+    ...(witnessDeceptions !== undefined ? { witnessDeceptions } : {}),
   };
 }
 

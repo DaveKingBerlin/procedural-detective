@@ -312,10 +312,25 @@ export interface AccusationResponse {
   accusation: SubmittedAccusationDTO;
 }
 
+/**
+ * Phase 41 — ONE deceived (lying) witness at reveal time (post-reveal only).
+ * Server-side explanation of a materially deceptive witness claim (Phase41
+ * §11/§22): the witness id, the PUBLIC name and the bounded deception reason.
+ * Only witnesses with a hidden DECEPTIVE entry appear — truthful witnesses
+ * never appear and `TRUTHFUL` is never emitted.
+ */
+export interface WitnessDeceptionDTO {
+  witnessId: string;
+  witnessName: string;
+  deceptionReason: string | null;
+}
+
 /** Canonical truth block of the reveal DTO (explicit server allowlist).
  *  Phase 41 — `resolutionType` is present and authoritative ("HOMICIDE" |
  *  "SUICIDE"); `murdererId`/`murdererName` are nullable ONLY for SUICIDE (a
- *  suicide case has no murderer — the victim is the self-inflicted subject). */
+ *  suicide case has no murderer — the victim is the self-inflicted subject).
+ *  `witnessDeceptions` is the OPTIONAL post-reveal deceptive-witness list
+ *  (absent/null from pre-41 servers or deception-free cases). */
 export interface RevealTruthDTO {
   resolutionType: ResolutionType;
   murdererId: string | null;
@@ -326,6 +341,8 @@ export interface RevealTruthDTO {
   weaponName: string;
   /** Full ISO timestamp carrying the authoritative local time-of-day. */
   crimeTime: string;
+  /** Phase 41 — OPTIONAL post-reveal deceptive-witness explanations. */
+  witnessDeceptions?: WitnessDeceptionDTO[] | null;
 }
 
 /** Per-dimension deterministic evaluation produced by the server. */

@@ -87,6 +87,21 @@ export default function RevealScreen({ reveal, candidates = null }: RevealScreen
         </div>
       )}
 
+      {model.witnessDeceptions.length > 0 && (
+        <div className="reveal-deceptions" data-testid="reveal-deceptions">
+          <h3>Witness deceits</h3>
+          <p>A witness statement in this case was not truthful:</p>
+          <ul className="reveal-deceptions-list">
+            {model.witnessDeceptions.map((deception, index) => (
+              <li className="reveal-deceptions-entry" data-testid="reveal-deceptions-entry" key={index}>
+                <strong>{deception.witnessName}</strong>
+                {deception.reason !== "" ? <span> — {deception.reason}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="reveal-accusation" data-testid="reveal-accusation">
         <h3>Your accusation</h3>
         <p className="reveal-accusation-note">

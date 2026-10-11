@@ -200,6 +200,12 @@ export function buildReplayReveal(
       weaponId: truth.weaponId,
       weaponName: truth.weaponName,
       crimeTime: truth.crimeTime,
+      // Phase 41 (ADV-41-04) — the saved deceptive-witness list surfaces ONLY
+      // here, in the post-reveal DTO, exactly like the server's
+      // `truth.witnessDeceptions`. It is NEVER published pre-reveal.
+      ...(truth.witnessDeceptions !== undefined
+        ? { witnessDeceptions: truth.witnessDeceptions }
+        : {}),
     },
     player: { accusation },
     result: {

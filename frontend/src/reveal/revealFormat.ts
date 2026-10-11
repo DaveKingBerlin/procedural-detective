@@ -88,6 +88,9 @@ export interface RevealPresentation {
     crimeTime: string;
   };
   playerSubmission: { murdererId: string; motiveId: string; weaponId: string; crimeTime: string };
+  /** Phase 41 (ADV-41-04) — post-reveal deceptive-witness explanations
+   *  (empty when the case hides no lying witness). */
+  witnessDeceptions: { witnessName: string; reason: string }[];
   dimensions: RevealDimensionRow[];
   overall: "solved" | "incorrect";
   score: { correctDimensions: number; totalDimensions: number };
@@ -176,6 +179,12 @@ export function revealPresentation(
       weaponId: asText(accusation.weaponId),
       crimeTime: asText(accusation.crimeTime),
     },
+    // Phase 41 (ADV-41-04) — the post-reveal deceptive-witness explanations
+    // (inert plain text; empty when the case hides no lying witness).
+    witnessDeceptions: (truth.witnessDeceptions ?? []).map((entry) => ({
+      witnessName: asText(entry.witnessName),
+      reason: asText(entry.deceptionReason),
+    })),
     dimensions,
     overall: reveal.result.overall,
     score: {
