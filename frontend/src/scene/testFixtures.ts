@@ -679,6 +679,12 @@ export function makeHotelSuiteBootstrap(): InvestigationBootstrapResponse {
  * no `correct`/`winner` fields exist (see phase-7 leak boundary), and the
  * arrays preserve the server's alphabetical ordering — the client must not
  * re-order them.
+ *
+ * Phase 41 — the fixture ALSO carries the additive FINAL final-theory fields:
+ * `finalTargets` (suspects + witnesses, victim excluded), `hasSuicideOption`
+ * (true — the victim-as-suicide option is offered) and `victimName` (the
+ * suicide card label). These are OPTIONAL on the DTO for legacy payloads; the
+ * canned fixture represents the CURRENT server shape.
  */
 export function makeCandidates(overrides: Partial<AccusationCandidatesDTO> = {}): AccusationCandidatesDTO {
   return {
@@ -697,6 +703,14 @@ export function makeCandidates(overrides: Partial<AccusationCandidatesDTO> = {})
       { id: "weapon_beta", assetId: "PROP_GENERIC_02", name: "Letter opener" },
       { id: "weapon_gamma", assetId: "PROP_GENERIC_03", name: "Scissors" },
     ],
+    finalTargets: [
+      { id: "suspect_alpha", name: "Ada Marsh", role: "suspect" },
+      { id: "suspect_beta", name: "Blake Niven", role: "suspect" },
+      { id: "suspect_gamma", name: "Casey Holt", role: "suspect" },
+      { id: "witness_cora", name: "Cora Blake", role: "witness" },
+    ],
+    hasSuicideOption: true,
+    victimName: "Alex Morgan",
     ...overrides,
   };
 }
@@ -740,6 +754,7 @@ export function makeRevealResponse(overrides: Partial<RevealResponse> = {}): Rev
     caseVersion: 1,
     status: "REVEALED",
     truth: {
+      resolutionType: "HOMICIDE",
       murdererId: "suspect_alpha",
       murdererName: "Ada Marsh",
       motiveId: "motive_alpha",
@@ -866,6 +881,83 @@ export function makePartialReveal(overrides: Partial<RevealResponse> = {}): Reve
   });
 }
 
+/**
+ * Phase 41 — a CANNED SUICIDE-reveal fixture: truth.resolutionType =
+ * "SUICIDE" with nullable murdererId/murdererName, and the player's accusation
+ * is the CORRECT suicide theory (murdererId null). Generic + winner-free.
+ */
+export function makeSuicideReveal(overrides: Partial<RevealResponse> = {}): RevealResponse {
+  return makeRevealResponse({
+    truth: {
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      murdererName: null,
+      motiveId: "motive_beta",
+      motiveLabel: "Jealousy toward the victim",
+      weaponId: "weapon_beta",
+      weaponName: "Letter opener",
+      crimeTime: CANNED_REVEAL_CRIME_TIME,
+    },
+    player: {
+      accusation: {
+        resolutionType: "SUICIDE",
+        murdererId: null,
+        motiveId: "motive_beta",
+        weaponId: "weapon_beta",
+        crimeTime: "21:45:00",
+      },
+    },
+    result: {
+      murdererCorrect: true,
+      motiveCorrect: true,
+      weaponCorrect: true,
+      timeCorrect: true,
+      overall: "solved",
+    },
+    score: { correctDimensions: 4, totalDimensions: 4 },
+    ...overrides,
+  });
+}
+
+/**
+ * Phase 41 — a CANNED WRONG-THEORY reveal: the truth is SUICIDE but the
+ * player accused a HOMICIDE person (the WHO dimension is the only wrong one —
+ * every other dimension is correct, matching §21's "truth SUICIDE: HOMICIDE +
+ * any person => incorrect").
+ */
+export function makeWrongTheoryReveal(overrides: Partial<RevealResponse> = {}): RevealResponse {
+  return makeRevealResponse({
+    truth: {
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      murdererName: null,
+      motiveId: "motive_beta",
+      motiveLabel: "Jealousy toward the victim",
+      weaponId: "weapon_beta",
+      weaponName: "Letter opener",
+      crimeTime: CANNED_REVEAL_CRIME_TIME,
+    },
+    player: {
+      accusation: {
+        resolutionType: "HOMICIDE",
+        murdererId: "suspect_beta",
+        motiveId: "motive_beta",
+        weaponId: "weapon_beta",
+        crimeTime: "21:45:00",
+      },
+    },
+    result: {
+      murdererCorrect: false,
+      motiveCorrect: true,
+      weaponCorrect: true,
+      timeCorrect: true,
+      overall: "incorrect",
+    },
+    score: { correctDimensions: 3, totalDimensions: 4 },
+    ...overrides,
+  });
+}
+
 /** A reveal whose every text field looks executable — inertness test fodder. */
 export function makeHostileReveal(): RevealResponse {
   const hostile = "<script>alert(1)</script>";
@@ -876,6 +968,7 @@ export function makeHostileReveal(): RevealResponse {
     caseVersion: 1,
     status: "REVEALED",
     truth: {
+      resolutionType: "HOMICIDE",
       murdererId: hostile,
       murdererName: unicode,
       motiveId: hostile,

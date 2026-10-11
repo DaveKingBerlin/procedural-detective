@@ -241,6 +241,55 @@ describe("accusation candidates block (Phase 7)", () => {
   it("rejects a non-object candidates payload", () => {
     expectValidationError(() => validateAccusationCandidates.validate(null), "candidates must be an object");
   });
+
+  it("Phase 41 — parses the additive final-theory fields (finalTargets/hasSuicideOption/victimName)", () => {
+    const candidates = makeCandidates();
+    const parsed = parseInvestigationBootstrap.validate(makeBootstrap());
+    expect(parsed.candidates.finalTargets).toEqual(candidates.finalTargets);
+    expect(parsed.candidates.hasSuicideOption).toBe(true);
+    expect(parsed.candidates.victimName).toBe("Alex Morgan");
+    // The finalTargets entry shape is exactly {id,name,role} — unknown fields dropped.
+    expect(Object.keys(parsed.candidates.finalTargets![0]).sort()).toEqual(["id", "name", "role"]);
+  });
+
+  it("Phase 41 — a legacy candidates payload (no additive fields) normalizes them to ABSENT", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    const candidates = raw.candidates as unknown as Record<string, unknown>;
+    delete candidates.finalTargets;
+    delete candidates.hasSuicideOption;
+    delete candidates.victimName;
+    const parsed = parseInvestigationBootstrap.validate(raw);
+    expect(parsed.candidates.finalTargets).toBeUndefined();
+    expect(parsed.candidates.hasSuicideOption).toBeUndefined();
+    expect(parsed.candidates.victimName).toBeUndefined();
+  });
+
+  it("Phase 41 — a PRESENT but malformed additive field is rejected (never silently coerced)", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    const candidates = raw.candidates as unknown as Record<string, unknown>;
+    candidates.finalTargets = [{ id: "a" }]; // missing name/role
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "candidates.finalTargets");
+    candidates.finalTargets = "nope";
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "candidates.finalTargets must be an array");
+    candidates.finalTargets = undefined;
+    candidates.hasSuicideOption = "yes";
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "candidates.hasSuicideOption");
+    candidates.hasSuicideOption = undefined;
+    candidates.victimName = 42;
+    expectValidationError(() => parseInvestigationBootstrap.validate(raw), "candidates.victimName");
+  });
+
+  it("Phase 41 — smuggled correct/winner markers on a final target are dropped (never survive)", () => {
+    const raw = makeBootstrap() as unknown as Record<string, unknown>;
+    const candidates = raw.candidates as unknown as Record<string, unknown>;
+    candidates.finalTargets = [
+      { id: "suspect_alpha", name: "Ada Marsh", role: "suspect", correct: true, winner: true, hiddenTruth: "x" },
+    ];
+    const parsed = parseInvestigationBootstrap.validate(raw);
+    expect(Object.keys(parsed.candidates.finalTargets![0]).sort()).toEqual(["id", "name", "role"]);
+    expect("correct" in parsed.candidates.finalTargets![0]).toBe(false);
+    expect("winner" in parsed.candidates.finalTargets![0]).toBe(false);
+  });
 });
 
 describe("bootstrap lifecycle state (Phase 7)", () => {

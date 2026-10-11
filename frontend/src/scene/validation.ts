@@ -1,5 +1,6 @@
 import type {
   AccusationCandidatesDTO,
+  FinalTargetDTO,
   GeneratedAssetDefinition,
   GeneratedPartDTO,
   GeneratedPrimitiveKind,
@@ -289,6 +290,22 @@ export const validateWeaponCandidate: Validator<WeaponCandidateDTO> = {
   },
 };
 
+/** Validator for ONE Phase 41 final homicide target ({id,name,role}); unknown
+ *  fields dropped. The `role` is PUBLIC data ("suspect" | "witness") — it is
+ *  never a correctness marker and never exposes truth. */
+export const validateFinalTarget: Validator<FinalTargetDTO> = {
+  validate(raw: unknown): FinalTargetDTO {
+    if (!isRecord(raw)) {
+      throw new ValidationError("candidates.finalTargets entry must be an object.");
+    }
+    return {
+      id: requireString(raw, "id", "candidates.finalTargets"),
+      name: requireString(raw, "name", "candidates.finalTargets"),
+      role: requireString(raw, "role", "candidates.finalTargets"),
+    };
+  },
+};
+
 /* ======================================================================
  * Phase 23 — player-safe witness list validation.
  *
@@ -357,11 +374,18 @@ export const validateWitnessListEntry: Validator<WitnessListEntryDTO> = {
  * Validates the player-safe `candidates` block of the bootstrap.
  *
  * Player-safe guarantees:
- *  - only {id,name} / {id,label} / {id,assetId,name} survive; every other
- *    field (e.g. a malformed/hostile "correct"/"winner" marker) is DROPPED,
- *    never copied into the typed DTO;
+ *  - only {id,name} / {id,label} / {id,assetId,name} / {id,name,role} survive;
+ *    every other field (e.g. a malformed/hostile "correct"/"winner" marker) is
+ *    DROPPED, never copied into the typed DTO;
  *  - the ARRAY ORDER is preserved exactly — the client renders candidates in
  *    the server's alphabetical order and never re-orders them.
+ *
+ * Phase 41 ADDITIVE fields are OPTIONAL-accept-required (mirroring the
+ * `witnesses` philosophy): a payload that omits `finalTargets` /
+ * `hasSuicideOption` / `victimName` (a pre-41 server) parses and NORMALIZES
+ * them to absent — the accusation flow then falls back to the legacy
+ * suspect-only universe / no suicide option. A PRESENT but malformed value is
+ * still rejected (never silently coerced).
  */
 export const validateAccusationCandidates: Validator<AccusationCandidatesDTO> = {
   validate(raw: unknown): AccusationCandidatesDTO {
@@ -380,11 +404,36 @@ export const validateAccusationCandidates: Validator<AccusationCandidatesDTO> = 
     if (!Array.isArray(weaponsRaw)) {
       throw new ValidationError("candidates.weapons must be an array.");
     }
-    return {
+    const candidates: AccusationCandidatesDTO = {
       suspects: suspectsRaw.map((entry) => validateSuspectCandidate.validate(entry)),
       motives: motivesRaw.map((entry) => validateMotiveCandidate.validate(entry)),
       weapons: weaponsRaw.map((entry) => validateWeaponCandidate.validate(entry)),
     };
+    // Phase 41 — additive final-target universe. Absent/null normalizes to
+    // absent (the flow falls back to `suspects`); a present array is strictly
+    // entry-validated and order-preserving.
+    const finalTargetsRaw = raw.finalTargets;
+    if (finalTargetsRaw !== undefined && finalTargetsRaw !== null) {
+      if (!Array.isArray(finalTargetsRaw)) {
+        throw new ValidationError("candidates.finalTargets must be an array.");
+      }
+      candidates.finalTargets = finalTargetsRaw.map((entry) => validateFinalTarget.validate(entry));
+    }
+    // Phase 41 — additive suicide-option affordance (legacy absent -> false).
+    const hasSuicideOptionRaw = raw.hasSuicideOption;
+    if (hasSuicideOptionRaw !== undefined && hasSuicideOptionRaw !== null) {
+      if (typeof hasSuicideOptionRaw !== "boolean") {
+        throw new ValidationError("candidates.hasSuicideOption must be a boolean.");
+      }
+      candidates.hasSuicideOption = hasSuicideOptionRaw;
+    }
+    // Phase 41 — additive victim display name for the suicide option card
+    // (absent/null/undefined -> absent; a present non-string is malformed).
+    const victimName = requireOptionalNullableString(raw, "victimName", "candidates");
+    if (victimName !== null) {
+      candidates.victimName = victimName;
+    }
+    return candidates;
   },
 };
 
