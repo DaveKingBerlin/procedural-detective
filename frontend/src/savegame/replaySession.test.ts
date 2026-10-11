@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import canonical from "./fixtures/v1_demo_apartment.pdcase.json";
+import suicideFixture from "./fixtures/v1_suicide_case.pdcase.json";
 import { loadHypothesis, saveHypothesis, type HypothesisStorage, type HypothesisPins } from "../notebook/hypothesisStore";
 import { witnessStatementKey } from "../witness/witnessStatementStore";
 import { clearReplay, replayOrLivePlaythroughId, replayStorageNamespace, startReplay } from "./replaySession";
@@ -149,5 +150,30 @@ describe("DEF-045 — per-file replay storage namespaces", () => {
     expect(replayStorageNamespace(truthB)).toBe(replayStorageNamespace(truthA));
     // And a REAL content change (different public title) still moves files.
     expect(replayStorageNamespace(bDefinition())).not.toBe(replayStorageNamespace(aDefinition()));
+  });
+
+  it("Phase 41 — a SUICIDE truth twin keeps the SAME public-case namespace (truth-independent)", () => {
+    // A schema-valid SUICIDE twin of the DEMO file (same public case content,
+    // only replayTruth becomes SUICIDE + murdererId null): the resolution-aware
+    // replay truth never influences the player-notes namespace.
+    const text = JSON.parse(A_TEXT) as any;
+    text.case.replayTruth.resolutionType = "SUICIDE";
+    text.case.replayTruth.murdererId = null;
+    text.case.replayTruth.murdererName = null;
+    const twin = parseSavegameV1(JSON.stringify(text), utf8ByteLength(JSON.stringify(text)));
+    expect(replayStorageNamespace(twin)).toBe(replayStorageNamespace(aDefinition()));
+    // And the resolution/murderer tokens never reach the storage key verbatim.
+    expect(replayStorageNamespace(twin)).not.toContain("SUICIDE");
+    expect(replayStorageNamespace(twin)).not.toContain("thomas_reed");
+  });
+
+  it("Phase 41 — the committed suicide fixture derives a stable per-file namespace", () => {
+    const text = JSON.stringify(suicideFixture);
+    const suicideDefinition = parseSavegameV1(text, utf8ByteLength(text));
+    const namespace = replayStorageNamespace(suicideDefinition);
+    expect(namespace).toMatch(/^saved-replay-[0-9a-z]{12}$/);
+    // Its public candidates DO differ from the demo (finalTargets etc. are
+    // public data), so it gets its OWN namespace — never shares the demo's.
+    expect(namespace).not.toBe(replayStorageNamespace(aDefinition()));
   });
 });
