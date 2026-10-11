@@ -52,8 +52,40 @@ class InvalidOutput(OllamaClientError):
 
 
 def _effective_timeout_ms(timeout_ms: int) -> int:
-    margin = min(5_000, int(timeout_ms) // 2)
-    return max(300, int(timeout_ms) - margin)
+    """The LOCAL Ollama HTTP/body-read budget for ONE job.
+
+    Phase38 timeout contract (§19-§22, single-authority): ``timeoutMs`` is the
+    SERVER-ISSUED authoritative per-job budget. The bridge's outer wait owns
+    the FULL budget (``bridge_client._effective_job_timeout_seconds``); this
+    inner HTTP read subtracts exactly ONE small, bounded, documented cleanup
+    reserve — never an implicit 50% cut — so a timed-out job still leaves the
+    bridge enough time to cancel Ollama, serialize the failure and deliver the
+    FAILED frame before the outer wait fires.
+
+    DEF-096 (ADV-38-03) — the single documented reserve is preserved across
+    the whole budget range. The floor keeps degenerate tiny server budgets
+    usable, and because the outer floor is DERIVED as this floor PLUS the
+    reserve (see ``bridge_client``), the inner read is ALWAYS strictly shorter
+    than the outer wait — the delivery guarantee holds even at the boundary
+    (``timeoutMs <= 300``), where the inner floor previously collided with the
+    outer floor and erased the reserve.
+    """
+    return max(OLLAMA_HTTP_MIN_TIMEOUT_MS, int(timeout_ms) - OLLAMA_HTTP_READ_RESERVE_MS)
+
+
+# The single documented transport cleanup reserve (milliseconds) that the
+# LOCAL Ollama read subtracts from the server-issued job budget. Small and
+# bounded; owned by exactly one layer (the Ollama HTTP read). The bridge's
+# outer wait keeps the rest of ``timeoutMs``.
+OLLAMA_HTTP_READ_RESERVE_MS = 250
+# The documented floor for the inner HTTP read (any smaller server budget is
+# already effectively unusable; the outer wait still bounds the whole job).
+# DEF-096 — the bridge's OUTER floor is derived as ``this floor + the reserve``
+# (``bridge_client._effective_job_timeout_seconds``), so the inner read always
+# stays strictly below the outer wait and the documented reserve is preserved
+# across the whole budget range — never erased by floor collision at
+# ``timeoutMs <= 300``.
+OLLAMA_HTTP_MIN_TIMEOUT_MS = 300
 
 
 # The documented minimum Ollama version whose ``/api/chat`` ``format`` field
@@ -274,4 +306,6 @@ __all__ = [
     "OllamaUnavailable",
     "ProviderTimeout",
     "_effective_timeout_ms",
+    "OLLAMA_HTTP_READ_RESERVE_MS",
+    "OLLAMA_HTTP_MIN_TIMEOUT_MS",
 ]

@@ -32,7 +32,12 @@ from websockets.exceptions import ConnectionClosed
 
 from . import protocol
 from .config import Config, TokenStore
-from .ollama_client import OllamaClient, OllamaClientError
+from .ollama_client import (
+    OLLAMA_HTTP_MIN_TIMEOUT_MS,
+    OLLAMA_HTTP_READ_RESERVE_MS,
+    OllamaClient,
+    OllamaClientError,
+)
 from .tls import (
     REASON_CONNECTION_ERROR,
     BridgeConnectionError,
@@ -61,8 +66,37 @@ class _Inflight:
 
 
 def _effective_job_timeout_seconds(timeout_ms: int) -> float:
-    margin = min(5_000, int(timeout_ms) // 2)
-    return max(0.3, (int(timeout_ms) - margin) / 1000.0)
+    """The bridge's OUTER job wait: the SERVER-ISSUED authoritative budget.
+
+    Phase38 timeout contract (§19-§21) — ``timeoutMs`` IS the per-job budget:
+    the backend already applied ``min(configured provider timeout, remaining
+    generation deadline - 100 ms)`` before dispatching it. The bridge therefore
+    honors it EXACTLY (no second 50% reduction): the outer ``asyncio.wait_for``
+    may keep the whole budget. The ONLY transport reserve is the documented
+    small single-layer Ollama-HTTP read reserve in
+    ``ollama_client._effective_timeout_ms`` (one owner), which guarantees the
+    bridge still has time to cancel Ollama, serialize and send the FAILED frame
+    before this outer wait fires (§22).
+
+    DEF-096 (ADV-38-03) — the OUTER floor is DERIVED as the inner read floor
+    PLUS the documented reserve:
+
+        outer_floor_ms = OLLAMA_HTTP_MIN_TIMEOUT_MS + OLLAMA_HTTP_READ_RESERVE_MS
+                       = 300 + 250 = 550
+
+    so the two floors can never collide. The single documented reserve is
+    therefore preserved across the WHOLE budget range: for tiny server budgets
+    (``timeoutMs <= 550``) ``inner_effective <= 300 < outer_floor`` leaves a
+    real 250ms delivery window, and for larger budgets the inner read subtracts
+    exactly the same reserve. The inner read is ALWAYS strictly shorter than
+    the outer wait, so the OLLAMA_HTTP_TIMEOUT-vs-BRIDGE_JOB_TIMEOUT
+    classification stays deterministic (never a scheduler race) and the FAILED
+    frame always has its 250ms delivery window.
+    """
+    return max(
+        (OLLAMA_HTTP_MIN_TIMEOUT_MS + OLLAMA_HTTP_READ_RESERVE_MS) / 1000.0,
+        int(timeout_ms) / 1000.0,
+    )
 
 
 class BridgeClient:
@@ -363,12 +397,22 @@ class BridgeClient:
             return
         except asyncio.TimeoutError:
             await self._send_failed(ws, job_id, "LOCAL_PROVIDER_TIMEOUT")
-            self.logger.info("bridge: job %s failed LOCAL_PROVIDER_TIMEOUT", job_id)
+            # Phase38 §23 — closed machine-readable timeout source (never raw
+            # exception text): the BRIDGE outer job wait fired.
+            self.logger.info(
+                "bridge: job %s failed LOCAL_PROVIDER_TIMEOUT timeoutSource=BRIDGE_JOB_TIMEOUT",
+                job_id,
+            )
             return
         except OllamaClientError as exc:
             code = exc.failure_code
             await self._send_failed(ws, job_id, code)
-            self.logger.info("bridge: job %s failed %s", job_id, code)
+            # Phase38 §23 — the inner LOCAL Ollama HTTP/body read fired first
+            # (the documented small single-layer reserve guarantees this is
+            # reported before the outer wait).
+            source = "OLLAMA_HTTP_TIMEOUT" if code == "LOCAL_PROVIDER_TIMEOUT" else None
+            suffix = f" timeoutSource={source}" if source is not None else ""
+            self.logger.info("bridge: job %s failed %s%s", job_id, code, suffix)
             return
         except Exception:  # noqa: BLE001 - closed vocabulary, no raw text
             await self._send_failed(ws, job_id, "LOCAL_PROVIDER_INVALID_OUTPUT")

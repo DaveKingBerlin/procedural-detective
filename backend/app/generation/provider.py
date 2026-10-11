@@ -201,6 +201,21 @@ class StageDriverProviderFailure(Exception):
         message: str,
         *,
         code: str | "GenerationFailureCode" = "PROVIDER_UNAVAILABLE",
+        issued_timeout_seconds: float | None = None,
+        configured_timeout_seconds: float | None = None,
     ) -> None:
         super().__init__(message)
         self.code = getattr(code, "value", None) or str(code)
+        # Phase38 DEF-094 — the ACTUAL server-issued per-call timeout budget
+        # and the configured provider timeout, attached by the driver/providers
+        # that dispatch with an explicit effective timeout. The controller
+        # classifies a timeout as deadline-clipped when ``issued`` is below
+        # ``configured`` by MORE than the classification margin
+        # (``issued + margin < configured``), which is exactly "the remaining
+        # generation deadline at dispatch was below the configured provider
+        # timeout" — robust against the transport reserve firing early and
+        # float-epsilon at the exact boundary. ``None`` keeps the legacy
+        # remaining-margin fallback for carriers that do not dispatch with a
+        # timeout budget.
+        self.issued_timeout_seconds = issued_timeout_seconds
+        self.configured_timeout_seconds = configured_timeout_seconds

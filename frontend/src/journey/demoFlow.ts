@@ -329,7 +329,7 @@ export interface DemoProgress {
 /** Player-safe failure messages — the ONLY strings the journey surfaces. */
 export const DEMO_FAILURE_MESSAGES = Object.freeze({
   failed: "This prompt could not be turned into a solvable case. Adjust the prompt, then try again.",
-  deadline: "Generation exceeded its time budget. Please try again.",
+  deadline: "Case generation exceeded its total time budget.",
   providerTimeout: "The AI provider took too long to respond. Please try again.",
   providerUnavailable: "The AI generation service is currently unavailable. Please try again.",
   // LEGACY (Phase 36): pre-reason-aware generic ADMISSION_DENIED copy. The
@@ -360,7 +360,7 @@ export const DEMO_FAILURE_MESSAGES = Object.freeze({
     "Local AI disconnected — Reconnect the local bridge or use Deterministic Demo.",
   localOllamaUnavailable: "Ollama is not reachable on this computer.",
   localModelUnavailable: "The selected local model is not available.",
-  localProviderTimeout: "Local AI did not finish within the allowed time.",
+  localProviderTimeout: "Local AI did not finish within the provider time limit.",
   // Phase 25 — explicit-selection validation rejections. The backend rejects
   // an unknown provider id (400 INVALID_GENERATION_PROVIDER) and an
   // explicitly-selected-but-unavailable provider (PROVIDER_UNAVAILABLE); the

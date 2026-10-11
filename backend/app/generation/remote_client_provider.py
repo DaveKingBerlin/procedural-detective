@@ -195,10 +195,17 @@ class RemoteClientProvider:
                 failureCode=GenerationFailureCode.LOCAL_PROVIDER_TIMEOUT.value,
                 latencyMs=latency_ms,
                 reasonCode="JOB_TIMEOUT",
+                # Phase38 §23 — closed machine-readable timeout source: the
+                # SERVER-side job wait fired on the authoritative server budget
+                # (the deadline-clipped metadata lives on the controller's
+                # classification path; nothing raw is ever emitted).
+                timeoutSource="SERVER_PROVIDER_TIMEOUT",
             )
             raise self._typed(
                 "local provider timed out",
                 GenerationFailureCode.LOCAL_PROVIDER_TIMEOUT,
+                issued_timeout_seconds=timeout_s,
+                configured_timeout_seconds=self._configured_job_timeout(),
             )
         kind, value = waiter.result or ("error", GenerationFailureCode.BRIDGE_PROTOCOL_ERROR.value)
         if kind == "content":
@@ -235,22 +242,21 @@ class RemoteClientProvider:
         return isinstance(model, str) and model in set(allowlist)
 
     def _effective_timeout(self, request: GenerateRequest) -> float:
-        configured = float(
-            getattr(self._settings, "bridge_job_deadline_seconds", 120.0) or 120.0
-        )
-        # ADV-250 defense-in-depth: ``BRIDGE_JOB_DEADLINE_SECONDS`` is
-        # HARD-CAPPED at config validation (Settings le=...), but the wire
-        # clamp must hold even for a settings object constructed WITHOUT
-        # pydantic validation (or any future non-validating caller): the
-        # dispatched ``job.timeoutMs`` may NEVER exceed
-        # min(remaining generation deadline, this cap).
-        configured = min(configured, float(BRIDGE_JOB_DEADLINE_MAX_SECONDS))
+        configured = self._configured_job_timeout()
         requested = (
             float(request.timeout_seconds)
             if request.timeout_seconds is not None
             else configured
         )
         return min(max(0.0, requested), configured)
+
+    def _configured_job_timeout(self) -> float:
+        """The operator-configured per-job bridge deadline (the value BEFORE
+        the generation-deadline clamp) — hard-capped at the ADV-250 ceiling."""
+        configured = float(
+            getattr(self._settings, "bridge_job_deadline_seconds", 120.0) or 120.0
+        )
+        return min(configured, float(BRIDGE_JOB_DEADLINE_MAX_SECONDS))
 
     def _dispatch(self, conn: Any, job_id: str, payload: dict[str, Any]) -> bool:
         """Best-effort async send of the job frame onto the bridge's loop."""
@@ -266,11 +272,22 @@ class RemoteClientProvider:
         except Exception:  # noqa: BLE001 - transport failure -> typed disconnect
             return False
 
-    @staticmethod
-    def _typed(message: str, code: Any) -> Exception:
+    def _typed(
+        self,
+        message: str,
+        code: Any,
+        *,
+        issued_timeout_seconds: float | None = None,
+        configured_timeout_seconds: float | None = None,
+    ) -> Exception:
         from app.generation.provider import StageDriverProviderFailure
 
-        return StageDriverProviderFailure(message, code=code)
+        return StageDriverProviderFailure(
+            message,
+            code=code,
+            issued_timeout_seconds=issued_timeout_seconds,
+            configured_timeout_seconds=configured_timeout_seconds,
+        )
 
 
 def asyncio_run_coroutine_threadsafe(coro: Any, loop: Any) -> Any:

@@ -114,12 +114,14 @@ def infer_failure_code(reason: str | None) -> GenerationFailureCode:
         if "timed out" in text or "timeout" in text:
             return GenerationFailureCode.FRONTIER_TIMEOUT
         return GenerationFailureCode.FRONTIER_PROVIDER_ERROR
-    if "timed out" in text or "timeout" in text:
-        return GenerationFailureCode.PROVIDER_TIMEOUT
-    # Phase 22 — the bridge typed-failure phrases map to their canonical codes
-    # (defensive: the driver/provider normally raise the typed code directly).
+    # Phase 22 — the LOCAL bridge typed-timeout phrases are MORE SPECIFIC than
+    # the generic timeout branch below, so they must be matched FIRST (Phase38
+    # §26 keeps this order stable). Defence-in-depth: the driver/provider
+    # normally raise the typed code carrier directly.
     if "local ai did not finish" in text or "local provider timed out" in text:
         return GenerationFailureCode.LOCAL_PROVIDER_TIMEOUT
+    if "timed out" in text or "timeout" in text:
+        return GenerationFailureCode.PROVIDER_TIMEOUT
     if "bridge not connected" in text:
         return GenerationFailureCode.BRIDGE_NOT_CONNECTED
     if "bridge disconnected" in text:

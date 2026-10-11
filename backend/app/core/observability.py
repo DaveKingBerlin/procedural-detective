@@ -23,6 +23,16 @@ _SAFE_FIELDS = frozenset(
         "deadlineRemainingMs", "configuredProviderTimeoutMs", "effectiveProviderTimeoutMs",
         "providerCallIndex", "deadlineRemainingBeforeMs",
         "deadlineRemainingAfterMs", "stageTimingSummary",
+        # Phase38 DEF-098 — exact stage-timing accounting counters. The bounded
+        # ``stageTimingSummary`` TUPLE may be item-capped by the safe event
+        # writer; ``stageTimingCount`` is the exact number of recorded per-call
+        # timing tokens (always reconciles with ``providerCallCount``) and
+        # ``stageTimingTruncated`` marks an attempt whose tokens exceeded the
+        # event writer's item cap — so §30 accounting is never SILENTLY
+        # truncated. Integers/booleans only; never prompts, timing internals
+        # or raw generated content.
+        "stageTimingCount",
+        "stageTimingTruncated",
         "providerCallCount", "repairCount", "regenerationCount", "provider", "model",
         "requestBytes", "responseBytes", "structuredOutput", "success", "published",
         "failureCode", "validationOutcome", "assetRequestCount", "assetRepairCount",
@@ -118,6 +128,17 @@ _SAFE_FIELDS = frozenset(
         "codesUnchanged",
         "validatorCodesBefore",
         "validatorCodesAfter",
+        # Phase38 — closed timeout-source observability (§23/§25): a closed
+        # vocabulary token for the timeout layer that fired and a boolean
+        # deadline-clip marker (deciding "the generation deadline was the
+        # binding limiter"). NEVER raw exception text, milliseconds windows or
+        # internal layers.
+        "timeoutSource",
+        "deadlineClipped",
+        # Phase38 — the closed repair-owner tuple for the running repair (the
+        # stage(s) a controller repair invalidated/reran — §31). Closed owner
+        # tokens only; never diagnostics/free text.
+        "repairOwners",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})
