@@ -61,6 +61,7 @@ from app.generation.failure_codes import (
 from app.core.observability import emit_event
 from app.generation import prompts
 from app.generation import parser as stage_parser
+from app.generation import candidate_projection as candidate_projection_mod
 from app.domain.time_interval import (
     epoch_to_iso,
     parse_iso8601,
@@ -2894,11 +2895,59 @@ class OllamaStageDriver:
         # defect): the driver then REGENERATES the stage so the owner data can
         # actually change — while PRESERVING CaseTruth secrecy: the original
         # crime (truth) is kept, only the PUBLIC output is replaced (§15).
+        #
+        # Phase40 (§14) refinement: when the ONLY case-affecting defect is the
+        # closed candidate-integrity set, the cached parsed persons are reused
+        # and corrected by the trusted deterministic projection (step 1b) —
+        # ZERO CASE_PEOPLE provider calls (the main Phase-40 performance
+        # guarantee). When the projection cannot honour the closed rules it
+        # DECLINES and the driver falls back to the canonical CASE_PEOPLE
+        # provider repair in the SAME pass (§41).
         cached_case = self._case_outputs.get(attempt.attempt_id)
         rerun_case = bool(repair_plan.rerun_case)
+        candidate_only_repair = bool(
+            getattr(repair_plan, "candidate_integrity_only", False)
+        )
+        if candidate_only_repair and not repair_plan.rerun_evidence:
+            # Phase40 §16 (defense in depth) — the deterministic projection
+            # changes the candidate universe; the candidate-dependent evidence
+            # MUST be regenerated from the corrected universe even when a
+            # hand-built plan omitted the evidence flag. Replacement is safe:
+            # RepairPlan is frozen; the surviving fields are unchanged.
+            repair_plan = dataclasses.replace(
+                repair_plan,
+                rerun_evidence=True,
+                rerun_activity_log=True,
+            )
+        provider_case_repair_needed = True
+        crime: Any = None
+        public: Any = None
         if cached_case is not None and not rerun_case:
             crime, public = cached_case
-        else:
+            provider_case_repair_needed = False
+        elif (
+            cached_case is not None
+            and rerun_case
+            and candidate_only_repair
+            and not repair_plan.is_default_full_rerun
+        ):
+            # Phase 40 §14 — candidate-only integrity repair: try the trusted
+            # deterministic projection FIRST (deterministic; zero calls). On
+            # success the cached persons are reused (the step-1b chokepoint
+            # re-applies the projection and emits the single bounded telemetry
+            # event). On decline, fall through to the canonical provider repair.
+            old_crime, old_public = cached_case
+            probe = candidate_projection_mod.project_candidate_integrity(
+                tuple(getattr(old_public, "persons", ()) or ()),
+                getattr(old_crime, "murderer_id", None),
+            )
+            if probe.outcome in (
+                candidate_projection_mod.CandidateProjectionOutcome.NO_CHANGE,
+                candidate_projection_mod.CandidateProjectionOutcome.CORRECTED,
+            ):
+                crime, public = old_crime, old_public
+                provider_case_repair_needed = False
+        if provider_case_repair_needed:
             case_prompt = prompts.build_case_people_prompt(
                 attempt.prompt, locked_map, id_sheet=id_sheet
             )
@@ -2944,6 +2993,21 @@ class OllamaStageDriver:
                 crime, public = cached_case
             else:
                 crime, public = None, None
+
+        # --- 1b. Phase40 trusted candidate-integrity projection --------------
+        # The canonical chokepoint (§15): runs on EVERY parsed/validated case
+        # (fresh parse, cached reuse or engine repair) BEFORE any candidate-
+        # dependent evidence, so evidence/activity logs are never built from a
+        # candidate universe the trusted backend already knows is impossible.
+        # Corrects ONLY victim/witness eligibility removal + murderer
+        # eligibility retention; preserves every other person field/order. A
+        # declined projection keeps the raw public so the canonical validators
+        # still classify it (§35/§36).
+        if crime is not None and public is not None:
+            crime, public = self._project_candidate_integrity(
+                crime, public, attempt
+            )
+            self._case_outputs[attempt.attempt_id] = (crime, public)
 
         # --- 2. EVIDENCE ------------------------------------------------------
         # Reused when (a) the case is unchanged, (b) the plan did not invalidate
@@ -3049,7 +3113,20 @@ class OllamaStageDriver:
             # Phase38 §13 — when the plan does not invalidate the activity-log
             # stage, every per-item validated log is REUSED (never re-paid);
             # otherwise the affected stage is regenerated.
-            reuse_validated_logs = not repair_plan.rerun_activity_log and not evidence_was_rerun
+            #
+            # Phase40 §16/§17/§38 — a candidate-only integrity repair reruns
+            # the dependent evidence (the universe changed) but the surviving
+            # evidence items are byte-identical (same ids, same canonical
+            # times), so every unaffected per-item log IS REUSED while only
+            # changed/removed candidate-derived items are rebuilt. Do not force
+            # ALL logs to rerun.
+            candidate_only_repair = bool(
+                getattr(repair_plan, "candidate_integrity_only", False)
+            )
+            reuse_validated_logs = (
+                candidate_only_repair
+                or (not repair_plan.rerun_activity_log and not evidence_was_rerun)
+            )
             evidence_spec = self._activity_log_stage(
                 provider,
                 attempt,
@@ -3229,6 +3306,61 @@ class OllamaStageDriver:
                     _dt_remaining(attempt),
                 )
             )
+
+    # -- Phase 40 -- trusted candidate-integrity projection ------------------
+
+    def _project_candidate_integrity(
+        self,
+        crime: Any,
+        public: Any,
+        attempt: Any,
+    ) -> tuple[Any, Any]:
+        """Phase40 — apply the trusted deterministic candidate-integrity
+        projection at the canonical chokepoint (§15).
+
+        Runs on EVERY parsed/validated case (fresh, cached reuse or repair)
+        BEFORE candidate-dependent evidence generation, so evidence/activity
+        logs are never built from a candidate universe the trusted backend
+        already knows is impossible. Corrects ONLY the impossible
+        candidate-affordance combinations (§7): victim/witness SUSPECT_ELIGIBLE
+        removal + murderer eligibility retention — preserving person id/name/
+        role/presentedData/unrelated affordances/ordering.
+
+        Pure: no provider call, no clock, no randomness (the projection module
+        is deterministic and idempotent). Never exposed to prompts: the
+        murderer id is read ONLY in this trusted backend layer.
+
+        Returns the (possibly corrected) ``(crime, public)``. A declined/
+        escalated projection leaves the public UNCHANGED so the canonical
+        validators and repair routing stay authoritative (§13/§35)."""
+        result = candidate_projection_mod.project_candidate_integrity(
+            tuple(getattr(public, "persons", ()) or ()),
+            getattr(crime, "murderer_id", None),
+        )
+        # Bounded truthful telemetry (§43): closed outcome + booleans + counts.
+        # NEVER the hidden murderer id, names, person records, prompts or raw
+        # provider output.
+        emit_event(
+            "candidate_integrity.projection",
+            caseId=getattr(attempt, "case_id", None),
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            victimEligibilityRemoved=result.victim_eligibility_removed,
+            witnessEligibilityRemovedCount=result.witness_eligibility_removed_count,
+            murdererEligibilityAdded=result.murderer_eligibility_added,
+            candidateCountBefore=result.candidate_count_before,
+            candidateCountAfter=result.candidate_count_after,
+            projectionOutcome=result.outcome.value,
+        )
+        if (
+            result.outcome
+            in (
+                candidate_projection_mod.CandidateProjectionOutcome.NO_CHANGE,
+                candidate_projection_mod.CandidateProjectionOutcome.CORRECTED,
+            )
+            and result.corrected_persons is not getattr(public, "persons", None)
+        ):
+            public = dataclasses.replace(public, persons=result.corrected_persons)
+        return crime, public
 
     def _make_budget_consumer(self, attempt: Any) -> Callable[[str | None], bool]:
         """Budget consumer with Phase 19 Fix C bucket attribution.

@@ -15,6 +15,17 @@ ACTUAL validator ownership — never from parsing issue-message strings:
    VICTIM_IN_SUSPECT_CANDIDATES /
    WITNESS_IN_SUSPECT_CANDIDATES /
    MURDERER_NOT_SUSPECT_CANDIDATE) -> CASE_PEOPLE  (public persons/roles)
+
+  Phase40 refinement (§14): of those, the three CANDIDATE-INTEGRITY codes
+  (VICTIM_IN_SUSPECT_CANDIDATES / WITNESS_IN_SUSPECT_CANDIDATES /
+  MURDERER_NOT_SUSPECT_CANDIDATE) elect ``candidate_integrity_only`` plans
+  when they are the ONLY owning defect. The driver then corrects the parsed
+  persons through the deterministic candidate-integrity projection with ZERO
+  CASE_PEOPLE provider calls, reuses the world when its weapon-evidence input
+  is unchanged (§18/§19), and still reruns the candidate-dependent evidence +
+  its activity logs (§16/§17). PUBLIC_ROLE_TRUTH_LEAK stays EXCLUSIVELY a
+  CASE_PEOPLE provider repair (the projection never rewrites public roles), so
+  genuine person/content defects still reach the provider (§41).
 - quality witness-coverage codes
   (WITNESS_STATEMENT_MISSING/EMPTY/
    UNKNOWN_WITNESS/WITNESS_ID_MISMATCH/
@@ -96,6 +107,21 @@ class RepairOwner(str, Enum):
 _CASE_PEOPLE_QUALITY_CODES: frozenset[str] = frozenset(
     {
         "PUBLIC_ROLE_TRUTH_LEAK",
+        "VICTIM_IN_SUSPECT_CANDIDATES",
+        "WITNESS_IN_SUSPECT_CANDIDATES",
+        "MURDERER_NOT_SUSPECT_CANDIDATE",
+    }
+)
+
+# Phase40 — the THREE closed candidate-integrity codes the trusted
+# deterministic projection owns (Phase40-Fix.md §5/§14). A report whose ONLY
+# owning defect is one of these elects the candidate-only repair path: the
+# driver corrects the parsed persons with ZERO CASE_PEOPLE provider calls
+# instead of a full provider regeneration. PUBLIC_ROLE_TRUTH_LEAK is
+# deliberately NOT here — the projection must never rewrite a public role, so
+# a truth-leak role always falls back to the canonical CASE_PEOPLE repair.
+_CANDIDATE_INTEGRITY_CODES: frozenset[str] = frozenset(
+    {
         "VICTIM_IN_SUSPECT_CANDIDATES",
         "WITNESS_IN_SUSPECT_CANDIDATES",
         "MURDERER_NOT_SUSPECT_CANDIDATE",
@@ -265,6 +291,14 @@ class RepairPlan:
                               an EVIDENCE-only change reruns world ONLY when the
                               weapon-evidence input changed — runtime check)
         recompose             world composition (asset calls) rerun
+
+    ``candidate_integrity_only`` (Phase40 — backward-compatible optional flag,
+    default False) marks a repair whose ONLY defect is one of the three closed
+    candidate-integrity codes. Such a repair must NOT regenerate CASE_PEOPLE
+    from the provider (the trusted deterministic projection corrects the parsed
+    persons), and it must NOT force a world/composition rerun solely because
+    candidate membership changed (Phase40 §14/§18). It still reruns evidence
+    and activity logs, because evidence depends on candidate eligibility.
     """
 
     repair_owners: tuple[RepairOwner, ...]
@@ -274,6 +308,7 @@ class RepairPlan:
     rerun_activity_log: bool
     rerun_world: bool
     recompose: bool
+    candidate_integrity_only: bool = False
 
     @property
     def is_default_full_rerun(self) -> bool:
@@ -302,6 +337,11 @@ class RepairPlan:
         silently consume a repair pass with zero work, so it FAILS SAFE to the
         documented UNKNOWN full-rerun (``is_default_full_rerun`` is True; the
         CASE stage is still NOT regenerated) — never a silent no-op.
+
+        Phase40 — a candidate-integrity-only plan becomes a no-op here too
+        (the projection is the only thing that can change its owner data), so
+        it FAILS SAFE exactly the same way; ``candidate_integrity_only`` is
+        dropped (the reused plan performs no case-affecting change).
         """
         if not self.rerun_case:
             return self
@@ -319,6 +359,7 @@ class RepairPlan:
             rerun_activity_log=logs_forced,
             rerun_world=world_forced,
             recompose=world_forced or RepairOwner.ASSET_SPEC in owners,
+            candidate_integrity_only=False,
         )
         if not result.repair_owners and not (
             result.rerun_evidence
@@ -344,25 +385,53 @@ class RepairPlan:
         )
 
     @classmethod
+    def _is_candidate_integrity_only(
+        cls, codes: tuple[str, ...], owners: tuple[RepairOwner, ...]
+    ) -> bool:
+        """True when the ONLY owning defect is the closed candidate-integrity
+        set (Phase40 §14). The generic ``VALIDATION_FAILED`` token that the
+        quality bucket always contributes is ignored — it never disqualifies
+        the deterministic projection path."""
+        if owners != (RepairOwner.CASE_PEOPLE,):
+            return False
+        if not codes:
+            return False
+        meaningful = {code for code in codes if code != VALIDATOR_CODE_GENERIC}
+        return bool(meaningful) and meaningful <= _CANDIDATE_INTEGRITY_CODES
+
+    @classmethod
     def from_report(cls, report: object) -> "RepairPlan":
         """Derive a deterministic repair plan from one ``ValidationReport``."""
         codes = tuple(sorted(set(validation_failure_codes(report))))
         owners = owner_for_report(report)
         if RepairOwner.UNKNOWN in owners:
             return cls.default_full_rerun(codes)
+        candidate_only = cls._is_candidate_integrity_only(codes, owners)
         evidence = RepairOwner.EVIDENCE in owners
         case = RepairOwner.CASE_PEOPLE in owners
         act_log = RepairOwner.ACTIVITY_LOG in owners
         world = RepairOwner.WORLD_GRAPH in owners
         asset = RepairOwner.ASSET_SPEC in owners
+        rerun_world = case or world
+        recompose = case or world or asset
+        if candidate_only:
+            # Phase40 §14/§18/§19 — candidate-integrity-only repair: the
+            # trusted deterministic projection changes ONLY candidate
+            # eligibility. Evidence (candidate-dependent) and its activity logs
+            # still rerun, but the CASE/PROVIDER stage is NOT regenerated and
+            # the world/composition are NOT force-rerun (reused when the
+            # weapon-evidence input is unchanged — runtime check in the driver).
+            rerun_world = False
+            recompose = False
         return cls(
             repair_owners=owners,
             validator_codes=codes,
             rerun_case=case,
             rerun_evidence=case or evidence,
             rerun_activity_log=case or evidence or act_log,
-            rerun_world=case or world,
-            recompose=case or world or asset,
+            rerun_world=rerun_world,
+            recompose=recompose,
+            candidate_integrity_only=candidate_only,
         )
 
 

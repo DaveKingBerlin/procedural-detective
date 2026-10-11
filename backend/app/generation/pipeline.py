@@ -77,6 +77,20 @@ _WITNESS_SCOPE_STAGES = frozenset(
     {GenerationStage.PUBLIC_WORLD, GenerationStage.REPAIR}
 )
 
+# Phase40 §20 — the closed candidate-integrity quality codes whose current
+# public candidate membership is INVALID. When one is present in the repair
+# context's report, the context never echoes the current (invalid) suspect
+# candidate ids as authoritative provider guidance; it prints the REQUIRED
+# CANDIDATE-INTEGRITY RULES instead (rule-only, truth-safe; never the hidden
+# murderer identity).
+_CANDIDATE_INTEGRITY_QUALITY_CODES: frozenset[str] = frozenset(
+    {
+        case_quality.VICTIM_IN_SUSPECT_CANDIDATES,
+        case_quality.WITNESS_IN_SUSPECT_CANDIDATES,
+        case_quality.MURDERER_NOT_SUSPECT_CANDIDATE,
+    }
+)
+
 
 @dataclass
 class AttemptRecord:
@@ -465,6 +479,18 @@ def case_quality_repair_context(attempt: AttemptRecord) -> str:
         public, _evidence, _truth, _draft = assemble(attempt)
     except Exception:  # noqa: BLE001 - context degrades safely
         public = None
+    report = getattr(attempt, "last_validation", None)
+    quality_codes = tuple(getattr(report, "quality_issues", ()) or ())
+    # Phase40 §20 — the current public candidate membership is INVALID exactly
+    # when the report carries a candidate-integrity code; it must NEVER be
+    # passed back as authoritative provider guidance (that contradicting
+    # "accuseable set" line was the ambiguity root cause of the Easy
+    # Local-Ollama regression). The fallback guidance then distinguishes:
+    #   CURRENT INVALID PUBLIC CANDIDATE MEMBERSHIP (not echoed)
+    #   vs REQUIRED CANDIDATE-INTEGRITY RULES (echoed, rule-only, truth-safe)
+    candidate_integrity_present = any(
+        code in _CANDIDATE_INTEGRITY_QUALITY_CODES for code in quality_codes
+    )
     if public is not None:
         persons = public.persons
         person_ids = sorted(p.person_id for p in persons)
@@ -483,16 +509,28 @@ def case_quality_repair_context(attempt: AttemptRecord) -> str:
             lines.append("- witness ids (each MUST have usable witness-statement "
                          f"evidence): {', '.join(witness_ids)}")
         if candidates is not None:
-            lines.append("- suspect candidate ids (the accuseable set): "
-                         + ", ".join(sorted(candidates.suspect_ids)))
+            if candidate_integrity_present:
+                lines.append("- REQUIRED CANDIDATE-INTEGRITY RULES (the current "
+                             "public candidate memberships are INVALID — do NOT "
+                             "treat them as authoritative):")
+                lines.append("- a public 'victim' person must NEVER carry "
+                             "SUSPECT_ELIGIBLE")
+                lines.append("- a public 'witness' person must NEVER carry "
+                             "SUSPECT_ELIGIBLE")
+                lines.append("- the true killer MUST remain a SUSPECT_ELIGIBLE "
+                             "candidate while keeping an ordinary public role")
+                lines.append("- keep every already-valid suspect candidate "
+                             "unchanged; remove ONLY the impossible "
+                             "victim/witness SUSPECT_ELIGIBLE tokens")
+            else:
+                lines.append("- suspect candidate ids (the accuseable set): "
+                             + ", ".join(sorted(candidates.suspect_ids)))
     lines.append(
         "- required witness-kind evidence: an evidence item with kind "
         "'witness_statement' whose statement is non-empty, whose speakerName "
         "matches the witness name and whose WITNESS_CLAIMS proposition "
         "references the witness personId (one per witness)."
     )
-    report = getattr(attempt, "last_validation", None)
-    quality_codes = tuple(getattr(report, "quality_issues", ()) or ())
     if quality_codes:
         lines.append("- safe issue codes to fix: " + ", ".join(quality_codes))
     lines.append(
