@@ -895,11 +895,32 @@ describe("generationFailed — Phase 22 BYO-Ollama bridge typed codes (§21)", (
       "The selected local model is not available.",
     );
     expect(generationFailed("LOCAL_PROVIDER_TIMEOUT").message).toBe(
-      "Local AI did not finish within the allowed time.",
+      "Local AI did not finish within the provider time limit.",
     );
     expect(generationFailed("BRIDGE_DISCONNECTED").message).toBe(
       "Local AI disconnected — Reconnect the local bridge or use Deterministic Demo.",
     );
+  });
+
+  it("Phase38 §27 — LOCAL_PROVIDER_TIMEOUT and GENERATION_DEADLINE_EXCEEDED carry distinct truthful copy", () => {
+    const local = generationFailed("LOCAL_PROVIDER_TIMEOUT");
+    const deadline = generationFailed("GENERATION_DEADLINE_EXCEEDED");
+    // Ordinary local-AI timeout: the PROVIDER time limit was the limiter.
+    expect(local.kind).toBe("provider");
+    expect(local.message).toBe(DEMO_FAILURE_MESSAGES.localProviderTimeout);
+    expect(local.message).toBe("Local AI did not finish within the provider time limit.");
+    // Deadline-clipped local timeout: the TOTAL generation time budget was the
+    // limiter (never "the provider was slow").
+    expect(deadline.kind).toBe("deadline");
+    expect(deadline.message).toBe(DEMO_FAILURE_MESSAGES.deadline);
+    expect(deadline.message).toBe("Case generation exceeded its total time budget.");
+    // The two branches are semantically distinct and never expose internals
+    // (no milliseconds, no layers).
+    expect(local.message).not.toBe(deadline.message);
+    expect(local.message).not.toMatch(/ms/i);
+    expect(deadline.message).not.toMatch(/ms/i);
+    expect(local.message).not.toContain("_");
+    expect(deadline.message).not.toContain("_");
   });
 
   it("exact strings only — a prefix/substring variant never narrows into the Phase 22 buckets", () => {
