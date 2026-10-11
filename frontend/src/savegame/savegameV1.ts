@@ -1,6 +1,7 @@
 import type {
   AccusationCandidatesDTO,
   EvidenceRenderType,
+  FinalTargetDTO,
   WitnessListEntryDTO,
   WorldObjectDTO,
 } from "../api/types";
@@ -303,6 +304,26 @@ export interface SavegameCandidatesV1 {
   suspects: { id: string; name: string }[];
   motives: { id: string; label: string }[];
   weapons: { id: string; assetId: string; name: string }[];
+  /**
+   * Phase 41 — OPTIONAL additive final homicide target universe (suspects +
+   * witnesses, victim excluded; deterministically ordered, deduplicated).
+   * ABSENT on legacy exports (the accuse flow then falls back to `suspects`);
+   * the normalized definition keeps it absent so a legacy re-export stays
+   * byte-identical. (`null` is tolerated for the shared-DTO type, never
+   * produced by this validator.)
+   */
+  finalTargets?: FinalTargetDTO[] | null;
+  /**
+   * Phase 41 — OPTIONAL additive suicide-option affordance (true when the
+   * victim-as-suicide final option is offered). ABSENT on legacy exports.
+   * (`null` is tolerated for the shared-DTO type, never produced here.)
+   */
+  hasSuicideOption?: boolean | null;
+  /**
+   * Phase 41 — OPTIONAL additive victim display name used ONLY by the suicide
+   * option card. ABSENT on legacy exports.
+   */
+  victimName?: string | null;
 }
 
 /** One kind-allowlisted evidence-content payload (Phase 19G render contract). */
@@ -338,15 +359,27 @@ export interface SavegameEvidenceRecordV1 {
 }
 
 /** ReplayTruthV1 — the explicit minimal solution DTO (ADR-003 §3). The
- *  internal backend/domain `CaseTruth` object is NEVER serialized. */
+ *  internal backend/domain `CaseTruth` object is NEVER serialized.
+ *
+ *  Phase 41 — RESOLUTION-AWARE conditional shape:
+ *   - `resolutionType` is OPTIONAL (absent == LEGACY HOMICIDE, exactly as
+ *     before; present == "HOMICIDE" | "SUICIDE");
+ *   - `murdererId` / `murdererName` are NULLABLE ONLY when
+ *     `resolutionType === "SUICIDE"` (a suicide case has no murderer);
+ *   - legacy homicide exports (no resolutionType + non-null murderer) stay
+ *     byte-identical and parse exactly as they always did. */
 export interface ReplayTruthV1 {
-  murdererId: string;
+  /** Phase 41 — OPTIONAL closed resolution type; absent = legacy HOMICIDE. */
+  resolutionType?: "HOMICIDE" | "SUICIDE";
+  /** Phase 41 — null ONLY when resolutionType === "SUICIDE". */
+  murdererId: string | null;
   motiveId: string;
   weaponId: string;
   /** The canonical full ISO-8601-with-offset crime timestamp. */
   crimeTime: string;
   accusationToleranceSeconds: number;
-  murdererName: string;
+  /** Phase 41 — null ONLY when resolutionType === "SUICIDE". */
+  murdererName: string | null;
   motiveLabel: string;
   weaponName: string;
 }
@@ -1095,18 +1128,28 @@ function validateScene(raw: unknown, where: string): SavegameSceneV1 {
  *  values are rendered as React text by the accuse/reveal flows, so they are
  *  capped here with the documented candidate-field bound
  *  ``MAX_SHORT_TEXT_LENGTH`` (300) for every rendered candidate string —
- *  suspects[].name, motives[].label and weapons[].name/.assetId — with the
- *  frozen ``invalid`` rejection (DEF-047 / ADV-32F-01). Asset ids KEEP going
- *  through the sibling trusted-asset bounds everywhere else in this file
- *  (public objects/placements/world objects at ``MAX_ID_LENGTH``, generated
+ *  suspects[].name, motives[].label, weapons[].name/.assetId AND Phase 41
+ *  finalTargets[].name/.role — with the frozen ``invalid`` rejection
+ *  (DEF-047 / ADV-32F-01). Asset ids KEEP going through the sibling
+ *  trusted-asset bounds everywhere else in this file (public
+ *  objects/placements/world objects at ``MAX_ID_LENGTH``, generated
  *  definitions at the shared parser's 128-char cap) — the candidate weapon
  *  assetId is display/resolution data and shares the same 300-char cap as the
  *  other rendered candidate strings per the regression contract. Strict
  *  rejection per Phase32 §19 — an over-long candidate field is never accepted
- *  into the normalized definition. */
+ *  into the normalized definition.
+ *
+ *  Phase 41 — `finalTargets` / `hasSuicideOption` / `victimName` are OPTIONAL
+ *  ADDITIVE keys (absent on legacy exports): a payload without them keeps the
+ *  legacy suspect-only candidates shape byte-identical. When PRESENT, every
+ *  value is strictly bounded/typed (never silently coerced) and re-exported. */
 function validateCandidates(raw: unknown, where: string): SavegameCandidatesV1 {
   const record = requireRecord(raw, where);
-  assertOnlyKeys(record, ["suspects", "motives", "weapons"], where);
+  assertOnlyKeys(
+    record,
+    ["suspects", "motives", "weapons", "finalTargets", "hasSuicideOption", "victimName"],
+    where,
+  );
   const textBounds: Record<string, { field: string; max: number }[]> = {
     suspects: [{ field: "name", max: MAX_SHORT_TEXT_LENGTH }],
     motives: [{ field: "label", max: MAX_SHORT_TEXT_LENGTH }],
@@ -1127,12 +1170,44 @@ function validateCandidates(raw: unknown, where: string): SavegameCandidatesV1 {
       }
     });
   }
+  // Phase 41 — OPTIONAL additive final homicide target universe.
+  let finalTargets: { id: string; name: string; role: string }[] | undefined;
+  const finalTargetsRaw = record.finalTargets;
+  if (finalTargetsRaw !== undefined && finalTargetsRaw !== null) {
+    const list = requireArray(finalTargetsRaw, `${where}.finalTargets`, MAX_CANDIDATES);
+    finalTargets = list.map((entry, index) => {
+      const at = `${where}.finalTargets[${index}]`;
+      const entryRecord = requireRecord(entry, at);
+      assertOnlyKeys(entryRecord, ["id", "name", "role"], at);
+      return {
+        id: requireBoundedString(entryRecord, "id", at, MAX_ID_LENGTH),
+        name: requireBoundedString(entryRecord, "name", at, MAX_SHORT_TEXT_LENGTH),
+        role: requireBoundedString(entryRecord, "role", at, MAX_SHORT_TEXT_LENGTH),
+      };
+    });
+  }
+  // Phase 41 — OPTIONAL additive suicide-option affordance (strict boolean).
+  let hasSuicideOption: boolean | undefined;
+  if (record.hasSuicideOption !== undefined) {
+    if (typeof record.hasSuicideOption !== "boolean") {
+      invalid(`${where}.hasSuicideOption`, "must be a boolean", record.hasSuicideOption, "boolean");
+    }
+    hasSuicideOption = record.hasSuicideOption;
+  }
+  // Phase 41 — OPTIONAL additive victim display name (bounded string or null).
+  let victimName: string | undefined;
+  if (record.victimName !== undefined) {
+    victimName = requireBoundedNullableString(record, "victimName", where, MAX_SHORT_TEXT_LENGTH) ?? undefined;
+  }
   try {
     const parsed = validateAccusationCandidates.validate(raw);
     return {
       suspects: parsed.suspects,
       motives: parsed.motives,
       weapons: parsed.weapons,
+      ...(finalTargets !== undefined ? { finalTargets } : {}),
+      ...(hasSuicideOption !== undefined ? { hasSuicideOption } : {}),
+      ...(victimName !== undefined ? { victimName } : {}),
     };
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -1364,6 +1439,7 @@ function validateReplayTruth(raw: unknown, where: string): ReplayTruthV1 {
   assertOnlyKeys(
     record,
     [
+      "resolutionType",
       "murdererId",
       "motiveId",
       "weaponId",
@@ -1375,6 +1451,16 @@ function validateReplayTruth(raw: unknown, where: string): ReplayTruthV1 {
     ],
     where,
   );
+  // Phase 41 — OPTIONAL closed resolution type (absent == LEGACY HOMICIDE).
+  let resolutionType: "HOMICIDE" | "SUICIDE" | undefined;
+  if (record.resolutionType !== undefined) {
+    const value = record.resolutionType;
+    if (value !== "HOMICIDE" && value !== "SUICIDE") {
+      invalid(`${where}.resolutionType`, `must be one of HOMICIDE, SUICIDE`, value, "HOMICIDE | SUICIDE");
+    }
+    resolutionType = value;
+  }
+  const isSuicide = resolutionType === "SUICIDE";
   const crimeTime = requireBoundedString(record, "crimeTime", where, MAX_TIME_TEXT_LENGTH);
   try {
     parseIso8601(crimeTime);
@@ -1384,8 +1470,19 @@ function validateReplayTruth(raw: unknown, where: string): ReplayTruthV1 {
     }
     throw error;
   }
+  // Phase 41 — murdererId/murdererName are NON-NULL for HOMICIDE/legacy and
+  // NULLABLE ONLY for SUICIDE. The previous universal
+  // `replayTruth.murdererId: null FAILS` rule is now conditional: a null
+  // murdererId on a legacy/homicide truth still FAILS closed.
+  const murdererId = isSuicide
+    ? requireBoundedNullableString(record, "murdererId", where, MAX_ID_LENGTH)
+    : requireBoundedString(record, "murdererId", where, MAX_ID_LENGTH);
+  const murdererName = isSuicide
+    ? requireBoundedNullableString(record, "murdererName", where, MAX_SHORT_TEXT_LENGTH)
+    : requireBoundedString(record, "murdererName", where, MAX_SHORT_TEXT_LENGTH);
   return {
-    murdererId: requireBoundedString(record, "murdererId", where, MAX_ID_LENGTH),
+    ...(resolutionType !== undefined ? { resolutionType } : {}),
+    murdererId,
     motiveId: requireBoundedString(record, "motiveId", where, MAX_ID_LENGTH),
     weaponId: requireBoundedString(record, "weaponId", where, MAX_ID_LENGTH),
     crimeTime,
@@ -1396,7 +1493,7 @@ function validateReplayTruth(raw: unknown, where: string): ReplayTruthV1 {
       0,
       86_400,
     ),
-    murdererName: requireBoundedString(record, "murdererName", where, MAX_SHORT_TEXT_LENGTH),
+    murdererName,
     motiveLabel: requireBoundedString(record, "motiveLabel", where, MAX_LONG_TEXT_LENGTH),
     weaponName: requireBoundedString(record, "weaponName", where, MAX_SHORT_TEXT_LENGTH),
   };
@@ -1534,6 +1631,17 @@ function validateCandidatesAgainstPublic(
       invalid(`savegame.case.candidates.suspects[${index}].id`, `suspect "${suspect.id}" is not a published person`, suspect.id, "a published person id");
     }
   });
+  // Phase 41 — every final homicide target must be a PUBLISHED person (the
+  // final-target universe is public-data based; a hidden/invalid person is
+  // never a selectable final target) and the ids are unique.
+  if (candidates.finalTargets !== undefined && candidates.finalTargets !== null) {
+    assertUniqueIds(candidates.finalTargets.map((t) => t.id), "savegame.case.candidates.finalTargets");
+    candidates.finalTargets.forEach((target, index) => {
+      if (!personIds.has(target.id)) {
+        invalid(`savegame.case.candidates.finalTargets[${index}].id`, `final target "${target.id}" is not a published person`, target.id, "a published person id");
+      }
+    });
+  }
   candidates.motives.forEach((motive, index) => {
     if (!motiveIds.has(motive.id)) {
       invalid(`savegame.case.candidates.motives[${index}].id`, `motive "${motive.id}" is not published`, motive.id, "a published motive id");
@@ -1546,12 +1654,38 @@ function validateCandidatesAgainstPublic(
   });
 }
 
+/** Phase 41 — the FINAL homicide target ids of a savegame candidates block:
+ *  `finalTargets` when published, else the legacy `suspects` universe (a
+ *  legacy homicide save has no finalTargets and its murderer must be a
+ *  suspect exactly as before). */
+function candidateFinalTargetIds(candidates: SavegameCandidatesV1): string[] {
+  if (candidates.finalTargets !== undefined && candidates.finalTargets !== null && candidates.finalTargets.length > 0) {
+    return candidates.finalTargets.map((target) => target.id);
+  }
+  return candidates.suspects.map((suspect) => suspect.id);
+}
+
 function validateReplayTruthAgainstCandidates(
   truth: ReplayTruthV1,
   candidates: SavegameCandidatesV1,
 ): void {
-  if (!candidates.suspects.some((s) => s.id === truth.murdererId)) {
-    invalid("savegame.case.replayTruth.murdererId", "murdererId is not a candidate", truth.murdererId, "a candidate suspect id");
+  // Phase 41 — conditional murderer rule: a SUICIDE truth has NO murderer
+  // (murdererId null, no candidate membership required); a HOMICIDE/legacy
+  // truth REQUIRES a murdererId that is a FINAL final homicide target (for a
+  // witness murderer the id is in finalTargets but NOT necessarily in the
+  // investigative `suspects` universe).
+  if (truth.resolutionType === "SUICIDE") {
+    if (truth.murdererId !== null) {
+      invalid("savegame.case.replayTruth.murdererId", "murdererId must be null for SUICIDE", truth.murdererId, "null");
+    }
+  } else {
+    if (truth.murdererId === null) {
+      invalid("savegame.case.replayTruth.murdererId", "murdererId is required for HOMICIDE", truth.murdererId, "a candidate suspect id");
+    }
+    const targetIds = candidateFinalTargetIds(candidates);
+    if (!targetIds.includes(truth.murdererId)) {
+      invalid("savegame.case.replayTruth.murdererId", "murdererId is not a candidate", truth.murdererId, "a candidate suspect id");
+    }
   }
   if (!candidates.motives.some((m) => m.id === truth.motiveId)) {
     invalid("savegame.case.replayTruth.motiveId", "motiveId is not a candidate", truth.motiveId, "a candidate motive id");
@@ -1698,6 +1832,16 @@ export function normalizeSavegameV1(document: unknown): SavedCaseDefinition {
       suspects: Object.freeze(candidates.suspects),
       motives: Object.freeze(candidates.motives),
       weapons: Object.freeze(candidates.weapons),
+      // Phase 41 — OPTIONAL additive fields are preserved ONLY when the
+      // source document carried them; a legacy candidates block stays
+      // byte-identical through a re-export (no fabricated keys).
+      ...(candidates.finalTargets !== undefined
+        ? { finalTargets: Object.freeze(candidates.finalTargets) }
+        : {}),
+      ...(candidates.hasSuicideOption !== undefined
+        ? { hasSuicideOption: candidates.hasSuicideOption }
+        : {}),
+      ...(candidates.victimName !== undefined ? { victimName: candidates.victimName } : {}),
     }),
     witnesses: Object.freeze(witnesses),
     evidence: Object.freeze(evidence),
