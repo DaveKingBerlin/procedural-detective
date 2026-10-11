@@ -18,6 +18,15 @@ import { REPLAY_CASE_ID, REPLAY_PLAYTHROUGH_ID } from "./savegameV1";
  * as a live case — only the TRUTH SOURCE differs: ReplayTruthV1 is UNTRUSTED
  * replay-scoped data, never canonical server truth (Phase32 §13/§18).
  *
+ * Phase 41 — RESOLUTION-AWARE verdicts (§21):
+ *   truth HOMICIDE:  HOMICIDE + correct person => murdererCorrect true
+ *                    HOMICIDE + wrong person  => false
+ *                    SUICIDE                  => false
+ *   truth SUICIDE:   SUICIDE                  => true
+ *                    HOMICIDE + any person    => false
+ * A legacy truth (no `resolutionType`) is HOMICIDE; a legacy accusation body
+ * (no `resolutionType`) is HOMICIDE.
+ *
  * Honest proof-boundary: the live reveal's explanation board derives from
  * the pinned payload's `solverProof` section, which is deliberately NEVER
  * exported into the `.pdcase` (ADR-003 §5). A replayed reveal therefore
@@ -49,6 +58,8 @@ export const REPLAY_CASE_VERSION = 1;
  * UNTRUSTED saved truth; the accusation is the player's immutable submission.
  * The time comparison uses the EXACT server scoring window
  * `[T−N, T+N+1)` (REQUIREMENTS 31.7 / DEC-003).
+ *
+ * Phase 41 — resolution-aware WHO verdict (see module doc, §21).
  */
 export function evaluateReplayAccusation(
   truth: ReplayTruthV1,
@@ -63,7 +74,7 @@ export function evaluateReplayAccusation(
     // A schema-valid edited file may carry an unparseable canonical: the
     // replay never white-screens — timeCorrect becomes false (never correct).
     return {
-      murdererCorrect: accusation.murdererId === truth.murdererId,
+      murdererCorrect: resolvedMurdererCorrect(truth, accusation),
       motiveCorrect: accusation.motiveId === truth.motiveId,
       weaponCorrect: accusation.weaponId === truth.weaponId,
       timeCorrect: false,
@@ -79,11 +90,25 @@ export function evaluateReplayAccusation(
   }
 
   return {
-    murdererCorrect: accusation.murdererId === truth.murdererId,
+    murdererCorrect: resolvedMurdererCorrect(truth, accusation),
     motiveCorrect: accusation.motiveId === truth.motiveId,
     weaponCorrect: accusation.weaponId === truth.weaponId,
     timeCorrect: tickCorrect,
   };
+}
+
+/** Phase 41 §21 — the resolution-aware WHO verdict. A legacy truth (no
+ *  `resolutionType`) is HOMICIDE; a legacy accusation (no `resolutionType`)
+ *  is HOMICIDE. */
+function resolvedMurdererCorrect(truth: ReplayTruthV1, accusation: SubmittedAccusationDTO): boolean {
+  const truthIsSuicide = truth.resolutionType === "SUICIDE";
+  const accusationIsSuicide = accusation.resolutionType === "SUICIDE";
+  if (truthIsSuicide) {
+    // suicide truth: only a SUICIDE theory is correct, ANY homicide is wrong.
+    return accusationIsSuicide;
+  }
+  // homicide truth: the correct person wins; a SUICIDE theory is wrong.
+  return !accusationIsSuicide && accusation.murdererId !== null && accusation.murdererId === truth.murdererId;
 }
 
 /** The player-safe timeline: public timestamps of the saved evidence records
@@ -165,6 +190,9 @@ export function buildReplayReveal(
     caseVersion: REPLAY_CASE_VERSION,
     status: "REVEALED",
     truth: {
+      // Phase 41 — the resolution type is always explicit in the reveal DTO
+      // (a legacy save's absent resolutionType normalizes to HOMICIDE).
+      resolutionType: truth.resolutionType === "SUICIDE" ? "SUICIDE" : "HOMICIDE",
       murdererId: truth.murdererId,
       murdererName: truth.murdererName,
       motiveId: truth.motiveId,
