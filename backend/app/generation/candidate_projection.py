@@ -192,7 +192,15 @@ def project_candidate_integrity(
     decline/escalation outcome returns the original tuple UNCHANGED so the
     canonical validators/repair path stay authoritative.
     """
-    original = tuple(persons)
+    try:
+        original = tuple(persons)
+    except TypeError:
+        # ADV-40-02 — ``persons=None`` / a non-iterable value is a boundary
+        # input like the empty tuple: closed ``DECLINED_INSUFFICIENT_CONTEXT``
+        # with an empty universe, never a raised ``TypeError``.
+        return _declined(
+            CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT, ()
+        )
     if not original:
         return _declined(
             CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT, original
@@ -201,6 +209,13 @@ def project_candidate_integrity(
     # --- structure / role validation (escalate; never hide) -----------------
     parsed: list[tuple[Any, str, str, Any]] = []
     for person in original:
+        if not dataclasses.is_dataclass(person):
+            # ADV-40-01 — a duck-typed record exposing the right attribute
+            # surface but NOT a dataclass cannot be rebuilt by
+            # ``dataclasses.replace`` later. Invalid structure -> closed
+            # ``FAILED_VALIDATION`` with the original tuple untouched; never
+            # raise.
+            return _failed_validation(original)
         fields = _person_fields(person)
         if fields is None:
             return _failed_validation(original)
@@ -263,7 +278,11 @@ def project_candidate_integrity(
         )
 
     return CandidateProjectionResult(
-        corrected_persons=tuple(corrected),
+        # ADV-40-03 — a NO_CHANGE pass returns the EXACT input tuple object
+        # (never a fresh ``tuple(corrected)``) so the caller's identity guard
+        # (``corrected_persons is not original_persons``) skips the pointless
+        # ``dataclasses.replace``/allocation churn on unchanged universes.
+        corrected_persons=original if not changed else tuple(corrected),
         outcome=(
             CandidateProjectionOutcome.CORRECTED
             if changed

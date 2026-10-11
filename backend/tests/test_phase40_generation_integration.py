@@ -457,3 +457,91 @@ def test_candidate_integrity_projection_telemetry_is_bounded_and_truthful(caplog
     # never the hidden murderer id / names / raw content
     assert "paul_becker" not in json.dumps(fields)
     assert "Dr. Anna Weiss" not in json.dumps(fields)
+
+
+# --------------------------------------------------------------------------- #
+# ADV-40-03 — the driver's ``is not`` identity guard must become effective:
+# a NO_CHANGE pass does NOT rebuild the PublicWorldSpec (no allocation churn)
+# while a CORRECTED pass still does
+# --------------------------------------------------------------------------- #
+
+
+def test_no_change_projection_does_not_rebuild_public_world_spec():
+    """ADV-40-03 — for an already-valid (clean) public, the chokepoint reports
+    NO_CHANGE and ``result.corrected_persons is public.persons``, so the
+    driver's identity guard skips ``dataclasses.replace``: the SAME
+    ``PublicWorldSpec`` object flows through the projection (identity
+    preserved, zero allocation churn)."""
+    from types import SimpleNamespace
+
+    from app.generation.candidate_projection import (
+        CandidateProjectionOutcome,
+        project_candidate_integrity,
+    )
+    from app.generation.schemas import PersonSpec, PublicWorldSpec
+
+    clean_persons = tuple(
+        PersonSpec(person_id=pid, name=name, role=role, affordances=aff)
+        for (pid, name, role, aff) in (
+            ("anna_weiss", "Dr. Anna Weiss", "victim", ("VISIBLE_CHARACTER",)),
+            ("lisa_koenig", "Lisa König", "witness", ("VISIBLE_CHARACTER",)),
+            ("paul_becker", "Paul Becker", "suspect", ("SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER")),
+            ("marcus_fischer", "Marcus Fischer", "suspect", ("SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER")),
+        )
+    )
+    public = PublicWorldSpec(persons=clean_persons)
+    crime = SimpleNamespace(murderer_id="paul_becker")
+    attempt = _direct_attempt("GA-p40-norebuild-0001")
+    driver = _make_driver(MockOllamaTransport(posts=[]))
+
+    _crime_out, public_out = driver._project_candidate_integrity(
+        crime, public, attempt
+    )
+    assert public_out is public, "NO_CHANGE must NOT rebuild PublicWorldSpec"
+
+    # pure-level companion: clean input twice -> NO_CHANGE and the corrected
+    # tuple IS the original tuple object (value + identity semantics).
+    first = project_candidate_integrity(clean_persons, "paul_becker")
+    assert first.outcome is CandidateProjectionOutcome.NO_CHANGE
+    assert first.corrected_persons is clean_persons
+    second = project_candidate_integrity(first.corrected_persons, "paul_becker")
+    assert second.outcome is CandidateProjectionOutcome.NO_CHANGE
+    assert second.corrected_persons is first.corrected_persons
+
+
+def test_corrected_projection_still_rebuilds_public_world_spec():
+    """ADV-40-03 companion — when the projection DOES correct (victim eligible),
+    the driver still rebuilds the PublicWorldSpec with the corrected persons;
+    the identity guard must never be weakened into a silent no-op."""
+    from types import SimpleNamespace
+
+    from app.generation.schemas import PersonSpec, PublicWorldSpec
+
+    poisoned = (
+        PersonSpec(
+            person_id="anna_weiss",
+            name="Dr. Anna Weiss",
+            role="victim",
+            affordances=("SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER"),
+        ),
+        PersonSpec(
+            person_id="paul_becker",
+            name="Paul Becker",
+            role="suspect",
+            affordances=("SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER"),
+        ),
+    )
+    public = PublicWorldSpec(persons=poisoned)
+    crime = SimpleNamespace(murderer_id="paul_becker")
+    attempt = _direct_attempt("GA-p40-rebuild-0001")
+    driver = _make_driver(MockOllamaTransport(posts=[]))
+
+    _crime_out, public_out = driver._project_candidate_integrity(
+        crime, public, attempt
+    )
+    assert public_out is not public, "CORRECTED must rebuild PublicWorldSpec"
+    assert public_out.persons is not public.persons
+    victim = {p.person_id: p for p in public_out.persons}["anna_weiss"]
+    assert "SUSPECT_ELIGIBLE" not in victim.affordances
+    murderer = {p.person_id: p for p in public_out.persons}["paul_becker"]
+    assert "SUSPECT_ELIGIBLE" in murderer.affordances

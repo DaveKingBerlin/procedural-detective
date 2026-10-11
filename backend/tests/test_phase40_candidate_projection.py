@@ -4,7 +4,9 @@ Covers the closed three-rule integrity semantics (§7/§10/§11), outcome
 vocabulary (§13/§44), idempotence (§24), determinism (§25), ordering (§26/§28),
 the exact Easy regression shape (§29/§30), murderer-missing-candidate (§31),
 combined corruption (§32), deep-equality preservation (§33), role-independence
-(§34), escalation (§35/§36) and the adversarial catalog (§53).
+(§34), escalation (§35/§36), the adversarial catalog (§53) and the ADVs-40-01/
+    02/03 robustness fixes (closed outcomes for duck-typed non-dataclass
+    records, non-iterable boundary inputs and NO_CHANGE tuple-identity).
 
 All tests are PURE: they construct ``PersonSpec`` records in memory and call
 ``project_candidate_integrity`` directly (zero providers, zero network, zero
@@ -436,3 +438,148 @@ def test_suspect_ids_remain_sorted_and_stable():
     assert universes.suspect_ids == ("marcus_fischer", "paul_becker", "sophie_hoffmann")
     # stable across repeated derivations
     assert derive_universes(public).suspect_ids == universes.suspect_ids
+
+
+# --------------------------------------------------------------------------- #
+# ADV-40-01 — duck-typed NON-dataclass records must close FAILED_VALIDATION
+# (never raise on the rebuild path)
+# --------------------------------------------------------------------------- #
+
+
+def test_duck_typed_non_dataclass_record_crash_repro_is_failed_validation():
+    """ADV-40-01 crash repro: a plain ``types.SimpleNamespace``-like object
+    exposing ``person_id/name/role/affordances`` with a victim that has
+    SUSPECT_ELIGIBLE and a murderer needing SUSPECT_ELIGIBLE used to reach
+    ``dataclasses.replace`` -> uncaught ``TypeError``. The controller contract
+    demands a CLOSED outcome: ``FAILED_VALIDATION`` with the original tuple
+    preserved, never raise."""
+    from types import SimpleNamespace
+
+    victim = SimpleNamespace(
+        person_id="anna_weiss",
+        name="Dr. Anna Weiss",
+        role="victim",
+        affordances=[_SE, _VIS],
+    )
+    murderer = SimpleNamespace(
+        person_id="paul_becker",
+        name="Paul Becker",
+        role="suspect",
+        affordances=[_VIS],
+    )
+    persons = (victim, murderer)
+    result = project_candidate_integrity(persons, murderer_id="paul_becker")
+
+    assert result.outcome is CandidateProjectionOutcome.FAILED_VALIDATION
+    assert result.corrected_persons is persons, "original tuple preserved untouched"
+
+
+def test_duck_typed_non_dataclass_public_affordances_is_failed_validation():
+    """ADV-40-01 ``public_affordances``-only variant: the non-dataclass record
+    exposes the ``PublicPerson``-style surface but is still not rebuildable —
+    the projection must close ``FAILED_VALIDATION`` instead of crashing."""
+    from types import SimpleNamespace
+
+    victim = SimpleNamespace(
+        person_id="anna_weiss",
+        name="Dr. Anna Weiss",
+        role="victim",
+        public_affordances=frozenset([_SE, _VIS]),
+    )
+    murderer = SimpleNamespace(
+        person_id="paul_becker",
+        name="Paul Becker",
+        role="suspect",
+        public_affordances=frozenset([_VIS]),
+    )
+    persons = (victim, murderer)
+    result = project_candidate_integrity(persons, murderer_id="paul_becker")
+
+    assert result.outcome is CandidateProjectionOutcome.FAILED_VALIDATION
+    assert result.corrected_persons is persons, "original tuple preserved untouched"
+
+
+def test_duck_typed_non_dataclass_unchanged_record_is_still_failed_validation():
+    """ADV-40-01 companion — even a non-dataclass record that needs NO change
+    is invalid structure for this projection (it can never be rebuilt): the
+    closed outcome is ``FAILED_VALIDATION`` so the canonical layer stays
+    authoritative, never a silent ``NO_CHANGE``."""
+    from types import SimpleNamespace
+
+    persons = (
+        SimpleNamespace(
+            person_id="anna_weiss",
+            name="Dr. Anna Weiss",
+            role="victim",
+            affordances=[_VIS],
+        ),
+        SimpleNamespace(
+            person_id="paul_becker",
+            name="Paul Becker",
+            role="suspect",
+            affordances=[_SE, _VIS],
+        ),
+    )
+    result = project_candidate_integrity(persons, murderer_id="paul_becker")
+    assert result.outcome is CandidateProjectionOutcome.FAILED_VALIDATION
+    assert result.corrected_persons is persons
+
+
+# --------------------------------------------------------------------------- #
+# ADV-40-02 — ``persons=None`` / non-iterable inputs close instead of raising
+# --------------------------------------------------------------------------- #
+
+
+def test_boundary_none_persons_is_declined_not_raised():
+    result = project_candidate_integrity(None, murderer_id="paul_becker")
+    assert result.outcome is CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT
+    assert result.corrected_persons == ()
+
+
+def test_boundary_int_persons_is_declined_not_raised():
+    result = project_candidate_integrity(17, murderer_id="paul_becker")
+    assert result.outcome is CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT
+    assert result.corrected_persons == ()
+
+
+def test_boundary_non_iterable_persons_is_declined_not_raised():
+    result = project_candidate_integrity(object(), murderer_id="paul_becker")
+    assert result.outcome is CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT
+    assert result.corrected_persons == ()
+
+
+# --------------------------------------------------------------------------- #
+# ADV-40-03 — NO_CHANGE returns the EXACT original tuple object (identity
+# semantics drive the driver's no-rebuild guard)
+# --------------------------------------------------------------------------- #
+
+
+def _clean_shape() -> tuple[PersonSpec, ...]:
+    """A fully valid candidate universe (all three closed rules already held):
+    victim/witness without SUSPECT_ELIGIBLE, murderer and red herrings with it."""
+    return (
+        _p("anna_weiss", role="victim", affordances=(_VIS,), name="Dr. Anna Weiss"),
+        _p("lisa_koenig", role="witness", affordances=(_VIS,), name="Lisa König"),
+        _p("paul_becker", role="suspect", affordances=(_SE, _VIS), name="Paul Becker"),
+        _p("marcus_fischer", role="suspect", affordances=(_SE, _VIS), name="Marcus Fischer"),
+    )
+
+
+def test_no_change_returns_the_original_tuple_object():
+    """ADV-40-03 — a clean (already-valid) input: the projection reports
+    NO_CHANGE AND ``corrected_persons`` IS the original input tuple object
+    (value + identity semantics). Re-applying to the same object stays
+    NO_CHANGE and keeps identity — the driver's ``is not`` guard then skips
+    the pointless ``dataclasses.replace`` allocation churn."""
+    persons = _clean_shape()
+    first = project_candidate_integrity(persons, murderer_id="paul_becker")
+    assert first.outcome is CandidateProjectionOutcome.NO_CHANGE
+    assert first.corrected_persons is persons
+
+    second = project_candidate_integrity(first.corrected_persons, murderer_id="paul_becker")
+    assert second.outcome is CandidateProjectionOutcome.NO_CHANGE
+    assert second.corrected_persons is first.corrected_persons
+
+    third = project_candidate_integrity(second.corrected_persons, murderer_id="paul_becker")
+    assert third.outcome is CandidateProjectionOutcome.NO_CHANGE
+    assert third.corrected_persons is second.corrected_persons
