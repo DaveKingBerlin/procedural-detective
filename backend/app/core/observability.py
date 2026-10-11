@@ -139,6 +139,16 @@ _SAFE_FIELDS = frozenset(
         # stage(s) a controller repair invalidated/reran — §31). Closed owner
         # tokens only; never diagnostics/free text.
         "repairOwners",
+        # Phase40 — bounded candidate-integrity projection telemetry
+        # (``candidate_integrity.projection``, §43). Booleans and bounded
+        # integers only + a closed outcome token. NEVER the hidden murderer id,
+        # person names/ids, full person records, prompts or raw provider output.
+        "victimEligibilityRemoved",
+        "witnessEligibilityRemovedCount",
+        "murdererEligibilityAdded",
+        "candidateCountBefore",
+        "candidateCountAfter",
+        "projectionOutcome",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})
