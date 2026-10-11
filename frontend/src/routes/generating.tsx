@@ -14,6 +14,7 @@ import type { CreateCaseGeneration, GenerationCapabilitiesResponse, GenerationMo
 import { setPlaythroughId, setPlaythroughToken } from "../api/playthroughToken";
 import { clearJourneyParams, getJourneyParams, type JourneyParams } from "../journey/context";
 import { clearSessionDemoCaseId } from "../journey/demoCaseSelection";
+import { clearReplay } from "../savegame/replaySession";
 import {
   getGenerationMode,
   validatedJourneyMode,
@@ -208,6 +209,18 @@ export default function GeneratingPage() {
       run={runJourney}
       loadCapabilities={capabilityLoader}
       onSuccess={(result) => {
+        // Phase 39 (DEF-100) — a NEWLY-STARTED LIVE playthrough must never be
+        // hijacked by a stale in-memory saved replay. `clearReplay()` is only
+        // invoked by the player-route back-buttons (scene/accuse/reveal), so a
+        // "browser-back -> New Investigation" journey could otherwise reach
+        // /scene with the OLD replay still active: the scene would render the
+        // "Saved Case" bar, build `buildReplayServices(oldDefinition)` and —
+        // because of the Phase 39 `!isReplayActive()` gates — silently skip
+        // ALL live `PT-*` persistence. Scoping this live session by clearing
+        // any active replay at the moment a live playthrough is created means
+        // /scene builds the LIVE services and persists under the live `PT-*`
+        // namespace as before.
+        clearReplay();
         setPlaythroughToken(result.playthroughToken);
         setPlaythroughId(result.playthroughId);
         clearJourneyParams();

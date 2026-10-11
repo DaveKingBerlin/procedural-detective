@@ -4,7 +4,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   EvidenceReadResultDTO,
@@ -17,12 +17,15 @@ import { makeWitnessBootstrap } from "../scene/testFixtures";
 import realReplayFixture from "../savegame/fixtures/v1_replay_witness_state.pdcase.json";
 import demoFixture from "../savegame/fixtures/v1_demo_apartment.pdcase.json";
 import generatedFixture from "../savegame/fixtures/v1_generated_quality_case.pdcase.json";
-import { clearReplay, replayStorageNamespace, startReplay } from "../savegame/replaySession";
+import { clearReplay, isReplayActive, replayStorageNamespace, startReplay } from "../savegame/replaySession";
 import { reExportV1, serializeSavegameV1 } from "../savegame/exportV1";
 import { parseSavegameV1, utf8ByteLength } from "../savegame/savegameV1";
 import { witnessStatementKey } from "../witness/witnessStatementStore";
 import ScenePage from "./scene";
 import { interviewWitness } from "../api/client";
+import GeneratingPage from "./generating";
+import { setJourneyParams } from "../journey/context";
+import { resetAnonymousSessionCache } from "../api/anonymousSession";
 
 /**
  * Phase 39 — saved-replay witness interview state (DEF-045 regression).
@@ -178,12 +181,48 @@ vi.mock("../api/client", async (importOriginal) => {
       };
     },
   );
+  // Phase 39 (DEF-100) — the live-flow journey endpoints, so the regression
+  // can drive a REAL new live playthrough through /generating (createCase
+  // PUBLISHES synchronously -> skip polling -> createPlaythrough).
+  const createAnonymousSession = vi.fn(async () => ({
+    anonymousSessionToken: "anon-test-0001",
+    quotaWindowEndsAt: 1e12,
+  }));
+  const createCase = vi.fn(async () => ({
+    caseId: "CASE-live-0001",
+    generationId: "GEN-live-0001",
+    generationAttemptId: "ATT-live-0001",
+    creatorAccessToken: "creator-live-0001",
+    status: "PUBLISHED",
+  }));
+  const getGenerationProgress = vi.fn(async () => ({
+    caseId: "CASE-live-0001",
+    generationId: "GEN-live-0001",
+    status: "PUBLISHED",
+    progress: 100,
+    stage: null,
+  }));
+  const createPlaythrough = vi.fn(async () => ({
+    playthroughId: "PT-test-0001",
+    caseId: "CASE-live-0001",
+    caseVersion: 1,
+    playthroughAccessToken: "pt-live-0001",
+    status: "PLAYING",
+  }));
+  const getGenerationCapabilities = vi.fn(async () => ({
+    modes: [{ id: "demo", available: true }],
+  }));
   return {
     ...actual,
     getInvestigation: vi.fn(async () => holders.bootstrap),
     interactObject,
     interviewWitness,
     readRecord,
+    createAnonymousSession,
+    createCase,
+    getGenerationProgress,
+    createPlaythrough,
+    getGenerationCapabilities,
   };
 });
 
@@ -317,6 +356,7 @@ afterEach(() => {
   holders.lastOnPick = null;
   vi.clearAllMocks();
   clearReplay();
+  resetAnonymousSessionCache();
   window.localStorage.clear();
 });
 
@@ -830,5 +870,72 @@ describe("Phase 39 — live playthrough witness persistence stays byte-identical
     expect(isAnswerRendered(mounted!.container, "OBSERVATION")).toBe(true);
     expect(answeredMarkerCount(mounted!.container)).toBe(1);
     expect(interviewWitness).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// Phase 39 (DEF-100) — a stale active replay must never hijack a live playthrough
+// --------------------------------------------------------------------------- //
+
+describe("Phase 39 — DEF-100 a stale active replay never hijacks a live playthrough", () => {
+  it("browser-back + New Investigation: the /generating journey clears the stale replay, /scene renders LIVE and persists PT-*", async () => {
+    const definition = realDefinition();
+    // A loaded replay is still ACTIVE (browser-back from /scene left it — the
+    // three route back-buttons never ran clearReplay). This is the exact
+    // stale state ADV-39-02 described.
+    startReplay(definition);
+    expect(isReplayActive()).toBe(true);
+
+    // The user starts a NEW live investigation: /new stages the journey,
+    // /generating runs it (mocked createCase -> PUBLISHED synchronously).
+    setJourneyParams({ prompt: "A crime", difficulty: "medium" });
+    resetAnonymousSessionCache();
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <MemoryRouter initialEntries={["/generating"]}>
+          <Routes>
+            <Route path="/generating" element={<GeneratingPage />} />
+            <Route path="/scene" element={<ScenePage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+    mounted = { container, root };
+    await flushAsync();
+
+    // The live journey reached the PUBLISHED done state (Enter investigation).
+    expect(
+      container.querySelector('[data-testid="enter-investigation"]'),
+    ).not.toBeNull();
+
+    // Enter the investigation: onSuccess clears the stale replay BEFORE the
+    // /scene mount, so the scene builds the LIVE services (pre-fix this
+    // mounted the OLD file's world under the "Saved Case" bar).
+    click(container, '[data-testid="enter-investigation"]');
+    await flushAsync();
+    await waitForReady(container);
+
+    // The live /scene renders: NO "Saved Case" replay bar, and a LIVE
+    // witness is served (the mocked PT bootstrap, not the old file's world).
+    expect(container.querySelector('[data-testid="replay-source-bar"]')).toBeNull();
+    expect(isReplayActive()).toBe(false);
+
+    // Asking a witness persists to the LIVE PT-* key (not skipped)…
+    click(container, '[data-testid="witness-witness_emily_reed"]');
+    await flushAsync();
+    click(container, '[data-testid="witness-question-OBSERVATION"]');
+    await flushAsync();
+    const stored = window.localStorage.getItem("pd_witness_statements_v1:PT-test-0001");
+    expect(stored).not.toBeNull();
+    expect(stored).toContain("OBSERVATION");
+
+    // …and NO stale `saved-replay-<hash>` namespace is ever written.
+    expect(
+      window.localStorage.getItem(witnessStatementKey(replayStorageNamespace(definition))),
+    ).toBeNull();
   });
 });
