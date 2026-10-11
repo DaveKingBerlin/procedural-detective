@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { reExportV1, serializeSavegameV1 } from "./exportV1";
 import canonical from "./fixtures/v1_demo_apartment.pdcase.json";
 import {
   MAX_EXPORT_BYTES,
@@ -559,8 +560,52 @@ describe("SavegameV1 — nullable vs optional contract (Phase32-Fix §7/§17/§2
       expect(kindOf(text)).toBe("invalid");
     });
 
-    it("replayTruth.murdererId: null FAILS", () => {
+    it("replayTruth.murdererId: null FAILS for a LEGACY/homicide truth (Phase 41 conditional rule)", () => {
+      // Without `resolutionType: "SUICIDE"`, a null murdererId stays a
+      // non-nullable-required field — the legacy homicide contract is pinned.
       const text = mutation((doc) => (doc.case.replayTruth.murdererId = null));
+      expect(kindOf(text)).toBe("invalid");
+    });
+
+    it("replayTruth.resolutionType is an accepted OPTIONAL key (absent on legacy stays byte-identical)", () => {
+      const legacy = parseSavegameV1(CANONICAL_TEXT, canonicalBytes());
+      expect(legacy.replayTruth.resolutionType).toBeUndefined();
+      // A present but unknown resolution value fails closed.
+      const bad = mutation((doc) => (doc.case.replayTruth.resolutionType = "ACCIDENT"));
+      expect(kindOf(bad)).toBe("invalid");
+      // An explicit HOMICIDE + non-null murderer is accepted (new-homicide shape).
+      const homicide = mutation((doc) => (doc.case.replayTruth.resolutionType = "HOMICIDE"));
+      const definition = parseSavegameV1(homicide, utf8ByteLength(homicide));
+      expect(definition.replayTruth.resolutionType).toBe("HOMICIDE");
+      expect(definition.replayTruth.murdererId).toBe("thomas_reed");
+    });
+
+    it("SUICIDE replayTruth accepts murdererId/murdererName null and requires no candidate membership", () => {
+      const text = mutation((doc) => {
+        doc.case.replayTruth.resolutionType = "SUICIDE";
+        doc.case.replayTruth.murdererId = null;
+        doc.case.replayTruth.murdererName = null;
+      });
+      const definition = parseSavegameV1(text, utf8ByteLength(text));
+      expect(definition.replayTruth.resolutionType).toBe("SUICIDE");
+      expect(definition.replayTruth.murdererId).toBeNull();
+      expect(definition.replayTruth.murdererName).toBeNull();
+      // Motive/weapon candidates are STILL required for a SUICIDE truth.
+      const badMotive = mutation((doc) => {
+        doc.case.replayTruth.resolutionType = "SUICIDE";
+        doc.case.replayTruth.murdererId = null;
+        doc.case.replayTruth.murdererName = null;
+        doc.case.replayTruth.motiveId = "not_a_motive";
+      });
+      expect(kindOf(badMotive)).toBe("invalid");
+    });
+
+    it("SUICIDE replayTruth rejects a non-null murdererId (phase-bound rule)", () => {
+      const text = mutation((doc) => {
+        doc.case.replayTruth.resolutionType = "SUICIDE";
+        doc.case.replayTruth.murdererId = "thomas_reed";
+        doc.case.replayTruth.murdererName = "Thomas Reed";
+      });
       expect(kindOf(text)).toBe("invalid");
     });
   });
@@ -674,6 +719,72 @@ describe("SavegameV1 — Phase32-Fix §5 test/debug diagnostic shape", () => {
     const text = mutateDocument((doc) => (doc.case.witnesses[0].sceneObjectId = null));
     // A VALID nullable null must still parse (no regression from the helper).
     expect(parseSavegameV1(text, utf8ByteLength(text)).witnesses[0].sceneObjectId).toBeNull();
+  });
+});
+
+describe("SavegameV1 — Phase 41 candidates block (finalTargets / hasSuicideOption / victimName)", () => {
+  const mutation = (mutate: (doc: any) => void): string => mutateDocument(mutate);
+
+  it("accepts the additive final-theory fields and preserves them in the normalized definition", () => {
+    const text = mutation((doc) => {
+      doc.case.candidates.finalTargets = [
+        { id: "anna_karlsson", name: "Anna Karlsson", role: "suspect" },
+        { id: "emily_reed", name: "Emily Reed", role: "witness" },
+        { id: "thomas_reed", name: "Thomas Reed", role: "suspect" },
+      ];
+      doc.case.candidates.hasSuicideOption = true;
+      doc.case.candidates.victimName = "Sarah Miller";
+    });
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+    expect(definition.candidates.finalTargets).toEqual([
+      { id: "anna_karlsson", name: "Anna Karlsson", role: "suspect" },
+      { id: "emily_reed", name: "Emily Reed", role: "witness" },
+      { id: "thomas_reed", name: "Thomas Reed", role: "suspect" },
+    ]);
+    expect(definition.candidates.hasSuicideOption).toBe(true);
+    expect(definition.candidates.victimName).toBe("Sarah Miller");
+  });
+
+  it("a legacy candidates block stays byte-identical (no fabricated final-theory keys)", () => {
+    const definition = parseSavegameV1(CANONICAL_TEXT, canonicalBytes());
+    expect(definition.candidates.finalTargets).toBeUndefined();
+    expect(definition.candidates.hasSuicideOption).toBeUndefined();
+    expect(definition.candidates.victimName).toBeUndefined();
+    // Re-export stays byte-identical (the round-trip guard pins this too).
+    const reExport = serializeSavegameV1(reExportV1(definition, canonical.exportedAt));
+    expect(reExport).toBe(CANONICAL_TEXT);
+  });
+
+  it("rejects malformed final-theory candidate fields (never silently coerced)", () => {
+    expect(kindOf(mutation((doc) => (doc.case.candidates.finalTargets = "nope")))).toBe("invalid");
+    expect(kindOf(mutation((doc) => (doc.case.candidates.hasSuicideOption = "yes")))).toBe("invalid");
+    expect(kindOf(mutation((doc) => (doc.case.candidates.finalTargets = [{ id: "a", name: "A" }])))).toBe("invalid");
+    // A final target that is NOT a published person is a reference violation.
+    expect(
+      kindOf(
+        mutation((doc) => {
+          doc.case.candidates.finalTargets = [{ id: "ghost_person", name: "Ghost", role: "witness" }];
+        }),
+      ),
+    ).toBe("invalid");
+    // Over-bound text fields stay rejected (DEF-047 applies to finalTargets too).
+    expect(
+      kindOf(
+        mutation((doc) => {
+          doc.case.candidates.finalTargets = [{ id: "emily_reed", name: "A".repeat(301), role: "witness" }];
+        }),
+      ),
+    ).toBe("invalid");
+  });
+
+  it("a duplicate finalTarget id is rejected", () => {
+    const text = mutation((doc) => {
+      doc.case.candidates.finalTargets = [
+        { id: "emily_reed", name: "Emily Reed", role: "witness" },
+        { id: "emily_reed", name: "Emily Reed", role: "witness" },
+      ];
+    });
+    expect(kindOf(text)).toBe("invalid");
   });
 });
 

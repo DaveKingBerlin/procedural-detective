@@ -76,6 +76,19 @@ describe("Phase32-Fix §9 — real-file-shaped fixture structure", () => {
     expect(raw.case.witnesses[0].sceneObjectId).toBeNull();
   });
 
+  it("Phase 41 — a LEGACY fixture stays LEGACY: no resolutionType, non-null murdererId, no final-theory candidates", () => {
+    const definition = realDefinition();
+    // The legacy homicide contract is pinned: no optional resolutionType is
+    // fabricated, murdererId stays non-null, and no additive final-theory
+    // candidates block is invented (re-exports stay byte-identical).
+    expect(definition.replayTruth.resolutionType).toBeUndefined();
+    expect(definition.replayTruth.murdererId).toBe("thomas_reed");
+    expect(definition.replayTruth.murdererName).toBe("Suspect C");
+    expect(definition.candidates.finalTargets).toBeUndefined();
+    expect(definition.candidates.hasSuicideOption).toBeUndefined();
+    expect(definition.candidates.victimName).toBeUndefined();
+  });
+
   it("parse -> validate -> normalize PASSES on the real-file shape", () => {
     const definition = realDefinition();
     expect(definition.formatVersion).toBe(1);
