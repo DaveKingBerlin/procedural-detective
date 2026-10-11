@@ -437,7 +437,8 @@ export function interviewWitness(
 
 /**
  * POST {base}/api/v1/playthroughs/{playthrough_id}/accusation
- * body {"murdererId","motiveId","weaponId","crimeTime"} -> AccusationResponse.
+ * body {"resolutionType"?,"murdererId"|null,"motiveId","weaponId","crimeTime"}
+ * -> AccusationResponse.
  * 409 -> CASE_ALREADY_SUBMITTED; 422 -> validation error; both as ApiError.
  */
 export function submitAccusation(

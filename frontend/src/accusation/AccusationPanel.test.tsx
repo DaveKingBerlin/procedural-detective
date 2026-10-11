@@ -312,6 +312,91 @@ describe("expired credential UI", () => {
   });
 });
 
+describe("Phase 41 — final-theory picker (replaces the legacy WHO picker)", () => {
+  it("uses neutral final-theory wording (never 'who is the murderer?')", () => {
+    const html = render(makeFlow());
+    expect(html).toContain("WHAT HAPPENED?");
+    expect(html).toContain("choose your final theory");
+    expect(html).not.toContain("who is the murderer");
+  });
+
+  it("renders the homicide group from finalTargets (suspects + witness) in stable server order", () => {
+    const html = render(makeFlow());
+    expect(html).toContain('data-testid="accusation-group-homicide"');
+    // suspects first then the witness, exactly as candidates.finalTargets orders them.
+    const positions = [
+      "accusation-option-murdererId-suspect_alpha",
+      "accusation-option-murdererId-suspect_beta",
+      "accusation-option-murdererId-suspect_gamma",
+      "accusation-option-murdererId-witness_cora",
+    ].map((id) => html.indexOf(id));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(html).toContain("Cora Blake");
+  });
+
+  it("renders ONE victim suicide card (no duplicate equivalent victim choices)", () => {
+    const html = render(makeFlow());
+    expect(html).toContain('data-testid="accusation-suicide"');
+    expect(html).toContain("Alex Morgan — suicide / self-inflicted");
+    expect((html.match(/Alex Morgan/g) ?? []).length).toBe(1); // never duplicated
+    expect((html.match(/accusation-option-suicide/g) ?? []).length).toBe(1);
+    // The victim is NOT also a homicide person.
+    expect(html).not.toContain("accusation-option-murdererId-Alex Morgan");
+  });
+
+  it("omits the suicide group entirely on legacy payloads (no hasSuicideOption)", () => {
+    const flow = makeFlow(makeCandidates({ hasSuicideOption: false }));
+    const html = render(flow);
+    expect(html).not.toContain('data-testid="accusation-suicide"');
+    expect(html).not.toContain("suicide / self-inflicted");
+  });
+
+  it("the panic: no pre-reveal marker distinguishes the correct category", () => {
+    const html = render(makeFlow());
+    expect(html.toLowerCase()).not.toContain("winner");
+    expect(html.toLowerCase()).not.toContain("the truth is");
+  });
+
+  it("selecting the suicide card checks the suicide option and submits resolutionType=SUICIDE", async () => {
+    const services = makeServices();
+    const flow = makeFlow(makeCandidates(), services);
+    flow.selectSuicide();
+    flow.selectMotive("motive_alpha");
+    flow.selectWeapon("weapon_alpha");
+    flow.setCrimeTime("21:45");
+    const html = render(flow);
+    expect(inputFor(html, "accusation-option-suicide")).toContain('checked=""');
+    expect(inputFor(html, "accusation-option-murdererId-suspect_alpha")).not.toContain('checked=""');
+
+    flow.openConfirmation();
+    const confirmation = render(flow);
+    expect(confirmation).toContain("Alex Morgan — suicide / self-inflicted");
+    await flow.confirmAccusation();
+    expect(services.submitAccusation).toHaveBeenCalledTimes(1);
+    const sentBody = (services.submitAccusation as ReturnType<typeof vi.fn>).mock.calls[0][1] as {
+      resolutionType: string;
+      murdererId: string | null;
+    };
+    expect(sentBody).toMatchObject({ resolutionType: "SUICIDE", murdererId: null });
+  });
+
+  it("a legacy payload (no finalTargets) falls back to the suspects universe for the homicide group", () => {
+    const legacy: AccusationCandidatesDTO = {
+      suspects: [
+        { id: "suspect_alpha", name: "Ada Marsh" },
+        { id: "suspect_beta", name: "Blake Niven" },
+      ],
+      motives: [makeCandidates().motives[0]],
+      weapons: [makeCandidates().weapons[0]],
+    };
+    const html = render(makeFlow(legacy));
+    expect(html).toContain("accusation-option-murdererId-suspect_alpha");
+    expect(html).toContain("accusation-option-murdererId-suspect_beta");
+    expect(html).toContain("Ada Marsh");
+  });
+});
+
 describe("keyboard accessibility", () => {
   it("pairs every picker with a labelled control and a single submit action", () => {
     const html = render(makeFlow());
