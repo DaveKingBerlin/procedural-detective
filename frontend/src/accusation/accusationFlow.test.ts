@@ -6,6 +6,7 @@ import {
   makeAccusationResponse,
   makeCandidates,
   makeRevealResponse,
+  makeSuicideAccusationResponse,
   TEST_TOKEN,
 } from "../scene/testFixtures";
 import {
@@ -284,8 +285,14 @@ describe("submission", () => {
     expect(flow.acceptedAccusation?.accusation.crimeTime).toBe("21:45:00");
   });
 
-  it("Phase 41 — a SUICIDE theory submits resolutionType=SUICIDE + murdererId=null", async () => {
-    const services = makeServices();
+  it("Phase 41 — a SUICIDE theory submits resolutionType=SUICIDE + murdererId=null and accepts the REAL SUICIDE echo shape", async () => {
+    // ADV-41-02/03 — the mock-realness gap that hid the defect: the service
+    // mock must answer a SUICIDE submission with the CORRECTED server echo
+    // (`{resolutionType:"SUICIDE", murdererId:null,...}`), NOT a legacy-shaped
+    // homicide body. Pre-fix the flow's parser rejected the corrected echo.
+    const services = makeServices({
+      submitAccusation: vi.fn(async () => makeSuicideAccusationResponse()),
+    });
     const flow = makeFlow(services);
     flow.selectSuicide();
     flow.selectMotive("motive_alpha");
@@ -306,6 +313,16 @@ describe("submission", () => {
       },
       TEST_TOKEN,
     );
+    // The accepted state carries the CORRECTED echo (resolutionType + null
+    // murderer) — the exact shape the real server now returns.
+    expect(flow.acceptedAccusation?.accusation).toEqual({
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      motiveId: "motive_alpha",
+      weaponId: "weapon_alpha",
+      crimeTime: "21:45:00",
+    });
+    expect(flow.phase).toBe("accepted");
   });
 
   it("Phase 41 — a SUICIDE selection cannot be confirmed when the case has no suicide option", () => {
@@ -486,6 +503,69 @@ describe("parseAccusationResponse (trust boundary)", () => {
     expect(() => parseAccusationResponse({ status: "REVEALED" })).toThrow(/status/);
     expect(() => parseAccusationResponse({ ...makeAccusationResponse(), accusation: null })).toThrow(/accusation/);
     expect(() => parseAccusationResponse("nope")).toThrow(/object/);
+  });
+
+  it("Phase 41 (ADV-41-02) — a REAL server-shaped SUICIDE echo parses into the typed allowlist", () => {
+    // The exact corrected server body for an accepted SUICIDE theory:
+    // `accusation.resolutionType:"SUICIDE"` + `accusation.murdererId:null`.
+    const serverEcho = JSON.parse(
+      JSON.stringify({
+        playthroughId: "PT-suicide-01",
+        caseId: "CASE-suicide-01",
+        caseVersion: 1,
+        status: "ACCUSED",
+        accusation: {
+          resolutionType: "SUICIDE",
+          murdererId: null,
+          motiveId: "motive_beta",
+          weaponId: "weapon_beta",
+          crimeTime: "21:45:00",
+        },
+      }),
+    );
+    const parsed = parseAccusationResponse(serverEcho);
+    expect(parsed.status).toBe("ACCUSED");
+    expect(parsed.accusation).toEqual({
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      motiveId: "motive_beta",
+      weaponId: "weapon_beta",
+      crimeTime: "21:45:00",
+    });
+  });
+
+  it("Phase 41 — a SUICIDE echo with a non-null murdererId is malformed (fail closed)", () => {
+    const bad = {
+      ...makeSuicideAccusationResponse(),
+      accusation: {
+        resolutionType: "SUICIDE",
+        murdererId: "suspect_alpha",
+        motiveId: "motive_alpha",
+        weaponId: "weapon_alpha",
+        crimeTime: "21:45:00",
+      },
+    };
+    expect(() => parseAccusationResponse(bad)).toThrow(/murdererId must be null for SUICIDE/);
+  });
+
+  it("Phase 41 — a HOMICIDE/LEGACY echo (no resolutionType, non-null murdererId) still parses unchanged", () => {
+    // The legacy/homicide echo contract is pinned: no resolutionType key is
+    // fabricated and the non-null murdererId survives.
+    const legacy = makeAccusationResponse();
+    const parsed = parseAccusationResponse(legacy);
+    expect("resolutionType" in parsed.accusation).toBe(false);
+    expect(parsed.accusation.murdererId).toBe("suspect_alpha");
+    // An explicit HOMICIDE echo with a non-null murdererId is equally valid.
+    const homicide = makeAccusationResponse({
+      accusation: {
+        resolutionType: "HOMICIDE",
+        murdererId: "suspect_alpha",
+        motiveId: "motive_alpha",
+        weaponId: "weapon_alpha",
+        crimeTime: "21:45:00",
+      },
+    });
+    expect(parseAccusationResponse(homicide).accusation.murdererId).toBe("suspect_alpha");
   });
 });
 

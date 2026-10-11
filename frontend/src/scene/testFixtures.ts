@@ -738,6 +738,27 @@ export function makeAccusationResponse(
 }
 
 /**
+ * Phase 41 — a CANNED SUICIDE accusation echo in the CORRECTED server shape:
+ * `resolutionType:"SUICIDE"` + `murdererId:null` (ADV-41-02/03 — the real
+ * backend now echoes the closed resolution token for a SUICIDE theory instead
+ * of a legacy-shaped body with a null murderer). Generic + winner-free.
+ */
+export function makeSuicideAccusationResponse(
+  overrides: Partial<AccusationResponse> = {},
+): AccusationResponse {
+  return makeAccusationResponse({
+    accusation: {
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      motiveId: "motive_alpha",
+      weaponId: "weapon_alpha",
+      crimeTime: "21:45:00",
+    },
+    ...overrides,
+  });
+}
+
+/**
  * Canned reveal DTO. The canonical truth here is GENERIC (never the golden
  * case's canonical answers) — the reveal screen is entirely DTO-driven, and
  * fixtures must stay free of golden literals so the shipped bundle can never

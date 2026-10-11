@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ApiError } from "../api/client";
 import type { AccusationCandidatesDTO } from "../api/types";
-import { makeAccusationResponse, makeCandidates, TEST_TOKEN } from "../scene/testFixtures";
+import { makeAccusationResponse, makeCandidates, makeSuicideAccusationResponse, TEST_TOKEN } from "../scene/testFixtures";
 import { AccusationFlow, type AccusationServices } from "./accusationFlow";
 import AccusationPanel from "./AccusationPanel";
 
@@ -359,7 +359,12 @@ describe("Phase 41 — final-theory picker (replaces the legacy WHO picker)", ()
   });
 
   it("selecting the suicide card checks the suicide option and submits resolutionType=SUICIDE", async () => {
-    const services = makeServices();
+    // ADV-41-02/03 — the mock-realism gap: a SUICIDE submission must be
+    // answered with the CORRECTED server echo (`{resolutionType:"SUICIDE",
+    // murdererId:null,...}`), never a legacy/HOMICIDE-shaped homicide body.
+    const services = makeServices({
+      submitAccusation: vi.fn(async () => makeSuicideAccusationResponse()),
+    });
     const flow = makeFlow(makeCandidates(), services);
     flow.selectSuicide();
     flow.selectMotive("motive_alpha");
@@ -379,6 +384,9 @@ describe("Phase 41 — final-theory picker (replaces the legacy WHO picker)", ()
       murdererId: string | null;
     };
     expect(sentBody).toMatchObject({ resolutionType: "SUICIDE", murdererId: null });
+    // The accepted echo is the REAL server shape (resolutionType + null person).
+    expect(flow.acceptedAccusation?.accusation.murdererId).toBeNull();
+    expect(flow.acceptedAccusation?.accusation.resolutionType).toBe("SUICIDE");
   });
 
   it("a legacy payload (no finalTargets) falls back to the suspects universe for the homicide group", () => {
