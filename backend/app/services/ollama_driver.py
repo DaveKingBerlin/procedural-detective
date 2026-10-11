@@ -926,7 +926,37 @@ def _evidence_gap_facts(
 
     # ---- motive: the locked motive (HOMICIDE: linked to the killer;
     # SUICIDE: the victim's own) + red-herring exclusions -------------------
-    if not is_suicide:
+    if is_suicide:
+        # FIX-6 (§15/§19): a SUICIDE truth still needs a UNIQUE motive
+        # deduction. The WHY solver only certifies a motive when it is
+        # SUPPORTED (``MOTIVE_LINKED_TO_PERSON``) and every alternative is
+        # contradicted — a bare exclusion set leaves the locked motive
+        # "unknown" (not unique) and the case would REGENERATE forever. The
+        # victim is the subject of a self-inflicted resolution, so the locked
+        # motive is deterministically linked to the VICTIM (never a murderer
+        # trace — the WHO solver only links suspects, so this never supports a
+        # person candidate).
+        extras.append(
+            _canonical_evidence_item(
+                eid="d_ev_motive_link",
+                kind="email",
+                propositions=(
+                    _canonical_prop(
+                        "MOTIVE_LINKED_TO_PERSON",
+                        person_id=victim_id,
+                        motive_id=motive_id,
+                    ),
+                ),
+                title="Recorded statement",
+                description=(
+                    f"A record connects the victim to the locked motive."
+                ),
+            )
+        )
+        notes.append(
+            f"d_ev_motive_link: canonical MOTIVE_LINKED_TO_PERSON {victim_id}->{motive_id} (suicide)"
+        )
+    else:
         extras.append(
             _canonical_evidence_item(
                 eid="d_ev_motive_link",
@@ -4705,6 +4735,20 @@ class OllamaStageDriver:
                     new_objects.append(_enhance_weapon(attempt, obj))
         objects = [*objects, *new_objects]
 
+        # Phase41 (FIX-3, ADV-41-05) — DISCOVERABLE deceptive-witness
+        # contradiction records. Every generated contradiction record (an
+        # access-log/view-record placing a lying witness at the scene) is
+        # bound to an app-owned INSPECTABLE camera placement so the player can
+        # discover it through the ordinary object-interaction path BEFORE
+        # accusation (``project_discovery`` refuses evidence with no
+        # placement). The camera is INSPECTABLE-only — it never enters the
+        # weapon universe or the suspect candidates.
+        contradiction_objects, contradiction_placements = _contradiction_world_placements(
+            evidence_spec, public, kit
+        )
+        objects = [*objects, *contradiction_objects]
+        placements.extend(contradiction_placements)
+
         scene: SceneSpec | None = None
         world_graph = WorldGraphSpec()
         if kit is not None:
@@ -4856,6 +4900,152 @@ def _when_activity_log_evidence_id(evidence_spec: Any) -> str | None:
         if str(getattr(item, "id", "")) == _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID:
             return _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Phase41 (FIX-3, ADV-41-05) — DISCOVERABLE deceptive-witness contradiction
+# --------------------------------------------------------------------------- #
+#
+# A materially deceptive witness claim must always be checkable BEFORE
+# accusation (Phase41 §14). The DRIVER generates the contradiction record
+# (``d_ev_contradict_<wid>``, a mechanical ``view_record`` access log) inside
+# ``_evidence_gap_facts``, but that record is only ``discoverable`` ON PAPER:
+# without a world placement linking it, ``InvestigationService.discover_evidence``
+# 404s ("evidence is not reachable") and the lie can never be challenged.
+#
+# The driver therefore injects an app-owned CCTV/access-reader placement bound
+# to EVERY discoverable mechanical contradiction record that attributes a
+# public WITNESS, so the player can inspect the camera and discover the record
+# through the ordinary object-interaction path. The camera is INSPECTABLE-only
+# (never a POTENTIAL_WEAPON, never a suspect candidate) and is a registered
+# logical asset (``CAMERA_HALL_01``) — deterministic, zero provider calls, and
+# the exact same placement/evidence contract the world graph validates.
+
+# The registered world asset bound to each contradiction record (a CCTV /
+# security camera). ``CAMERA_HALL_01`` is already in the frozen AssetRegistry
+# (``app.generation.safety.AssetRegistry``) so no registry/catalog change is
+# needed and the world-graph asset-reference gate stays green.
+_CONTRADICTION_ASSET_ID = "CAMERA_HALL_01"
+
+
+def _contradiction_record_ids(evidence_spec: Any, public: Any) -> tuple[str, ...]:
+    """Sorted ids of the DISCOVERABLE mechanical contradiction records of a
+    driver evidence set.
+
+    The DRIVER is the sole generator of contradiction records
+    (``_evidence_gap_facts``): exactly one per deceptive witness, under the
+    deterministic id namespace ``d_ev_contradict_<wid>`` (the ids the FIX-3
+    review names — ``d_ev_contradict_*``). The namespace is the precise
+    discriminator: other mechanical-kind facts that reference the same person
+    (``d_ev_presence`` — a witness killer's scene presence — and the
+    ``d_ev_opp_*`` opportunity exclusions for suspects) are the deduction
+    algebra, NOT contradiction records, and must never be re-placed as
+    cameras. The public-witness-role check is kept as a defensive second
+    guard.
+    """
+    from app.generation.evidence_facts import MECHANICAL_CONTRADICTION_KINDS
+
+    witness_ids = {
+        str(getattr(p, "person_id", "") or "")
+        for p in (getattr(public, "persons", ()) or ())
+        if str(getattr(p, "role", "")) == "witness"
+    }
+    hits: set[str] = set()
+    for item in (getattr(evidence_spec, "evidence", ()) or ()):
+        item_id = str(getattr(item, "id", ""))
+        if not item_id.startswith("d_ev_contradict_"):
+            continue
+        if str(getattr(item, "kind", "") or "") not in MECHANICAL_CONTRADICTION_KINDS:
+            continue
+        if getattr(item, "discoverable", True) is False:
+            continue
+        referenced = {
+            str(getattr(p, "person_id", "") or "")
+            for p in getattr(item, "propositions", ()) or ()
+        }
+        if referenced & witness_ids:
+            hits.add(item_id)
+    return tuple(sorted(h for h in hits if h))
+
+
+def _contradiction_anchor(kit: Any) -> tuple[str, str] | None:
+    """``(anchor_id, zone_id)`` of the kit's CCTV/access-control anchor.
+
+    Deterministic preference: the first (alphabetical) CCTV anchor, then the
+    first ACCESS_CONTROL anchor, then the first non-exclusive GENERIC_PROP.
+    Every kit ships a CCTV + ACCESS_CONTROL anchor (the Phase-11 kit
+    manifests), so this is normally the CCTV anchor. Returns None only when
+    the kit carries none of those anchor types (never fabricates).
+    """
+    if kit is None:
+        return None
+    for anchor_type in ("CCTV", "ACCESS_CONTROL", "GENERIC_PROP"):
+        candidates = sorted(
+            (
+                a
+                for a in getattr(kit, "anchors", ()) or ()
+                if getattr(a, "type", "") == anchor_type
+                and (
+                    anchor_type != "GENERIC_PROP"
+                    or not getattr(a, "exclusive", False)
+                )
+            ),
+            key=lambda a: str(getattr(a, "anchor_id", "") or ""),
+        )
+        if candidates:
+            anchor = candidates[0]
+            return (
+                str(getattr(anchor, "anchor_id", "")),
+                str(getattr(anchor, "zone_id", "")),
+            )
+    return None
+
+
+def _contradiction_world_placements(
+    evidence_spec: Any, public: Any, kit: Any
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    """The app-owned camera ``(objects, placements)`` binding every discoverable
+    witness-contradiction record to a world placement (FIX-3).
+
+    Deterministic and bounded: exactly one INSPECTABLE camera object +
+    placement per contradiction record (the driver stamps at most one
+    deceptive witness — the witness murderer — so normally a single pair).
+    Each placement carries ``interaction="inspect"`` and the contradiction
+    ``evidence_id`` so ``project_discovery`` / the interact gate surface it.
+    """
+    from app.generation.constraints import normalize_identity
+    from app.generation.schemas import ObjectSpec, PlacementSpec
+
+    record_ids = _contradiction_record_ids(evidence_spec, public)
+    if not record_ids:
+        return (), ()
+    anchor = _contradiction_anchor(kit)
+    if anchor is None:
+        return (), ()
+    anchor_id, zone_id = anchor
+    objects: list[Any] = []
+    placements: list[Any] = []
+    for record_id in record_ids:
+        camera_id = f"cctv_camera_{normalize_identity(record_id) or 'witness'}"
+        objects.append(
+            ObjectSpec(
+                object_id=camera_id,
+                asset_id=_CONTRADICTION_ASSET_ID,
+                affordances=("INSPECTABLE",),
+                subtype="camera",
+            )
+        )
+        placements.append(
+            PlacementSpec(
+                object_id=camera_id,
+                asset_id=_CONTRADICTION_ASSET_ID,
+                location_id=zone_id,
+                anchor=anchor_id,
+                interaction="inspect",
+                evidence_id=record_id,
+            )
+        )
+    return tuple(objects), tuple(placements)
 
 
 def _evidence_bind_rank(item: Any, needle: str) -> int:

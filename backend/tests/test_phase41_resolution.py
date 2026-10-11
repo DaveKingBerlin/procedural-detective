@@ -498,3 +498,180 @@ def test_report_classification_homicide_still_requires_unique_who():
         validation=_suicide_validation(resolution_type="HOMICIDE", murderer_true=False),
     )
     assert report.outcome is ValidationOutcome.RECOVERABLE_REGENERATE
+
+
+# --------------------------------------------------------------------------- #
+# FIX-6 (ADV-41-01) — witness-murderer GENERATION boundary + SUICIDE publish
+# --------------------------------------------------------------------------- #
+
+
+def _witness_murderer_public_evidence() -> tuple:
+    """A HOMICIDE witness-murderer (hidden killer = public witness) canonical
+    public + driver-generated evidence set (reused for the generation-boundary
+    and suicide-publish tests)."""
+    from app.generation.constraints import LockedConstraints
+    from app.generation.provider import GenerationStage
+    from app.generation.parser import parse_stage
+    from app.services.ollama_driver import OllamaStageDriver, _evidence_gap_facts
+
+    from tests.test_ollama_driver import _case_people, _j
+
+    case_data = _case_people()
+    case_data["crime"]["murdererId"] = "lisa_koenig"  # a witness, not a suspect
+    case_data["objects"] = []
+    pub = {
+        k: v
+        for k, v in case_data.items()
+        if k in ("persons", "motives", "locations", "travelRules", "scene", "objects")
+    }
+    public = parse_stage(GenerationStage.PUBLIC_WORLD, _j(pub), non_throwing=False)
+    crime = parse_stage(
+        GenerationStage.CASE_TRUTH, _j({"crime": case_data["crime"]}), non_throwing=False
+    )
+
+    class _Attempt:
+        locked = LockedConstraints(
+            victim="Dr. Anna Weiss",
+            murderer="Lisa Koenig",
+            motive="stolen research data",
+            weapon="bronze ceremonial ice pick",
+            crime_time="23:42",
+            witness="Lisa König",
+        )
+        _phase3_cache = None
+        _witness_truthfulness = ()
+
+    spec, _rules, _notes = _evidence_gap_facts(_Attempt(), crime, public, None)
+    assert spec is not None
+    return crime, public, spec
+
+
+def test_fix6b_witness_murderer_not_auto_generated_by_design():
+    """(b) The GENERATOR deduces over INVESTIGATIVE SUSPECTS only
+    (``universes.suspect_ids`` — SUSPECT_ELIGIBLE, frozen REQUIREMENTS §17/
+    §31.1), so a HOMICIDE witness murderer can never be the WHO winner:
+    ``solve_case`` never yields the witness as the deduced killer and
+    ``evaluate_solution.all_true`` stays False. The generator therefore
+    REGENERATES rather than auto-publish a witness-murderer case — a
+    REQUIREMENTS-bound boundary, NOT a hidden failure. Witness-murderer CASE
+    SHAPES are fully supported at the accusation/reveal/interview/save layer
+    (covered by ``test_witness_murderer_homicide_accusation_wins`` and the
+    Phase-41 savegame/savegame replay tests)."""
+    from app.environments.manifests import load_environment
+    from app.generation.pipeline import _draft_to_phase3
+    from app.world.composer import compose_world
+    from app.world.requirements import ObjectRequest, WorldRequirements
+
+    crime, public, spec = _witness_murderer_public_evidence()
+    from app.generation.constraints import LockedConstraints
+    from app.services.ollama_driver import OllamaStageDriver
+
+    class _Attempt:
+        locked = LockedConstraints(
+            victim="Dr. Anna Weiss",
+            murderer="Lisa Koenig",
+            motive="stolen research data",
+            weapon="bronze ceremonial ice pick",
+            crime_time="23:42",
+            witness="Lisa König",
+        )
+        _phase3_cache = None
+
+    world = WorldRequirements(
+        environment_hint="office",
+        objects=(ObjectRequest(requested_name="bronze ceremonial ice pick", criticality="required"),),
+        relations=(),
+        unsafe_unsupported=(),
+    )
+    kit = load_environment("office")
+    composition = compose_world(world, environment_id="office", kit=kit)
+    driver = OllamaStageDriver(settings=None, provider_factory=None)
+    draft = driver._assemble(_Attempt(), crime, public, spec, world, composition)
+    p, e, truth = _draft_to_phase3(draft, case_id="boundary-witness", title="t")
+
+    from app.domain.solver import solve_case
+    from app.validation.solution import evaluate_solution
+
+    proof = solve_case(p, e)
+    # The deduction universe is the SUSPECT universe (never the witness).
+    assert "lisa_koenig" not in proof.who.universe
+    assert proof.who.winner != "lisa_koenig"
+    # HOMICIDE requires the WHO winner == the truth murderer; the witness
+    # killer can never satisfy it -> all_true False -> REGENERATE.
+    val = evaluate_solution(proof, truth)
+    assert val.resolution_type == "HOMICIDE"
+    assert val.murderer_true is False
+    assert val.all_true is False
+
+
+def test_fix6c_suicide_generation_path_publishes_hermetically():
+    """(c) The SUICIDE generation path IS genuinely generator-supported: the
+    full driver ``run_into -> assemble -> validate -> publish`` publishes a
+    suicide case hermetically with a mocked provider (zero network, zero
+    randomness) in exactly the bounded call budget — no regeneration."""
+    from app.domain.time_interval import epoch_to_iso, parse_iso8601
+    from app.generation.clock import ManualClock
+    from app.generation.ids import IdSource
+    from app.generation.state_machine import GenerationState
+
+    from tests.test_ollama_driver import (
+        ICEPICK_SPEC,
+        MockOllamaTransport,
+        _admission,
+        _alog,
+        _case_people,
+        _controller,
+        _evidence,
+        _j,
+        _make_driver,
+        _world,
+    )
+
+    def _suicide_people():
+        d = _case_people()
+        d["crime"]["murdererId"] = None
+        d["crime"]["resolutionType"] = "SUICIDE"
+        return d
+
+    SUICIDE_PROMPT = (
+        "Victim: Dr. Anna Weiss\nMotive: stolen research data\n"
+        "Weapon: bronze ceremonial ice pick\nTime: 23:42\n"
+        "Witness: Lisa König\nLocation: office\n"
+    )
+    CANONICAL = "2026-09-11T23:42:00+02:00"
+    tick, offset = parse_iso8601(CANONICAL)
+
+    def _iso(delta_seconds):
+        return epoch_to_iso(tick + delta_seconds, offset)
+
+    posts = [
+        _j(_suicide_people()),
+        _j(_evidence()),
+        # activity-log anchors (evidence order): when_obs (t-10) + 3 opp (t-120)
+        _j(_alog(_iso(-10))),
+        _j(_alog(_iso(-120))),
+        _j(_alog(_iso(-120))),
+        _j(_alog(_iso(-120))),
+        _j(_world()),
+        ICEPICK_SPEC,
+    ]
+    clock = ManualClock()
+    ids = IdSource()
+    admission = _admission(clock, ids)
+    session = admission.create_anonymous_quota_session()
+    transport = MockOllamaTransport(posts=posts)
+    driver = _make_driver(transport)
+    controller = _controller(driver, transport, admission, clock, ids)
+    handle = controller.start_generation(
+        SUICIDE_PROMPT, anonymous_quota_session_id=session.session_id
+    )
+    record = controller.attempt(handle.attempt_id)
+    assert record.state is GenerationState.PUBLISHED
+    published = record.published.draft
+    assert published.crime.resolution_type is SUICIDE
+    assert published.crime.murderer_id is None
+    assert record.last_validation.valid is True
+    assert record.last_validation.validation.all_true is True
+    assert record.last_validation.quality_issues == ()
+    # exactly the bounded staged calls — the suicide case does NOT regenerate.
+    assert transport.call_count == 8
