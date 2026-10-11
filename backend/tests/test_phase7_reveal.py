@@ -45,8 +45,10 @@ REVEAL_KEYS = {
     "result", "score", "timeline", "explanation",
 }
 TRUTH_KEYS = {
-    "murdererId", "murdererName", "motiveId", "motiveLabel",
-    "weaponId", "weaponName", "crimeTime",
+    # Phase41 — the reveal truth carries the closed resolution type and the
+    # post-reveal deceptive-witness list (both additive, explicit allowlist).
+    "resolutionType", "murdererId", "murdererName", "motiveId", "motiveLabel",
+    "weaponId", "weaponName", "crimeTime", "witnessDeceptions",
 }
 RESULT_KEYS = {
     "murdererCorrect", "motiveCorrect", "weaponCorrect", "timeCorrect", "overall",

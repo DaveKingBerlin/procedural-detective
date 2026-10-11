@@ -45,8 +45,10 @@ REVEAL_KEYS = {
     "result", "score", "timeline", "explanation",
 }
 TRUTH_KEYS = {
-    "murdererId", "murdererName", "motiveId", "motiveLabel",
-    "weaponId", "weaponName", "crimeTime",
+    # Phase41 — the reveal truth carries the closed resolution type and the
+    # post-reveal deceptive-witness list (both additive, explicit allowlist).
+    "resolutionType", "murdererId", "murdererName", "motiveId", "motiveLabel",
+    "weaponId", "weaponName", "crimeTime", "witnessDeceptions",
 }
 PLAYER_KEYS = {"accusation"}
 RESULT_KEYS = {
@@ -235,7 +237,11 @@ def test_candidates_block_alphabetical_unmarked(phase5_app):
         assert res.status_code == 200, res.json()
         candidates = res.json()["candidates"]
 
-    assert set(candidates.keys()) == {"suspects", "motives", "weapons"}
+    assert set(candidates.keys()) == {
+        # Phase41 — the candidates block is additive: finalTargets
+        # (deterministic suspects+witnesses) + the public-role suicide marker.
+        "suspects", "motives", "weapons", "finalTargets", "hasSuicideOption",
+    }
     assert_candidates_unmarked(candidates, truth)
 
     suspects = [s["id"] for s in candidates["suspects"]]
