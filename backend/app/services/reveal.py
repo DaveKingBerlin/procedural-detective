@@ -132,11 +132,19 @@ def candidate_block_of(payload: Mapping[str, Any]) -> dict[str, list[dict[str, A
     - ``motives`` from the published MOTIVE_CANDIDATE universe + public
       motives (``{"id", "label"}``);
     - ``weapons`` from the published POTENTIAL_WEAPON universe + public
-      objects (``{"id", "assetId", "name"}``).
+      objects (``{"id", "assetId", "name"}``);
+    - ``finalTargets`` (Phase41 §5/§8/§20): the FINAL HOMICIDE TARGET
+      universe ``{"id", "name", "role"}`` = the deterministic suspects +
+      witnesses derivation (never the victim). This is the accusation
+      universe — broader than ``suspects``;
+    - ``hasSuicideOption`` (Phase41 §6/§20/§23): True exactly when a public
+      victim person exists (the victim-as-self-inflicted final choice).
 
     Every list is sorted alphabetically by ``id``. Candidate universes may
     contain the winning id, but NO field marks/ranks it and NO canonical
-    designation is ever included (Phase7 P / test N24).
+    designation is ever included (Phase7 P / test N24). The Phase41 blocks are
+    equally safe/public: finalTargets are public roles and hasSuicideOption is
+    a public-role predicate, never the resolution truth.
     """
     universes = payload.get("universes")
     if not isinstance(universes, Mapping):
@@ -181,7 +189,34 @@ def candidate_block_of(payload: Mapping[str, Any]) -> dict[str, list[dict[str, A
             }
         )
 
-    return {"suspects": suspects, "motives": candidate_motives, "weapons": weapons}
+    # Phase41 — deterministic final homicide target universe + suicide option.
+    from app.domain.eligibility import (
+        final_homicide_target_ids_of_records,
+        has_public_victim_of_records,
+    )
+
+    person_records = tuple(
+        v for v in persons.values() if isinstance(v, Mapping) and v.get("person_id")
+    )
+    final_targets: list[dict[str, Any]] = []
+    for target_id in final_homicide_target_ids_of_records(person_records):
+        person = persons.get(target_id)
+        final_targets.append(
+            {
+                "id": target_id,
+                "name": str(person.get("name") or target_id),
+                "role": str(person.get("role") or ""),
+            }
+        )
+    has_suicide_option = has_public_victim_of_records(person_records)
+
+    return {
+        "suspects": suspects,
+        "motives": candidate_motives,
+        "weapons": weapons,
+        "finalTargets": final_targets,
+        "hasSuicideOption": has_suicide_option,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -589,9 +624,18 @@ def truth_labels(payload: Mapping[str, Any]) -> dict[str, str]:
     (which id is the winner) comes from the truth section at reveal time —
     this function is reveal-only and never feeds a pre-reveal response.
 
+    PHASE 41 (§22/§23): the labels carry the closed ``resolutionType``
+    (``HOMICIDE`` for every legacy payload). A SUICIDE truth renders
+    ``murdererId``/``murdererName`` as ``None`` — never a "murderer" label —
+    and any hidden deceptive-witness entries are projected into the
+    ``witnessDeceptions`` list (post-reveal only).
+
     DEF-053: the truth section is validated FIRST and any missing/invalid
     required field raises ``RevealProjectionError`` (-> sanitized 500) BEFORE
-    str(None) can ever be rendered — zero partial truth is exposed.
+    str(None) can ever be rendered — zero partial truth is exposed. For
+    HOMICIDE a missing/invalid ``murderer_id`` still raises exactly as
+    before; for SUICIDE a present non-null murderer is a truth-shape defect
+    and also raises.
     """
     truth = payload.get("truth")
     if not isinstance(truth, Mapping):
@@ -599,11 +643,30 @@ def truth_labels(payload: Mapping[str, Any]) -> dict[str, str]:
     crime = truth.get("crime")
     if not isinstance(crime, Mapping):
         raise RevealProjectionError("payload carries no truth/crime section")
-    for name in ("murderer_id", "motive_id", "weapon_id"):
+    resolution = str(crime.get("resolution_type") or "HOMICIDE")
+    if resolution not in ("HOMICIDE", "SUICIDE"):
+        raise RevealProjectionError("truth.crime.resolution_type is invalid")
+    is_suicide = resolution == "SUICIDE"
+    for name in ("motive_id", "weapon_id"):
         value = crime.get(name)
         if not isinstance(value, str) or not value:
             raise RevealProjectionError(
                 f"truth.crime.{name} is missing or invalid"
+            )
+    murderer_id = crime.get("murderer_id")
+    if is_suicide:
+        if murderer_id is not None:
+            raise RevealProjectionError(
+                "truth.crime.murderer_id is present on a SUICIDE truth"
+            )
+    else:
+        if not isinstance(murderer_id, str) or not murderer_id:
+            raise RevealProjectionError(
+                "truth.crime.murderer_id is missing or invalid"
+            )
+        if murderer_id == crime.get("victim_id"):
+            raise RevealProjectionError(
+                "truth.crime.murderer_id equals victim_id"
             )
     crime_time = crime.get("crime_time")
     if not isinstance(crime_time, Mapping):
@@ -616,16 +679,22 @@ def truth_labels(payload: Mapping[str, Any]) -> dict[str, str]:
     persons = persons_by_id(payload)
     motives = motives_by_id(payload)
     objects = objects_by_id(payload)
-    murderer_id = str(crime["murderer_id"])
     motive_id = str(crime["motive_id"])
     weapon_id = str(crime["weapon_id"])
-    person = persons.get(murderer_id, {})
     motive = motives.get(motive_id, {})
     obj = objects.get(weapon_id, {})
     asset_id = obj.get("asset_id")
+    if is_suicide:
+        murderer_id_label: str | None = None
+        murderer_name_label: str | None = None
+    else:
+        murderer_id_label = str(murderer_id)
+        person = persons.get(murderer_id_label, {})
+        murderer_name_label = str(person.get("name") or murderer_id_label)
     return {
-        "murdererId": murderer_id,
-        "murdererName": str(person.get("name") or murderer_id),
+        "resolutionType": resolution,
+        "murdererId": murderer_id_label,
+        "murdererName": murderer_name_label,
         "motiveId": motive_id,
         "motiveLabel": str(motive.get("label") or motive_id),
         "weaponId": weapon_id,
@@ -635,7 +704,49 @@ def truth_labels(payload: Mapping[str, Any]) -> dict[str, str]:
         # the player as the weapon name).
         "weaponName": weapon_label_of(asset_id, object_id=weapon_id),
         "crimeTime": canonical,
+        "witnessDeceptions": _witness_deceptions_of(payload, persons),
     }
+
+
+def _witness_deceptions_of(
+    payload: Mapping[str, Any],
+    persons: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """The post-reveal deceptive-witness list (Phase41 §11/§22).
+
+    Reads ONLY the hidden ``truth.witness_truthfulness`` map (statement-level
+    entries with ``truthfulness == "DECEPTIVE"``) and maps each DECEIVING
+    witness id to its PUBLIC name + the bounded deception reason. TRUTHFUL
+    witnesses never appear; ``TRUTHFUL`` is never emitted. De-duplicated and
+    ordered by witness id (deterministic).
+    """
+    truth = payload.get("truth")
+    entries = truth.get("witness_truthfulness") if isinstance(truth, Mapping) else ()
+    deceptive: dict[str, str | None] = {}
+    for entry in entries or ():
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("truthfulness")) != "DECEPTIVE":
+            continue
+        witness_id = str(entry.get("witness_id") or "")
+        if not witness_id:
+            continue
+        if witness_id not in deceptive:
+            reason = entry.get("deception_reason")
+            deceptive[witness_id] = (
+                str(reason) if isinstance(reason, str) and reason else None
+            )
+    out: list[dict[str, Any]] = []
+    for witness_id in sorted(deceptive):
+        person = persons.get(witness_id, {})
+        out.append(
+            {
+                "witnessId": witness_id,
+                "witnessName": str(person.get("name") or witness_id),
+                "deceptionReason": deceptive[witness_id],
+            }
+        )
+    return out
 
 
 def reveal_dto_of(

@@ -197,6 +197,20 @@ class CandidateWeaponDTO(BaseModel):
     name: str
 
 
+class CandidateFinalTargetDTO(BaseModel):
+    """Phase41 — one FINAL HOMICIDE TARGET (§8 Option B).
+
+    A public ``role == suspect`` OR ``role == witness`` person who can be the
+    player's final homicide theory. Public-data only ({id, name, role}); the
+    victim is NEVER a final homicide target (represented via the suicide
+    option) and no winner is ever marked.
+    """
+
+    id: str
+    name: str
+    role: str
+
+
 # The CLOSED wire-level witness presence tokens (mirrors the frozen domain
 # enum in app/domain/witness.py; re-declared here so schemas stay free of a
 # domain import — the same boundary contract as QUESTION_TYPE_VALUES).
@@ -229,11 +243,19 @@ class AccusationCandidatesDTO(BaseModel):
     objects; every list is sorted alphabetically by id. The winning candidate
     may appear but is NEVER marked or ranked (no positional marking — the
     frontend must treat all candidates equally).
+
+    Phase41 (§5/§8/§20/§23): the block additionally carries ``finalTargets`` —
+    the FINAL HOMICIDE TARGET universe (suspects + witnesses, never the
+    victim) — and ``hasSuicideOption`` — True exactly when a public victim
+    person exists. Both are public-role predicates / public ids; neither
+    reveals the resolution truth.
     """
 
     suspects: list[CandidateSuspectDTO] = Field(default_factory=list)
     motives: list[CandidateMotiveDTO] = Field(default_factory=list)
     weapons: list[CandidateWeaponDTO] = Field(default_factory=list)
+    finalTargets: list[CandidateFinalTargetDTO] = Field(default_factory=list)
+    hasSuicideOption: bool = False
 
 
 class InvestigationBootstrapResponse(BaseModel):
