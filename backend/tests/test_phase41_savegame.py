@@ -202,3 +202,56 @@ def test_committed_suicide_fixture_round_trips_the_serializer():
     assert replay["murdererId"] is None
     assert sg.serialize_savegame_v1(doc) + "\n" == fixture_text
     assert "resolutionType" in _all_docs(doc)
+
+
+def test_savegame_replay_truth_carries_witness_deceptions_only_when_present(phase5_app):
+    """The reveal-gated replay truth carries the OPTIONAL witnessDeceptions
+    list exactly when a witness lied — the browser-local reveal can explain the
+    deception identically to the server; a deception-free save omits the key."""
+    bundle = create_published_case_and_playthrough(phase5_app)
+    payload = read_payload(phase5_app, bundle["caseId"], 1)
+    payload["truth"]["witness_truthfulness"] = [
+        {
+            "witness_id": "emily_reed",
+            "question_type": "OBSERVATION",
+            "truthfulness": "DECEPTIVE",
+            "deception_reason": "SELF_PROTECTION",
+        }
+    ]
+    insert_variant(phase5_app, bundle["caseId"], 2, payload)
+    pt_id, pt_token = playthrough(phase5_app, bundle["caseId"], bundle["creator"], version=2)
+    body = {
+        "murdererId": payload["truth"]["crime"]["murderer_id"],
+        "motiveId": payload["truth"]["crime"]["motive_id"],
+        "weaponId": payload["truth"]["crime"]["weapon_id"],
+        "crimeTime": payload["truth"]["crime"]["crime_time"]["canonical"],
+    }
+    with client(phase5_app) as c:
+        make_accusation(c, pt_id, pt_token, body)
+        export = c.get(
+            f"/api/v1/playthroughs/{pt_id}/savegame", headers=auth(pt_token)
+        )
+        assert export.status_code == 200, export.text
+        replay = json.loads(export.text)["case"]["replayTruth"]
+        assert replay["witnessDeceptions"] == [
+            {
+                "witnessId": "emily_reed",
+                "witnessName": "Emily Reed",
+                "deceptionReason": "SELF_PROTECTION",
+            }
+        ]
+    # A deception-free case never carries the key (exact legacy shape).
+    pt2_id, pt2_token = playthrough(phase5_app, bundle["caseId"], bundle["creator"], version=1)
+    with client(phase5_app) as c:
+        make_accusation(c, pt2_id, pt2_token, {
+            "murdererId": "thomas_reed",
+            "motiveId": "cover_up_embezzlement",
+            "weaponId": "kitchen_knife",
+            "crimeTime": "2026-09-11T22:17:00+02:00",
+        })
+        export2 = c.get(
+            f"/api/v1/playthroughs/{pt2_id}/savegame", headers=auth(pt2_token)
+        )
+        assert export2.status_code == 200, export2.text
+        replay2 = json.loads(export2.text)["case"]["replayTruth"]
+        assert "witnessDeceptions" not in replay2
