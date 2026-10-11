@@ -174,6 +174,14 @@ MAX_SPEC_REPAIR_PASSES = 2
 # canonical time.
 MAX_ACTIVITY_LOG_REPAIR_PASSES = 2
 
+# Phase38 DEF-098 (ADV-38-05) — the legacy per-attempt stage-timing recorder
+# cap applies to budget-less callers only. Real attempts cap by their OWN
+# ``budget.max_calls`` legal provider-call envelope (see
+# ``OllamaStageDriver._stage_timing_cap``), which makes the
+# ``stageTimingSummary`` LOSS-LESS — never a silent 32-token truncation. This
+# fixed bound only guards the defensively small budget-less test surface.
+_STAGE_TIMING_LEGACY_CAP = 32
+
 # The four (non-AssetSpec) stage surfaces the driver walks (in order).
 _DRIVER_STAGES = (
     GenerationStage.CASE_TRUTH,
@@ -2775,8 +2783,16 @@ class OllamaStageDriver:
         self._stage_timings: dict[str, list[str]] = {}
 
     def stage_timing_summary(self, attempt_id: str) -> tuple[str, ...]:
-        """Return at most 32 safe timing tokens for final lifecycle events."""
-        return tuple(self._stage_timings.get(str(attempt_id), ())[:32])
+        """Return the safe per-attempt timing tokens for final lifecycle events.
+
+        Phase38 DEF-098 (ADV-38-05) — the summary is LOSS-LESS up to the
+        attempt's legal global provider-call envelope: the recorder caps by
+        ``budget.max_calls`` (each REAL budgeted provider call records exactly
+        one token, and ``max_calls`` is the hard envelope), so
+        ``len(summary) == providerCallCount`` always reconciles — never a
+        silent 32-token truncation.
+        """
+        return tuple(self._stage_timings.get(str(attempt_id), ()))
 
     def reset_attempt_cache(self, attempt_id: str) -> None:
         """Discard the per-attempt validated-stage caches for a full
@@ -2794,12 +2810,30 @@ class OllamaStageDriver:
         self._activity_cache.pop(aid, None)
         self._world_cache.pop(aid, None)
 
+    @staticmethod
+    def _stage_timing_cap(attempt: Any) -> int:
+        """The DEF-098 per-attempt recorder cap.
+
+        ``budget.max_calls`` IS the legal global provider-call envelope for
+        the attempt (e.g. 720) and the recorder emits exactly one token per
+        REAL budgeted provider call, so capping at the envelope is LOSS-LESS —
+        the summary always reconciles with ``providerCallCount``. Budget-less
+        legacy callers keep the old fixed bound (no real budgeted call can be
+        recorded without a budget anyway, so the bound is never silently
+        reached in production).
+        """
+        budget = getattr(attempt, "budget", None)
+        max_calls = getattr(budget, "max_calls", None) if budget is not None else None
+        if isinstance(max_calls, int) and max_calls > 0:
+            return max_calls
+        return _STAGE_TIMING_LEGACY_CAP
+
     def _record_stage_timing(
         self, attempt: Any, stage: GenerationStage, elapsed_ms: int, outcome: str
     ) -> None:
         closed_outcome = outcome if outcome in {"success", "timeout", "error"} else "error"
         entries = self._stage_timings.setdefault(str(attempt.attempt_id), [])
-        if len(entries) < 32:
+        if len(entries) < self._stage_timing_cap(attempt):
             entries.append(f"{stage.value}:{max(0, int(elapsed_ms))}:{closed_outcome}")
 
     # -- public driver entry points (controller lifecycle) -------------------

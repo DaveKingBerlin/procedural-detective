@@ -384,3 +384,145 @@ def test_timeout_source_vocabulary_is_closed_and_safe():
     # The only deadline-clipped source token the controller emits is the
     # closed "GENERATION_DEADLINE".
     assert "GENERATION_DEADLINE" in sources
+
+
+# --------------------------------------------------------------------------- #
+# DEF-098 (ADV-38-05) — stage-timing accounting is loss-less or explicitly
+# marked truncated (never a silent 32-token cap)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeStageTimingDriver:
+    """Mimics a stage driver that recorded >32 REAL provider calls: one timing
+    token per real call (the count matches the per-attempt budget)."""
+
+    def __init__(self, clock: ManualClock, tokens: int = 40) -> None:
+        self._clock = clock
+        self._tokens = tuple(
+            f"CASE_TRUTH:{1000 + i}:success" for i in range(tokens)
+        )
+
+    def stage_timing_summary(self, attempt_id: str):
+        return self._tokens
+
+    def run_into(self, attempt, diagnostics=(), repair_plan=None) -> None:
+        # the attempt really consumed one provider call per recorded token.
+        if attempt.budget is not None:
+            attempt.budget.calls = len(self._tokens)
+        raise StageDriverProviderFailure(
+            "local provider timed out",
+            code=GenerationFailureCode.LOCAL_PROVIDER_TIMEOUT,
+        )
+
+
+def test_stage_timing_accounting_explicitly_truncated_not_silent(caplog):
+    """DEF-098 — an attempt with 40 (> 32) real provider calls: the
+    driver-level summary stays LOSS-LESS (all 40 tokens), the terminal event
+    carries the EXACT ``stageTimingCount`` and an explicit
+    ``stageTimingTruncated`` marker (the event writer's bounded item cap is
+    never silent), and ``providerCallCount`` remains exact and reconciles with
+    ``stageTimingCount``."""
+    clock = ManualClock(start_time=0.0)
+    ids = IdSource()
+    admission = AdmissionController(
+        clock=clock,
+        ids=ids,
+        max_concurrent_generations=1,
+        max_concurrent_generations_global=4,
+        max_generations_per_session_per_window=8,
+        max_generations_global_per_window=50,
+        anonymous_quota_session_ttl_seconds=86400,
+    )
+    session = admission.create_anonymous_quota_session()
+    driver = _FakeStageTimingDriver(clock, tokens=40)
+    controller = GenerationController(
+        provider=None,  # the driver path never touches the scalar provider
+        admission=admission,
+        clock=clock,
+        ids=ids,
+        deadline_seconds=300,
+        max_llm_calls_per_generation=60,
+        max_core_llm_calls=60,
+        max_repair_passes=2,
+        max_full_regenerations=1,
+        max_prompt_chars=4000,
+        seed=17,
+        stage_driver=driver,
+        provider_timeout_seconds=180.0,
+    )
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        handle = controller.start_generation(
+            _PROMPT, anonymous_quota_session_id=session.session_id
+        )
+    record = controller.attempt(handle.attempt_id)
+    assert record.state is GenerationState.FAILED
+    # The driver-level summary API is LOSS-LESS (all 40 tokens available).
+    assert len(driver.stage_timing_summary(record.attempt_id)) == 40
+    failed = [
+        e for e in caplog.records
+        if getattr(e, "pd_event", None) == "generation.failed"
+    ]
+    assert len(failed) == 1
+    fields = failed[0].pd_fields
+    # Exact accounting: the per-call count reconciles with providerCallCount.
+    assert fields["stageTimingCount"] == 40
+    assert fields["providerCallCount"] == 40
+    assert fields["stageTimingTruncated"] is True
+    # The emitted summary is bounded by the safe event writer (never expanded
+    # beyond its documented item cap — the truncation is EXPLICIT).
+    summary = fields["stageTimingSummary"]
+    assert isinstance(summary, list)
+    assert len(summary) <= 32
+    for token in summary:
+        parts = token.split(":")
+        assert len(parts) == 3 and parts[0] == "CASE_TRUTH"
+
+
+def test_stage_timing_accounting_lossless_below_event_cap(caplog):
+    """DEF-098 control — an attempt with 20 (<= 32) real provider calls is
+    fully LOSS-LESS: no truncation marker, ``stageTimingCount ==
+    providerCallCount == 20`` and every token is emitted."""
+    clock = ManualClock(start_time=0.0)
+    ids = IdSource()
+    admission = AdmissionController(
+        clock=clock,
+        ids=ids,
+        max_concurrent_generations=1,
+        max_concurrent_generations_global=4,
+        max_generations_per_session_per_window=8,
+        max_generations_global_per_window=50,
+        anonymous_quota_session_ttl_seconds=86400,
+    )
+    session = admission.create_anonymous_quota_session()
+    driver = _FakeStageTimingDriver(clock, tokens=20)
+    controller = GenerationController(
+        provider=None,
+        admission=admission,
+        clock=clock,
+        ids=ids,
+        deadline_seconds=300,
+        max_llm_calls_per_generation=60,
+        max_core_llm_calls=60,
+        max_repair_passes=2,
+        max_full_regenerations=1,
+        max_prompt_chars=4000,
+        seed=17,
+        stage_driver=driver,
+        provider_timeout_seconds=180.0,
+    )
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        handle = controller.start_generation(
+            _PROMPT, anonymous_quota_session_id=session.session_id
+        )
+    record = controller.attempt(handle.attempt_id)
+    assert record.state is GenerationState.FAILED
+    failed = [
+        e for e in caplog.records
+        if getattr(e, "pd_event", None) == "generation.failed"
+    ]
+    assert len(failed) == 1
+    fields = failed[0].pd_fields
+    assert fields["stageTimingCount"] == 20
+    assert fields["providerCallCount"] == 20
+    assert fields.get("stageTimingTruncated") is None
+    assert len(fields["stageTimingSummary"]) == 20

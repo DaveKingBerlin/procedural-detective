@@ -23,6 +23,16 @@ _SAFE_FIELDS = frozenset(
         "deadlineRemainingMs", "configuredProviderTimeoutMs", "effectiveProviderTimeoutMs",
         "providerCallIndex", "deadlineRemainingBeforeMs",
         "deadlineRemainingAfterMs", "stageTimingSummary",
+        # Phase38 DEF-098 — exact stage-timing accounting counters. The bounded
+        # ``stageTimingSummary`` TUPLE may be item-capped by the safe event
+        # writer; ``stageTimingCount`` is the exact number of recorded per-call
+        # timing tokens (always reconciles with ``providerCallCount``) and
+        # ``stageTimingTruncated`` marks an attempt whose tokens exceeded the
+        # event writer's item cap — so §30 accounting is never SILENTLY
+        # truncated. Integers/booleans only; never prompts, timing internals
+        # or raw generated content.
+        "stageTimingCount",
+        "stageTimingTruncated",
         "providerCallCount", "repairCount", "regenerationCount", "provider", "model",
         "requestBytes", "responseBytes", "structuredOutput", "success", "published",
         "failureCode", "validationOutcome", "assetRequestCount", "assetRepairCount",
