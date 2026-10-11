@@ -88,6 +88,7 @@ _CANDIDATE_INTEGRITY_QUALITY_CODES: frozenset[str] = frozenset(
         case_quality.VICTIM_IN_SUSPECT_CANDIDATES,
         case_quality.WITNESS_IN_SUSPECT_CANDIDATES,
         case_quality.MURDERER_NOT_SUSPECT_CANDIDATE,
+        case_quality.HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET,
     }
 )
 
@@ -135,6 +136,11 @@ class AttemptRecord:
     # ``generation.repair.outcome`` delta). Diagnostics only — never read by
     # validators/solvers/budgets and never leaves the attempt.
     _repair_before_codes: tuple[str, ...] | None = None
+    # Phase41 — hidden driver-owned witness-truthfulness stamp (statement-
+    # level, trusted). Set by the driver chokepoint from ``(crime, public)``;
+    # lifted into ``CaseTruth.witness_truthfulness`` by ``_draft_to_phase3``.
+    # NEVER serialized into the draft, NEVER a public DTO / telemetry field.
+    _witness_truthfulness: tuple[Any, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +214,11 @@ def _title_for_prompt(prompt: str) -> str:
 
 
 def _draft_to_phase3(
-    draft: GeneratedDraft, *, case_id: str, title: str
+    draft: GeneratedDraft,
+    *,
+    case_id: str,
+    title: str,
+    witness_truthfulness: tuple[Any, ...] = (),
 ) -> tuple[PublicCase, tuple[EvidenceFact, ...], CaseTruth]:
     """Reassemble a parsed draft into the Phase 3 objects.
 
@@ -218,6 +228,10 @@ def _draft_to_phase3(
     the attempt (``caseId`` from IdSource, ``caseVersion = 1``) instead of the
     golden constants. This keeps the production package free of test-fixture
     imports while the golden fixtures independently verify the conversion.
+
+    Phase41: the draft's optional trusted ``resolution_type`` and the hidden
+    ``witness_truthfulness`` stamp (driver-side only; NEVER provider-parsed)
+    are lifted into the ``CaseTruth`` — the trusted truth path.
     """
     persons = tuple(
         PublicPerson(
@@ -305,11 +319,13 @@ def _draft_to_phase3(
                 canonical=crime_spec.crime_time.canonical,
                 accusation_tolerance_seconds=crime_spec.crime_time.accusation_tolerance_seconds,
             ),
+            resolution_type=crime_spec.resolution_type,
         ),
         timeline=(),
         persons=(),
         relationships=(),
         facts=(),
+        witness_truthfulness=tuple(witness_truthfulness),
     )
     return public, evidence, truth
 
@@ -338,7 +354,10 @@ def assemble(
     if cache is not None and cache[0] is draft:
         return cache[1], cache[2], cache[3], draft
     public, evidence, truth = _draft_to_phase3(
-        draft, case_id=attempt.case_id, title=_title_for_prompt(attempt.prompt)
+        draft,
+        case_id=attempt.case_id,
+        title=_title_for_prompt(attempt.prompt),
+        witness_truthfulness=tuple(getattr(attempt, "_witness_truthfulness", ()) or ()),
     )
     attempt._phase3_cache = (draft, public, evidence, truth)
     return public, evidence, truth, draft
@@ -350,20 +369,30 @@ def assemble(
 
 
 def _crime_resolution_issues(draft: GeneratedDraft) -> tuple[str, ...]:
-    """Crime.* ids must resolve inside the draft's public data (structural)."""
+    """Crime.* ids must resolve inside the draft's public data (structural).
+
+    Phase41 (§15/§32): the ``murdererId -> person`` resolution check is
+    HOMICIDE-only. A SUICIDE case has ``murderer_id=None`` by contract, so the
+    murderer must be SKIPPED (never a dangling-reference "None" issue) while
+    victim/motive/weapon/location still resolve.
+    """
     issues: list[str] = []
     person_ids = {p.person_id for p in draft.persons}
     motive_ids = {m.motive_id for m in draft.motives}
     object_ids = {o.object_id for o in draft.objects}
     location_ids = {l.location_id for l in draft.locations}
     crime = draft.crime
-    checks = (
+    from app.domain.resolution import ResolutionType
+
+    is_suicide = crime.resolution_type is ResolutionType.SUICIDE
+    checks = [
         ("victimId", crime.victim_id, person_ids, "a person"),
-        ("murdererId", crime.murderer_id, person_ids, "a person"),
         ("motiveId", crime.motive_id, motive_ids, "a motive"),
         ("weaponId", crime.weapon_id, object_ids, "an object"),
         ("locationId", crime.location_id, location_ids, "a location"),
-    )
+    ]
+    if not is_suicide:
+        checks.insert(1, ("murdererId", crime.murderer_id, person_ids, "a person"))
     for field_name, value, known, expected in checks:
         if value not in known:
             issues.append(
@@ -746,7 +775,19 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
         universe_issues.append("candidate universes unavailable: public case incomplete")
     else:
         universes = derive_universes(public)
-        if not universes.suspect_ids:
+        # Phase41 (§15/§32): "suspect universe is empty" must NOT force a
+        # REGENERATE for a SUICIDE case — an empty investigative suspect
+        # universe is legitimately possible when the end-game is the
+        # victim-suicide option (the final target universe + the suicide
+        # option provide the resolution). HOMICIDE still requires an
+        # investigative universe (the deduction needs some suspect to solve).
+        from app.domain.resolution import ResolutionType
+
+        if truth is not None:
+            is_suicide = truth.crime.resolution_type is ResolutionType.SUICIDE
+        else:
+            is_suicide = False
+        if not universes.suspect_ids and not is_suicide:
             universe_issues.append("suspect universe is empty")
         if not universes.motive_ids:
             universe_issues.append("motive universe is empty")

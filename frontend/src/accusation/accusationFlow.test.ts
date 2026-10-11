@@ -6,6 +6,7 @@ import {
   makeAccusationResponse,
   makeCandidates,
   makeRevealResponse,
+  makeSuicideAccusationResponse,
   TEST_TOKEN,
 } from "../scene/testFixtures";
 import {
@@ -100,7 +101,13 @@ describe("accusation candidates (player-safe, unmarked, ordered)", () => {
 describe("selection state", () => {
   it("updates each dimension independently and reflects the exact chosen ids", () => {
     const flow = makeFlow(makeServices());
-    expect(flow.currentSelection).toEqual({ murdererId: null, motiveId: null, weaponId: null, crimeTime: null });
+    expect(flow.currentSelection).toEqual({
+      resolutionType: null,
+      murdererId: null,
+      motiveId: null,
+      weaponId: null,
+      crimeTime: null,
+    });
 
     flow.selectSuspect("suspect_beta");
     flow.selectMotive("motive_gamma");
@@ -108,11 +115,36 @@ describe("selection state", () => {
     flow.setCrimeTime("19:00");
 
     expect(flow.currentSelection).toEqual({
+      resolutionType: "HOMICIDE", // selecting a person chooses a HOMICIDE theory
       murdererId: "suspect_beta",
       motiveId: "motive_gamma",
       weaponId: "weapon_beta",
       crimeTime: "19:00",
     });
+  });
+
+  it("Phase 41 — selecting the suicide option clears the person (HOMICIDE <-> SUICIDE XOR)", () => {
+    const flow = makeFlow(makeServices());
+    flow.selectSuspect("suspect_alpha");
+    expect(flow.currentSelection).toEqual({
+      resolutionType: "HOMICIDE",
+      murdererId: "suspect_alpha",
+      motiveId: null,
+      weaponId: null,
+      crimeTime: null,
+    });
+    flow.selectSuicide();
+    expect(flow.currentSelection).toEqual({
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      motiveId: null,
+      weaponId: null,
+      crimeTime: null,
+    });
+    // Selecting a homicide target again moves OFF the suicide option.
+    flow.selectHomicideTarget("suspect_gamma");
+    expect(flow.currentSelection.murdererId).toBe("suspect_gamma");
+    expect(flow.currentSelection.resolutionType).toBe("HOMICIDE");
   });
 });
 
@@ -149,6 +181,7 @@ describe("missing-field validation (client-side)", () => {
     const candidates = makeCandidates();
     const errors = validateAccusationForm(
       {
+        resolutionType: "HOMICIDE",
         murdererId: "not_a_suspect",
         motiveId: "motive_alpha",
         weaponId: "weapon_alpha",
@@ -160,6 +193,56 @@ describe("missing-field validation (client-side)", () => {
     expect(errors.crimeTime).toMatch(/24-hour time/);
     expect(errors.motiveId).toBeUndefined();
     expect(errors.weaponId).toBeUndefined();
+  });
+
+  it("Phase 41 — a legacy selection (no resolutionType, person chosen) validates as HOMICIDE", () => {
+    const errors = validateAccusationForm(
+      {
+        resolutionType: null,
+        murdererId: "suspect_alpha",
+        motiveId: "motive_alpha",
+        weaponId: "weapon_alpha",
+        crimeTime: "21:45",
+      },
+      makeCandidates(),
+    );
+    expect(errors).toEqual({});
+  });
+
+  it("Phase 41 — a SUICIDE theory requires the suicide option and a null person", () => {
+    const withOption = makeCandidates({ hasSuicideOption: true });
+    expect(
+      validateAccusationForm(
+        { resolutionType: "SUICIDE", murdererId: null, motiveId: "motive_alpha", weaponId: "weapon_alpha", crimeTime: "21:45" },
+        withOption,
+      ),
+    ).toEqual({});
+    // With the option, a non-null murdererId is a closed client-side error.
+    const withPerson = validateAccusationForm(
+      { resolutionType: "SUICIDE", murdererId: "suspect_alpha", motiveId: "motive_alpha", weaponId: "weapon_alpha", crimeTime: "21:45" },
+      withOption,
+    );
+    expect(withPerson.murdererId).toMatch(/cannot name a perpetrator/);
+    // Without the option, SUICIDE is closed (even with a null person).
+    const noOption = validateAccusationForm(
+      { resolutionType: "SUICIDE", murdererId: null, motiveId: "motive_alpha", weaponId: "weapon_alpha", crimeTime: "21:45" },
+      makeCandidates({ hasSuicideOption: false }),
+    );
+    expect(noOption.murdererId).toMatch(/not available/);
+  });
+
+  it("Phase 41 — an unknown resolution value is a closed client-side error (never a crash)", () => {
+    const errors = validateAccusationForm(
+      {
+        resolutionType: "ACCIDENT" as never,
+        murdererId: "suspect_alpha",
+        motiveId: "motive_alpha",
+        weaponId: "weapon_alpha",
+        crimeTime: "21:45",
+      },
+      makeCandidates(),
+    );
+    expect(errors.murdererId).toMatch(/Choose one of the options/);
   });
 
   it("isValidCrimeTime only accepts real 24h HH:MM values", () => {
@@ -177,7 +260,7 @@ describe("missing-field validation (client-side)", () => {
 });
 
 describe("submission", () => {
-  it("sends the exact frozen request body with crimeTime as HH:MM:00 (no date)", async () => {
+  it("sends the exact frozen Phase 41 request body with crimeTime as HH:MM:00 (no date)", async () => {
     const services = makeServices();
     const flow = makeFlow(services);
     selectAll(flow);
@@ -189,11 +272,74 @@ describe("submission", () => {
     expect(services.submitAccusation).toHaveBeenCalledTimes(1);
     expect(services.submitAccusation).toHaveBeenCalledWith(
       PT_ID,
-      { murdererId: "suspect_alpha", motiveId: "motive_alpha", weaponId: "weapon_alpha", crimeTime: "21:45:00" },
+      {
+        resolutionType: "HOMICIDE",
+        murdererId: "suspect_alpha",
+        motiveId: "motive_alpha",
+        weaponId: "weapon_alpha",
+        crimeTime: "21:45:00",
+      },
       TEST_TOKEN,
     );
     expect(flow.phase).toBe("accepted");
     expect(flow.acceptedAccusation?.accusation.crimeTime).toBe("21:45:00");
+  });
+
+  it("Phase 41 — a SUICIDE theory submits resolutionType=SUICIDE + murdererId=null and accepts the REAL SUICIDE echo shape", async () => {
+    // ADV-41-02/03 — the mock-realness gap that hid the defect: the service
+    // mock must answer a SUICIDE submission with the CORRECTED server echo
+    // (`{resolutionType:"SUICIDE", murdererId:null,...}`), NOT a legacy-shaped
+    // homicide body. Pre-fix the flow's parser rejected the corrected echo.
+    const services = makeServices({
+      submitAccusation: vi.fn(async () => makeSuicideAccusationResponse()),
+    });
+    const flow = makeFlow(services);
+    flow.selectSuicide();
+    flow.selectMotive("motive_alpha");
+    flow.selectWeapon("weapon_alpha");
+    flow.setCrimeTime("21:45");
+
+    expect(flow.openConfirmation()).toBe("confirmed");
+    expect((await flow.confirmAccusation()) as ConfirmOutcome).toEqual({ outcome: "accepted" });
+    expect(services.submitAccusation).toHaveBeenCalledTimes(1);
+    expect(services.submitAccusation).toHaveBeenCalledWith(
+      PT_ID,
+      {
+        resolutionType: "SUICIDE",
+        murdererId: null,
+        motiveId: "motive_alpha",
+        weaponId: "weapon_alpha",
+        crimeTime: "21:45:00",
+      },
+      TEST_TOKEN,
+    );
+    // The accepted state carries the CORRECTED echo (resolutionType + null
+    // murderer) — the exact shape the real server now returns.
+    expect(flow.acceptedAccusation?.accusation).toEqual({
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      motiveId: "motive_alpha",
+      weaponId: "weapon_alpha",
+      crimeTime: "21:45:00",
+    });
+    expect(flow.phase).toBe("accepted");
+  });
+
+  it("Phase 41 — a SUICIDE selection cannot be confirmed when the case has no suicide option", () => {
+    const services = makeServices();
+    const flow = new AccusationFlow(
+      services,
+      TEST_TOKEN,
+      { playthroughId: PT_ID },
+      makeCandidates({ hasSuicideOption: false }),
+    );
+    flow.selectSuicide();
+    flow.selectMotive("motive_alpha");
+    flow.selectWeapon("weapon_alpha");
+    flow.setCrimeTime("21:45");
+    expect(flow.openConfirmation()).toBe("invalid");
+    expect(flow.lastFieldErrors.murdererId).toMatch(/not available/);
+    expect(services.submitAccusation).not.toHaveBeenCalled();
   });
 
   it("a 200 response is parsed into the typed allowlist (truth never present)", async () => {
@@ -358,6 +504,69 @@ describe("parseAccusationResponse (trust boundary)", () => {
     expect(() => parseAccusationResponse({ ...makeAccusationResponse(), accusation: null })).toThrow(/accusation/);
     expect(() => parseAccusationResponse("nope")).toThrow(/object/);
   });
+
+  it("Phase 41 (ADV-41-02) — a REAL server-shaped SUICIDE echo parses into the typed allowlist", () => {
+    // The exact corrected server body for an accepted SUICIDE theory:
+    // `accusation.resolutionType:"SUICIDE"` + `accusation.murdererId:null`.
+    const serverEcho = JSON.parse(
+      JSON.stringify({
+        playthroughId: "PT-suicide-01",
+        caseId: "CASE-suicide-01",
+        caseVersion: 1,
+        status: "ACCUSED",
+        accusation: {
+          resolutionType: "SUICIDE",
+          murdererId: null,
+          motiveId: "motive_beta",
+          weaponId: "weapon_beta",
+          crimeTime: "21:45:00",
+        },
+      }),
+    );
+    const parsed = parseAccusationResponse(serverEcho);
+    expect(parsed.status).toBe("ACCUSED");
+    expect(parsed.accusation).toEqual({
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      motiveId: "motive_beta",
+      weaponId: "weapon_beta",
+      crimeTime: "21:45:00",
+    });
+  });
+
+  it("Phase 41 — a SUICIDE echo with a non-null murdererId is malformed (fail closed)", () => {
+    const bad = {
+      ...makeSuicideAccusationResponse(),
+      accusation: {
+        resolutionType: "SUICIDE",
+        murdererId: "suspect_alpha",
+        motiveId: "motive_alpha",
+        weaponId: "weapon_alpha",
+        crimeTime: "21:45:00",
+      },
+    };
+    expect(() => parseAccusationResponse(bad)).toThrow(/murdererId must be null for SUICIDE/);
+  });
+
+  it("Phase 41 — a HOMICIDE/LEGACY echo (no resolutionType, non-null murdererId) still parses unchanged", () => {
+    // The legacy/homicide echo contract is pinned: no resolutionType key is
+    // fabricated and the non-null murdererId survives.
+    const legacy = makeAccusationResponse();
+    const parsed = parseAccusationResponse(legacy);
+    expect("resolutionType" in parsed.accusation).toBe(false);
+    expect(parsed.accusation.murdererId).toBe("suspect_alpha");
+    // An explicit HOMICIDE echo with a non-null murdererId is equally valid.
+    const homicide = makeAccusationResponse({
+      accusation: {
+        resolutionType: "HOMICIDE",
+        murdererId: "suspect_alpha",
+        motiveId: "motive_alpha",
+        weaponId: "weapon_alpha",
+        crimeTime: "21:45:00",
+      },
+    });
+    expect(parseAccusationResponse(homicide).accusation.murdererId).toBe("suspect_alpha");
+  });
 });
 
 describe("confirmation lifecycle", () => {
@@ -423,6 +632,8 @@ describe("Phase 18C — applyHypothesis (player notes never affect the solver or
     flow.applyHypothesis({ suspect: "suspect_beta", motive: null, weapon: null, time: "19:00" });
 
     expect(flow.currentSelection).toEqual({
+      // A hypothesis suspect pin selects a HOMICIDE theory.
+      resolutionType: "HOMICIDE",
       murdererId: "suspect_beta",
       motiveId: null,
       weaponId: null,
@@ -454,10 +665,16 @@ describe("Phase 18C — applyHypothesis (player notes never affect the solver or
     expect(services.submitAccusation).toHaveBeenCalledTimes(1);
     expect(services.submitAccusation).toHaveBeenCalledWith(
       PT_ID,
-      { murdererId: "suspect_beta", motiveId: "motive_gamma", weaponId: "weapon_beta", crimeTime: "19:00:00" },
+      {
+        resolutionType: "HOMICIDE",
+        murdererId: "suspect_beta",
+        motiveId: "motive_gamma",
+        weaponId: "weapon_beta",
+        crimeTime: "19:00:00",
+      },
       TEST_TOKEN,
     );
-    // The accepted echo carries ONLY the four submitted dimensions.
+    // The accepted echo carries ONLY the submitted dimensions.
     expect(JSON.stringify(flow.acceptedAccusation)).not.toMatch(/murdererName|motiveLabel|weaponName|timeline|explanation/);
   });
 
@@ -469,6 +686,7 @@ describe("Phase 18C — applyHypothesis (player notes never affect the solver or
     // Same object identity/value — the pins only moved the selection.
     expect(flow.candidatesSnapshot).toBe(before);
     expect(flow.requestBody).toEqual({
+      resolutionType: "HOMICIDE",
       murdererId: "suspect_alpha",
       motiveId: "motive_alpha",
       weaponId: "weapon_alpha",

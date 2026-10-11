@@ -1,59 +1,52 @@
-"""Phase40 — trusted deterministic candidate-integrity projection.
+"""Phase40/41 — trusted deterministic candidate-integrity projection.
 
-The model authors public people and their ``SUSPECT_ELIGIBLE`` affordances
-independently from the public roles. Three CLOSED candidate-integrity
-invariants are enforced by the trusted backend (``case_quality``): a victim is
-never a suspect candidate, a witness is never a suspect candidate, and the
-trusted murderer (``CaseTruth.crime.murderer_id``) is always a suspect
-candidate. Repeatedly repairing these three rules through a full CASE_PEOPLE
-provider regeneration is slow, ambiguous (Phase-40 root cause: the repair
-regressed the Easy Local-Ollama case) and unnecessary — the backend can
-enforce exactly what the three rules demand.
+Phase 40 (unchanged) enforces the two CLOSED protected-role invariants at the
+trusted backend: a victim is never a suspect candidate and a witness is never
+a suspect candidate. Phase 40's THIRD rule — the trusted murderer always gets
+``SUSPECT_ELIGIBLE`` — is exhausted by Phase 41 and replaced with the
+resolution-aware final-target rule (Phase41.md §9):
 
-This module is that projection: a PURE, deterministic, idempotent helper that
-takes already-parsed/validated person records and the trusted murderer id and
-corrects ONLY the impossible candidate-affordance combinations.
+    HOMICIDE:  the murderer must be a FINAL HOMICIDE TARGET (a public suspect
+               OR witness). A SUSPECT-role murderer keeps ``SUSPECT_ELIGIBLE``
+               (investigative suspect semantics); a WITNESS-role murderer is
+               deliberately NOT forced into ``SUSPECT_ELIGIBLE`` (the witness
+               stays interviewable + a final target without becoming an
+               investigative suspect).
+    SUICIDE:   there is no murderer; only the victim/witness eligibility
+               removals apply.
 
-Contract (Phase40-Fix.md §7/§10/§11):
+This module is a PURE, deterministic, idempotent helper that takes
+already-parsed/validated person records and the trusted crime shape
+(``murderer_id`` + ``resolution_type``) and corrects ONLY the impossible
+candidate-affordance combinations.
+
+Contract (Phase40-Fix.md §7/§10/§11 + Phase41.md §9):
 
 - preserve personId / name / role / presentedData / unrelated affordances /
   person ordering / every other field;
 - ``role == victim``    -> remove ``SUSPECT_ELIGIBLE``;
 - ``role == witness``   -> remove ``SUSPECT_ELIGIBLE``;
-- the trusted murderer  -> ensure ``SUSPECT_ELIGIBLE`` exists;
+- HOMICIDE murderer     -> must be a final homicide target; a SUSPECT-role
+  murderer gets ``SUSPECT_ELIGIBLE`` re-added; a WITNESS-role murderer does
+  NOT (the universal murderer-in-suspect rule is retired);
 - every other person    -> preserve the current ``SUSPECT_ELIGIBLE`` decision.
-
-The projection NEVER invents content (§13): it does not manufacture red
-herrings, does not auto-promote ``other``/``family`` people (Decision B —
-``REQUIREMENTS`` treats the candidate count as a difficulty-varying suggestion;
-only the prompt teaches a minimum, no canonical rule enforces it), never writes
-a public ``murderer`` role (§8/§9) and never hides a genuine person/data defect
-from the canonical validators (§35).
 
 ESCALATION (decline — the caller falls back to the canonical CASE_PEOPLE
 provider repair or lets the canonical validators classify):
 
-- murderer id missing or unmatchable (``DECLINED_INSUFFICIENT_CONTEXT``);
-- the murderer person record's role is itself ``victim``/``witness``
-  (truth/public mismatch beyond candidate membership);
+- murderer id missing or unmatchable for HOMICIDE (``DECLINED_INSUFFICIENT_
+  CONTEXT``);
+- the murderer person record's role is ``victim`` (truth/public mismatch
+  beyond candidate membership) or ``family``/``other`` (NOT a final homicide
+  target — the projection must never turn a non-target into one);
 - candidate universe becomes empty after the closed corrections
   (``DECLINED_CANDIDATE_COUNT``);
 - invalid person structure / duplicate ids / out-of-vocabulary public role
   (``FAILED_VALIDATION`` — left to the canonical validators unchanged).
 
-Purity (§25): no provider call, no randomness, no clock, no network, no DB
-mutation. Idempotent (§24): ``project(project(x)) == project(x)``. Person order
-preserved (§26). Rebuilt records use a canonical sorted affordance tuple so no
-provider-order-dependent diff can appear (§27).
-
-REPAIR-COUNT SEMANTICS (§42): this projection is CANONICAL NORMALIZATION, not
-a provider regeneration. It never consumes a provider call and never
-increments ``repairCount`` — the controller's ``consume_repair_pass`` is the
-only repair counter and is NOT touched here. When the projection runs inside a
-controller-dispatched repair pass that pass is the controller's own accounting.
-Telemetry stays truthful: ``candidate_integrity.projection`` reports the closed
-outcome and bounded eligibility deltas only — never the hidden murderer id,
-names, full person records, prompts or raw provider output.
+The Phase-40 tests keep passing: a witness murderer was previously DECLINED,
+now it is a legal CORRECTED shape (the ONLY behavior change outside the
+legacy/suicide paths).
 """
 
 from __future__ import annotations
@@ -70,6 +63,12 @@ SUSPECT_ELIGIBLE: str = "SUSPECT_ELIGIBLE"
 # Protected public roles that may never be candidate suspects.
 _VICTIM = "victim"
 _WITNESS = "witness"
+
+# Phase41 — the CLOSED public roles a HOMICIDE murderer may legitimately hold
+# (the FINAL HOMICIDE TARGET roles of ``app.domain.eligibility``). A murderer
+# with any other public role is not accuseable in the final theory and the
+# projection must escalate ($8/$9).
+_TARGET_ROLES = frozenset({"suspect", "witness"})
 
 
 class CandidateProjectionOutcome(str, Enum):
@@ -178,6 +177,7 @@ def _declined(
 def project_candidate_integrity(
     persons: Iterable[Any],
     murderer_id: str | None,
+    resolution_type: Any = None,
 ) -> CandidateProjectionResult:
     """The trusted deterministic candidate-integrity projection (§7).
 
@@ -186,12 +186,29 @@ def project_candidate_integrity(
             or ``PublicPerson``-compatible) in their original order.
         murderer_id: the trusted ``CaseTruth.crime.murderer_id`` (handed in by
             the trusted caller — this PURE module never imports CaseTruth).
+        resolution_type: the trusted resolution (``ResolutionType.HOMICIDE`` /
+            ``ResolutionType.SUICIDE`` or their str values). ``None`` == legacy
+            homicide (a non-null murderer id).
 
     Returns a ``CandidateProjectionResult``. A succeeded outcome
     (``NO_CHANGE`` / ``CORRECTED``) carries the corrected person tuple; every
     decline/escalation outcome returns the original tuple UNCHANGED so the
     canonical validators/repair path stay authoritative.
     """
+    from app.domain.resolution import ResolutionType
+
+    resolution_token = _resolution_token(resolution_type)
+    is_suicide = resolution_token == "SUICIDE"
+    require_murderer = resolution_token in ("HOMICIDE", None)
+    if require_murderer and not isinstance(murderer_id, str) or not murderer_id:
+        if not is_suicide:
+            return _declined(
+                CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT, persons
+            )
+    # SUICIDE has no murderer: only the two protected-role removals apply.
+    if is_suicide:
+        return _project_protected_roles(persons, murderer_id=None, murderer_role=None)
+
     try:
         original = tuple(persons)
     except TypeError:
@@ -238,14 +255,93 @@ def project_candidate_integrity(
             CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT, original
         )
     murderer_person, murderer_pid, murderer_role, _container = matches[0]
-    if murderer_role in (_VICTIM, _WITNESS):
-        # Cannot satisfy both sides of the rules (protected role IS the killer)
-        # — a truth/public integrity mismatch beyond candidate membership.
+    if murderer_role == _VICTIM:
+        # Cannot satisfy both sides of the rules (protected victim role IS the
+        # killer) — a truth/public integrity mismatch beyond candidate
+        # membership.
+        return _declined(
+            CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT, original
+        )
+    if murderer_role == _WITNESS:
+        # Phase41 — WITNESS MURDERERS ARE LEGAL: the witness is a final
+        # homicide target by public rule; the universal murderer-in-suspect
+        # rule is retired for witnesses (a witness murderer is NOT forced into
+        # SUSPECT_ELIGIBLE). The witness-eligibility removal below runs as the
+        # only correction; the murderer add-eligibility step is skipped.
+        pass
+    elif murderer_role not in _TARGET_ROLES:
+        # A family/other (or any non-suspect/witness) murderer is NOT a final
+        # homicide target — the projection cannot create one deterministically
+        # and must escalate (truth/public mismatch beyond candidate
+        # membership). This is the final-target invariant (§8/§9).
         return _declined(
             CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT, original
         )
 
-    # --- apply the closed three rules ---------------------------------------
+    # --- apply the closed project rules ------------------------------------
+    murderer_target_role = (
+        murderer_role
+        if murderer_role in _TARGET_ROLES
+        else None
+    )
+    return _project_protected_roles(
+        original, murderer_id=murderer_id, murderer_role=murderer_target_role
+    )
+
+
+def _resolution_token(resolution_type: Any) -> str | None:
+    """The closed str token of a resolution value (``HOMICIDE`` | ``SUICIDE``
+    | None for legacy)."""
+    if resolution_type is None or resolution_type == "HOMICIDE":
+        return None
+    value = getattr(resolution_type, "value", resolution_type)
+    if value == "SUICIDE":
+        return "SUICIDE"
+    raise ValueError(f"unsupported resolution_type: {resolution_type!r}")
+
+
+def _project_protected_roles(
+    persons: Iterable[Any],
+    *,
+    murderer_id: str | None,
+    murderer_role: str | None,
+) -> CandidateProjectionResult:
+    """Apply the two protected-role removals + the HOMICIDE murderer add-rule.
+
+    ``murderer_role`` is ``"suspect"`` for a suspect murderer (eligibility is
+    re-added) or ``"witness"`` for a witness murderer (eligibility is NOT
+    re-added — the retired universal rule), ``None`` for SUICIDE / no
+    murderer-derived addition.
+
+    Structure validation is performed here too (SUICIDE calls this helper
+    directly without the HOMICIDE murderer-matching block): invalid records,
+    non-dataclass duck-typed records and out-of-vocabulary roles always close
+    ``FAILED_VALIDATION`` and never raise (ADV-40-01/-02).
+    """
+    try:
+        original = tuple(persons)
+    except TypeError:
+        return _declined(
+            CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT, ()
+        )
+    if not original:
+        return _declined(
+            CandidateProjectionOutcome.DECLINED_INSUFFICIENT_CONTEXT, original
+        )
+    parsed: list[tuple[Any, str, str, Any]] = []
+    for person in original:
+        if not dataclasses.is_dataclass(person):
+            return _failed_validation(original)
+        fields = _person_fields(person)
+        if fields is None:
+            return _failed_validation(original)
+        person_id, role, container = fields
+        if role not in PUBLIC_ROLE_VOCABULARY:
+            return _failed_validation(original)
+        parsed.append((person, person_id, role, container))
+    ids = [entry[1] for entry in parsed]
+    if len(set(ids)) != len(ids):
+        return _failed_validation(original)
     before_count = _candidate_count(original)
     corrected: list[Any] = []
     changed = False
@@ -260,7 +356,11 @@ def project_candidate_integrity(
         elif role == _WITNESS and SUSPECT_ELIGIBLE in new_container:
             new_container = _remove_eligible(new_container)
             witness_removed += 1
-        if person_id == murderer_id and SUSPECT_ELIGIBLE not in new_container:
+        if (
+            person_id == murderer_id
+            and murderer_role == "suspect"
+            and SUSPECT_ELIGIBLE not in new_container
+        ):
             new_container = _add_eligible(new_container)
             murderer_added = True
         if new_container != container:

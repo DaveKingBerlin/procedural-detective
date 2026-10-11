@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AccusationCandidatesDTO } from "../api/types";
-import { CANNED_REVEAL_CRIME_TIME, makeCandidates, makeHostileReveal, makePartialReveal, makeRevealResponse, makeWrongReveal } from "../scene/testFixtures";
+import { CANNED_REVEAL_CRIME_TIME, makeCandidates, makeHostileReveal, makePartialReveal, makeRevealResponse, makeSuicideReveal, makeWrongReveal, makeWrongTheoryReveal } from "../scene/testFixtures";
 import RevealScreen from "./RevealScreen";
 
 /**
@@ -75,6 +75,7 @@ describe("Phase 19E — semantic weapon 'fork' reveal", () => {
   it("shows the semantic weaponName 'Fork' in the truth and never a proc.* render id", () => {
     const reveal = makeRevealResponse({
       truth: {
+        resolutionType: "HOMICIDE",
         murdererId: "suspect_alpha",
         murdererName: "Ada Marsh",
         motiveId: "motive_alpha",
@@ -152,6 +153,92 @@ describe("inert generated reveal text", () => {
     expect(html).toContain("ひらがな");
     expect(html).toContain("你好");
     expect(html).toContain("😀");
+  });
+});
+
+describe("Phase 41 — SUICIDE reveal rendering", () => {
+  it("renders NO 'Murderer' row; shows the self-inflicted resolution and the outcome block", () => {
+    const html = markup(makeSuicideReveal());
+
+    // No murderer truth row or murderer label anywhere.
+    expect(html).not.toContain("reveal-truth-murderer");
+    expect(html).not.toContain(">Murderer<");
+    // The resolution row + the suicide outcome block are present.
+    expect(html).toContain('data-testid="reveal-truth-resolution"');
+    expect(html).toContain("Self-inflicted / suicide");
+    expect(html).toContain('data-testid="reveal-suicide-outcome"');
+    expect(html).toContain("The death was self-inflicted");
+    // A solved suicide case still reports 4/4 dimensions.
+    expect(html).toContain("CASE SOLVED");
+    expect(html).toContain("4 / 4");
+    // Motive/weapon/time truth rows remain.
+    expect(html).toContain("Jealousy toward the victim");
+    expect(html).toContain("Letter opener");
+  });
+
+  it("a wrong suicide-truth theory renders the player's homicide person vs the self-inflicted truth", () => {
+    const html = markup(makeWrongTheoryReveal());
+    expect(html).toContain("CASE NOT SOLVED");
+    expect(html).toContain("3 / 4");
+    // The submitted WHO is the player's chosen person (wrong on a suicide truth).
+    expect(html).toContain("Blake Niven");
+    expect(html).toContain("Self-inflicted / suicide");
+    // Exactly ONE incorrect indicator (the WHO dimension).
+    expect(html).toContain(">Incorrect<");
+  });
+});
+
+describe("Phase 41 — witness-deceptions block (ADV-41-04, post-reveal only)", () => {
+  it("renders the deceptive-witness explanations as inert plain text when present", () => {
+    const reveal = makeSuicideReveal({
+      truth: {
+        resolutionType: "SUICIDE",
+        murdererId: null,
+        murdererName: null,
+        motiveId: "motive_beta",
+        motiveLabel: "Jealousy toward the victim",
+        weaponId: "weapon_beta",
+        weaponName: "Letter opener",
+        crimeTime: CANNED_REVEAL_CRIME_TIME,
+        witnessDeceptions: [
+          { witnessId: "witness_cora", witnessName: "Cora Blake", deceptionReason: "HIDE_UNRELATED_SECRET" },
+        ],
+      },
+    });
+    const html = markup(reveal);
+    expect(html).toContain('data-testid="reveal-deceptions"');
+    expect(html).toContain("Witness deceits");
+    expect(html).toContain("Cora Blake");
+    expect(html).toContain("HIDE_UNRELATED_SECRET");
+    // Inert: hostile-looking reasons stay escaped text, never markup.
+    const hostile = makeSuicideReveal({
+      truth: {
+        resolutionType: "SUICIDE",
+        murdererId: null,
+        murdererName: null,
+        motiveId: "motive_beta",
+        motiveLabel: "x",
+        weaponId: "weapon_beta",
+        weaponName: "y",
+        crimeTime: CANNED_REVEAL_CRIME_TIME,
+        witnessDeceptions: [
+          { witnessId: "w1", witnessName: "<script>alert(1)</script>", deceptionReason: "<img/src=x>" },
+        ],
+      },
+    });
+    const hostileHtml = markup(hostile);
+    expect(hostileHtml).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(hostileHtml).not.toContain("<script>");
+    expect(hostileHtml).not.toContain("<img");
+  });
+
+  it("renders NO deceptions block when the reveal carries none (or null)", () => {
+    expect(markup(makeSuicideReveal())).not.toContain('data-testid="reveal-deceptions"');
+    const nullBlock = makeSuicideReveal() as unknown as Record<string, unknown>;
+    (nullBlock.truth as Record<string, unknown>).witnessDeceptions = null;
+    expect(markup(nullBlock as unknown as Parameters<typeof RevealScreen>[0]["reveal"])).not.toContain(
+      'data-testid="reveal-deceptions"',
+    );
   });
 });
 

@@ -221,20 +221,72 @@ export interface WeaponCandidateDTO {
   name: string;
 }
 
+/* ======================================================================
+ * Phase 41 — final-theory / resolution contract.
+ *
+ * The final player action is a RESOLUTION THEORY ("what happened?") — not a
+ * bare suspect pick. The closed resolution universe stays HOMICIDE | SUICIDE
+ * (no ACCIDENT in Phase 41). SUSPECT_ELIGIBLE remains an INVESTIGATIVE
+ * affordance only: the final homicide target universe is broader (suspects +
+ * witnesses, excluding the victim) and is published as `finalTargets`.
+ * ==================================================================== */
+
+/** The closed trusted resolution type of a case / final theory (Phase 41 §3). */
+export type ResolutionType = "HOMICIDE" | "SUICIDE";
+
+/**
+ * ONE final homicide target (Phase 41 §8/§12). `role` is the PUBLIC published
+ * person role ("suspect" | "witness"); it never marks a winner and never leaks
+ * truth (a guilty witness stays publicly a witness). `finalTargets` are
+ * distinct from the investigative `suspects` universe and ALWAYS exclude the
+ * victim (the victim is represented separately through the suicide option).
+ */
+export interface FinalTargetDTO {
+  id: string;
+  name: string;
+  role: string;
+}
+
 /**
  * Player-safe candidate universes published in the investigation bootstrap.
  * `suspects` arrive SORTED ALPHABETICALLY by id; the client preserves that
  * order exactly and never derives/renders any correctness/winnership marker.
+ *
+ * Phase 41 ADDITIVE fields — `finalTargets` (suspects + witnesses eligible as
+ * final homicide perpetrators) and `hasSuicideOption` (true when the
+ * victim-as-suicide final option is offered) are OPTIONAL here so pre-Phase-41
+ * payloads parse byte-identically; clients fall back to `suspects` (and a
+ * missing suicide option) for legacy cases. `victimName` is the OPTIONAL
+ * display name used ONLY by the suicide option card. None of these expose
+ * truth — the true resolution / murderer / truthfulness stay server-only.
  */
 export interface AccusationCandidatesDTO {
   suspects: SuspectCandidateDTO[];
   motives: MotiveCandidateDTO[];
   weapons: WeaponCandidateDTO[];
+  /** Phase 41 — OPTIONAL final homicide target universe (suspects + witnesses,
+   *  deterministically ordered, deduplicated, truth-independent). Absent/null
+   *  (or empty) on pre-41 servers: the client falls back to `suspects`. */
+  finalTargets?: FinalTargetDTO[] | null;
+  /** Phase 41 — OPTIONAL false/absent on pre-41 servers. When true the client
+   *  may offer the "Victim Name — suicide / self-inflicted" final option. */
+  hasSuicideOption?: boolean | null;
+  /** Phase 41 — OPTIONAL victim display name for the suicide option card (the
+   *  layout requirement "Victim Name — suicide / self-inflicted"). Falls back
+   *  to a generic label when absent. */
+  victimName?: string | null;
 }
 
-/** POST .../accusation request body. crimeTime is a bare 24h time "HH:MM:SS". */
+/** POST .../accusation request body. crimeTime is a bare 24h time "HH:MM:SS".
+ *  Phase 41 — the final-theory semantics: `resolutionType` is OPTIONAL
+ *  (absent + a non-null murdererId = LEGACY HOMICIDE, exactly as before);
+ *  "SUICIDE" requires `murdererId: null`; "HOMICIDE" requires a person in the
+ *  published final homicide target universe (candidates.finalTargets). */
 export interface AccusationRequest {
-  murdererId: string;
+  resolutionType?: ResolutionType | null;
+  /** Phase 41 — the responsible person id: REQUIRED (non-null) for HOMICIDE
+   *  /legacy, null ONLY for SUICIDE. */
+  murdererId: string | null;
   motiveId: string;
   weaponId: string;
   crimeTime: string;
@@ -242,7 +294,10 @@ export interface AccusationRequest {
 
 /** The immutable accepted accusation echoed by 200/409/reveal responses. */
 export interface SubmittedAccusationDTO {
-  murdererId: string;
+  /** Phase 41 — OPTIONAL echo of the submitted resolution type. */
+  resolutionType?: ResolutionType | null;
+  /** Phase 41 — nullable ONLY for SUICIDE submissions (murdererId: null). */
+  murdererId: string | null;
   motiveId: string;
   weaponId: string;
   crimeTime: string;
@@ -257,16 +312,37 @@ export interface AccusationResponse {
   accusation: SubmittedAccusationDTO;
 }
 
-/** Canonical truth block of the reveal DTO (explicit server allowlist). */
+/**
+ * Phase 41 — ONE deceived (lying) witness at reveal time (post-reveal only).
+ * Server-side explanation of a materially deceptive witness claim (Phase41
+ * §11/§22): the witness id, the PUBLIC name and the bounded deception reason.
+ * Only witnesses with a hidden DECEPTIVE entry appear — truthful witnesses
+ * never appear and `TRUTHFUL` is never emitted.
+ */
+export interface WitnessDeceptionDTO {
+  witnessId: string;
+  witnessName: string;
+  deceptionReason: string | null;
+}
+
+/** Canonical truth block of the reveal DTO (explicit server allowlist).
+ *  Phase 41 — `resolutionType` is present and authoritative ("HOMICIDE" |
+ *  "SUICIDE"); `murdererId`/`murdererName` are nullable ONLY for SUICIDE (a
+ *  suicide case has no murderer — the victim is the self-inflicted subject).
+ *  `witnessDeceptions` is the OPTIONAL post-reveal deceptive-witness list
+ *  (absent/null from pre-41 servers or deception-free cases). */
 export interface RevealTruthDTO {
-  murdererId: string;
-  murdererName: string;
+  resolutionType: ResolutionType;
+  murdererId: string | null;
+  murdererName: string | null;
   motiveId: string;
   motiveLabel: string;
   weaponId: string;
   weaponName: string;
   /** Full ISO timestamp carrying the authoritative local time-of-day. */
   crimeTime: string;
+  /** Phase 41 — OPTIONAL post-reveal deceptive-witness explanations. */
+  witnessDeceptions?: WitnessDeceptionDTO[] | null;
 }
 
 /** Per-dimension deterministic evaluation produced by the server. */

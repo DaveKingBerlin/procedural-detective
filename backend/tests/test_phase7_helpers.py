@@ -177,7 +177,17 @@ def publish_v2(app, case_id: str) -> dict[str, Any]:
     payload["caseVersion"] = 2
     payload["publishedAt"] = now
     payload["draft"]["persons"].append(
-        {"person_id": V2_MURDERER_ID, "name": V2_MURDERER_NAME}
+        {
+            "person_id": V2_MURDERER_ID,
+            "name": V2_MURDERER_NAME,
+            # Phase41 — a v2-only candidate person must carry a real public
+            # role to be a FINAL HOMICIDE TARGET (the accusation universe is
+            # role-derived; the old untyped person was only ever an
+            # SUSPECT_ELIGIBLE universe id). The cross-version rejection under
+            # test is still the version pinning, not a broken id.
+            "role": "suspect",
+            "affordances": ["SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER"],
+        }
     )
     payload["draft"]["motives"].append(
         {"motive_id": V2_MOTIVE_ID, "label": V2_MOTIVE_LABEL}

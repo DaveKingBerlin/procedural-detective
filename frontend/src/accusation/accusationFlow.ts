@@ -10,14 +10,26 @@ import {
 } from "./accusationValidation";
 
 /**
- * Accusation controller (Phase 7 K, pure state machine).
+ * Accusation controller (Phase 7 K + Phase 41, pure state machine).
  *
  * The ONLY accusation state the client is allowed to hold lives here:
  *   - the player-safe candidate list (already validated),
- *   - the current WHO/WHY/WEAPON/WHEN selection,
+ *   - the current final-theory selection (HOMICIDE person XOR SUICIDE option,
+ *     plus WHY/WEAPON/WHEN),
  *   - the submission phase (editing -> confirming -> submitting ->
  *     accepted | already-submitted),
  *   - the immutable accepted accusation (echoed by the server).
+ *
+ * Phase 41 final-theory semantics:
+ *   - the final action is "what happened?" — a resolution theory, not a bare
+ *     suspect pick;
+ *   - a HOMICIDE selection names ONE person from `candidates.finalTargets`
+ *     (suspects fallback for legacy payloads; the victim is never a target);
+ *   - a SUICIDE selection carries `murdererId: null` and is only valid when
+ *     `candidates.hasSuicideOption` is true;
+ *   - the request body carries `resolutionType` + `murdererId` (null for
+ *     suicide); a legacy body (no resolutionType + non-null murdererId =
+ *     HOMICIDE) stays accepted by the backend and by the replay runtime.
  *
  * Guarantees:
  *   - candidates are used exactly as the server returned them: NO re-ordering,
@@ -139,27 +151,62 @@ export class AccusationFlow {
     return this.phaseValue === "editing";
   }
 
-  /** Submit body exactly as the frozen contract expects (HH:MM -> HH:MM:00). */
+  /** Submit body exactly as the frozen contract expects (HH:MM -> HH:MM:00).
+   *  Phase 41 — the body ALWAYS carries `resolutionType` (+ `murdererId` null
+   *  for SUICIDE); the legacy shape (no resolutionType + non-null murdererId)
+   *  is still valid on the server and in the replay runtime. */
   get requestBody(): AccusationRequest | null {
-    if (this.selection.murdererId === null || this.selection.motiveId === null || this.selection.weaponId === null) {
+    if (this.selection.motiveId === null || this.selection.weaponId === null) {
       return null;
     }
     const crimeTime = this.selection.crimeTime;
     if (typeof crimeTime !== "string" || !/^\d{2}:\d{2}$/.test(crimeTime)) return null;
-    return {
-      murdererId: this.selection.murdererId,
-      motiveId: this.selection.motiveId,
-      weaponId: this.selection.weaponId,
-      crimeTime: `${crimeTime}:00`,
-    };
+    if (this.selection.resolutionType === "SUICIDE") {
+      return {
+        resolutionType: "SUICIDE",
+        murdererId: null,
+        motiveId: this.selection.motiveId,
+        weaponId: this.selection.weaponId,
+        crimeTime: `${crimeTime}:00`,
+      };
+    }
+    if (this.selection.resolutionType === "HOMICIDE" && this.selection.murdererId !== null) {
+      return {
+        resolutionType: "HOMICIDE",
+        murdererId: this.selection.murdererId,
+        motiveId: this.selection.motiveId,
+        weaponId: this.selection.weaponId,
+        crimeTime: `${crimeTime}:00`,
+      };
+    }
+    return null;
   }
 
   /* ------------------------------- actions ------------------------------ */
 
+  /** Phase 41 — select ONE final homicide target (a person from
+   *  candidates.finalTargets, suspects fallback for legacy payloads). This
+   *  EXPRESSLY selects a HOMICIDE theory (moves the SUICIDE option off). */
+  selectHomicideTarget(id: string): void {
+    this.selectSuspect(id);
+  }
+
+  /** Legacy alias kept for the existing test/API surface: selecting a person
+   *  is a HOMICIDE theory selection. */
   selectSuspect(id: string): void {
-    this.selection = { ...this.selection, murdererId: id };
+    this.selection = { ...this.selection, resolutionType: "HOMICIDE", murdererId: id };
     // Re-open the confirmation context? No: keep the current phase, but clear
     // stale field errors while editing so feedback stays current.
+    if (this.phaseValue === "editing") {
+      this.fieldErrors = { ...this.fieldErrors, murdererId: undefined };
+    }
+    this.changed();
+  }
+
+  /** Phase 41 — select the SUICIDE final theory ("Victim — suicide /
+   *  self-inflicted"). Submits resolutionType=SUICIDE + murdererId=null. */
+  selectSuicide(): void {
+    this.selection = { ...this.selection, resolutionType: "SUICIDE", murdererId: null };
     if (this.phaseValue === "editing") {
       this.fieldErrors = { ...this.fieldErrors, murdererId: undefined };
     }
@@ -210,6 +257,9 @@ export class AccusationFlow {
   }): void {
     if (this.phaseValue !== "editing") return; // a submitted accusation is immutable
     this.selection = {
+      // Phase 41 — a hypothesis pin names a HOMICIDE person (pins never
+      // express suicide); an unpinned suspect leaves the resolution unset.
+      resolutionType: pins.suspect !== null ? "HOMICIDE" : null,
       murdererId: pins.suspect,
       motiveId: pins.motive,
       weaponId: pins.weapon,

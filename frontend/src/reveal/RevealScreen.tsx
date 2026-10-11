@@ -3,7 +3,7 @@ import ProofBoard from "./ProofBoard";
 import { revealPresentation } from "./revealFormat";
 
 /**
- * End-of-case reveal screen (Phase 7 L + Phase 8 G).
+ * End-of-case reveal screen (Phase 7 L + Phase 8 G + Phase 41).
  *
  * PURE DTO-driven: this component renders ONLY `revealPresentation`, which is
  * derived from a validated RevealResponse (parsed by revealValidation, unknown
@@ -14,6 +14,12 @@ import { revealPresentation } from "./revealFormat";
  * "correct X of 4" score line, strong WHO/WHY/WEAPON/WHEN truth cards with
  * player-vs-truth rows and correct/incorrect badges, the evidence explanation
  * list and the timeline. Visually unmistakable from the 3D scene.
+ *
+ * Phase 41: a SUICIDE truth renders NO "Murderer" row — the resolution row
+ * shows the self-inflicted outcome, and a dedicated outcome block explains
+ * that the death was self-inflicted (the supporting evidence, the misleading
+ * homicide clues and any witness-deception note are the SERVER-published
+ * explanation items rendered in the "How the case is proven" list).
  *
  * Security posture:
  *   - every value is rendered with React's default string rendering (inert;
@@ -33,6 +39,7 @@ export default function RevealScreen({ reveal, candidates = null }: RevealScreen
   const model = revealPresentation(reveal, candidates);
   const solved = model.overall === "solved";
   const score = `${model.score.correctDimensions} / ${model.score.totalDimensions}`;
+  const selfInflicted = model.truth.resolutionType === "SUICIDE";
 
   return (
     <section className="reveal-screen" data-testid="reveal-screen" aria-label="Case reveal">
@@ -58,12 +65,42 @@ export default function RevealScreen({ reveal, candidates = null }: RevealScreen
       <div className="reveal-truth" data-testid="reveal-truth">
         <h3>The truth</h3>
         <dl className="reveal-truth-list">
-          <TruthRow label="Murderer" value={model.truth.murderer} dataTestId="reveal-truth-murderer" />
+          {selfInflicted ? (
+            <TruthRow label={model.truth.resolutionLabel} value={model.truth.resolutionValue} dataTestId="reveal-truth-resolution" />
+          ) : (
+            <TruthRow label={model.truth.resolutionLabel} value={model.truth.resolutionValue} dataTestId="reveal-truth-murderer" />
+          )}
           <TruthRow label="Motive" value={model.truth.motive} dataTestId="reveal-truth-motive" />
           <TruthRow label="Weapon" value={model.truth.weapon} dataTestId="reveal-truth-weapon" />
           <TruthRow label="Crime time" value={model.truth.crimeTime} dataTestId="reveal-truth-time" />
         </dl>
       </div>
+
+      {selfInflicted && (
+        <div className="reveal-suicide-outcome" data-testid="reveal-suicide-outcome">
+          <h3>The outcome</h3>
+          <p>The death was self-inflicted — this case has no murderer.</p>
+          <p>
+            The supporting evidence, why any apparent homicide clues were misleading, and whether a
+            witness statement was deceptive are explained in the proof list below.
+          </p>
+        </div>
+      )}
+
+      {model.witnessDeceptions.length > 0 && (
+        <div className="reveal-deceptions" data-testid="reveal-deceptions">
+          <h3>Witness deceits</h3>
+          <p>A witness statement in this case was not truthful:</p>
+          <ul className="reveal-deceptions-list">
+            {model.witnessDeceptions.map((deception, index) => (
+              <li className="reveal-deceptions-entry" data-testid="reveal-deceptions-entry" key={index}>
+                <strong>{deception.witnessName}</strong>
+                {deception.reason !== "" ? <span> — {deception.reason}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="reveal-accusation" data-testid="reveal-accusation">
         <h3>Your accusation</h3>

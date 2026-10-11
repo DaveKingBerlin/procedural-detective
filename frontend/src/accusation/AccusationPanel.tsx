@@ -1,17 +1,27 @@
 import type { AccusationCandidatesDTO } from "../api/types";
 import { AccusationFlow } from "./accusationFlow";
+import { finalHomicideTargets, finalTheoryPersonLabel } from "./accusationValidation";
 
 /**
- * Accusation panel (Phase 7 K).
+ * Accusation panel (Phase 7 K + Phase 41).
  *
- * Pickers for WHO / WHY / WEAPON / WHEN built ONLY from the player-safe
- * `candidates` of the investigation bootstrap:
+ * FINAL-THEORY pickers built ONLY from the player-safe `candidates` of the
+ * investigation bootstrap:
+ *   - WHAT HAPPENED? — the final theory, NOT a bare suspect pick:
+ *       Homicide   Person A / Person B / Witness C  (candidates.finalTargets:
+ *                  suspects AND witnesses, victim excluded, stable order)
+ *       Suicide    Victim Name — suicide / self-inflicted
+ *                  (only when candidates.hasSuicideOption)
+ *   - the suicide option and the homicide persons are MUTUALLY EXCLUSIVE
+ *     (selecting one clears the other) and there is NEVER a duplicate
+ *     equivalent victim/suicide pair;
  *   - candidates render in the EXACT order the server returned them (the
- *     server sorts suspects alphabetically; this client MUST NOT re-order or
- *     mark a winner — there is no `correct`/`winner` anywhere in the model);
+ *     server orders deterministically; this client MUST NOT re-order or mark a
+ *     winner — there is no `correct`/`winner` anywhere in the model);
  *   - WHEN is a 24h time-of-day input collecting "HH:MM" — the flow submits
  *     it as "HH:MM:00" (no date: the date is hidden truth).
  *
+ * Post-reveal note: the correct category is NEVER visually marked pre-reveal.
  * Flow: editing -> confirmation -> submitting -> accepted/already-submitted.
  * The confirmation step is mandatory before the irreversible submit; the
  * submit button disables while in flight and the controller ignores a second
@@ -74,7 +84,7 @@ export default function AccusationPanel({ flow, onReveal, onResetToken }: Accusa
 
           {!confirming && (
             <>
-              <SuspectPicker flow={flow} candidates={candidates} fieldError={fieldErrors.murdererId} />
+              <FinalTheoryPicker flow={flow} candidates={candidates} fieldError={fieldErrors.murdererId} />
               <MotivePicker flow={flow} candidates={candidates} fieldError={fieldErrors.motiveId} />
               <WeaponPicker flow={flow} candidates={candidates} fieldError={fieldErrors.weaponId} />
               <WhenPicker flow={flow} fieldError={fieldErrors.crimeTime} />
@@ -119,7 +129,21 @@ export default function AccusationPanel({ flow, onReveal, onResetToken }: Accusa
   );
 }
 
-function SuspectPicker({
+/**
+ * Phase 41 — the final-theory picker. Replaces the legacy WHO picker.
+ *
+ * Neutral wording ("What happened? Choose your final theory.") with TWO
+ * mutually exclusive groups:
+ *   Homicide — one person per final target (suspects + witnesses, victim
+ *              never present; stable server order preserved);
+ *   Suicide  — ONE victim/self-inflicted card (only when hasSuicideOption),
+ *              which submits resolutionType=SUICIDE + murdererId=null.
+ *
+ * No duplicate equivalent choices: a victim NEVER also appears as a homicide
+ * person (finalTargets exclude the victim), and there is exactly ONE suicide
+ * card. The correct category is never visually marked.
+ */
+function FinalTheoryPicker({
   flow,
   candidates,
   fieldError,
@@ -128,24 +152,50 @@ function SuspectPicker({
   candidates: AccusationCandidatesDTO;
   fieldError: string | undefined;
 }) {
+  const selection = flow.currentSelection;
+  const targets = finalHomicideTargets(candidates);
+  const showSuicide = candidates.hasSuicideOption === true;
+
   return (
     <fieldset className="accusation-fieldset" data-testid="accusation-suspects">
-      <legend>
-        <strong>WHO</strong> — who is the murderer?
+      <legend className="accusation-final-theory-legend">
+        <strong>WHAT HAPPENED?</strong> — choose your final theory.
       </legend>
-      {candidates.suspects.map((candidate) => (
+
+      <p className="accusation-group-heading" data-testid="accusation-group-homicide">
+        Homicide
+      </p>
+      {targets.map((candidate) => (
         <label className="accusation-choice" key={candidate.id}>
           <input
             type="radio"
             name="murdererId"
             value={candidate.id}
-            checked={flow.currentSelection.murdererId === candidate.id}
-            onChange={() => flow.selectSuspect(candidate.id)}
+            checked={selection.resolutionType !== "SUICIDE" && selection.murdererId === candidate.id}
+            onChange={() => flow.selectHomicideTarget(candidate.id)}
             data-testid={`accusation-option-murdererId-${candidate.id}`}
           />
           <span>{candidate.name}</span>
         </label>
       ))}
+
+      {showSuicide && (
+        <div className="accusation-suicide-group" data-testid="accusation-suicide">
+          <p className="accusation-group-heading">Suicide</p>
+          <label className="accusation-choice">
+            <input
+              type="radio"
+              name="murdererId"
+              value="__suicide__"
+              checked={selection.resolutionType === "SUICIDE"}
+              onChange={() => flow.selectSuicide()}
+              data-testid="accusation-option-suicide"
+            />
+            <span>{candidates.victimName ?? "The victim"} — suicide / self-inflicted</span>
+          </label>
+        </div>
+      )}
+
       {fieldError && (
         <p className="accusation-field-error" data-testid="accusation-field-error-murdererId" role="alert">
           {fieldError}
@@ -251,7 +301,7 @@ function WhenPicker({ flow, fieldError }: { flow: AccusationFlow; fieldError: st
 
 function ConfirmationSummary({ flow, candidates }: { flow: AccusationFlow; candidates: AccusationCandidatesDTO }) {
   const selection = flow.currentSelection;
-  const suspect = candidates.suspects.find((entry) => entry.id === selection.murdererId);
+  const resolvedPerson = finalTheoryPersonLabel(selection, candidates);
   const motive = candidates.motives.find((entry) => entry.id === selection.motiveId);
   const weapon = candidates.weapons.find((entry) => entry.id === selection.weaponId);
 
@@ -262,8 +312,8 @@ function ConfirmationSummary({ flow, candidates }: { flow: AccusationFlow; candi
       </p>
       <dl className="accusation-summary">
         <div className="accusation-summary-row">
-          <dt>WHO</dt>
-          <dd data-testid="accusation-summary-murderer">{suspect?.name ?? "—"}</dd>
+          <dt>RESOLUTION</dt>
+          <dd data-testid="accusation-summary-murderer">{resolvedPerson}</dd>
         </div>
         <div className="accusation-summary-row">
           <dt>WHY</dt>

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import suicideFixture from "./fixtures/v1_suicide_case.pdcase.json";
 import canonical from "./fixtures/v1_demo_apartment.pdcase.json";
 import { parseSavegameV1, utf8ByteLength } from "./savegameV1";
 import { evaluateReplayAccusation, timelineOf } from "./replayTruth";
@@ -101,6 +102,42 @@ describe("replay truth evaluation — canonical demo apartment", () => {
     const doc = JSON.parse(CANONICAL_TEXT);
     doc.case.replayTruth.crimeTime = "garbage";
     expect(() => parseSavegameV1(JSON.stringify(doc), 0)).toThrow();
+  });
+});
+
+describe("Phase 41 — resolution-aware wrong-theory verdicts (§21)", () => {
+  const SUICIDE_TEXT: string = JSON.stringify(suicideFixture);
+  const suicideTruth = (): ReturnType<typeof parseSavegameV1>["replayTruth"] =>
+    parseSavegameV1(SUICIDE_TEXT, utf8ByteLength(SUICIDE_TEXT)).replayTruth;
+
+  function accusation(overrides: Partial<{ resolutionType: "HOMICIDE" | "SUICIDE"; murdererId: string | null }> = {}) {
+    return {
+      resolutionType: "HOMICIDE" as "HOMICIDE" | "SUICIDE" | undefined,
+      murdererId: "thomas_reed",
+      motiveId: "cover_up_embezzlement",
+      weaponId: "kitchen_knife",
+      crimeTime: "22:17:00",
+      ...overrides,
+    };
+  }
+
+  it("legacy homicide truth: correct person wins; a SUICIDE theory is ALWAYS wrong", () => {
+    const truth = load().replayTruth; // legacy — no resolutionType
+    expect(truth.resolutionType).toBeUndefined();
+    expect(evaluateReplayAccusation(truth, accusation()).murdererCorrect).toBe(true);
+    expect(
+      evaluateReplayAccusation(truth, accusation({ murdererId: "anna_karlsson" })).murdererCorrect,
+    ).toBe(false);
+    expect(
+      evaluateReplayAccusation(truth, accusation({ resolutionType: "SUICIDE", murdererId: null }))
+        .murdererCorrect,
+    ).toBe(false);
+  });
+
+  it("suicide truth: only SUICIDE wins; the homicide truth-person is wrong", () => {
+    const truth = suicideTruth();
+    expect(evaluateReplayAccusation(truth, accusation({ resolutionType: "SUICIDE", murdererId: null })).murdererCorrect).toBe(true);
+    expect(evaluateReplayAccusation(truth, accusation({ murdererId: "thomas_reed" })).murdererCorrect).toBe(false);
   });
 });
 

@@ -582,10 +582,13 @@ async def validation_exception_handler(
     """422s (query/body/path validation) use the same envelope.
 
     The ``input`` value of each error is stripped so client-supplied values
-    (potentially sensitive) are never echoed back to the response.
+    (potentially sensitive) are never echoed back to the response. The
+    ``ctx`` map is stripped too (DEF-adv): Pydantic v2 model/field validators
+    embed the raised exception object in ``ctx.error``, which is not JSON
+    serializable and would 500 the handler itself.
     """
     errors = [
-        {key: value for key, value in err.items() if key != "input"}
+        {key: value for key, value in err.items() if key not in ("input", "ctx")}
         for err in exc.errors()
     ]
     return JSONResponse(

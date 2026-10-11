@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 # Bounded id/text lengths of the frozen accusation contract (Phase7 B).
 ACCUSATION_ID_MIN = 1
@@ -39,15 +39,34 @@ CRIME_TIME_MAX = 64
 
 
 class AccusationRequest(BaseModel):
-    """POST /api/v1/playthroughs/{playthrough_id}/accusation body (frozen)."""
+    """POST /api/v1/playthroughs/{playthrough_id}/accusation body (frozen).
+
+    Phase41 (§5/§31): the accusation is a FINAL RESOLUTION THEORY, not only a
+    suspect choice. ``resolutionType`` is an optional closed token
+    (``HOMICIDE`` | ``SUICIDE``) and ``murdererId`` is nullable:
+
+    - legacy body (no ``resolutionType`` + a non-null ``murdererId``) infers
+      HOMICIDE (backward compatible);
+    - ``HOMICIDE`` -> ``murdererId`` REQUIRED and a member of the final
+      homicide-target universe (never the victim);
+    - ``SUICIDE``  -> ``murdererId`` MUST be null (the victim is the implicit
+      self-inflicted subject);
+    - any other ``resolutionType`` token is rejected (422).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    murdererId: str = Field(
-        ...,
+    resolutionType: Literal["HOMICIDE", "SUICIDE"] | None = Field(
+        default=None,
+        description="The closed resolution type of the final theory. "
+        "Absent + a non-null murdererId infers HOMICIDE (legacy).",
+    )
+    murdererId: str | None = Field(
+        default=None,
         min_length=ACCUSATION_ID_MIN,
         max_length=ACCUSATION_ID_MAX,
-        description="A suspect from the pinned CaseVersion SUSPECT_ELIGIBLE universe.",
+        description="A final homicide target from the pinned CaseVersion, or "
+        "null for a SUICIDE theory.",
     )
     motiveId: str = Field(
         ...,
@@ -72,14 +91,70 @@ class AccusationRequest(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _check_resolution_shape(self) -> "AccusationRequest":
+        """Frozen cross-field resolution contract (§5/§31):
+
+        - ``SUICIDE``            -> ``murdererId`` MUST be null;
+        - ``HOMICIDE`` (explicit OR the legacy no-token + non-null-murderer
+          inference)          -> ``murdererId`` MUST be present;
+        - any other token is rejected by the ``Literal`` type (422).
+        """
+        if self.resolutionType == "SUICIDE":
+            if self.murdererId not in (None, ""):
+                raise ValueError(
+                    "murdererId must be null for a SUICIDE resolution"
+                )
+        elif self.murdererId in (None, ""):
+            raise ValueError(
+                "murdererId is required for a HOMICIDE resolution"
+            )
+        return self
+
 
 class AccusationEchoDTO(BaseModel):
-    """The submitted — never corrected — accusation value object."""
+    """The submitted — never corrected — accusation value object.
 
-    murdererId: str
+    Phase41: ``murdererId`` is nullable (null for a SUICIDE theory) and
+    ``resolutionType`` is an OPTIONAL additive key. The echo deliberately
+    keeps the frozen four keys (a SUICIDE theory is identified by its null
+    ``murdererId``) so every historical exact-echo test stays byte-identical
+    for homicide bodies.
+
+    ADV-41-02 (FIX-1): the strict frontend accusation parser treats a
+    MISSING ``resolutionType`` as a legacy HOMICIDE echo and therefore
+    REJECTS a null ``murdererId``. A SUICIDE echo must carry the closed
+    ``resolutionType:"SUICIDE"`` token; a legacy/HOMICIDE echo must OMIT the
+    key entirely (byte-identical — the exact-echo tests assert the key set).
+    The model serializer drops ``resolutionType`` whenever it is ``None`` so a
+    homicide echo never serializes ``"resolutionType":null``.
+    """
+
+    murdererId: str | None
     motiveId: str
     weaponId: str
     crimeTime: str
+    resolutionType: Literal["HOMICIDE", "SUICIDE"] | None = Field(
+        default=None,
+        description="The closed resolution token of the echoed theory. "
+        "Present ONLY on a SUICIDE echo (``\"SUICIDE\"``); omitted (never "
+        "null) on legacy/HOMICIDE echoes.",
+    )
+
+    @model_serializer(mode="wrap")
+    def _serialize_drop_none_resolution(self, handler):
+        """Omit ``resolutionType`` from the serialized echo when ``None``.
+
+        ADV-41-02: a legacy/HOMICIDE echo must be BYTE-IDENTICAL to the
+        pre-Phase-41 shape (the exact-echo tests assert
+        ``{"murdererId","motiveId","weaponId","crimeTime"}`` exactly), so a
+        ``None`` resolution type can never serialize as
+        ``"resolutionType":null``.
+        """
+        data = handler(self)
+        if data.get("resolutionType") is None:
+            data.pop("resolutionType", None)
+        return data
 
 
 class AccusationResponseDTO(BaseModel):
@@ -101,18 +176,42 @@ class AccusationResponseDTO(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+class WitnessDeceptionDTO(BaseModel):
+    """Phase41 — ONE deceived (lying) witness at reveal time (post-reveal only).
+
+    Server-side explanation of a materially deceptive witness claim
+    (Phase41.md §11/§22): the witness id, the public name and the bounded
+    deception reason. Only witnesses with a ``DECEPTIVE`` entry in the hidden
+    truth map appear — truthful witnesses never appear and ``TRUTHFUL`` is
+    never emitted.
+    """
+
+    witnessId: str
+    witnessName: str
+    deceptionReason: str | None = None
+
+
 class RevealTruthDTO(BaseModel):
     """Canonical truth labels at reveal time (Phase7 E; player-safety: only
     ids + PUBLIC labels — the DESIGNATION comes from the truth section, the
-    names/labels come from the published public persons/motives/objects)."""
+    names/labels come from the published public persons/motives/objects).
 
-    murdererId: str
-    murdererName: str
+    Phase41 (§22/§23): the truth now carries the closed ``resolutionType``.
+    For a SUICIDE case ``murdererId``/``murdererName`` are ``null`` — the
+    victim-as-self-inflicted option is the truth and NO murderer label is ever
+    rendered. ``witnessDeceptions`` lists the lying witnesses (hidden truth,
+    revealed server-side).
+    """
+
+    resolutionType: Literal["HOMICIDE", "SUICIDE"]
+    murdererId: str | None
+    murdererName: str | None
     motiveId: str
     motiveLabel: str
     weaponId: str
     weaponName: str
     crimeTime: str
+    witnessDeceptions: list[WitnessDeceptionDTO] = Field(default_factory=list)
 
 
 class RevealPlayerAccusationDTO(BaseModel):

@@ -93,6 +93,12 @@ class PublishedCaseVersion:
 
         Contains NO hidden truth winners, NO canonical crime time and NO
         comparison internals — only public/solver-derived material.
+
+        Phase41: the resolution type is exposed here (trusted, server-only
+        observability) so operators can distinguish a SUICIDE publication
+        from a HOMICIDE one without digging into the hidden truth; the solver
+        "murderer winner" is a deduced red herring for SUICIDE and kept as the
+        deduction's survivor for HOMICIDE.
         """
         proof = self.solver_proof
         return {
@@ -100,6 +106,11 @@ class PublishedCaseVersion:
             "caseVersion": self.case_version,
             "generationAttemptId": self.generation_attempt_id,
             "publishedAt": self.published_at,
+            "resolutionType": (
+                self.truth.crime.resolution_type.value
+                if self.truth.crime.resolution_type is not None
+                else "HOMICIDE"
+            ),
             "universes": {
                 "suspects": len(self.universes.suspect_ids),
                 "motives": len(self.universes.motive_ids),

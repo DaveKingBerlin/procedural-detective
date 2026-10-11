@@ -647,7 +647,13 @@ describe("Phase 19E — 'Weapon: fork' end-to-end proof (unit/DTO level)", () =>
     // the client as a weapon dimension.
     expect(submitAccusation).toHaveBeenCalledWith(
       PT_ID,
-      { murdererId: "suspect_alpha", motiveId: "motive_alpha", weaponId: "fork", crimeTime: "21:45:00" },
+      {
+        resolutionType: "HOMICIDE",
+        murdererId: "suspect_alpha",
+        motiveId: "motive_alpha",
+        weaponId: "fork",
+        crimeTime: "21:45:00",
+      },
       TEST_TOKEN,
     );
     const sentBody = (submitAccusation.mock.calls[0] as unknown as Array<unknown>)[1] as AccusationRequest;

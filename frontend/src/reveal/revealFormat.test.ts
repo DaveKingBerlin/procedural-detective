@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TimelineEntryDTO } from "../api/types";
-import { CANNED_REVEAL_CRIME_TIME, makeCandidates, makeHostileReveal, makeRevealResponse, makeWrongReveal, makePartialReveal } from "../scene/testFixtures";
-import { asText, formatCrimeTime, revealPresentation, sortTimeline } from "./revealFormat";
+import { CANNED_REVEAL_CRIME_TIME, makeCandidates, makeHostileReveal, makeRevealResponse, makeSuicideReveal, makeWrongReveal, makePartialReveal, makeWrongTheoryReveal } from "../scene/testFixtures";
+import { asText, formatCrimeTime, revealPresentation, sortTimeline, SELF_INFLICTED_TRUTH_LABEL } from "./revealFormat";
 
 /**
  * Pure presentation-model coverage for the reveal screen (Phase 7 L/O):
@@ -59,7 +59,9 @@ describe("revealPresentation (solved, DTO-driven)", () => {
     expect(model.overall).toBe("solved");
     expect(model.score).toEqual({ correctDimensions: 4, totalDimensions: 4 });
     expect(model.truth).toEqual({
-      murderer: "Ada Marsh",
+      resolutionType: "HOMICIDE",
+      resolutionLabel: "Murderer",
+      resolutionValue: "Ada Marsh",
       motive: "A dispute over money",
       weapon: "Kitchen knife",
       crimeTime: "21:45",
@@ -149,6 +151,7 @@ describe("revealPresentation weapon identity (DEF-081 golden semantic label)", (
     // assetId. Both display surfaces must prefer the semantic label.
     const reveal = makeRevealResponse({
       truth: {
+        resolutionType: "HOMICIDE",
         murdererId: "paul_becker",
         murdererName: "Paul Becker",
         motiveId: "stolen_research_data",
@@ -189,6 +192,41 @@ describe("revealPresentation weapon identity (DEF-081 golden semantic label)", (
   });
 });
 
+describe("Phase 41 — SUICIDE presentation model", () => {
+  it("a solved suicide reveal shows the self-inflicted resolution and the suicide WHO value", () => {
+    const model = revealPresentation(makeSuicideReveal(), makeCandidates());
+    expect(model.truth.resolutionType).toBe("SUICIDE");
+    expect(model.truth.resolutionLabel).toBe("Resolution");
+    expect(model.truth.resolutionValue).toBe(SELF_INFLICTED_TRUTH_LABEL);
+    expect(model.dimensions[0]).toMatchObject({
+      label: "WHO — the resolution",
+      truth: SELF_INFLICTED_TRUTH_LABEL,
+      submitted: SELF_INFLICTED_TRUTH_LABEL,
+      correct: true,
+    });
+    expect(model.overall).toBe("solved");
+  });
+
+  it("a wrong-theory reveal on a suicide truth shows the player's homicide person vs the truth", () => {
+    const model = revealPresentation(makeWrongTheoryReveal(), makeCandidates());
+    expect(model.truth.resolutionType).toBe("SUICIDE");
+    expect(model.dimensions[0]).toMatchObject({
+      truth: SELF_INFLICTED_TRUTH_LABEL,
+      submitted: "Blake Niven", // the player's chosen homicide person
+      correct: false,
+    });
+    expect(model.score).toEqual({ correctDimensions: 3, totalDimensions: 4 });
+  });
+
+  it("a HOMICIDE reveal keeps the murderer label/value (no suicide-only change)", () => {
+    const model = revealPresentation(makeRevealResponse(), makeCandidates());
+    expect(model.truth.resolutionType).toBe("HOMICIDE");
+    expect(model.truth.resolutionLabel).toBe("Murderer");
+    expect(model.truth.resolutionValue).toBe("Ada Marsh");
+    expect(model.dimensions[0].label).toBe("WHO — the murderer");
+  });
+});
+
 describe("asText / hostile values (model-level inertness)", () => {
   it("keeps hostile and unicode strings as literal text", () => {
     const hostile = "<script>alert(1)</script>";
@@ -202,7 +240,7 @@ describe("asText / hostile values (model-level inertness)", () => {
 
   it("hostile reveal values flow through untouched as plain strings (never executed)", () => {
     const model = revealPresentation(makeHostileReveal(), null);
-    expect(model.truth.murderer).toContain("<script>alert(1)</script>");
+    expect(model.truth.resolutionValue).toContain("<script>alert(1)</script>");
     expect(model.explanation[0].title).toContain("ひらがな");
     expect(model.timeline[0].description).toContain("你好");
   });

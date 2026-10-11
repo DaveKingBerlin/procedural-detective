@@ -25,7 +25,7 @@ STRICT rules (reject, never coerce):
    requires a valid ``claimedDeparture`` (Phase 3 TypedProposition validation
    is reused by constructing it);
 7. size bounds: MAX_CHARACTERS=8, MAX_LOCATIONS=8, MAX_EVIDENCE_ITEMS=50,
-   MAX_DOCUMENT_CHARS=12000 (presentation/description), 
+   MAX_DOCUMENT_CHARS=12000 (presentation/description),
    MAX_SINGLE_TEXT_FIELD_CHARS=4000 (every string field), whole provider output
    <= MAX_PROVIDER_OUTPUT_CHARS=200000;
 8. cross-field reference checks are deferred to the assemble step (lifecycle
@@ -102,7 +102,19 @@ _RELIABILITY_VOCABULARY = frozenset({"high", "medium", "low"})
 
 _CASE_TRUTH_TOP = frozenset({"crime"})
 _CRIME_KEYS = frozenset(
-    {"type", "victimId", "murdererId", "motiveId", "weaponId", "locationId", "crimeTime"}
+    {
+        "type",
+        "victimId",
+        "murdererId",
+        "motiveId",
+        "weaponId",
+        "locationId",
+        "crimeTime",
+        # Phase41 — optional trusted resolution token (HOMICIDE|SUICIDE). An
+        # absent token + a non-null murdererId is the documented legacy
+        # HOMICIDE inference (§4). SUICIDE carries a nil/absent murdererId.
+        "resolutionType",
+    }
 )
 _CRIME_TIME_KEYS = frozenset({"canonical", "accusationToleranceSeconds"})
 _PUBLIC_WORLD_TOP = frozenset(
@@ -643,7 +655,11 @@ def _validate_crime(node: Any, where: str) -> tuple[CrimeSpec | None, list[str]]
     issues += more
     victim_id, more = _str_field(node, "victimId", where)
     issues += more
-    murderer_id, more = _str_field(node, "murdererId", where)
+    # Phase41 — ``murdererId`` is OPTIONAL at the JSON level: HOMICIDE requires
+    # it, SUICIDE forbids it. The caller passes ``required=False`` here and the
+    # -paired ``resolutionType`` rule is enforced in ``CrimeSpec.__post_init__``
+    # (which the construct path below re-validates).
+    murderer_id, more = _str_field(node, "murdererId", where, required=False)
     issues += more
     motive_id, more = _str_field(node, "motiveId", where)
     issues += more
@@ -651,6 +667,13 @@ def _validate_crime(node: Any, where: str) -> tuple[CrimeSpec | None, list[str]]
     issues += more
     location_id, more = _str_field(node, "locationId", where)
     issues += more
+    resolution_type, more = _optional_str_field(node, "resolutionType", where)
+    issues += more
+    if resolution_type is not None and resolution_type not in ("HOMICIDE", "SUICIDE"):
+        issues.append(
+            f"{where}.resolutionType must be one of HOMICIDE|SUICIDE; got "
+            f"{resolution_type!r}"
+        )
     crime_time: CrimeTimeSpec | None = None
     if not isinstance(node, dict) or "crimeTime" not in node:
         issues.append(f"{where}: missing required key 'crimeTime'")
@@ -668,6 +691,7 @@ def _validate_crime(node: Any, where: str) -> tuple[CrimeSpec | None, list[str]]
             weapon_id=weapon_id,
             location_id=location_id,
             crime_time=crime_time,
+            resolution_type=resolution_type,
         )
     except ValueError as exc:
         return None, [f"{where}: invalid crime: {exc}"]

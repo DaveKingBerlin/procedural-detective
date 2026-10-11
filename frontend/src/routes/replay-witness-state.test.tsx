@@ -17,7 +17,9 @@ import { makeWitnessBootstrap } from "../scene/testFixtures";
 import realReplayFixture from "../savegame/fixtures/v1_replay_witness_state.pdcase.json";
 import demoFixture from "../savegame/fixtures/v1_demo_apartment.pdcase.json";
 import generatedFixture from "../savegame/fixtures/v1_generated_quality_case.pdcase.json";
+import suicideFixture from "../savegame/fixtures/v1_suicide_case.pdcase.json";
 import { clearReplay, isReplayActive, replayStorageNamespace, startReplay } from "../savegame/replaySession";
+import { FreshReplayState } from "../savegame/replayRuntime";
 import { reExportV1, serializeSavegameV1 } from "../savegame/exportV1";
 import { parseSavegameV1, utf8ByteLength } from "../savegame/savegameV1";
 import { witnessStatementKey } from "../witness/witnessStatementStore";
@@ -444,6 +446,52 @@ describe("Phase 39 — real saved-replay fixture contract (SavegameV1)", () => {
     expect(statement!.content.questionType).toBe("OBSERVATION");
     const found: string[] = [];
     forbiddenProgressKeys(JSON.parse(exported), "savegame", found);
+    expect(found).toEqual([]);
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// Phase 41 — the suicide fixture preserves Phase-39 fresh replay witness state
+// (truthfulness belongs to immutable case/replay truth; asked/discovered
+// progress belongs ONLY to the fresh playthrough state).
+// --------------------------------------------------------------------------- //
+
+describe("Phase 41 — suicide fixture preserves fresh replay witness state", () => {
+  const text = () => JSON.stringify(suicideFixture);
+  const definition = (): ReturnType<typeof parseSavegameV1> => parseSavegameV1(text(), utf8ByteLength(text()));
+
+  it("loads as formatVersion 1 with the additive final-target candidates and a SUICIDE truth", () => {
+    const parsed = definition();
+    expect(parsed.formatVersion).toBe(1);
+    expect(parsed.candidates.hasSuicideOption).toBe(true);
+    expect(parsed.candidates.finalTargets?.length).toBeGreaterThan(0);
+    expect(parsed.replayTruth.resolutionType).toBe("SUICIDE");
+    expect(parsed.replayTruth.murdererId).toBeNull();
+  });
+
+  it("fresh load -> 0 asked; ask -> 1 answered; repeat -> same answer + no duplicate discovery; reload -> 0 (§24/§30)", () => {
+    const state = new FreshReplayState(definition());
+    expect(state.askedWitnessStatementsSnapshot()).toHaveLength(0);
+    // The witness who is ALSO a final target stays interviewable.
+    const first = state.interviewWitness("emily_reed", "OBSERVATION");
+    expect(first.statement.summary).not.toBe("");
+    expect(state.askedWitnessStatementsSnapshot()).toHaveLength(1);
+    // Idempotent re-ask: same answer, NO duplicate discovery (newlyDiscovered
+    // flips to false; the discovered set is unchanged).
+    const second = state.interviewWitness("emily_reed", "OBSERVATION");
+    expect(second.statement).toEqual(first.statement);
+    expect(second.discovery?.newlyDiscovered).toBe(false);
+    expect(state.knowledgeSnapshot().discoveredEvidenceIds.filter((id) => id === "witness_statement_emily_01")).toHaveLength(1);
+    expect(state.askedWitnessStatementsSnapshot()).toHaveLength(1);
+    // Reload the SAME file -> a brand-new fresh replay (0 answered again).
+    const again = new FreshReplayState(definition());
+    expect(again.askedWitnessStatementsSnapshot()).toHaveLength(0);
+    expect(again.interviewWitness("emily_reed", "OBSERVATION").discovery?.newlyDiscovered).toBe(true);
+  });
+
+  it("contains NO interview-progress fields in the serialized document (§24)", () => {
+    const found: string[] = [];
+    forbiddenProgressKeys(suicideFixture, "savegame", found);
     expect(found).toEqual([]);
   });
 });

@@ -333,8 +333,13 @@ export class FreshReplayState {
   /* ------------------------- accusation ---------------------------------- */
 
   /**
-   * The immutable accusation write (SAME rules as the server): membership in
-   * the saved candidate universes + the frozen crimeTime grammar. The
+   * The immutable accusation write (SAME rules as the server + Phase 41):
+   * membership in the saved candidate universes + the frozen crimeTime
+   * grammar. A SUICIDE theory (resolutionType="SUICIDE") requires
+   * `murdererId:null` AND the saved `hasSuicideOption` affordance; a
+   * HOMICIDE/legacy theory requires a person in the FINAL homicide target
+   * universe (`finalTargets`, falling back to `suspects` for legacy saves) —
+   * so a witness murderer is selectable exactly like on the live path. The
    * response NEVER reveals correctness — evaluation happens ONLY in
    * getReveal (separation contract C, Phase7).
    */
@@ -354,7 +359,9 @@ export class FreshReplayState {
     if (!isValidAccusationTime(body.crimeTime)) {
       throw new ApiError(422, "VALIDATION_ERROR", "crimeTime is invalid", null);
     }
+    const resolutionType: "HOMICIDE" | "SUICIDE" = body.resolutionType === "SUICIDE" ? "SUICIDE" : "HOMICIDE";
     const accusation: SubmittedAccusationDTO = {
+      resolutionType,
       murdererId: body.murdererId,
       motiveId: body.motiveId,
       weaponId: body.weaponId,
@@ -395,12 +402,27 @@ export class FreshReplayState {
     );
   }
 
+  /** Phase 41 — resolution-aware membership (mirror of the live accusation
+   *  validation): SUICIDE requires `murdererId:null` + `hasSuicideOption`;
+   *  HOMICIDE/legacy requires a person in the final target universe
+   *  (`finalTargets`, suspects fallback for legacy saves). Motive/weapon
+   *  membership is unchanged; no truth is revealed by any rejection. */
   private validateMembership(body: AccusationRequest): string | null {
-    const suspectIds = this.candidates.suspects.map((entry) => entry.id);
+    const resolutionType: "HOMICIDE" | "SUICIDE" = body.resolutionType === "SUICIDE" ? "SUICIDE" : "HOMICIDE";
     const motiveIds = this.candidates.motives.map((entry) => entry.id);
     const weaponIds = this.candidates.weapons.map((entry) => entry.id);
-    if (!suspectIds.includes(body.murdererId)) {
-      return "The accusation was rejected because one of the options has become invalid.";
+    if (resolutionType === "SUICIDE") {
+      if (this.candidates.hasSuicideOption !== true) {
+        return "The accusation was rejected because one of the options has become invalid.";
+      }
+      if (body.murdererId !== null) {
+        return "The accusation was rejected because one of the options has become invalid.";
+      }
+    } else {
+      const targetIds = this.finalHomicideTargetIds();
+      if (body.murdererId === null || !targetIds.includes(body.murdererId)) {
+        return "The accusation was rejected because one of the options has become invalid.";
+      }
     }
     if (!motiveIds.includes(body.motiveId)) {
       return "The accusation was rejected because one of the options has become invalid.";
@@ -409,6 +431,15 @@ export class FreshReplayState {
       return "The accusation was rejected because one of the options has become invalid.";
     }
     return null;
+  }
+
+  /** Phase 41 — the FINAL homicide target ids of this replay (finalTargets
+   *  when published, suspects fallback for legacy saves) — never re-sorted. */
+  private finalHomicideTargetIds(): string[] {
+    if (this.candidates.finalTargets !== undefined && this.candidates.finalTargets !== null && this.candidates.finalTargets.length > 0) {
+      return this.candidates.finalTargets.map((target) => target.id);
+    }
+    return this.candidates.suspects.map((suspect) => suspect.id);
   }
 
   private toReadDto(record: SavegameEvidenceRecordV1): EvidenceReadResultDTO {

@@ -113,7 +113,16 @@ class ValidationReport:
         if proof.who is None or proof.why is None or proof.weapon is None or proof.when is None:
             # incomplete solver result — the deduction may not be trusted
             return ValidationOutcome.RECOVERABLE_REGENERATE
-        if not (proof.who.unique and proof.why.unique and proof.weapon.unique):
+        # Phase41 (§15/§32): a SUICIDE truth has no WHO dimension requirement —
+        # the WHO solver result (possibly empty/non-unique) is a red herring.
+        # ``all_true`` (below) already carries the suicide-aware murderer_true.
+        resolution = "HOMICIDE"
+        if self.validation is not None:
+            resolution = str(getattr(self.validation, "resolution_type", "") or "HOMICIDE")
+        who_unique_required = resolution != "SUICIDE"
+        if who_unique_required and not proof.who.unique:
+            return ValidationOutcome.RECOVERABLE_REGENERATE
+        if not (proof.why.unique and proof.weapon.unique):
             return ValidationOutcome.RECOVERABLE_REGENERATE
         if proof.when.ambiguous or proof.when.overconstrained:
             return ValidationOutcome.RECOVERABLE_REGENERATE

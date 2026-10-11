@@ -166,6 +166,18 @@ def evaluate_accusation(
     ``accusation`` carries the submitted ``murderer_id`` / ``motive_id`` /
     ``weapon_id`` and the RAW ``crime_time`` string. Returns the frozen
     booleans: murdererCorrect / motiveCorrect / weaponCorrect / timeCorrect.
+
+    PHASE 41 (§21): ``murdererCorrect`` is RESOLUTION-AWARE:
+
+        truth HOMICIDE: HOMICIDE + correct person => True;
+                        HOMICIDE + wrong person   => False;
+                        SUICIDE theory            => False.
+        truth SUICIDE : SUICIDE + null murderer   => True;
+                        HOMICIDE + any person     => False.
+
+    A stored ``""`` (the immutable accusation row's sentinel for a submitted
+    null murderer) is treated as a null — the API contract is "null", the row
+    keeps the NOT-NULL column with the documented empty sentinel.
     """
     crime_time = truth_crime.get("crime_time")
     canonical = crime_time.get("canonical") if isinstance(crime_time, Mapping) else None
@@ -177,10 +189,33 @@ def evaluate_accusation(
     canonical_tick = parse_iso8601(canonical)[0]
     accepted = accepted_scoring_time_set(canonical_tick, int(tolerance))
     tick = submitted_tick(str(accusation.get("crime_time", "")), canonical)
+
+    truth_resolution = str(truth_crime.get("resolution_type") or "HOMICIDE")
+    if truth_crime.get("resolution_type") is None and truth_crime.get("murderer_id") in (
+        None,
+        "",
+    ):
+        # Legacy inference: a truth with no resolution token and a null
+        # murderer can only be SUICIDE (the legacy shape requires a murderer
+        # for HOMICIDE).
+        truth_resolution = "SUICIDE"
+    submitted_resolution = str(accusation.get("resolution_type") or truth_resolution)
+    submitted_murderer = accusation.get("murderer_id")
+    submitted_null = submitted_murderer in (None, "")
+    if truth_resolution == "SUICIDE":
+        murderer_correct = (
+            submitted_resolution == "SUICIDE" and submitted_null
+        )
+        truth_murderer = None
+    else:
+        truth_murderer = truth_crime.get("murderer_id")
+        murderer_correct = (
+            submitted_resolution == "HOMICIDE"
+            and not submitted_null
+            and str(submitted_murderer) == str(truth_murderer)
+        )
     return {
-        "murdererCorrect": str(accusation.get("murderer_id")) == str(
-            truth_crime.get("murderer_id")
-        ),
+        "murdererCorrect": bool(murderer_correct),
         "motiveCorrect": str(accusation.get("motive_id")) == str(
             truth_crime.get("motive_id")
         ),
@@ -191,27 +226,77 @@ def evaluate_accusation(
     }
 
 
+def _resolution_of_body(body: AccusationRequest) -> str:
+    """The trusted resolution of an accusation body (Phase41 §5).
+
+    An explicit ``resolutionType`` wins; a legacy body (no ``resolutionType``)
+    with a non-null ``murdererId`` is HOMICIDE; a body with a null murderer and
+    no resolution type is interpreted as SUICIDE (the only closed alternative).
+    """
+    if body.resolutionType is not None:
+        return body.resolutionType
+    if body.murdererId not in (None, ""):
+        return "HOMICIDE"
+    return "SUICIDE"
+
+
 def validate_universe_membership(
-    payload: Mapping[str, Any], body: AccusationRequest
+    payload: Mapping[str, Any],
+    body: AccusationRequest,
+    resolution_type: str | None = None,
 ) -> None:
     """Every id MUST belong to the pinned CaseVersion's published candidate
-    universes (Phase7 B): suspect in SUSPECT_ELIGIBLE, motive in
-    MOTIVE_CANDIDATE, weapon in POTENTIAL_WEAPON. Unknown/foreign ids answer
-    422 VALIDATION_ERROR with a GENERIC message -- zero existence leak, and
-    cross-version candidates are rejected the same way (Phase7 N9/N10).
+    universes (Phase7 B): motive in MOTIVE_CANDIDATE, weapon in
+    POTENTIAL_WEAPON and — Phase41 — the HOMICIDE murderer in the FINAL
+    HOMICIDE TARGET universe (suspects + witnesses, never the victim), NOT the
+    old SUSPECT_ELIGIBLE universe. A SUICIDE theory requires a null murderer.
+    Unknown/foreign ids answer 422 VALIDATION_ERROR with a GENERIC message —
+    zero existence leak, and cross-version candidates are rejected the same
+    way (Phase7 N9/N10).
     """
+    resolution = resolution_type or _resolution_of_body(body)
     universes = payload.get("universes")
     if not isinstance(universes, Mapping):
         raise AccusationValidationError(
             "ids must belong to the pinned case candidate universes"
         )
-    suspects = {str(i) for i in (universes.get("suspect_ids") or ())}
+
+    from app.domain.eligibility import (
+        final_homicide_target_ids_of_records,
+        has_public_victim_of_records,
+    )
+
+    draft = payload.get("draft")
+    persons = draft.get("persons") if isinstance(draft, Mapping) else ()
+    persons = tuple(
+        p for p in (persons or ()) if isinstance(p, Mapping) and p.get("person_id")
+    )
+    final_targets = set(final_homicide_target_ids_of_records(persons))
+
+    if resolution == "SUICIDE":
+        if body.murdererId not in (None, ""):
+            raise AccusationValidationError(
+                "ids must belong to the pinned case candidate universes"
+            )
+        if not has_public_victim_of_records(persons):
+            raise AccusationValidationError(
+                "ids must belong to the pinned case candidate universes"
+            )
+    else:
+        # HOMICIDE — the murderer must be a FINAL HOMICIDE TARGET (the victim
+        # is never a homicide target; unknown/foreign and family-only people
+        # are rejected with the same generic message).
+        if not isinstance(body.murdererId, str) or not body.murdererId:
+            raise AccusationValidationError(
+                "ids must belong to the pinned case candidate universes"
+            )
+        if body.murdererId not in final_targets:
+            raise AccusationValidationError(
+                "ids must belong to the pinned case candidate universes"
+            )
+
     motives = {str(i) for i in (universes.get("motive_ids") or ())}
     weapons = {str(i) for i in (universes.get("weapon_ids") or ())}
-    if str(body.murdererId) not in suspects:
-        raise AccusationValidationError(
-            "ids must belong to the pinned case candidate universes"
-        )
     if str(body.motiveId) not in motives:
         raise AccusationValidationError(
             "ids must belong to the pinned case candidate universes"
@@ -264,18 +349,30 @@ class AccusationService:
         payload = self._pinned_payload(playthrough)
         if playthrough.state not in _PRE_ACCUSATION_STATES:
             raise AccusationConflictError("an accusation was already submitted")
-        _require_clean_id(body.murdererId, "murdererId")
+        resolution = _resolution_of_body(body)
+        if resolution == "HOMICIDE":
+            _require_clean_id(body.murdererId, "murdererId")
+        else:
+            # SUICIDE: the theory carries NO person (the victim is the implicit
+            # self-inflicted subject); only the closed token is valid (an
+            # ``resolutionType="SUICIDE"`` + a non-null murdererId was already
+            # rejected at the schema level by the cross-field rule below).
+            if body.murdererId not in (None, ""):
+                raise AccusationValidationError("murdererId must be null for SUICIDE")
         _require_clean_id(body.motiveId, "motiveId")
         _require_clean_id(body.weaponId, "weaponId")
         parse_accusation_time(body.crimeTime)
-        validate_universe_membership(payload, body)
+        validate_universe_membership(payload, body, resolution_type=resolution)
         now = self._now()
         try:
             row = self._store.insert_accusation_if_unaccused(
                 playthrough_id=playthrough.playthrough_id,
                 case_id=playthrough.case_id,
                 case_version=playthrough.case_version,
-                murderer_id=body.murdererId,
+                # The immutable accusation row keeps the NOT-NULL column; the
+                # scheme for a SUICIDE theory is the documented empty sentinel
+                # (the API echoes null, never the sentinel).
+                murderer_id=body.murdererId or "",
                 motive_id=body.motiveId,
                 weapon_id=body.weaponId,
                 crime_time=body.crimeTime,
@@ -283,17 +380,25 @@ class AccusationService:
             )
         except DuplicateAccusation:
             raise AccusationConflictError("an accusation was already submitted") from None
+        echoed_murderer = None if resolution == "SUICIDE" else row.murderer_id
+        # ADV-41-02 (FIX-1): a SUICIDE echo carries the closed
+        # ``resolutionType:"SUICIDE"`` token (the strict frontend parser
+        # requires it to accept a null murderer); a legacy/HOMICIDE echo OMITS
+        # the key so every historical exact-echo test stays byte-identical.
+        accusation_echo: dict[str, Any] = {
+            "murdererId": echoed_murderer,
+            "motiveId": row.motive_id,
+            "weaponId": row.weapon_id,
+            "crimeTime": row.crime_time,
+        }
+        if resolution == "SUICIDE":
+            accusation_echo["resolutionType"] = "SUICIDE"
         return {
             "playthroughId": row.playthrough_id,
             "caseId": row.case_id,
             "caseVersion": row.case_version,
             "status": "ACCUSED",
-            "accusation": {
-                "murdererId": row.murderer_id,
-                "motiveId": row.motive_id,
-                "weaponId": row.weapon_id,
-                "crimeTime": row.crime_time,
-            },
+            "accusation": accusation_echo,
         }
 
     def get_reveal(self, playthrough: Any) -> dict[str, Any]:

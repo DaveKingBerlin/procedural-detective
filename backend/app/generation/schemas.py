@@ -23,6 +23,7 @@ from typing import Any, Mapping, Union
 
 from app.domain.evidence import FrozenDict, PROPOSITION_TYPES, TypedProposition
 from app.domain.public import AFFORDANCES
+from app.domain.resolution import ResolutionType
 from app.domain.time_interval import assert_epoch_in_domain, parse_iso8601
 
 MAX_CHARACTERS = 8
@@ -223,24 +224,50 @@ class CrimeTimeSpec:
 class CrimeSpec:
     type: str
     victim_id: str
-    murderer_id: str
-    motive_id: str
-    weapon_id: str
-    location_id: str
-    crime_time: CrimeTimeSpec
+    murderer_id: str | None = None
+    motive_id: str = ""
+    weapon_id: str = ""
+    location_id: str = ""
+    crime_time: CrimeTimeSpec | None = None
+    # Phase41 — optional trusted resolution token (``HOMICIDE`` | ``SUICIDE``).
+    # Absent + non-null murderer_id == legacy HOMICIDE. The strict parser only
+    # accepts this key from the provider JSON; the hidden witness-truthfulness
+    # map is deliberately NOT a CrimeSpec field — it lives on the attempt
+    # (memory/driver-owned) and is lifted straight into ``CaseTruth`` so the
+    # serialized DRAFT tree never carries any truthfulness material.
+    resolution_type: "ResolutionType | None" = None
 
     def __post_init__(self) -> None:
-        for name in (
-            "type",
-            "victim_id",
-            "murderer_id",
-            "motive_id",
-            "weapon_id",
-            "location_id",
-        ):
+        for name in ("type", "victim_id", "motive_id", "weapon_id", "location_id"):
             _require_nonempty_str(getattr(self, name), f"CrimeSpec.{name}")
         if not isinstance(self.crime_time, CrimeTimeSpec):
             raise ValueError("CrimeSpec.crime_time must be a CrimeTimeSpec")
+        if self.resolution_type is not None and not isinstance(
+            self.resolution_type, ResolutionType
+        ):
+            if isinstance(self.resolution_type, str) and self.resolution_type in (
+                "HOMICIDE",
+                "SUICIDE",
+            ):
+                object.__setattr__(
+                    self, "resolution_type", ResolutionType(self.resolution_type)
+                )
+            else:
+                raise ValueError(
+                    "CrimeSpec.resolution_type must be HOMICIDE|SUICIDE|None"
+                )
+        resolution = self.resolution_type or ResolutionType.HOMICIDE
+        if resolution is ResolutionType.SUICIDE:
+            if self.murderer_id is not None:
+                raise ValueError(
+                    "CrimeSpec.murderer_id must be None for a SUICIDE resolution"
+                )
+        else:
+            _require_nonempty_str(self.murderer_id, "CrimeSpec.murderer_id")
+            if self.murderer_id == self.victim_id:
+                raise ValueError(
+                    "CrimeSpec.murderer_id must not equal victim_id"
+                )
 
 
 @dataclass(frozen=True)

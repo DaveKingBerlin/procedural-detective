@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
 import canonical from "./fixtures/v1_demo_apartment.pdcase.json";
+import suicideFixture from "./fixtures/v1_suicide_case.pdcase.json";
+import witnessMurdererFixture from "./fixtures/v1_witness_murderer.pdcase.json";
 import { FreshReplayState } from "./replayRuntime";
 import { parseSavegameV1, utf8ByteLength } from "./savegameV1";
 
@@ -174,7 +176,7 @@ describe("replay — accusation flow", () => {
     expect(reveal.truth.motiveLabel).toBe("Cover up the \u20ac240,000 embezzlement");
     expect(reveal.truth.weaponName).toBe("Kitchen Knife");
     expect(reveal.truth.crimeTime).toBe("2026-09-11T22:17:00+02:00");
-    expect(reveal.player.accusation).toEqual({ ...SOLVED });
+    expect(reveal.player.accusation).toEqual({ resolutionType: "HOMICIDE", ...SOLVED });
   });
 
   it("partial correctness reports the mixed score (2/4)", () => {
@@ -313,6 +315,83 @@ describe("replay — accusation flow", () => {
     const second = state.getReveal();
     expect(first).toEqual(second);
     expect(state.lifecycleState()).toBe("REVEALED");
+  });
+});
+
+describe("Phase 41 replay — witness-murderer final target (replayRuntime)", () => {
+  const TEXT: string = JSON.stringify(witnessMurdererFixture);
+  function load(): ReturnType<typeof parseSavegameV1> {
+    return parseSavegameV1(TEXT, utf8ByteLength(TEXT));
+  }
+
+  it("accusing the WITNESS wins even though she is NOT an investigative suspect", () => {
+    const state = new FreshReplayState(load());
+    const accepted = state.submitAccusation({
+      resolutionType: "HOMICIDE",
+      murdererId: "emily_reed",
+      motiveId: "cover_up_embezzlement",
+      weaponId: "kitchen_knife",
+      crimeTime: "22:17:00",
+    });
+    expect(accepted.status).toBe("ACCUSED");
+    const reveal = state.getReveal();
+    expect(reveal.result.overall).toBe("solved");
+    expect(reveal.truth.murdererName).toBe("Emily Reed");
+  });
+
+  it("a person that is NOT in the finalTargets universe is rejected when finalTargets exist", () => {
+    // david_kim is a published person (role family) but NOT a member of the
+    // final target universe: the final-target universe is the membership
+    // authority for the declaration.
+    const state = new FreshReplayState(load());
+    try {
+      state.submitAccusation({
+        resolutionType: "HOMICIDE",
+        murdererId: "david_kim",
+        motiveId: "cover_up_embezzlement",
+        weaponId: "kitchen_knife",
+        crimeTime: "22:17:00",
+      });
+      expect.unreachable("should have thrown 422");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).status).toBe(422);
+    }
+  });
+});
+
+describe("Phase 41 replay — suicide final theory (replayRuntime)", () => {
+  const TEXT: string = JSON.stringify(suicideFixture);
+  function load(): ReturnType<typeof parseSavegameV1> {
+    return parseSavegameV1(TEXT, utf8ByteLength(TEXT));
+  }
+
+  it("a SUICIDE theory submits murdererId null and solves the case", () => {
+    const state = new FreshReplayState(load());
+    state.submitAccusation({
+      resolutionType: "SUICIDE",
+      murdererId: null,
+      motiveId: "cover_up_embezzlement",
+      weaponId: "kitchen_knife",
+      crimeTime: "22:17:00",
+    });
+    const reveal = state.getReveal();
+    expect(reveal.result.overall).toBe("solved");
+    expect(reveal.truth.resolutionType).toBe("SUICIDE");
+  });
+
+  it("a HOMICIDE theory on a suicide truth is INCORRECT (wrong-theory verdict)", () => {
+    const state = new FreshReplayState(load());
+    state.submitAccusation({
+      resolutionType: "HOMICIDE",
+      murdererId: "thomas_reed",
+      motiveId: "cover_up_embezzlement",
+      weaponId: "kitchen_knife",
+      crimeTime: "22:17:00",
+    });
+    const reveal = state.getReveal();
+    expect(reveal.result.overall).toBe("incorrect");
+    expect(reveal.result.murdererCorrect).toBe(false);
   });
 });
 

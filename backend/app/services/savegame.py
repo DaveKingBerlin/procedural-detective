@@ -286,6 +286,13 @@ def project_savegame_v1(
                 # canonical crime time + tolerance (the reveal DTO omits
                 # tolerance, so the save MUST carry it for ``timeCorrect``)
                 # + the public winner labels for rendering THE TRUTH.
+                # Phase41 (§4/§24): the OPTIONAL ``resolutionType`` key is
+                # present ONLY for a SUICIDE save (omitted for legacy/homicide
+                # saves so the exact-key legacy shape is unchanged); for a
+                # SUICIDE save ``murdererId``/``murdererName`` are null. The
+                # OPTIONAL ``witnessDeceptions`` list is present only when the
+                # case hides a lying witness (the browser-local reveal needs
+                # the same post-reveal explanation the server provides).
                 "murdererId": truth["murdererId"],
                 "motiveId": truth["motiveId"],
                 "weaponId": truth["weaponId"],
@@ -294,6 +301,16 @@ def project_savegame_v1(
                 "murdererName": truth["murdererName"],
                 "motiveLabel": truth["motiveLabel"],
                 "weaponName": truth["weaponName"],
+                **(
+                    {"resolutionType": truth["resolutionType"]}
+                    if truth.get("resolutionType") == "SUICIDE"
+                    else {}
+                ),
+                **(
+                    {"witnessDeceptions": truth["witnessDeceptions"]}
+                    if truth.get("witnessDeceptions")
+                    else {}
+                ),
             },
         },
     }

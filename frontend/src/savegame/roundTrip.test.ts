@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getSavegame } from "../api/client";
 import canonical from "./fixtures/v1_demo_apartment.pdcase.json";
+import suicideFixture from "./fixtures/v1_suicide_case.pdcase.json";
 import { downloadSavegameText, reExportV1, savegameFilenameFor, serializeSavegameV1, setSavegameDownloadSink } from "./exportV1";
 import { loadSavegameFile } from "./loadCase";
 import { FreshReplayState } from "./replayRuntime";
@@ -49,7 +50,7 @@ const SOLVED = {
 };
 
 /** Play a fresh replay to the correct solution + reveal. */
-function playToReveal(definition: ReturnType<typeof parsed>): { revealed: string; truthIdentity: boolean } {
+function playToReveal(definition: ReturnType<typeof parsed>): { revealed: string | null; truthIdentity: boolean } {
   const state = new FreshReplayState(definition);
   expect(state.freshBootstrap().state).toBe("PLAYING");
   expect(state.freshBootstrap().playerKnowledge.discoveredEvidenceIds).toEqual([]);
@@ -97,6 +98,79 @@ describe("Phase 32 §31 — deterministic generated-case fixture round-trip", ()
     expect(definition.metadata.source).toBe("generated");
     const result = playToReveal(definition);
     expect(result.revealed).toBe("Thomas Reed");
+  });
+});
+
+describe("Phase 41 — suicide savegame round-trip (§24/§30)", () => {
+  const SUICIDE_TEXT: string = JSON.stringify(suicideFixture);
+
+  function suicideDefinition(): ReturnType<typeof parseSavegameV1> {
+    return parseSavegameV1(SUICIDE_TEXT, utf8ByteLength(SUICIDE_TEXT));
+  }
+
+  const SUICIDE_SOLVED = {
+    resolutionType: "SUICIDE" as "SUICIDE",
+    murdererId: null,
+    motiveId: "cover_up_embezzlement",
+    weaponId: "kitchen_knife",
+    crimeTime: "22:17:00",
+  };
+
+  it("parse -> validate -> normalize -> fresh replay -> solve (suicide) -> reveal", () => {
+    const definition = suicideDefinition();
+    const state = new FreshReplayState(definition);
+    expect(state.freshBootstrap().state).toBe("PLAYING");
+    expect(JSON.stringify(state.freshBootstrap())).not.toContain("replayTruth");
+    const accepted = state.submitAccusation({ ...SUICIDE_SOLVED });
+    expect(accepted.status).toBe("ACCUSED");
+    const reveal = state.getReveal();
+    expect(reveal.result.overall).toBe("solved");
+    expect(reveal.truth.resolutionType).toBe("SUICIDE");
+    expect(reveal.truth.murdererId).toBeNull();
+  });
+
+  it("export -> import -> fresh replay -> solve -> reveal -> re-export -> re-import, ZERO provider calls", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("network must never be used");
+    });
+    const previous = globalThis.fetch;
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const SUICIDE_BODY = {
+      resolutionType: "SUICIDE" as const,
+      murdererId: null as string | null,
+      motiveId: "cover_up_embezzlement",
+      weaponId: "kitchen_knife",
+      crimeTime: "22:17:00",
+    };
+    try {
+      const outcome = await loadSavegameFile({
+        size: utf8ByteLength(SUICIDE_TEXT),
+        text: async () => SUICIDE_TEXT,
+      });
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        startReplay(outcome.definition);
+        const state = activeReplay()!.state;
+        state.submitAccusation({ ...SUICIDE_BODY });
+        const reveal = state.getReveal();
+        expect(reveal.result.overall).toBe("solved");
+        // Re-export (fresh exportedAt) and re-import: the resolution shape and
+        // fresh-play semantics survive.
+        const reExported = serializeSavegameV1(reExportV1(outcome.definition));
+        const reloaded = parseSavegameV1(reExported, utf8ByteLength(reExported));
+        expect(reloaded.replayTruth.resolutionType).toBe("SUICIDE");
+        expect(reloaded.replayTruth.murdererId).toBeNull();
+        expect(reloaded.candidates.hasSuicideOption).toBe(true);
+        const again = new FreshReplayState(reloaded);
+        expect(again.freshBootstrap().state).toBe("PLAYING");
+        expect(JSON.stringify(again.freshBootstrap())).not.toContain("replayTruth");
+        again.submitAccusation({ ...SUICIDE_BODY });
+        expect(again.getReveal().result.overall).toBe("solved");
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = previous;
+    }
   });
 });
 

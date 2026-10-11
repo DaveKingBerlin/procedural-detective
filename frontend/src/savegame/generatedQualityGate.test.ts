@@ -121,7 +121,7 @@ describe("Phase35 §17 — generated-case quality gate", () => {
     expect(reveal.truth.weaponId).toBe("bronze_ceremonial_ice_pick");
     expect(reveal.truth.weaponName).toBe("Bronze Ceremonial Ice Pick");
     expect(reveal.truth.crimeTime).toBe("2026-09-11T23:42:00+02:00");
-    expect(reveal.player.accusation).toEqual({ ...SOLVED });
+    expect(reveal.player.accusation).toEqual({ resolutionType: "HOMICIDE", ...SOLVED });
   });
 
   it("a WRONG accusation follows the server rules (accepted, reveal reports incorrect, never leaks truth)", () => {
