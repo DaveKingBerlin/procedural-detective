@@ -615,3 +615,105 @@ def test_driver_forbidden_token_derivation_matches_fixture():
     # static sanity: the fixture's own canonical tokens are what we assert
     assert all(t in HIDDEN_VALUE_SENTINELS for t in PERSON_TOKENS)
     assert "Konsortium Office" in HIDDEN_VALUE_SENTINELS
+
+
+# --------------------------------------------------------------------------- #
+# §20/§25/§17 — privacy & collision regressions (additional, Phase 37)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [(60, 60), (90, 90), (15, 130), (0, 120), (120, 0), (30, 0)],
+)
+def test_prompt_vocabulary_sharing_across_window_configs(before, after):
+    """§18/§25: across AWKWARD/clamped windows the INITIAL and REPAIR prompt
+    still receive the SAME safe vocabulary (same deterministic builder) while
+    the canonical timestamp grid / entry bounds contract is preserved."""
+    initial = prompts.build_activity_log_prompt(
+        CANONICAL, before_minutes=before, after_minutes=after, **_forbidden()
+    )
+    repair = prompts.build_activity_log_repair_prompt(
+        CANONICAL, ("ENTITY_LEAK_DETECTED",),
+        validator_code="ACTIVITY_LOG_ENTITY_LEAK",
+        before_minutes=before, after_minutes=after,
+        **_forbidden(),
+    )
+    assert _extract_vocab(initial) == _extract_vocab(repair)
+    assert "TIMESTAMP_GRID: " in initial and "TIMESTAMP_GRID: " in repair
+    assert "satisfy ALL of these at once" in initial and "satisfy ALL of these at once" in repair
+    for sentinel in HIDDEN_VALUE_SENTINELS:
+        assert sentinel not in initial, sentinel
+        assert sentinel not in repair, sentinel
+
+
+def test_precomputed_safe_vocabulary_equals_internal_derivation():
+    """The driver passes a PRECOMPUTED safe vocabulary into both builders; the
+    rendered prompts must equal the internally-derived ones (the same-builder
+    property when the caller precomputes — §20/§25)."""
+    vocab = prompts.activity_log_safe_neutral_vocabulary(**_forbidden())
+    direct = prompts.build_activity_log_prompt(CANONICAL, **_forbidden())
+    precomputed = prompts.build_activity_log_prompt(
+        CANONICAL, safe_vocabulary=vocab, **_forbidden()
+    )
+    assert _extract_vocab(direct) == _extract_vocab(precomputed) == vocab
+    repair_direct = prompts.build_activity_log_repair_prompt(
+        CANONICAL, ("ENTITY_LEAK_DETECTED",),
+        validator_code="ACTIVITY_LOG_ENTITY_LEAK", **_forbidden(),
+    )
+    repair_pre = prompts.build_activity_log_repair_prompt(
+        CANONICAL, ("ENTITY_LEAK_DETECTED",),
+        validator_code="ACTIVITY_LOG_ENTITY_LEAK",
+        safe_vocabulary=vocab, **_forbidden(),
+    )
+    assert _extract_vocab(repair_direct) == _extract_vocab(repair_pre) == vocab
+
+
+def test_multi_finding_repair_still_uses_dedicated_leak_directive():
+    """A repair whose findings carry ENTITY_LEAK_DETECTED TOGETHER with other
+    codes still gets the DEDICATED leak directive and never the generic
+    'other' fallback (the leak guidance is never lost in a composite repair)."""
+    blob = prompts.build_activity_log_repair_prompt(
+        CANONICAL,
+        ("ENTRY_COUNT_TOO_LOW (need 15..20, have 1)", "ENTITY_LEAK_DETECTED"),
+        validator_code="ACTIVITY_LOG_SCHEMA_INVALID",
+        **_forbidden(),
+    )
+    assert (
+        "- ACTIVITY_LOG_ENTITY_LEAK: regenerate the COMPLETE activity log using "
+        "ONLY the supplied safe neutral vocabulary" in blob
+    )
+    assert "- other: preserve ALL simultaneous rules" not in blob
+    assert "make it EXACTLY 15..20 rows" in blob  # the count guidance stays
+
+
+def test_anchor_phrase_is_part_of_the_safe_vocabulary():
+    """The canonical-anchor example row text ('Local user activity detected')
+    is itself a collision-safe vocabulary member, so the worked example and the
+    closed output contract never disagree (§7/§9)."""
+    vocab = prompts.activity_log_safe_neutral_vocabulary(**_forbidden())
+    assert "Local user activity detected" in vocab
+
+
+def test_leak_repair_rebuild_from_safe_vocabulary_validates():
+    """§23 hermetic 'repair produces valid output': a COMPLETE replacement log
+    rebuilt using ONLY the supplied safe vocabulary is accepted by the strict
+    validator for this case — the repair's closed output contract is provably
+    sufficient to PASS after an ENTITY_LEAK."""
+    vocab = prompts.activity_log_safe_neutral_vocabulary(**_forbidden())
+    when_obs = _when_obs()
+    tick, offset = parse_iso8601(when_obs)
+    rows = []
+    for i in range(MIN_ACTIVITY_LOG_ENTRIES):
+        ts = tick + (i - 7) * 180
+        rows.append(
+            {
+                "timestamp": when_obs if ts == tick else epoch_to_iso(ts, offset),
+                "activityType": _ALOG_TYPES[i % len(_ALOG_TYPES)],
+                "activity": vocab[i % len(vocab)],
+            }
+        )
+    entries = parse_activity_log(_j({"entries": rows}))
+    assert validate_activity_log(
+        entries, canonical_time=when_obs, **_forbidden()
+    ) == ()
