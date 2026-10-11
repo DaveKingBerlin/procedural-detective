@@ -1915,10 +1915,18 @@ REPAIR_PROMPT_v1 = (
 # ``__CANONICAL_TIME__`` value lands verbatim in this ONE example row; the
 # activityType token stays a closed-enum token and the activity text is the
 # existing neutral fixture phrase already used throughout the tree).
+#
+# Phase37 (DEF-091): the example activity phrase is ALSO template-filled via
+# ``__CANONICAL_EXAMPLE_PHRASE__``. The builder substitutes a COLLISION-CHECKED
+# phrase whenever the default "Local user activity detected" collides with a
+# hidden forbidden token for this case (e.g. ``person_names=("Local",)``), so
+# a model copying the canonical-anchor example can never re-trigger
+# ``ACTIVITY_LOG_ENTITY_LEAK``. Default runs (no collision) render the exact
+# pre-Phase37 sentence byte-for-byte.
 _CANONICAL_ROW_ANCHOR_SENTENCE = (
     "The locked canonical time MUST appear VERBATIM in exactly one entry: "
     '{"timestamp": "__CANONICAL_TIME__", "activityType": '
-    '"LOCAL_ACTIVITY", "activity": "Local user activity detected"}.'
+    '"LOCAL_ACTIVITY", "activity": "__CANONICAL_EXAMPLE_PHRASE__"}.'
 )
 
 # DEF-104 follow-up #2 — COMPLETE worked example + simultaneous-constraint rule.
@@ -2208,7 +2216,11 @@ _ACTIVITY_LOG_SAFE_VOCABULARY_BLOCK = (
 _ACTIVITY_LOG_REPAIR_DIRECTIVE_BLOCK = (
     "\nVALIDATOR FAILURE CODE: __VALIDATOR_CODE__\n"
     "PARSE FAILURE CLASS: __PARSE_FAILURE_CLASS__\n"
-    "Fix per the deterministic directives below:\n"
+    # Phase37 (DEF-090): compact prose so the deterministic total-prompt length
+    # guard (``ACTIVITY_LOG_PROMPT_MAX_CHARS``) holds for EVERY supported
+    # forbidden-token set even when the safe-vocabulary block is long. The
+    # instructions below are unchanged; only the frame sentence is shorter.
+    "Apply these directives:\n"
     "__REPAIR_DIRECTIVES__"
 )
 
@@ -2350,8 +2362,7 @@ def _neutral_text_collides(
     )
 
 
-def _first_safe_fallback_text(
-    start_at: int,
+def _shortest_safe_fallback_text(
     *,
     person_names: Iterable[str],
     weapon_names: Iterable[str],
@@ -2359,14 +2370,29 @@ def _first_safe_fallback_text(
     location_ids: Iterable[str],
     location_names: Iterable[str],
 ) -> str:
-    """Deterministic first non-colliding fallback phrase (ADV-D). Scans the
-    bounded reserved ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` cyclically from
-    ``start_at``; returns the pool's first phrase when every fallback phrase
-    collides (a pathological hostile set beyond the bounded pool — documented
-    LOW residual, same bound the validator's own lexical limits carry)."""
+    """Deterministic SHORTEST non-colliding fallback phrase (ADV-D + Phase37
+    DEF-090).
+
+    ADV-D: a colliding scaffold row is substituted with a guaranteed-safe,
+    non-colliding phrase from the bounded reserved
+    ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` (every member passes the strict
+    validator with no needles; the canonical forbidden names NEVER enter the
+    rendered text).
+
+    Phase37 DEF-090 length bound: the SHORTEST collision-free fallback phrase
+    is selected (deterministic tie-break = canonical pool order), bounding the
+    worked-example scaffold's substituted-row length so the rendered prompt
+    stays inside the pinned ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` guard for EVERY
+    supported forbidden-token set (hostile-but-§15-supported common-word sets
+    included).
+
+    Returns the pool's first phrase when every fallback phrase collides (a
+    pathological hostile set beyond the bounded pool — documented LOW residual,
+    same bound the validator's own lexical limits carry)."""
     pool = ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL
-    for index in range(len(pool)):
-        phrase = pool[(start_at + index) % len(pool)]
+    safe = [
+        phrase
+        for phrase in pool
         if not _neutral_text_collides(
             phrase,
             person_names=person_names,
@@ -2374,9 +2400,13 @@ def _first_safe_fallback_text(
             motive_names=motive_names,
             location_ids=location_ids,
             location_names=location_names,
-        ):
-            return phrase
-    return pool[start_at % len(pool)]
+        )
+    ]
+    if not safe:
+        return pool[0]
+    # ``min`` returns the FIRST minimal-length member in fixed pool order ⇒
+    # deterministic for identical inputs.
+    return min(safe, key=len)
 
 
 # Phase 37 — closed collision-safe neutral output vocabulary for activity
@@ -2390,6 +2420,18 @@ def _first_safe_fallback_text(
 # repair is guided by a positive proven-safe output set instead of
 # "regenerate and hope".
 ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE = 12
+
+# Phase19J-RI (DEF-013) / Phase37 (DEF-090): the AUTHORITATIVE built-prompt
+# length guard pinned by ``test_ri26`` — both activity-log prompts (the
+# worst-case initial AND the worst-case multi-finding repair) stay <= this many
+# rendered characters so the whole prompt fits the ``OLLAMA_NUM_CTX=4096``
+# context-pressure budget. The builders enforce this BY CONSTRUCTION: the
+# safe-vocabulary block is deterministically bounded to whatever budget remains
+# after the fixed prose + the worked-example scaffold, and the scaffold's
+# collision substitution picks the SHORTEST collision-free fallback phrase — so
+# a hostile-but-supported forbidden-token set can never overflow the guard
+# (the 15-row shape + timestamp-grid contract is untouched).
+ACTIVITY_LOG_PROMPT_MAX_CHARS = 7000
 
 # Closed match-category tokens for the optional bounded diagnostics
 # (Phase37 §13/§27) — never hidden values, never raw activity strings.
@@ -2460,6 +2502,95 @@ def activity_log_safe_neutral_vocabulary(
     return combined
 
 
+def _collision_checked_canonical_example_phrase(
+    safe_vocabulary: Iterable[str],
+    *,
+    person_names: Iterable[str],
+    weapon_names: Iterable[str],
+    motive_names: Iterable[str],
+    location_ids: Iterable[str],
+    location_names: Iterable[str],
+) -> str:
+    """Phase37 DEF-091: the canonical-row anchor/example phrase for BOTH
+    prompts, collision-checked against the case's hidden forbidden tokens.
+
+    The default canonical phrase (``_ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT`` —
+    "Local user activity detected") is rendered whenever it passes the SAME
+    canonical collider (``_neutral_text_collides`` → ``entity_leak_tokens``,
+    never weakened). When it collides (e.g. ``person_names=("Local",)``), the
+    FIRST deterministic member of the supplied collision-checked safe
+    vocabulary is substituted — a phrase the strict validator accepts — so a
+    model copying the prose anchor can never re-trigger
+    ``ACTIVITY_LOG_ENTITY_LEAK``. Same inputs ⇒ same phrase in the INITIAL and
+    REPAIR prompts.
+
+    Fail-closed: an EMPTY ``safe_vocabulary`` (Phase37 DEF-092) yields the
+    empty string rather than a raw-pool phrase; the caller's typed fail-closed
+    guard (or the builders' own internal derivation) is the only authority.
+    """
+    if not _neutral_text_collides(
+        _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    ):
+        return _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT
+    phrases = tuple(safe_vocabulary or ())
+    if phrases:
+        return phrases[0]
+    return ""
+
+
+def _rendered_safe_vocabulary(
+    safe_vocabulary: Iterable[str],
+    *,
+    max_chars: int | None = None,
+) -> str:
+    """Deterministic render of the ``__SAFE_VOCABULARY__`` fill value.
+
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` renders
+    the EMPTY block — NEVER the raw unfiltered
+    ``ACTIVITY_LOG_NEUTRAL_TEXT_POOL`` (colliding phrases included). Only the
+    caller's typed fail-closed guard / the builders' derivation may supply
+    vocabulary; the render path never silently disables the collision filter.
+
+    Phase37 DEF-090 (length bound): when ``max_chars`` is given, render the
+    LARGEST deterministic prefix of the supplied (collision-checked) phrases
+    that fits inside ``max_chars``. The builders compute ``max_chars`` from the
+    actual remaining budget after the fixed prose + worked-example scaffold, so
+    the total rendered prompt can NEVER exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for any supported forbidden-token set.
+    The floor (≥ ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` phrases) is
+    documented and holds for every supported set: the scaffold's SHORTEST-safe
+    substitution plus the compact directive prose leave the budget wide enough.
+    When the initial and repair prompts have different remaining budgets they
+    render different PREFIXES of the SAME supplied safe tuple (the repair's
+    block is a subset of the initial's) — every rendered phrase in either
+    prompt stays collision-checked, so the §7/§25 "same safe vocabulary"
+    contract is preserved at the supply level.
+    """
+    phrases = tuple(safe_vocabulary or ())
+    if not phrases:
+        return ""
+    if max_chars is None:
+        return ", ".join(phrases)
+    count = 0
+    length = 0
+    for phrase in phrases:
+        length += (2 if count else 0) + len(phrase)
+        if length > max_chars:
+            break
+        count += 1
+    if count == 0:
+        # Pathological guard (unreachable for supported sets): the fixed prose
+        # already filled the whole budget; render the first phrase alone so the
+        # block still names at least one collision-safe phrase.
+        return phrases[0]
+    return ", ".join(phrases[:count])
+
+
 def _activity_log_match_category(
     matches: Iterable[str],
     *,
@@ -2519,7 +2650,6 @@ def activity_log_entity_leak_diagnostics(
     production logging stays safe.
     """
     safe_vocab_size = 0
-    raise_exc: ValueError | None = None
     try:
         safe_vocab = activity_log_safe_neutral_vocabulary(
             person_names=person_names,
@@ -2529,8 +2659,12 @@ def activity_log_entity_leak_diagnostics(
             location_names=location_names,
         )
         safe_vocab_size = len(safe_vocab)
-    except ValueError as exc:  # pragma: no cover - pathological defensive path
-        raise_exc = exc
+    except ValueError:  # pragma: no cover - pathological defensive path
+        # Phase37 DEF-093: the no-match + exhausted-vocabulary path keeps the
+        # CLOSED set ``{rowIndex, matchCategory, safeVocabularySize}`` with
+        # ``safeVocabularySize: 0``. No prose ``error`` key is ever emitted —
+        # observability stays aligned to §13/§27 and no hidden values leak.
+        safe_vocab_size = 0
     for index, entry in enumerate(entries):
         matches = entity_leak_tokens(
             getattr(entry, "activity", None) or "",
@@ -2560,7 +2694,6 @@ def activity_log_entity_leak_diagnostics(
         "rowIndex": None,
         "matchCategory": None,
         "safeVocabularySize": safe_vocab_size,
-        **({"error": str(raise_exc)} if raise_exc is not None else {}),
     }
 
 
@@ -2601,8 +2734,13 @@ def _activity_log_worked_example_json(
     ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` — everything else stays identical,
     so the built scaffold self-validates (entity_leak_tokens == zero codes)
     even for hostile names like "Mail" / "User" / "Local" / "Workspace" or a
-    distinctive location like "ServerWorkspace". The canonical anmes NEVER
+    distinctive location like "ServerWorkspace". The canonical names NEVER
     enter the rendered text (ADV-256).
+
+    Phase37 DEF-090 (total-prompt length bound): the substitution picks the
+    SHORTEST collision-free fallback phrase (``_shortest_safe_fallback_text``),
+    bounding the scaffold's length growth so the rendered prompt stays inside
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for every supported forbidden-token set.
 
     Fail-closed degenerate windows (total span below ``MIN - 1`` seconds — the
     reachable 0/0 configuration) cannot hold 15 distinct rows; the scaffold
@@ -2631,7 +2769,8 @@ def _activity_log_worked_example_json(
         if index == canon_index:
             text = _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT
             if _neutral_text_collides(text, **forbidden):
-                text = _first_safe_fallback_text(0, **forbidden)
+                # Phase37 DEF-090: shortest collision-safe fallback bound.
+                text = _shortest_safe_fallback_text(**forbidden)
             out.append(
                 {
                     "timestamp": canonical_time,  # verbatim, exactly once
@@ -2642,7 +2781,7 @@ def _activity_log_worked_example_json(
         else:
             text = pool[position % len(pool)]
             if _neutral_text_collides(text, **forbidden):
-                text = _first_safe_fallback_text(position % len(ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL), **forbidden)
+                text = _shortest_safe_fallback_text(**forbidden)
             out.append(
                 {
                     "timestamp": ts,
@@ -2711,7 +2850,7 @@ ACTIVITY_LOG_PROMPT_v1 = (
     f"most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
     + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
     + "- Include the locked canonical time EXACTLY ONCE, in an ordinary row "
-    "(e.g. \"Local user activity detected\"); never label it as crime/"
+    "(e.g. \"__CANONICAL_EXAMPLE_PHRASE__\"); never label it as crime/"
     "evidence.\n"
     "- All other entries: plausible harmless computer/system actions only.\n"
     + _ACTIVITY_LOG_ACTIVITY_TEXT_RULES
@@ -2761,7 +2900,7 @@ ACTIVITY_LOG_REPAIR_PROMPT_v1 = (
     "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__].\n"
     + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
     + "- Include the locked canonical time EXACTLY ONCE, in an ordinary row "
-    "(e.g. \"Local user activity detected\"); never label it as crime/"
+    "(e.g. \"__CANONICAL_EXAMPLE_PHRASE__\"); never label it as crime/"
     "evidence.\n"
     + "\n" + _ACTIVITY_LOG_SAFE_VOCABULARY_BLOCK
     + _ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD
@@ -2939,8 +3078,23 @@ def build_activity_log_prompt(
     computes it once and passes the SAME tuple into BOTH stages — determinism
     guarantees equality when omitted). The hidden forbidden values and
     rejection reasons never reach the provider (§6/§7/§19/§25).
+
+    Phase37 DEF-090 (length): the SAFE VOCABULARY block is deterministically
+    bounded to the remaining budget after the fixed prose + worked-example
+    scaffold, so the rendered prompt can never exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for ANY supported forbidden-token set
+    (hostile-but-§15-supported common-word sets included); the 15-20 row shape
+    and the timestamp-grid contract survive untouched.
+    Phase37 DEF-091 (canonical example): the prose canonical-anchor example
+    phrase is collision-checked (``_collision_checked_canonical_example_phrase``)
+    and substituted when it collides with a hidden forbidden token.
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` is treated
+    as "not supplied" and re-derived internally — the render path NEVER falls
+    back to the raw unfiltered pool.
     """
-    if safe_vocabulary is None:
+    if not safe_vocabulary:
+        # Phase37 DEF-092: ``None`` OR any falsy iterable re-derives the
+        # collision-checked vocabulary internally (never the raw pool).
         safe_vocabulary = activity_log_safe_neutral_vocabulary(
             person_names=person_names,
             weapon_names=weapon_names,
@@ -2948,6 +3102,13 @@ def build_activity_log_prompt(
             location_ids=location_ids,
             location_names=location_names,
         )
+    forbidden = dict(
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
     start_iso, end_iso, before_min, after_min = _activity_log_window_context(
         canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
     )
@@ -2961,24 +3122,37 @@ def build_activity_log_prompt(
         location_ids=location_ids,
         location_names=location_names,
     )
+    grid_text = ", ".join(
+        activity_log_timestamp_grid(
+            canonical_time,
+            before_minutes=before_minutes,
+            after_minutes=after_minutes,
+        )
+    )
+    tokens = {
+        "CANONICAL_TIME": canonical_time,
+        "WINDOW_BEFORE": before_min,
+        "WINDOW_AFTER": after_min,
+        "WINDOW_START_ISO": start_iso,
+        "WINDOW_END_ISO": end_iso,
+        "TIMESTAMP_GRID": grid_text,
+        "WORKED_EXAMPLE": worked_example,
+        "CANONICAL_EXAMPLE_PHRASE": _collision_checked_canonical_example_phrase(
+            safe_vocabulary, **forbidden
+        ),
+        "SAFE_VOCABULARY": "",
+    }
+    # Phase37 DEF-090: the SAFE_VOCABULARY fill value is bounded to the exact
+    # remaining budget, so len(rendered) <= ACTIVITY_LOG_PROMPT_MAX_CHARS holds
+    # by construction for this case.
+    base = _fill(template=ACTIVITY_LOG_PROMPT_v1, **tokens)
+    rendered_sv = _rendered_safe_vocabulary(
+        safe_vocabulary,
+        max_chars=ACTIVITY_LOG_PROMPT_MAX_CHARS - len(base),
+    )
     return _fill(
         template=ACTIVITY_LOG_PROMPT_v1,
-        CANONICAL_TIME=canonical_time,
-        WINDOW_BEFORE=before_min,
-        WINDOW_AFTER=after_min,
-        WINDOW_START_ISO=start_iso,
-        WINDOW_END_ISO=end_iso,
-        TIMESTAMP_GRID=", ".join(
-            activity_log_timestamp_grid(
-                canonical_time,
-                before_minutes=before_minutes,
-                after_minutes=after_minutes,
-            )
-        ),
-        WORKED_EXAMPLE=worked_example,
-        SAFE_VOCABULARY=", ".join(
-            safe_vocabulary if safe_vocabulary else ACTIVITY_LOG_NEUTRAL_TEXT_POOL
-        ),
+        **{**tokens, "SAFE_VOCABULARY": rendered_sv},
     )
 
 
@@ -3034,8 +3208,23 @@ def build_activity_log_repair_prompt(
     canonical row unchanged. ADV-C/ADV-D: same adaptive grid + deterministic
     scaffold collision substitution as the initial prompt (operational guard
     still fails fast before an unsatisfiable window ever reaches a builder).
+
+    Phase37 DEF-090 (length): the SAFE VOCABULARY block is deterministically
+    bounded to the remaining budget after the fixed prose + worked-example
+    scaffold, so the rendered prompt can never exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for ANY supported forbidden-token set;
+    the 15-20 row shape and the timestamp-grid contract survive untouched.
+    Phase37 DEF-091 (canonical example): the prose canonical-anchor example
+    phrase is collision-checked for THIS case and substituted when it collides
+    with a hidden forbidden token (never shown when it would re-trigger the
+    leak).
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` is treated
+    as "not supplied" and re-derived internally — the render path NEVER falls
+    back to the raw unfiltered pool.
     """
-    if safe_vocabulary is None:
+    if not safe_vocabulary:
+        # Phase37 DEF-092: ``None`` OR any falsy iterable re-derives the
+        # collision-checked vocabulary internally (never the raw pool).
         safe_vocabulary = activity_log_safe_neutral_vocabulary(
             person_names=person_names,
             weapon_names=weapon_names,
@@ -3043,6 +3232,13 @@ def build_activity_log_repair_prompt(
             location_ids=location_ids,
             location_names=location_names,
         )
+    forbidden = dict(
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
     start_iso, end_iso, before_min, after_min = _activity_log_window_context(
         canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
     )
@@ -3056,28 +3252,44 @@ def build_activity_log_repair_prompt(
         location_ids=location_ids,
         location_names=location_names,
     )
+    grid_text = ", ".join(
+        activity_log_timestamp_grid(
+            canonical_time,
+            before_minutes=before_minutes,
+            after_minutes=after_minutes,
+        )
+    )
+    findings_text = (
+        "\n".join(f"- {finding}" for finding in findings) or "- SCHEMA_INVALID"
+    )
+    tokens = {
+        "CANONICAL_TIME": canonical_time,
+        "FINDINGS": findings_text,
+        "WINDOW_BEFORE": before_min,
+        "WINDOW_AFTER": after_min,
+        "WINDOW_START_ISO": start_iso,
+        "WINDOW_END_ISO": end_iso,
+        "TIMESTAMP_GRID": grid_text,
+        "WORKED_EXAMPLE": worked_example,
+        "VALIDATOR_CODE": validator_code or "UNKNOWN",
+        "PARSE_FAILURE_CLASS": parse_failure_class or "none",
+        "REPAIR_DIRECTIVES": _activity_log_repair_directive_lines(findings),
+        "CANONICAL_EXAMPLE_PHRASE": _collision_checked_canonical_example_phrase(
+            safe_vocabulary, **forbidden
+        ),
+        "SAFE_VOCABULARY": "",
+    }
+    # Phase37 DEF-090: the SAFE_VOCABULARY fill value is bounded to the exact
+    # remaining budget, so len(rendered) <= ACTIVITY_LOG_PROMPT_MAX_CHARS holds
+    # by construction for this case.
+    base = _fill(template=ACTIVITY_LOG_REPAIR_PROMPT_v1, **tokens)
+    rendered_sv = _rendered_safe_vocabulary(
+        safe_vocabulary,
+        max_chars=ACTIVITY_LOG_PROMPT_MAX_CHARS - len(base),
+    )
     return _fill(
         template=ACTIVITY_LOG_REPAIR_PROMPT_v1,
-        CANONICAL_TIME=canonical_time,
-        FINDINGS="\n".join(f"- {finding}" for finding in findings) or "- SCHEMA_INVALID",
-        WINDOW_BEFORE=before_min,
-        WINDOW_AFTER=after_min,
-        WINDOW_START_ISO=start_iso,
-        WINDOW_END_ISO=end_iso,
-        TIMESTAMP_GRID=", ".join(
-            activity_log_timestamp_grid(
-                canonical_time,
-                before_minutes=before_minutes,
-                after_minutes=after_minutes,
-            )
-        ),
-        WORKED_EXAMPLE=worked_example,
-        VALIDATOR_CODE=validator_code or "UNKNOWN",
-        PARSE_FAILURE_CLASS=parse_failure_class or "none",
-        REPAIR_DIRECTIVES=_activity_log_repair_directive_lines(findings),
-        SAFE_VOCABULARY=", ".join(
-            safe_vocabulary if safe_vocabulary else ACTIVITY_LOG_NEUTRAL_TEXT_POOL
-        ),
+        **{**tokens, "SAFE_VOCABULARY": rendered_sv},
     )
 
 
@@ -3087,6 +3299,7 @@ __all__ = [
     "ACTIVITY_LOG_NEUTRAL_TEXT_POOL",
     "ACTIVITY_LOG_PROMPT_v1",
     "ACTIVITY_LOG_REPAIR_PROMPT_v1",
+    "ACTIVITY_LOG_PROMPT_MAX_CHARS",
     "ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE",
     "ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN",
     "ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN",

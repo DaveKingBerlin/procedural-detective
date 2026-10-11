@@ -39,6 +39,7 @@ prompt builders are pure.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from app.domain.activity_log import (  # noqa: E402
     MIN_ACTIVITY_LOG_ENTRIES,
     ActivityLogValidatorCode,
     parse_activity_log,
+    repair_findings,
     validate_activity_log,
 )
 from app.domain.time_interval import epoch_to_iso, parse_iso8601  # noqa: E402
@@ -717,3 +719,295 @@ def test_leak_repair_rebuild_from_safe_vocabulary_validates():
     assert validate_activity_log(
         entries, canonical_time=when_obs, **_forbidden()
     ) == ()
+
+
+# --------------------------------------------------------------------------- #
+# DEF-090..093 — Phase37 gate acceptance fixes
+# (prompt-length guard / canonical-example collider / fail-closed empty vocab /
+#  closed diagnostics key set)
+# --------------------------------------------------------------------------- #
+
+# The worst-case co-occurring multi-finding repair package test_ri26 pins
+# (every ``repair_findings`` token + longest validator code + parse class).
+_DEF090_WORST_CODES = (
+    ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,
+    ActivityLogValidatorCode.ACTIVITY_LOG_ENTRY_COUNT_INVALID,
+    ActivityLogValidatorCode.ACTIVITY_LOG_TIME_ORDER_INVALID,
+    ActivityLogValidatorCode.ACTIVITY_LOG_CANONICAL_TIME_MISSING,
+    ActivityLogValidatorCode.ACTIVITY_LOG_CANONICAL_TIME_DUPLICATED,
+    ActivityLogValidatorCode.ACTIVITY_LOG_TIME_WINDOW_INVALID,
+    ActivityLogValidatorCode.ACTIVITY_LOG_DIRECT_TRUTH_LEAK,
+    ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK,
+)
+
+
+def _def090_worst_findings() -> tuple[str, ...]:
+    findings = repair_findings(
+        _DEF090_WORST_CODES,
+        entry_count=27,
+        non_chronological=True,
+        duplicate_timestamp=True,
+    )
+    assert "ENTRY_COUNT_TOO_HIGH (need 15..20, have 27)" in findings
+    return findings
+
+
+def _extract_worked_example_doc(blob: str) -> str:
+    """The embedded COMPLETE single-line worked-example JSON document."""
+    match = re.search(r'\{"entries":\[[^\n]*\}', blob)
+    assert match, "built prompt carries no complete worked-example JSON document"
+    return match.group(0)
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        dict(person_names=("Browser", "Document", "Session")),
+        dict(person_names=("Mail", "Document", "File")),
+        dict(person_names=("User", "Mail", "Browser", "Document", "File")),
+        dict(person_names=("Browser", "Document", "Session", "Mail", "File", "Local")),
+        dict(person_names=("Local", "User", "Workspace", "ServerWorkspace")),
+    ],
+)
+def test_def090_hostile_forbidden_sets_stay_within_prompt_length_guard(hostile):
+    """DEF-090 (ADV-37-01): a hostile but §15-supported forbidden set (short
+    common-word names colliding with the neutral pools) must NEVER push either
+    rendered activity-log prompt over the pinned ≤ 7000-char guard
+    (``ACTIVITY_LOG_PROMPT_MAX_CHARS``). The builders deterministically bound
+    the safe-vocabulary block to the remaining budget after the fixed prose +
+    worked-example scaffold, and the scaffold substitution picks the SHORTEST
+    collision-free fallback phrase — so the total is guarded BY CONSTRUCTION.
+    The 15-20 row shape and the timestamp-grid contract survive."""
+    kwargs = dict(
+        weapon_names=(),
+        motive_names=(),
+        location_ids=(),
+        location_names=(),
+        **hostile,
+    )
+    initial = prompts.build_activity_log_prompt(CANONICAL, **kwargs)
+    repair = prompts.build_activity_log_repair_prompt(
+        CANONICAL,
+        _def090_worst_findings(),
+        validator_code="ACTIVITY_LOG_CANONICAL_TIME_DUPLICATED",
+        parse_failure_class="schema_invalid_unclassified",
+        **kwargs,
+    )
+    assert prompts.ACTIVITY_LOG_PROMPT_MAX_CHARS == 7000
+    assert len(initial) <= prompts.ACTIVITY_LOG_PROMPT_MAX_CHARS, len(initial)
+    assert len(repair) <= prompts.ACTIVITY_LOG_PROMPT_MAX_CHARS, len(repair)
+
+    for blob in (initial, repair):
+        # the 15-20 row shape + timestamp-grid + worked-example contracts stay
+        assert "TIMESTAMP_GRID: " in blob
+        assert "Note: 'entries' is a JSON ARRAY of 15..20 objects" in blob
+        assert blob.count(CANONICAL) == 4  # canonical line+anchor+scaffold+grid
+        # the COMPLETE worked-example scaffold still SELF-VALIDATES (15 rows)
+        entries = parse_activity_log(_extract_worked_example_doc(blob))
+        assert len(entries) == MIN_ACTIVITY_LOG_ENTRIES == 15
+        assert validate_activity_log(
+            entries, canonical_time=CANONICAL, **kwargs
+        ) == ()
+        # the safe-vocabulary block keeps its documented floor and only ever
+        # carries collision-checked phrases
+        vocab = _extract_vocab(blob)
+        assert len(vocab) >= prompts.ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE, vocab
+        for phrase in vocab:
+            assert not prompts._neutral_text_collides(phrase, **kwargs), phrase
+        # no hidden value ever leaked
+        for sentinel in HIDDEN_VALUE_SENTINELS:
+            assert sentinel not in blob, sentinel
+
+
+def test_def090_empty_forbidden_set_still_within_guard():
+    """DEF-090 regression via the EXACT test_ri26 shape: with empty forbidden
+    tokens (the pre-Phase37 guard input) the worst-case multi-finding repair
+    prompt still stays ≤ 7000 — the length-bound changes never regress the
+    pinned guard."""
+    repair = prompts.build_activity_log_repair_prompt(
+        CANONICAL,
+        _def090_worst_findings(),
+        validator_code="ACTIVITY_LOG_CANONICAL_TIME_DUPLICATED",
+        parse_failure_class="schema_invalid_unclassified",
+    )
+    initial = prompts.build_activity_log_prompt(CANONICAL)
+    assert len(repair) <= prompts.ACTIVITY_LOG_PROMPT_MAX_CHARS, len(repair)
+    assert len(initial) <= prompts.ACTIVITY_LOG_PROMPT_MAX_CHARS, len(initial)
+
+
+def test_def091_canonical_example_phrase_collision_substituted_in_both_prompts():
+    """DEF-091 (ADV-37-02): the hard-coded canonical-row anchor sentence AND
+    the requirements bullet must be collision-checked like the worked example.
+    With ``person_names=("Local",)`` the phrase 'Local user activity detected'
+    is excluded from the supplied safe vocabulary yet (pre-fix) was shown as
+    the canonical example — a model copying it re-triggered
+    ACTIVITY_LOG_ENTITY_LEAK. Post-fix the prose anchors substitute a
+    collision-checked safe phrase in BOTH prompts, so copying any example in
+    the prompt passes the strict validator."""
+    hostile = dict(
+        person_names=("Local",),
+        weapon_names=(),
+        motive_names=(),
+        location_ids=(),
+        location_names=(),
+    )
+    vocab = prompts.activity_log_safe_neutral_vocabulary(**hostile)
+    # the colliding phrase is genuinely excluded from the supplied safe set
+    assert "Local user activity detected" not in vocab
+
+    initial = prompts.build_activity_log_prompt(CANONICAL, **hostile)
+    repair = prompts.build_activity_log_repair_prompt(
+        CANONICAL, ("ENTITY_LEAK_DETECTED",),
+        validator_code="ACTIVITY_LOG_ENTITY_LEAK",
+        **hostile,
+    )
+    for blob in (initial, repair):
+        # the colliding canonical phrase is gone from BOTH prose anchors and
+        # nowhere else in the prompt (the scaffold's own canonical row was
+        # already ADV-D substituted)
+        assert "Local user activity detected" not in blob
+        assert '"activity": "Local user activity detected"' not in blob
+        # the substituted canonical-example phrase IS the safe vocabulary's
+        # first member and passes the canonical collider (a model copying the
+        # anchor can never re-trigger the leak)
+        example = blob.split('(e.g. "', 1)[1].split('"', 1)[0]
+        assert example == vocab[0], example
+        assert not prompts._neutral_text_collides(example, **hostile), example
+        assert example in _extract_vocab(blob)
+        assert '"LOCAL_ACTIVITY", "activity": "' + example + '"}' in blob
+        assert (
+            "Include the locked canonical time EXACTLY ONCE, in an ordinary row "
+            f'(e.g. "{example}")' in blob
+        )
+
+    # both prompts share the SAME safe vocabulary (still §7/§25 aligned)
+    assert _extract_vocab(initial) == _extract_vocab(repair)
+
+
+def test_def091_default_non_colliding_case_keeps_original_anchor_phrase():
+    """DEF-091 must NOT change the default (no-collision) behaviour: the
+    canonical-anchor example stays 'Local user activity detected' byte for
+    byte, so the Phase19J pinned default prompt is untouched."""
+    blob = prompts.build_activity_log_prompt(CANONICAL)
+    assert '"activity": "Local user activity detected"' in blob
+    assert (
+        "- Include the locked canonical time EXACTLY ONCE, in an ordinary row "
+        '(e.g. "Local user activity detected")' in blob
+    )
+
+
+def test_def092_falsy_safe_vocabulary_fails_closed_no_raw_pool():
+    """DEF-092 (ADV-37-03): a falsy/empty ``safe_vocabulary`` (``()``/``[]``/
+    ``""``) must NOT silently fall back to the RAW unfiltered pool in the RENDER
+    path. The builders treat it as "not supplied" and re-derive the
+    COLLISION-checked vocabulary internally; the render helper itself never
+    emits the raw pool for falsy input (fail-closed)."""
+    hostile = dict(
+        person_names=("Local", "User"),
+        weapon_names=(),
+        motive_names=(),
+        location_ids=(),
+        location_names=(),
+    )
+    raw_colliders = (
+        "Local user activity detected",
+        "User session login recorded",
+        "User session unlocked",
+        "Local file written",
+    )
+    for falsy in ((), [], ""):
+        initial = prompts.build_activity_log_prompt(
+            CANONICAL, safe_vocabulary=falsy, **hostile
+        )
+        repair = prompts.build_activity_log_repair_prompt(
+            CANONICAL, ("ENTITY_LEAK_DETECTED",),
+            validator_code="ACTIVITY_LOG_ENTITY_LEAK",
+            safe_vocabulary=falsy, **hostile,
+        )
+        for blob in (initial, repair):
+            for raw in raw_colliders:
+                assert raw not in blob, raw
+            vocab = _extract_vocab(blob)
+            # the derived vocabulary is NOT empty (positive output contract kept)
+            assert len(vocab) >= prompts.ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE
+            for phrase in vocab:
+                assert not prompts._neutral_text_collides(phrase, **hostile), phrase
+    # the RENDER path itself is fail-closed for falsy input (never the raw pool)
+    assert prompts._rendered_safe_vocabulary((), max_chars=1000) == ""
+    assert prompts._rendered_safe_vocabulary([], max_chars=1000) == ""
+    assert prompts._rendered_safe_vocabulary("", max_chars=1000) == ""
+
+
+def test_def093_diagnostics_keys_closed_in_matched_and_exhausted_paths():
+    """DEF-093 (ADV-37-04): ``activity_log_entity_leak_diagnostics`` returns
+    EXACTLY the closed key set ``{rowIndex, matchCategory, safeVocabularySize}``
+    on BOTH the matched path AND the no-match + exhausted-vocabulary path
+    (which previously emitted a 4th prose ``error`` key). The exhausted path
+    folds to ``safeVocabularySize: 0`` + the closed None markers — no hidden
+    values, no unpinned prose, §13/§27 observability aligned."""
+    # matched path
+    matched = prompts.activity_log_entity_leak_diagnostics(
+        parse_activity_log(
+            _valid_doc(_when_obs(), "Konsortium Office sweeper queued")
+        ),
+        **_forbidden(),
+    )
+    assert set(matched) == {"rowIndex", "matchCategory", "safeVocabularySize"}
+    assert matched["rowIndex"] == 3
+    assert matched["matchCategory"] == "LOCATION_TOKEN"
+    assert matched["safeVocabularySize"] == len(
+        prompts.activity_log_safe_neutral_vocabulary(**_forbidden())
+    )
+
+    # exhausted no-match path (pathological forbidden set leaves < MIN phrases).
+    # Use an explicit NON-colliding document (the fixture ``_ALOG_TEXTS``
+    # contains phrases like 'System resumed...'/'User session...' that collide
+    # with this pathological person set, which would shift rowIndex off None).
+    exhausted_persons = (
+        "Mail", "User", "Local", "Workspace", "ServerWorkspace",
+        "System", "Network", "Storage", "Display", "Peripheral",
+    )
+    when_obs = _when_obs()
+    tick, offset = parse_iso8601(when_obs)
+    safe_rows = []
+    for i in range(MIN_ACTIVITY_LOG_ENTRIES):
+        ts = tick + (i - 7) * 180
+        safe_rows.append(
+            {
+                "timestamp": when_obs if ts == tick else epoch_to_iso(ts, offset),
+                "activityType": "LOCAL_ACTIVITY",
+                "activity": "Cloud synchronization completed",  # non-colliding
+            }
+        )
+    safe_entries = parse_activity_log(_j({"entries": safe_rows}))
+    assert validate_activity_log(
+        safe_entries,
+        canonical_time=when_obs,
+        person_names=exhausted_persons,
+        weapon_names=(),
+        motive_names=(),
+        location_ids=(),
+        location_names=(),
+    ) == ()
+    exhausted = prompts.activity_log_entity_leak_diagnostics(
+        safe_entries,
+        person_names=exhausted_persons,
+        weapon_names=(),
+        motive_names=(),
+        location_ids=(),
+        location_names=(),
+    )
+    assert set(exhausted) == {"rowIndex", "matchCategory", "safeVocabularySize"}
+    assert exhausted["rowIndex"] is None
+    assert exhausted["matchCategory"] is None
+    assert exhausted["safeVocabularySize"] == 0
+    assert "error" not in exhausted
+
+    # no-match non-exhausted path also keeps the closed set
+    no_match = prompts.activity_log_entity_leak_diagnostics(
+        parse_activity_log(_valid_doc(_when_obs(), "Browser tab opened")),
+        **_forbidden(),
+    )
+    assert set(no_match) == {"rowIndex", "matchCategory", "safeVocabularySize"}
+    assert no_match["rowIndex"] is None
+    assert no_match["safeVocabularySize"] > 0
