@@ -3237,6 +3237,31 @@ class OllamaStageDriver:
         except (TypeError, ValueError):
             canonical_tick_epoch = None
 
+        # Phase 37 — the SINGLE collision-checked safe neutral vocabulary for
+        # THIS case, computed ONCE by the deterministic builder (exact existing
+        # entity-leak collider against the hidden forbidden tokens; never
+        # rendered with the hidden values) and passed into BOTH the initial and
+        # the repair prompt, so an ENTITY_LEAK repair is bound to the SAME
+        # proven-safe closed output set. Fail-closed (Phase37 §16/§17): a
+        # pathological forbidden set that leaves fewer than the minimum
+        # collision-free phrases fails with a typed activity-log code BEFORE any
+        # provider call — the server never supplies a colliding phrase.
+        try:
+            safe_vocabulary = prompts.activity_log_safe_neutral_vocabulary(
+                person_names=person_names,
+                weapon_names=weapon_names,
+                motive_names=motive_names,
+                location_ids=location_ids,
+                location_names=location_names,
+            )
+        except (TypeError, ValueError):
+            raise StageDriverProviderFailure(
+                "activity log safe neutral vocabulary exhausted for this case",
+                code=GenerationFailureCode(
+                    ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK.value
+                ),
+            ) from None
+
         def _elapsed() -> int:
             return int((time.perf_counter() - attempt_clock) * 1000)
 
@@ -3261,6 +3286,11 @@ class OllamaStageDriver:
             motive_names=motive_names,
             location_ids=location_ids,
             location_names=location_names,
+            # Phase 37 — the SAME collision-checked safe neutral vocabulary
+            # (computed once above) is injected into BOTH stages: the initial
+            # prompt's ACTIVITY TEXT RULES + SAFE NEUTRAL ACTIVITY VOCABULARY
+            # and the repair prompt's dedicated ENTITY_LEAK directive (§10/§11).
+            safe_vocabulary=safe_vocabulary,
         )
         # ADV-256 â€” the activity-log stages never receive the FULL locked
         # identity sheet. The provider appends every non-None locked field to
@@ -3532,6 +3562,8 @@ class OllamaStageDriver:
                     if parse_error and parse_shape is not None
                     else None
                 ),
+                # Phase 37 — SAME safe vocabulary as the initial prompt.
+                safe_vocabulary=safe_vocabulary,
             )
             stage = GenerationStage.ACTIVITY_LOG_REPAIR
             # fall through to the next bounded pass (no other state needed)

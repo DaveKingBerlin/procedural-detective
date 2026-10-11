@@ -1915,10 +1915,18 @@ REPAIR_PROMPT_v1 = (
 # ``__CANONICAL_TIME__`` value lands verbatim in this ONE example row; the
 # activityType token stays a closed-enum token and the activity text is the
 # existing neutral fixture phrase already used throughout the tree).
+#
+# Phase37 (DEF-091): the example activity phrase is ALSO template-filled via
+# ``__CANONICAL_EXAMPLE_PHRASE__``. The builder substitutes a COLLISION-CHECKED
+# phrase whenever the default "Local user activity detected" collides with a
+# hidden forbidden token for this case (e.g. ``person_names=("Local",)``), so
+# a model copying the canonical-anchor example can never re-trigger
+# ``ACTIVITY_LOG_ENTITY_LEAK``. Default runs (no collision) render the exact
+# pre-Phase37 sentence byte-for-byte.
 _CANONICAL_ROW_ANCHOR_SENTENCE = (
-    "The locked canonical time is ONE row and must appear VERBATIM in exactly "
-    'one entry, e.g. {"timestamp": "__CANONICAL_TIME__", "activityType": '
-    '"LOCAL_ACTIVITY", "activity": "Local user activity detected"}.'
+    "The locked canonical time MUST appear VERBATIM in exactly one entry: "
+    '{"timestamp": "__CANONICAL_TIME__", "activityType": '
+    '"LOCAL_ACTIVITY", "activity": "__CANONICAL_EXAMPLE_PHRASE__"}.'
 )
 
 # DEF-104 follow-up #2 — COMPLETE worked example + simultaneous-constraint rule.
@@ -2038,8 +2046,8 @@ ACTIVITY_LOG_GRID_COUNT = 18
 _ACTIVITY_LOG_SIMULTANEOUS_COMMON = (
     " log MUST satisfy ALL of these at once:\n"
     f"(a) {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries;\n"
-    "(b) every timestamp strictly increasing and inside "
-    "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__];\n"
+    "(b) every timestamp strictly increasing and inside the deterministic "
+    "window;\n"
     "(c) the locked canonical time appears verbatim exactly once;\n"
     "(d) every activityType is one of the closed tokens;\n"
     "(e) every activity is harmless neutral text.\n"
@@ -2050,8 +2058,7 @@ _ACTIVITY_LOG_SIMULTANEOUS_COMMON = (
 # the answer: the model must keep the shape and invent its own content.
 _ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD = (
     "The complete worked example below shows the required shape/format only — "
-    "replace the row content with your own plausible harmless rows, keep the "
-    "same structure."
+    "replace the row content with your own plausible harmless rows."
 )
 
 # DEF-104 follow-up #2 step 4 — repair-stage recheck line (the repair must
@@ -2100,9 +2107,8 @@ _ACTIVITY_LOG_REPAIR_GRID_LINE = (
 # job frame carries only ``schemaId`` + prompt; the local Ollama receives
 # ``format: "json"`` free-form, so the prompt is the ONLY structural channel).
 _ACTIVITY_LOG_HARD_CONTRACT = (
-    "MACHINE-VERIFIABLE CONTRACT (the server deterministically re-validates "
-    "the log against EVERY line below; a log that violates ANY of them is "
-    "REJECTED):\n"
+    "MACHINE-VERIFIABLE CONTRACT (deterministically re-validated server-side "
+    "against EVERY line below; ANY violation is REJECTED):\n"
     f"- The \"entries\" array MUST contain between {MIN_ACTIVITY_LOG_ENTRIES} "
     f"and {MAX_ACTIVITY_LOG_ENTRIES} objects — never fewer, never more.\n"
     "- Every \"activityType\" MUST be exactly one of the closed tokens:\n"
@@ -2111,8 +2117,81 @@ _ACTIVITY_LOG_HARD_CONTRACT = (
     "entry.\n"
     "- Every \"timestamp\" MUST lie inside the deterministic window, strictly "
     "increasing and unique.\n"
-    "- Do not exceed the entry limit. Do not invent activityType values. Do "
-    "not omit the canonical time. Preserve chronological order.\n"
+    "- Do not exceed the entry limit, invent activityType tokens, omit the "
+    "canonical time, or break chronology.\n"
+)
+
+# Phase 37 §10 — the positive ACTIVITY TEXT RULES block for the INITIAL
+# activity-log prompt. Feeds the model a POSITIVE closed output contract on
+# top of the hidden negative vocabulary the validator enforces: the model may
+# only use the supplied safe neutral phrases, so it never needs to know the
+# secret values it must avoid.
+_ACTIVITY_LOG_ACTIVITY_TEXT_RULES = (
+    "\nACTIVITY TEXT RULES:\n"
+    "- Use ONLY the supplied neutral activity phrases for every \"activity\" "
+    "value.\n"
+    "- Do not introduce names, locations, weapons, motives, organizations, or "
+    "other proper entities.\n"
+    "- Do not invent synonyms or additional named entities.\n"
+    "- Keep each activity short and generic.\n"
+)
+
+# Phase 37 §11 — the DEDICATED entity-leak repair directive. ``ENTITY_LEAK``
+# repairs must NOT fall through the generic "other" directive: they regenerate
+# the COMPLETE log using ONLY the supplied safe neutral vocabulary (see
+# ``_activity_log_repair_directive_lines`` below).
+_ACTIVITY_LOG_ENTITY_LEAK_DIRECTIVE = (
+    "- ACTIVITY_LOG_ENTITY_LEAK: regenerate the COMPLETE activity log using "
+    "ONLY the supplied safe neutral vocabulary; do NOT invent activity phrases "
+    "or introduce named people, places, weapons, motives, organizations.\n"
+)
+
+# The non-leak directive bullets shared by every repair prompt (count /
+# activityType / canonical-time fixes). ``other`` is appended ONLY when the
+# findings carry no entity leak (Phase 37 §11: a leak repair never falls
+# through the generic path).
+_ACTIVITY_LOG_REPAIR_COMMON_DIRECTIVES = (
+    "- count: make it EXACTLY "
+    f"{MIN_ACTIVITY_LOG_ENTRIES}..{MAX_ACTIVITY_LOG_ENTRIES} rows; remove "
+    "ONLY filler rows; keep canonical row/types/order.\n"
+    "- invalid activityType: replace ONLY with a closed token from the EXACT "
+    "schema.\n"
+    "- canonical time missing: MUST include the locked canonical time verbatim "
+    "exactly once.\n"
+)
+
+_ACTIVITY_LOG_REPAIR_OTHER_DIRECTIVE = (
+    "- other: preserve ALL simultaneous rules; never trade one for another.\n"
+)
+
+
+def _activity_log_repair_directive_lines(findings: Iterable[str]) -> str:
+    """Deterministic per-finding directive lines for the repair prompt.
+
+    Phase26-Fix-B kept the count/type/canonical bullets; Phase 37 adds the
+    DEDICATED ``ACTIVITY_LOG_ENTITY_LEAK`` directive whenever the findings
+    carry ``ENTITY_LEAK_DETECTED`` and silently KEEPS the generic "other" line
+    OUT of that path (§11: the leak repair never falls through the generic
+    directive, which would leave the model with no positive safe output
+    contract).
+    """
+    present = set(findings or ())
+    lines = [_ACTIVITY_LOG_REPAIR_COMMON_DIRECTIVES]
+    if "ENTITY_LEAK_DETECTED" in present:
+        lines.append(_ACTIVITY_LOG_ENTITY_LEAK_DIRECTIVE)
+    else:
+        lines.append(_ACTIVITY_LOG_REPAIR_OTHER_DIRECTIVE)
+    return "".join(lines)
+
+
+# Phase 37 — the shared SAFE NEUTRAL ACTIVITY VOCABULARY block used by BOTH
+# activity-log prompts. The vocabulary itself is computed by the deterministic
+# ``activity_log_safe_neutral_vocabulary`` builder (same inputs => same
+# output), so the initial AND the repair prompt always receive the SAME
+# collision-checked safe phrases for the case (§7/§16/§18/§20/§25).
+_ACTIVITY_LOG_SAFE_VOCABULARY_BLOCK = (
+    "SAFE NEUTRAL ACTIVITY VOCABULARY (use ONLY these for every activity): "
+    "__SAFE_VOCABULARY__\n\n"
 )
 
 # Phase26-Fix-B (H5/H4) — the repair stage's EXACT validator-failure-code and
@@ -2137,16 +2216,12 @@ _ACTIVITY_LOG_HARD_CONTRACT = (
 _ACTIVITY_LOG_REPAIR_DIRECTIVE_BLOCK = (
     "\nVALIDATOR FAILURE CODE: __VALIDATOR_CODE__\n"
     "PARSE FAILURE CLASS: __PARSE_FAILURE_CLASS__\n"
-    "Fix by the deterministic directive for the code above (the EXACT schema "
-    "at the end is authoritative):\n"
-    f"- count: make it EXACTLY {MIN_ACTIVITY_LOG_ENTRIES}.."
-    f"{MAX_ACTIVITY_LOG_ENTRIES} rows; remove ONLY filler rows; KEEP "
-    "the canonical-time row (never drop it), valid types, order.\n"
-    "- invalid activityType: replace ONLY with a closed token from the EXACT "
-    "schema.\n"
-    "- canonical time missing: MUST include the locked canonical time verbatim "
-    "exactly once.\n"
-    "- other: preserve ALL simultaneous rules; never trade one for another.\n"
+    # Phase37 (DEF-090): compact prose so the deterministic total-prompt length
+    # guard (``ACTIVITY_LOG_PROMPT_MAX_CHARS``) holds for EVERY supported
+    # forbidden-token set even when the safe-vocabulary block is long. The
+    # instructions below are unchanged; only the frame sentence is shorter.
+    "Apply these directives:\n"
+    "__REPAIR_DIRECTIVES__"
 )
 
 
@@ -2287,8 +2362,7 @@ def _neutral_text_collides(
     )
 
 
-def _first_safe_fallback_text(
-    start_at: int,
+def _shortest_safe_fallback_text(
     *,
     person_names: Iterable[str],
     weapon_names: Iterable[str],
@@ -2296,14 +2370,29 @@ def _first_safe_fallback_text(
     location_ids: Iterable[str],
     location_names: Iterable[str],
 ) -> str:
-    """Deterministic first non-colliding fallback phrase (ADV-D). Scans the
-    bounded reserved ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` cyclically from
-    ``start_at``; returns the pool's first phrase when every fallback phrase
-    collides (a pathological hostile set beyond the bounded pool — documented
-    LOW residual, same bound the validator's own lexical limits carry)."""
+    """Deterministic SHORTEST non-colliding fallback phrase (ADV-D + Phase37
+    DEF-090).
+
+    ADV-D: a colliding scaffold row is substituted with a guaranteed-safe,
+    non-colliding phrase from the bounded reserved
+    ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` (every member passes the strict
+    validator with no needles; the canonical forbidden names NEVER enter the
+    rendered text).
+
+    Phase37 DEF-090 length bound: the SHORTEST collision-free fallback phrase
+    is selected (deterministic tie-break = canonical pool order), bounding the
+    worked-example scaffold's substituted-row length so the rendered prompt
+    stays inside the pinned ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` guard for EVERY
+    supported forbidden-token set (hostile-but-§15-supported common-word sets
+    included).
+
+    Returns the pool's first phrase when every fallback phrase collides (a
+    pathological hostile set beyond the bounded pool — documented LOW residual,
+    same bound the validator's own lexical limits carry)."""
     pool = ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL
-    for index in range(len(pool)):
-        phrase = pool[(start_at + index) % len(pool)]
+    safe = [
+        phrase
+        for phrase in pool
         if not _neutral_text_collides(
             phrase,
             person_names=person_names,
@@ -2311,9 +2400,301 @@ def _first_safe_fallback_text(
             motive_names=motive_names,
             location_ids=location_ids,
             location_names=location_names,
-        ):
-            return phrase
-    return pool[start_at % len(pool)]
+        )
+    ]
+    if not safe:
+        return pool[0]
+    # ``min`` returns the FIRST minimal-length member in fixed pool order ⇒
+    # deterministic for identical inputs.
+    return min(safe, key=len)
+
+
+# Phase 37 — closed collision-safe neutral output vocabulary for activity
+# text. The server filters the canonical neutral pools through the EXACT
+# existing entity-leak collider (``_neutral_text_collides`` →
+# ``entity_leak_tokens`` — never weakened, never re-implemented) with the
+# case's hidden forbidden tokens and supplies ONLY the collision-safe phrases
+# to BOTH the initial and the repair prompt. The provider never learns the
+# hidden forbidden values or the rejection reasons (time-only identity
+# isolation preserved — Phase37 §6/§19/§40 principle), and an ENTITY_LEAK
+# repair is guided by a positive proven-safe output set instead of
+# "regenerate and hope".
+ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE = 12
+
+# Phase19J-RI (DEF-013) / Phase37 (DEF-090): the AUTHORITATIVE built-prompt
+# length guard pinned by ``test_ri26`` — both activity-log prompts (the
+# worst-case initial AND the worst-case multi-finding repair) stay <= this many
+# rendered characters so the whole prompt fits the ``OLLAMA_NUM_CTX=4096``
+# context-pressure budget. The builders enforce this BY CONSTRUCTION: the
+# safe-vocabulary block is deterministically bounded to whatever budget remains
+# after the fixed prose + the worked-example scaffold, and the scaffold's
+# collision substitution picks the SHORTEST collision-free fallback phrase — so
+# a hostile-but-supported forbidden-token set can never overflow the guard
+# (the 15-row shape + timestamp-grid contract is untouched).
+ACTIVITY_LOG_PROMPT_MAX_CHARS = 7000
+
+# Closed match-category tokens for the optional bounded diagnostics
+# (Phase37 §13/§27) — never hidden values, never raw activity strings.
+ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN = "PERSON_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN = "LOCATION_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN = "WEAPON_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN = "MOTIVE_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM = "STATIC_FORBIDDEN_TERM"
+
+
+def activity_log_safe_neutral_vocabulary(
+    *,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Deterministic collision-checked neutral activity vocabulary (Phase 37).
+
+    Filters the canonical ``ACTIVITY_LOG_NEUTRAL_TEXT_POOL`` through the exact
+    existing entity-leak collider (``_neutral_text_collides`` →
+    ``entity_leak_tokens``) using the case's hidden forbidden tokens and
+    returns ONLY phrases proven safe for THIS case. Pure and deterministic:
+    same inputs ⇒ same output, zero provider calls / randomness / network.
+
+    Minimum-size behavior (Phase37 §17):
+    - the filtered PRIMARY pool is used when it is sufficient
+      (≥ ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` phrases);
+    - otherwise the collision-checked reserved
+      ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` is appended, so `the supplied
+      vocabulary stays large enough for the model to fill 15..20 rows.
+    - EVERY returned phrase passes the SAME canonical collision checker.
+
+    Fail-closed (Phase37 §16/§17): a pathological forbidden set that leaves
+    fewer than ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` collision-free
+    phrases across BOTH pools raises ``ValueError`` deterministically rather
+    than ever supplying a phrase the strict validator would reject (same
+    documented bounded LOW residual the ADV-D scaffold fallback carries).
+
+    The hidden forbidden values never appear in the output.
+    """
+    forbidden = dict(
+        person_names=tuple(person_names or ()),
+        weapon_names=tuple(weapon_names or ()),
+        motive_names=tuple(motive_names or ()),
+        location_ids=tuple(location_ids or ()),
+        location_names=tuple(location_names or ()),
+    )
+    primary = tuple(
+        phrase
+        for phrase in ACTIVITY_LOG_NEUTRAL_TEXT_POOL
+        if not _neutral_text_collides(phrase, **forbidden)
+    )
+    if len(primary) >= ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE:
+        return primary
+    combined = primary + tuple(
+        phrase
+        for phrase in ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL
+        if not _neutral_text_collides(phrase, **forbidden)
+    )
+    if len(combined) < ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE:
+        raise ValueError(
+            "activity-log safe neutral vocabulary exhausted for this case "
+            f"(only {len(combined)} collision-free phrases remain; minimum is "
+            f"{ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE})"
+        )
+    return combined
+
+
+def _collision_checked_canonical_example_phrase(
+    safe_vocabulary: Iterable[str],
+    *,
+    person_names: Iterable[str],
+    weapon_names: Iterable[str],
+    motive_names: Iterable[str],
+    location_ids: Iterable[str],
+    location_names: Iterable[str],
+) -> str:
+    """Phase37 DEF-091: the canonical-row anchor/example phrase for BOTH
+    prompts, collision-checked against the case's hidden forbidden tokens.
+
+    The default canonical phrase (``_ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT`` —
+    "Local user activity detected") is rendered whenever it passes the SAME
+    canonical collider (``_neutral_text_collides`` → ``entity_leak_tokens``,
+    never weakened). When it collides (e.g. ``person_names=("Local",)``), the
+    FIRST deterministic member of the supplied collision-checked safe
+    vocabulary is substituted — a phrase the strict validator accepts — so a
+    model copying the prose anchor can never re-trigger
+    ``ACTIVITY_LOG_ENTITY_LEAK``. Same inputs ⇒ same phrase in the INITIAL and
+    REPAIR prompts.
+
+    Fail-closed: an EMPTY ``safe_vocabulary`` (Phase37 DEF-092) yields the
+    empty string rather than a raw-pool phrase; the caller's typed fail-closed
+    guard (or the builders' own internal derivation) is the only authority.
+    """
+    if not _neutral_text_collides(
+        _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    ):
+        return _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT
+    phrases = tuple(safe_vocabulary or ())
+    if phrases:
+        return phrases[0]
+    return ""
+
+
+def _rendered_safe_vocabulary(
+    safe_vocabulary: Iterable[str],
+    *,
+    max_chars: int | None = None,
+) -> str:
+    """Deterministic render of the ``__SAFE_VOCABULARY__`` fill value.
+
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` renders
+    the EMPTY block — NEVER the raw unfiltered
+    ``ACTIVITY_LOG_NEUTRAL_TEXT_POOL`` (colliding phrases included). Only the
+    caller's typed fail-closed guard / the builders' derivation may supply
+    vocabulary; the render path never silently disables the collision filter.
+
+    Phase37 DEF-090 (length bound): when ``max_chars`` is given, render the
+    LARGEST deterministic prefix of the supplied (collision-checked) phrases
+    that fits inside ``max_chars``. The builders compute ``max_chars`` from the
+    actual remaining budget after the fixed prose + worked-example scaffold, so
+    the total rendered prompt can NEVER exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for any supported forbidden-token set.
+    The floor (≥ ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` phrases) is
+    documented and holds for every supported set: the scaffold's SHORTEST-safe
+    substitution plus the compact directive prose leave the budget wide enough.
+    When the initial and repair prompts have different remaining budgets they
+    render different PREFIXES of the SAME supplied safe tuple (the repair's
+    block is a subset of the initial's) — every rendered phrase in either
+    prompt stays collision-checked, so the §7/§25 "same safe vocabulary"
+    contract is preserved at the supply level.
+    """
+    phrases = tuple(safe_vocabulary or ())
+    if not phrases:
+        return ""
+    if max_chars is None:
+        return ", ".join(phrases)
+    count = 0
+    length = 0
+    for phrase in phrases:
+        length += (2 if count else 0) + len(phrase)
+        if length > max_chars:
+            break
+        count += 1
+    if count == 0:
+        # Pathological guard (unreachable for supported sets): the fixed prose
+        # already filled the whole budget; render the first phrase alone so the
+        # block still names at least one collision-safe phrase.
+        return phrases[0]
+    return ", ".join(phrases[:count])
+
+
+def _activity_log_match_category(
+    matches: Iterable[str],
+    *,
+    person_names: Iterable[str],
+    weapon_names: Iterable[str],
+    motive_names: Iterable[str],
+    location_ids: Iterable[str],
+    location_names: Iterable[str],
+) -> str:
+    """Deterministic closed match-category for one row's leak findings.
+
+    Maps the raw ``entity_leak_tokens`` labels onto the bounded closed enum
+    (PERSON_TOKEN / LOCATION_TOKEN / WEAPON_TOKEN / MOTIVE_TOKEN /
+    STATIC_FORBIDDEN_TERM). Never returns hidden values or raw text.
+    """
+    tokens = tuple(matches or ())
+    if "<person-name-token>" in tokens:
+        return ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN
+    if any(t.startswith("weapon-token:") for t in tokens):
+        return ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN
+    if any(t.startswith("motive-token:") for t in tokens):
+        return ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN
+    known = set(person_names or ())
+    weapon_set = set(weapon_names or ())
+    motive_set = set(motive_names or ())
+    location_ids_set = set(location_ids or ())
+    location_names_set = set(location_names or ())
+    for raw in tokens:
+        if raw in known:
+            return ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN
+        if raw in weapon_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN
+        if raw in motive_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN
+        if raw in location_ids_set or raw in location_names_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN
+        # Any other label (e.g. "knife", "stolen") is a STATIC forbidden
+        # content term from the deterministic ADV-255 (c) vocabulary.
+    return ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM
+
+
+def activity_log_entity_leak_diagnostics(
+    entries,
+    *,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> dict[str, Any]:
+    """BOUNDED safe entity-leak diagnostics (Phase37 §13/§27).
+
+    Returns ONLY non-secret metadata for the FIRST colliding row:
+    ``rowIndex`` (0-based), ``matchCategory`` (closed enum) and
+    ``safeVocabularySize`` (the deterministic safe-vocabulary size for this
+    case). Never includes hidden entity values or raw activity strings;
+    production logging stays safe.
+    """
+    safe_vocab_size = 0
+    try:
+        safe_vocab = activity_log_safe_neutral_vocabulary(
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+        safe_vocab_size = len(safe_vocab)
+    except ValueError:  # pragma: no cover - pathological defensive path
+        # Phase37 DEF-093: the no-match + exhausted-vocabulary path keeps the
+        # CLOSED set ``{rowIndex, matchCategory, safeVocabularySize}`` with
+        # ``safeVocabularySize: 0``. No prose ``error`` key is ever emitted —
+        # observability stays aligned to §13/§27 and no hidden values leak.
+        safe_vocab_size = 0
+    for index, entry in enumerate(entries):
+        matches = entity_leak_tokens(
+            getattr(entry, "activity", None) or "",
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+        category: str | None = None
+        if matches:
+            category = _activity_log_match_category(
+                matches,
+                person_names=person_names,
+                weapon_names=weapon_names,
+                motive_names=motive_names,
+                location_ids=location_ids,
+                location_names=location_names,
+            )
+        if category is not None:
+            return {
+                "rowIndex": index,
+                "matchCategory": category,
+                "safeVocabularySize": safe_vocab_size,
+            }
+    return {
+        "rowIndex": None,
+        "matchCategory": None,
+        "safeVocabularySize": safe_vocab_size,
+    }
 
 
 def _activity_log_worked_example_json(
@@ -2353,8 +2734,13 @@ def _activity_log_worked_example_json(
     ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` — everything else stays identical,
     so the built scaffold self-validates (entity_leak_tokens == zero codes)
     even for hostile names like "Mail" / "User" / "Local" / "Workspace" or a
-    distinctive location like "ServerWorkspace". The canonical anmes NEVER
+    distinctive location like "ServerWorkspace". The canonical names NEVER
     enter the rendered text (ADV-256).
+
+    Phase37 DEF-090 (total-prompt length bound): the substitution picks the
+    SHORTEST collision-free fallback phrase (``_shortest_safe_fallback_text``),
+    bounding the scaffold's length growth so the rendered prompt stays inside
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for every supported forbidden-token set.
 
     Fail-closed degenerate windows (total span below ``MIN - 1`` seconds — the
     reachable 0/0 configuration) cannot hold 15 distinct rows; the scaffold
@@ -2383,7 +2769,8 @@ def _activity_log_worked_example_json(
         if index == canon_index:
             text = _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT
             if _neutral_text_collides(text, **forbidden):
-                text = _first_safe_fallback_text(0, **forbidden)
+                # Phase37 DEF-090: shortest collision-safe fallback bound.
+                text = _shortest_safe_fallback_text(**forbidden)
             out.append(
                 {
                     "timestamp": canonical_time,  # verbatim, exactly once
@@ -2394,7 +2781,7 @@ def _activity_log_worked_example_json(
         else:
             text = pool[position % len(pool)]
             if _neutral_text_collides(text, **forbidden):
-                text = _first_safe_fallback_text(position % len(ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL), **forbidden)
+                text = _shortest_safe_fallback_text(**forbidden)
             out.append(
                 {
                     "timestamp": ts,
@@ -2452,37 +2839,29 @@ ACTIVITY_LOG_PROMPT_v1 = (
     + _CANONICAL_ROW_ANCHOR_SENTENCE
     + "\n\n" + _ACTIVITY_LOG_HARD_CONTRACT
     + "\n\nThe generated" + _ACTIVITY_LOG_SIMULTANEOUS_COMMON
-    + "\n\nRequirements:\n"
-    f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
-    "chronological entries (strictly increasing unique timestamps; the entry "
-    f"limit is HARD: never fewer than {MIN_ACTIVITY_LOG_ENTRIES}, never more "
-    f"than {MAX_ACTIVITY_LOG_ENTRIES}).\n"
-    f"- Cover approximately the window around the canonical time: from "
-    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes relative to it "
-    f"(the whole log spans at most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
-    f"- Every entry timestamp MUST lie inside the deterministic window "
++ "\n\nRequirements:\n"
+    + f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
+    "chronological entries.\n"
+    + f"- Cover the window: from "
+    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes around the "
+    "canonical time.\n"
+    + f"- Every entry timestamp MUST lie inside the deterministic window "
     "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__] (the whole log spans at "
     f"most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
     + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
-    + "- Include the locked canonical evidence time EXACTLY ONCE, in an "
-    "ordinary-looking row (e.g. \"Local user activity detected\", \"Foreground "
-    "application activity recorded\"); NEVER label it as crime, murder, "
-    "attack, death, weapon, evidence, clue, culprit or victim activity.\n"
-    "- All other entries must be plausible harmless computer/system actions "
-    "(system resume/idle, session unlock/lock, login/logout, file/document "
-    "activity, browser/mail/cloud/background sync, USB, network, backup, "
-    "application open/close).\n"
-    "- Do NOT mention: murder, crime, death, killer, murderer, victim, "
-    "weapon, motive, witness, culprit, attack, or any conclusion.\n"
-    "- Do NOT introduce named people, named weapons, motives, or locations.\n"
-    "\n"
+    + "- Include the locked canonical time EXACTLY ONCE, in an ordinary row "
+    "(e.g. \"__CANONICAL_EXAMPLE_PHRASE__\"); never label it as crime/"
+    "evidence.\n"
+    "- All other entries: plausible harmless computer/system actions only.\n"
+    + _ACTIVITY_LOG_ACTIVITY_TEXT_RULES
+    + "\n" + _ACTIVITY_LOG_SAFE_VOCABULARY_BLOCK
     + _ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD
     + "\nComplete worked example:\n__WORKED_EXAMPLE__\n\n"
-    "Return ONLY a single JSON document matching this EXACT schema:\n"
+    "Return ONLY a JSON document with this EXACT schema:\n"
     + schema_contract("activity_log")
     + "\nNote: 'entries' is a JSON ARRAY of "
     + f"{MIN_ACTIVITY_LOG_ENTRIES}..{MAX_ACTIVITY_LOG_ENTRIES} "
-    + "objects, every object exactly like the worked-example rows.\n\n"
+    + "objects.\n\n"
     "No HTML, no markdown tables, no prose outside the JSON document."
 )
 
@@ -2492,48 +2871,45 @@ ACTIVITY_LOG_REPAIR_PROMPT_v1 = (
     "GENERATION_PROVIDER=ollama (prompt template version activity_log_repair_v1).\n"
     "The server OWNS the canonical evidence fact; the locked time below must "
     "appear VERBATIM in exactly ONE of the "
-    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries: never "
-    "change it, never add a second occurrence, never call it crime/murder/"
-    "attack time.\n\n"
+    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries; never "
+    "change or duplicate it, never call it crime time.\n\n"
     "Canonical evidence time: __CANONICAL_TIME__\n\n"
     + _CANONICAL_ROW_ANCHOR_SENTENCE
     + "\n\nThe repaired" + _ACTIVITY_LOG_SIMULTANEOUS_COMMON
-    + "\n\nYour previous log failed validation. The repaired response MUST be a "
-    "COMPLETE replacement ActivityLogDocument with "
+    + "\n\nYour previous log failed validation: return a COMPLETE replacement "
+    "ActivityLogDocument with "
     f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries — never "
-    "a single surrounding entry, never a patched wrapper; the locked canonical "
-    "time is ONE of those rows.\n\n"
-    "Fix EXACTLY the machine-readable findings below:\n"
+    "a single surrounding entry; the locked canonical time is ONE of those "
+    "rows.\n\n"
+    "Fix the machine-readable findings below:\n"
     "__FINDINGS__\n\n"
     "Findings-to-fix mapping (deterministic): CANONICAL_TIME_MISSING -> "
-    "include the locked canonical time verbatim (exactly once); "
-    "TIMESTAMP_OUTSIDE_WINDOW -> every row inside the deterministic window.\n"
+    "include the locked time verbatim once; TIMESTAMP_OUTSIDE_WINDOW "
+    "-> every row inside the window.\n"
     + _ACTIVITY_LOG_REPAIR_GRID_LINE
     + "\n"
     + _ACTIVITY_LOG_REPAIR_RECHECK_LINE
     + _ACTIVITY_LOG_REPAIR_DIRECTIVE_BLOCK
-    + "\n\nRequirements (deterministic, reapplied after this repair):\n"
-    f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
-    "chronological entries (strictly increasing unique timestamps).\n"
-    f"- Cover approximately the window around the canonical time: from "
-    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes relative to it.\n"
-    f"- Every entry timestamp MUST lie inside the deterministic window "
+    + "\n\nRequirements (reapplied after this repair):\n"
+    + f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
+    "chronological entries.\n"
+    + f"- Cover the window: from "
+    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes around the "
+    "canonical time.\n"
+    + f"- Every entry timestamp MUST lie inside the deterministic window "
     "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__].\n"
     + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
-    + "- Include the locked canonical evidence time EXACTLY ONCE, in an "
-    "ordinary-looking row (e.g. \"Local user activity detected\"); NEVER label "
-    "it as crime, murder, attack, death, weapon, evidence, clue, culprit or "
-    "victim activity.\n"
-    "- All other entries must be plausible harmless computer/system actions "
-    "(no named people, weapons, motives or locations; no crime wording).\n"
-    "\n"
+    + "- Include the locked canonical time EXACTLY ONCE, in an ordinary row "
+    "(e.g. \"__CANONICAL_EXAMPLE_PHRASE__\"); never label it as crime/"
+    "evidence.\n"
+    + "\n" + _ACTIVITY_LOG_SAFE_VOCABULARY_BLOCK
     + _ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD
     + "\nComplete worked example:\n__WORKED_EXAMPLE__\n\n"
-    "Return ONLY a single JSON document matching this EXACT schema:\n"
+    "Return ONLY a JSON document with this EXACT schema:\n"
     + schema_contract("activity_log")
     + "\nNote: 'entries' is a JSON ARRAY of "
     + f"{MIN_ACTIVITY_LOG_ENTRIES}..{MAX_ACTIVITY_LOG_ENTRIES} "
-    + "objects, every object exactly like the worked-example rows.\n\n"
+    + "objects.\n\n"
     "No HTML, no markdown tables, no prose outside the JSON document."
 )
 
@@ -2665,6 +3041,7 @@ def build_activity_log_prompt(
     motive_names: Iterable[str] = (),
     location_ids: Iterable[str] = (),
     location_names: Iterable[str] = (),
+    safe_vocabulary: Iterable[str] | None = None,
 ) -> str:
     """The Phase 19J activity-log prompt (locked canonical time + window).
 
@@ -2692,7 +3069,46 @@ def build_activity_log_prompt(
     name/location sets are accepted ONLY for deterministic collision
     substitution inside the scaffold (reserved fallback pool); they are NEVER
     rendered into the prompt text (ADV-256 holds).
+
+    Phase 37: the SAME collision-safe neutral activity vocabulary is derived
+    by the deterministic ``activity_log_safe_neutral_vocabulary`` builder
+    (identical to the repair prompt's) and rendered as the positive closed
+    output contract (ACTIVITY TEXT RULES + SAFE NEUTRAL ACTIVITY VOCABULARY).
+    ``safe_vocabulary`` is the optional precomputed builder output (the driver
+    computes it once and passes the SAME tuple into BOTH stages — determinism
+    guarantees equality when omitted). The hidden forbidden values and
+    rejection reasons never reach the provider (§6/§7/§19/§25).
+
+    Phase37 DEF-090 (length): the SAFE VOCABULARY block is deterministically
+    bounded to the remaining budget after the fixed prose + worked-example
+    scaffold, so the rendered prompt can never exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for ANY supported forbidden-token set
+    (hostile-but-§15-supported common-word sets included); the 15-20 row shape
+    and the timestamp-grid contract survive untouched.
+    Phase37 DEF-091 (canonical example): the prose canonical-anchor example
+    phrase is collision-checked (``_collision_checked_canonical_example_phrase``)
+    and substituted when it collides with a hidden forbidden token.
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` is treated
+    as "not supplied" and re-derived internally — the render path NEVER falls
+    back to the raw unfiltered pool.
     """
+    if not safe_vocabulary:
+        # Phase37 DEF-092: ``None`` OR any falsy iterable re-derives the
+        # collision-checked vocabulary internally (never the raw pool).
+        safe_vocabulary = activity_log_safe_neutral_vocabulary(
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+    forbidden = dict(
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
     start_iso, end_iso, before_min, after_min = _activity_log_window_context(
         canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
     )
@@ -2706,21 +3122,37 @@ def build_activity_log_prompt(
         location_ids=location_ids,
         location_names=location_names,
     )
+    grid_text = ", ".join(
+        activity_log_timestamp_grid(
+            canonical_time,
+            before_minutes=before_minutes,
+            after_minutes=after_minutes,
+        )
+    )
+    tokens = {
+        "CANONICAL_TIME": canonical_time,
+        "WINDOW_BEFORE": before_min,
+        "WINDOW_AFTER": after_min,
+        "WINDOW_START_ISO": start_iso,
+        "WINDOW_END_ISO": end_iso,
+        "TIMESTAMP_GRID": grid_text,
+        "WORKED_EXAMPLE": worked_example,
+        "CANONICAL_EXAMPLE_PHRASE": _collision_checked_canonical_example_phrase(
+            safe_vocabulary, **forbidden
+        ),
+        "SAFE_VOCABULARY": "",
+    }
+    # Phase37 DEF-090: the SAFE_VOCABULARY fill value is bounded to the exact
+    # remaining budget, so len(rendered) <= ACTIVITY_LOG_PROMPT_MAX_CHARS holds
+    # by construction for this case.
+    base = _fill(template=ACTIVITY_LOG_PROMPT_v1, **tokens)
+    rendered_sv = _rendered_safe_vocabulary(
+        safe_vocabulary,
+        max_chars=ACTIVITY_LOG_PROMPT_MAX_CHARS - len(base),
+    )
     return _fill(
         template=ACTIVITY_LOG_PROMPT_v1,
-        CANONICAL_TIME=canonical_time,
-        WINDOW_BEFORE=before_min,
-        WINDOW_AFTER=after_min,
-        WINDOW_START_ISO=start_iso,
-        WINDOW_END_ISO=end_iso,
-        TIMESTAMP_GRID=", ".join(
-            activity_log_timestamp_grid(
-                canonical_time,
-                before_minutes=before_minutes,
-                after_minutes=after_minutes,
-            )
-        ),
-        WORKED_EXAMPLE=worked_example,
+        **{**tokens, "SAFE_VOCABULARY": rendered_sv},
     )
 
 
@@ -2737,6 +3169,7 @@ def build_activity_log_repair_prompt(
     location_names: Iterable[str] = (),
     validator_code: str | None = None,
     parse_failure_class: str | None = None,
+    safe_vocabulary: Iterable[str] | None = None,
 ) -> str:
     """The Phase 19J repair prompt: machine-readable findings + locked time.
 
@@ -2753,6 +3186,15 @@ def build_activity_log_repair_prompt(
     ``entry_activity_type_invalid``) plus per-code fix directives, so a
     bounded repair is contract-guided instead of generic.
 
+    Phase 37 (§11): ``ACTIVITY_LOG_ENTITY_LEAK``/``ENTITY_LEAK_DETECTED`` gets
+    a DEDICATED repair directive (regenerate the COMPLETE activity log using
+    ONLY the supplied safe neutral vocabulary) and NEVER falls through the
+    generic "other" directive. The SAME deterministic
+    ``activity_log_safe_neutral_vocabulary`` builder the initial prompt uses
+    supplies the collision-checked closed output vocabulary (``safe_vocabulary``
+    optional precomputed value — the driver computes it once and passes it into
+    BOTH stages). The rejected activity-log text is never passed back (§12).
+
     Phase19J-RI (DEF-104): the exponential repair also receives the concrete
     ISO-8601 window endpoints and the canonical-anchor example row, because a
     stateless 8B model cannot reliably compute the relative ±N-minute window
@@ -2766,7 +3208,37 @@ def build_activity_log_repair_prompt(
     canonical row unchanged. ADV-C/ADV-D: same adaptive grid + deterministic
     scaffold collision substitution as the initial prompt (operational guard
     still fails fast before an unsatisfiable window ever reaches a builder).
+
+    Phase37 DEF-090 (length): the SAFE VOCABULARY block is deterministically
+    bounded to the remaining budget after the fixed prose + worked-example
+    scaffold, so the rendered prompt can never exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for ANY supported forbidden-token set;
+    the 15-20 row shape and the timestamp-grid contract survive untouched.
+    Phase37 DEF-091 (canonical example): the prose canonical-anchor example
+    phrase is collision-checked for THIS case and substituted when it collides
+    with a hidden forbidden token (never shown when it would re-trigger the
+    leak).
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` is treated
+    as "not supplied" and re-derived internally — the render path NEVER falls
+    back to the raw unfiltered pool.
     """
+    if not safe_vocabulary:
+        # Phase37 DEF-092: ``None`` OR any falsy iterable re-derives the
+        # collision-checked vocabulary internally (never the raw pool).
+        safe_vocabulary = activity_log_safe_neutral_vocabulary(
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+    forbidden = dict(
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
     start_iso, end_iso, before_min, after_min = _activity_log_window_context(
         canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
     )
@@ -2780,24 +3252,44 @@ def build_activity_log_repair_prompt(
         location_ids=location_ids,
         location_names=location_names,
     )
+    grid_text = ", ".join(
+        activity_log_timestamp_grid(
+            canonical_time,
+            before_minutes=before_minutes,
+            after_minutes=after_minutes,
+        )
+    )
+    findings_text = (
+        "\n".join(f"- {finding}" for finding in findings) or "- SCHEMA_INVALID"
+    )
+    tokens = {
+        "CANONICAL_TIME": canonical_time,
+        "FINDINGS": findings_text,
+        "WINDOW_BEFORE": before_min,
+        "WINDOW_AFTER": after_min,
+        "WINDOW_START_ISO": start_iso,
+        "WINDOW_END_ISO": end_iso,
+        "TIMESTAMP_GRID": grid_text,
+        "WORKED_EXAMPLE": worked_example,
+        "VALIDATOR_CODE": validator_code or "UNKNOWN",
+        "PARSE_FAILURE_CLASS": parse_failure_class or "none",
+        "REPAIR_DIRECTIVES": _activity_log_repair_directive_lines(findings),
+        "CANONICAL_EXAMPLE_PHRASE": _collision_checked_canonical_example_phrase(
+            safe_vocabulary, **forbidden
+        ),
+        "SAFE_VOCABULARY": "",
+    }
+    # Phase37 DEF-090: the SAFE_VOCABULARY fill value is bounded to the exact
+    # remaining budget, so len(rendered) <= ACTIVITY_LOG_PROMPT_MAX_CHARS holds
+    # by construction for this case.
+    base = _fill(template=ACTIVITY_LOG_REPAIR_PROMPT_v1, **tokens)
+    rendered_sv = _rendered_safe_vocabulary(
+        safe_vocabulary,
+        max_chars=ACTIVITY_LOG_PROMPT_MAX_CHARS - len(base),
+    )
     return _fill(
         template=ACTIVITY_LOG_REPAIR_PROMPT_v1,
-        CANONICAL_TIME=canonical_time,
-        FINDINGS="\n".join(f"- {finding}" for finding in findings) or "- SCHEMA_INVALID",
-        WINDOW_BEFORE=before_min,
-        WINDOW_AFTER=after_min,
-        WINDOW_START_ISO=start_iso,
-        WINDOW_END_ISO=end_iso,
-        TIMESTAMP_GRID=", ".join(
-            activity_log_timestamp_grid(
-                canonical_time,
-                before_minutes=before_minutes,
-                after_minutes=after_minutes,
-            )
-        ),
-        WORKED_EXAMPLE=worked_example,
-        VALIDATOR_CODE=validator_code or "UNKNOWN",
-        PARSE_FAILURE_CLASS=parse_failure_class or "none",
+        **{**tokens, "SAFE_VOCABULARY": rendered_sv},
     )
 
 
@@ -2807,6 +3299,13 @@ __all__ = [
     "ACTIVITY_LOG_NEUTRAL_TEXT_POOL",
     "ACTIVITY_LOG_PROMPT_v1",
     "ACTIVITY_LOG_REPAIR_PROMPT_v1",
+    "ACTIVITY_LOG_PROMPT_MAX_CHARS",
+    "ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE",
+    "ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM",
     "ASSET_SPEC_PROMPT_v1",
     "ASSET_SPEC_REPAIR_PROMPT_v1",
     "CASE_PEOPLE_PROMPT_v1",
@@ -2818,6 +3317,8 @@ __all__ = [
     "STAGE_TO_PROMPT_VERSION",
     "WORLD_REQUIREMENTS_PROMPT_v1",
     "activity_log_timestamp_grid",
+    "activity_log_safe_neutral_vocabulary",
+    "activity_log_entity_leak_diagnostics",
     "build_activity_log_prompt",
     "build_activity_log_repair_prompt",
     "build_asset_spec_prompt",
