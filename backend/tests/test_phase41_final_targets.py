@@ -380,3 +380,107 @@ def test_evaluate_accusation_wrong_theories():
         suicide_truth, {**base, "murderer_id": "thomas_reed", "resolution_type": "HOMICIDE"}
     )
     assert homicide_any["murdererCorrect"] is False
+
+
+# --------------------------------------------------------------------------- #
+# FIX-5 (ADV-41-07) — MURDERER_NOT_SUSPECT_CANDIDATE NARROWING (pinned)
+# --------------------------------------------------------------------------- #
+#
+# Phase41 retired the universal "murderer must be SUSPECT_ELIGIBLE" rule and
+# replaced it with the FINAL TARGET invariant, but the narrowed
+# ``MURDERER_NOT_SUSPECT_CANDIDATE`` is RETAINED for the classical investigative
+# role: a public ``role=suspect`` murderer missing from ``SUSPECT_ELIGIBLE``
+# still fires (frozen REQUIREMENTS §17/§31.1 tie the deduction universe to
+# SUSPECT_ELIGIBLE). A witness murderer (a final target, never a deduction
+# candidate) does NOT fire it — ``HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET`` is
+# the primary final-target invariant.
+
+
+def _case_quality_for_murderer(murderer_id: str):
+    """quality codes for a golden public/evidence with the given hidden
+    murderer (deterministic, zero provider)."""
+    from dataclasses import replace
+
+    from app.domain.eligibility import derive_universes
+    from app.generation.case_quality import validate_case_quality
+
+    from fixtures.golden import golden_evidence, golden_public, truth_variant_a
+
+    public = golden_public()
+    evidence = golden_evidence()
+    truth = replace(truth_variant_a(), crime=replace(truth_variant_a().crime, murderer_id=murderer_id))
+    return validate_case_quality(public, truth, evidence, derive_universes(public))
+
+
+def test_fix5_suspect_murderer_out_of_eligibility_fires_narrowed_code():
+    """A classical ``role=suspect`` murderer missing from ``SUSPECT_ELIGIBLE``
+    still fires ``MURDERER_NOT_SUSPECT_CANDIDATE`` (the narrowed retention)."""
+    from app.generation.case_quality import MURDERER_NOT_SUSPECT_CANDIDATE
+
+    codes = _case_quality_for_murderer("thomas_reed")
+    # thomas IS SUSPECT_ELIGIBLE in the golden — baseline: no narrowed code.
+    assert MURDERER_NOT_SUSPECT_CANDIDATE not in codes
+    # Strip SUSPECT_ELIGIBLE from the suspect murderer -> the narrowed code.
+    from dataclasses import replace
+
+    from app.domain.eligibility import derive_universes
+    from app.generation.case_quality import validate_case_quality
+    from app.domain.public import PublicPerson
+
+    from fixtures.golden import golden_evidence, golden_public, truth_variant_a
+
+    public = golden_public()
+    stripped = []
+    for person in public.persons:
+        if person.person_id == "thomas_reed":
+            stripped.append(
+                PublicPerson(
+                    person_id=person.person_id,
+                    name=person.name,
+                    role=person.role,
+                    public_affordances=frozenset(
+                        person.public_affordances - {"SUSPECT_ELIGIBLE"}
+                    ),
+                )
+            )
+        else:
+            stripped.append(person)
+    from app.domain.public import PublicCase
+
+    public = PublicCase(
+        case_id=public.case_id,
+        case_version=public.case_version,
+        persons=stripped,
+        motives=public.motives,
+        objects=public.objects,
+        locations=public.locations,
+        travel_rules=public.travel_rules,
+        scene=public.scene,
+    )
+    truth = replace(truth_variant_a(), crime=replace(truth_variant_a().crime, murderer_id="thomas_reed"))
+    codes = validate_case_quality(public, truth, golden_evidence(), derive_universes(public))
+    assert MURDERER_NOT_SUSPECT_CANDIDATE in codes
+
+
+def test_fix5_witness_murderer_does_not_fire_narrowed_code():
+    """A WITNESS murderer (role=witness, never ``SUSPECT_ELIGIBLE``, but a
+    final homicide target) does NOT fire ``MURDERER_NOT_SUSPECT_CANDIDATE`` —
+    the narrowed code covers only the classical investigative-suspect role."""
+    from app.generation.case_quality import MURDERER_NOT_SUSPECT_CANDIDATE
+
+    codes = _case_quality_for_murderer("emily_reed")
+    assert MURDERER_NOT_SUSPECT_CANDIDATE not in codes
+
+
+def test_fix5_homicide_perpetrator_not_final_target_is_primary():
+    """``HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET`` remains the PRIMARY final-
+    target invariant: a family/other-role murderer (not a final target) fires
+    it — and never the narrowed ``MURDERER_NOT_SUSPECT_CANDIDATE``."""
+    from app.generation.case_quality import (
+        HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET,
+        MURDERER_NOT_SUSPECT_CANDIDATE,
+    )
+
+    codes = _case_quality_for_murderer("david_kim")  # role=family
+    assert HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET in codes
+    assert MURDERER_NOT_SUSPECT_CANDIDATE not in codes
