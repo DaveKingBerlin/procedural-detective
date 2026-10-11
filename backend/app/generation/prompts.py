@@ -2316,6 +2316,192 @@ def _first_safe_fallback_text(
     return pool[start_at % len(pool)]
 
 
+# Phase 37 — closed collision-safe neutral output vocabulary for activity
+# text. The server filters the canonical neutral pools through the EXACT
+# existing entity-leak collider (``_neutral_text_collides`` →
+# ``entity_leak_tokens`` — never weakened, never re-implemented) with the
+# case's hidden forbidden tokens and supplies ONLY the collision-safe phrases
+# to BOTH the initial and the repair prompt. The provider never learns the
+# hidden forbidden values or the rejection reasons (time-only identity
+# isolation preserved — Phase37 §6/§19/§40 principle), and an ENTITY_LEAK
+# repair is guided by a positive proven-safe output set instead of
+# "regenerate and hope".
+ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE = 12
+
+# Closed match-category tokens for the optional bounded diagnostics
+# (Phase37 §13/§27) — never hidden values, never raw activity strings.
+ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN = "PERSON_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN = "LOCATION_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN = "WEAPON_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN = "MOTIVE_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM = "STATIC_FORBIDDEN_TERM"
+
+
+def activity_log_safe_neutral_vocabulary(
+    *,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Deterministic collision-checked neutral activity vocabulary (Phase 37).
+
+    Filters the canonical ``ACTIVITY_LOG_NEUTRAL_TEXT_POOL`` through the exact
+    existing entity-leak collider (``_neutral_text_collides`` →
+    ``entity_leak_tokens``) using the case's hidden forbidden tokens and
+    returns ONLY phrases proven safe for THIS case. Pure and deterministic:
+    same inputs ⇒ same output, zero provider calls / randomness / network.
+
+    Minimum-size behavior (Phase37 §17):
+    - the filtered PRIMARY pool is used when it is sufficient
+      (≥ ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` phrases);
+    - otherwise the collision-checked reserved
+      ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` is appended, so `the supplied
+      vocabulary stays large enough for the model to fill 15..20 rows.
+    - EVERY returned phrase passes the SAME canonical collision checker.
+
+    Fail-closed (Phase37 §16/§17): a pathological forbidden set that leaves
+    fewer than ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` collision-free
+    phrases across BOTH pools raises ``ValueError`` deterministically rather
+    than ever supplying a phrase the strict validator would reject (same
+    documented bounded LOW residual the ADV-D scaffold fallback carries).
+
+    The hidden forbidden values never appear in the output.
+    """
+    forbidden = dict(
+        person_names=tuple(person_names or ()),
+        weapon_names=tuple(weapon_names or ()),
+        motive_names=tuple(motive_names or ()),
+        location_ids=tuple(location_ids or ()),
+        location_names=tuple(location_names or ()),
+    )
+    primary = tuple(
+        phrase
+        for phrase in ACTIVITY_LOG_NEUTRAL_TEXT_POOL
+        if not _neutral_text_collides(phrase, **forbidden)
+    )
+    if len(primary) >= ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE:
+        return primary
+    combined = primary + tuple(
+        phrase
+        for phrase in ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL
+        if not _neutral_text_collides(phrase, **forbidden)
+    )
+    if len(combined) < ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE:
+        raise ValueError(
+            "activity-log safe neutral vocabulary exhausted for this case "
+            f"(only {len(combined)} collision-free phrases remain; minimum is "
+            f"{ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE})"
+        )
+    return combined
+
+
+def _activity_log_match_category(
+    matches: Iterable[str],
+    *,
+    person_names: Iterable[str],
+    weapon_names: Iterable[str],
+    motive_names: Iterable[str],
+    location_ids: Iterable[str],
+    location_names: Iterable[str],
+) -> str:
+    """Deterministic closed match-category for one row's leak findings.
+
+    Maps the raw ``entity_leak_tokens`` labels onto the bounded closed enum
+    (PERSON_TOKEN / LOCATION_TOKEN / WEAPON_TOKEN / MOTIVE_TOKEN /
+    STATIC_FORBIDDEN_TERM). Never returns hidden values or raw text.
+    """
+    tokens = tuple(matches or ())
+    if "<person-name-token>" in tokens:
+        return ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN
+    if any(t.startswith("weapon-token:") for t in tokens):
+        return ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN
+    if any(t.startswith("motive-token:") for t in tokens):
+        return ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN
+    known = set(person_names or ())
+    weapon_set = set(weapon_names or ())
+    motive_set = set(motive_names or ())
+    location_ids_set = set(location_ids or ())
+    location_names_set = set(location_names or ())
+    for raw in tokens:
+        if raw in known:
+            return ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN
+        if raw in weapon_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN
+        if raw in motive_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN
+        if raw in location_ids_set or raw in location_names_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN
+        # Any other label (e.g. "knife", "stolen") is a STATIC forbidden
+        # content term from the deterministic ADV-255 (c) vocabulary.
+    return ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM
+
+
+def activity_log_entity_leak_diagnostics(
+    entries,
+    *,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> dict[str, Any]:
+    """BOUNDED safe entity-leak diagnostics (Phase37 §13/§27).
+
+    Returns ONLY non-secret metadata for the FIRST colliding row:
+    ``rowIndex`` (0-based), ``matchCategory`` (closed enum) and
+    ``safeVocabularySize`` (the deterministic safe-vocabulary size for this
+    case). Never includes hidden entity values or raw activity strings;
+    production logging stays safe.
+    """
+    safe_vocab_size = 0
+    raise_exc: ValueError | None = None
+    try:
+        safe_vocab = activity_log_safe_neutral_vocabulary(
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+        safe_vocab_size = len(safe_vocab)
+    except ValueError as exc:  # pragma: no cover - pathological defensive path
+        raise_exc = exc
+    for index, entry in enumerate(entries):
+        matches = entity_leak_tokens(
+            getattr(entry, "activity", None) or "",
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+        category: str | None = None
+        if matches:
+            category = _activity_log_match_category(
+                matches,
+                person_names=person_names,
+                weapon_names=weapon_names,
+                motive_names=motive_names,
+                location_ids=location_ids,
+                location_names=location_names,
+            )
+        if category is not None:
+            return {
+                "rowIndex": index,
+                "matchCategory": category,
+                "safeVocabularySize": safe_vocab_size,
+            }
+    return {
+        "rowIndex": None,
+        "matchCategory": None,
+        "safeVocabularySize": safe_vocab_size,
+        **({"error": str(raise_exc)} if raise_exc is not None else {}),
+    }
+
+
+
 def _activity_log_worked_example_json(
     canonical_time: str,
     *,
@@ -2807,6 +2993,12 @@ __all__ = [
     "ACTIVITY_LOG_NEUTRAL_TEXT_POOL",
     "ACTIVITY_LOG_PROMPT_v1",
     "ACTIVITY_LOG_REPAIR_PROMPT_v1",
+    "ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE",
+    "ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM",
     "ASSET_SPEC_PROMPT_v1",
     "ASSET_SPEC_REPAIR_PROMPT_v1",
     "CASE_PEOPLE_PROMPT_v1",
@@ -2818,6 +3010,8 @@ __all__ = [
     "STAGE_TO_PROMPT_VERSION",
     "WORLD_REQUIREMENTS_PROMPT_v1",
     "activity_log_timestamp_grid",
+    "activity_log_safe_neutral_vocabulary",
+    "activity_log_entity_leak_diagnostics",
     "build_activity_log_prompt",
     "build_activity_log_repair_prompt",
     "build_asset_spec_prompt",
