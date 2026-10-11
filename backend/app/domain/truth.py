@@ -17,6 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.domain.resolution import ResolutionType
+from app.domain.witness_truth import WitnessStatementTruth  # noqa: F401  (re-export)
+
 
 @dataclass(frozen=True)
 class CrimeTime:
@@ -45,23 +48,54 @@ class CrimeTime:
 
 @dataclass(frozen=True)
 class Crime:
-    """Canonical hidden crime facts (REQUIREMENTS 7.6)."""
+    """Canonical hidden crime facts (REQUIREMENTS 7.6).
+
+    PHASE 41 (Phase41.md §3/§4): the crime now carries an OPTIONAL
+    ``resolution_type`` (``ResolutionType.HOMICIDE`` / ``ResolutionType.SUICIDE``)
+    and ``murderer_id`` is NULLABLE:
+
+    - ``resolution_type`` is ``None`` ONLY for LEGACY cases (a pre-Phase-41
+      truth with a non-null murderer) — the documented inference treats those
+      as HOMICIDE;
+    - ``HOMICIDE``        -> ``murderer_id`` REQUIRED and != ``victim_id``;
+    - ``SUICIDE``         -> ``murderer_id`` MUST be ``None`` (``victim_id``
+      stays required). Suicide is NEVER ``murderer_id == victim_id``.
+    """
 
     type: str
     victim_id: str
-    murderer_id: str
-    motive_id: str
-    weapon_id: str
-    location_id: str
-    crime_time: CrimeTime
+    murderer_id: str | None = None
+    motive_id: str = ""
+    weapon_id: str = ""
+    location_id: str = ""
+    crime_time: CrimeTime | None = None
+    resolution_type: ResolutionType | None = None
 
     def __post_init__(self) -> None:
-        for name in ("type", "victim_id", "murderer_id", "motive_id", "weapon_id", "location_id"):
+        for name in ("type", "victim_id", "motive_id", "weapon_id", "location_id"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"Crime.{name} must be a non-empty string")
         if not isinstance(self.crime_time, CrimeTime):
             raise ValueError("Crime.crime_time must be a CrimeTime")
+        if self.resolution_type is not None and not isinstance(
+            self.resolution_type, ResolutionType
+        ):
+            raise ValueError("Crime.resolution_type must be a ResolutionType")
+        resolution = self.resolution_type or ResolutionType.HOMICIDE
+        if resolution is ResolutionType.SUICIDE:
+            if self.murderer_id is not None:
+                raise ValueError(
+                    "Crime.murderer_id must be None for a SUICIDE resolution "
+                    "(suicide is never murderer_id == victim_id)"
+                )
+        else:
+            if not isinstance(self.murderer_id, str) or not self.murderer_id:
+                raise ValueError(
+                    "Crime.murderer_id must be a non-empty string for HOMICIDE"
+                )
+            if self.murderer_id == self.victim_id:
+                raise ValueError("Crime.murderer_id must not equal victim_id")
 
 
 @dataclass(frozen=True)
@@ -81,6 +115,10 @@ class CaseTruth:
     persons: tuple[Any, ...] = field(default_factory=tuple)
     relationships: tuple[Any, ...] = field(default_factory=tuple)
     facts: tuple[Any, ...] = field(default_factory=tuple)
+    # Phase41 trusted hidden witness-truthfulness map (§11-§14). Statement-
+    # level metadata consumed ONLY by reveal/deception checks; never a public
+    # DTO field and never a solver premise.
+    witness_truthfulness: tuple[WitnessStatementTruth, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         for name in ("case_id", "title"):
@@ -95,3 +133,13 @@ class CaseTruth:
             value = getattr(self, name)
             if not isinstance(value, tuple):
                 object.__setattr__(self, name, tuple(value))
+        for name in ("witness_truthfulness",):
+            value = getattr(self, name)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, name, tuple(value))
+        for entry in self.witness_truthfulness:
+            if not isinstance(entry, WitnessStatementTruth):
+                raise ValueError(
+                    "CaseTruth.witness_truthfulness must contain "
+                    "WitnessStatementTruth instances"
+                )
