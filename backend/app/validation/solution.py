@@ -26,6 +26,7 @@ from app.domain.evidence import EvidenceFact
 from app.domain.inputs import ensure_public_case, evidence_by_id
 from app.domain.proof import CandidateDimensionResult, SolverProof
 from app.domain.public import PublicCase
+from app.domain.resolution import ResolutionType
 from app.domain.time_interval import (
     IntervalSet,
     accepted_scoring_time_set,
@@ -61,6 +62,9 @@ class AccusedSolutionValidation:
     canonical_murderer: str = ""
     canonical_motive: str = ""
     canonical_weapon: str = ""
+    # Phase41 — the trusted resolution of the compared truth
+    # ("HOMICIDE" | "SUICIDE"). SUICIDE cases do not require a WHO winner.
+    resolution_type: str = "HOMICIDE"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +83,7 @@ class AccusedSolutionValidation:
             "canonicalMurderer": self.canonical_murderer,
             "canonicalMotive": self.canonical_motive,
             "canonicalWeapon": self.canonical_weapon,
+            "resolutionType": self.resolution_type,
         }
 
 
@@ -171,6 +176,13 @@ def evaluate_solution(proof: SolverProof, truth: CaseTruth) -> AccusedSolutionVa
 
     Truth-aware, strictly post-deduction (§31.10 "CaseTruth is used only for
     final comparison").
+
+    PHASE 41 (§15/§32): the comparison is resolution-aware. A SUICIDE truth
+    has ``crime.murderer_id is None`` — ``murderer_true`` then means "no WHO
+    winner required / suicide outcome" (this also closes the latent
+    ``None == None`` hole where a null winner against a null canonical
+    murderer used to report True by accident). ``all_true`` follows the
+    resolution model; the WHO dimension is vacuous for SUICIDE.
     """
     if not isinstance(truth, CaseTruth):
         raise TypeError(f"truth must be a CaseTruth; got {type(truth).__name__}")
@@ -181,7 +193,18 @@ def evaluate_solution(proof: SolverProof, truth: CaseTruth) -> AccusedSolutionVa
     canonical_tick = parse_iso8601_to_epoch(crime.crime_time.canonical)
     tolerance = crime.crime_time.accusation_tolerance_seconds
 
-    murderer_true = proof.who.winner == crime.murderer_id
+    from app.domain.resolution import ResolutionType
+
+    resolution = crime.resolution_type or ResolutionType.HOMICIDE
+    if resolution is ResolutionType.SUICIDE:
+        # SUICIDE: no murderer exists to be deduced; the WHO dimension is a
+        # red herring. Never compare str(None) — the suicide outcome is the
+        # truth.
+        murderer_true = True
+        canonical_murderer = ""
+    else:
+        murderer_true = proof.who.winner == crime.murderer_id
+        canonical_murderer = crime.murderer_id or ""
     motive_true = proof.why.winner == crime.motive_id
     weapon_true = proof.weapon.winner == crime.weapon_id
 
@@ -207,9 +230,10 @@ def evaluate_solution(proof: SolverProof, truth: CaseTruth) -> AccusedSolutionVa
         deducted_murderer=proof.who.winner,
         deducted_motive=proof.why.winner,
         deducted_weapon=proof.weapon.winner,
-        canonical_murderer=crime.murderer_id,
+        canonical_murderer=canonical_murderer,
         canonical_motive=crime.motive_id,
         canonical_weapon=crime.weapon_id,
+        resolution_type=resolution.value,
     )
 
 
@@ -298,12 +322,14 @@ def assemble_solution_proof(
         ambiguous=proof.when.ambiguous,
         overconstrained=getattr(proof.when, "overconstrained", proof.when.feasible.is_empty),
     )
+    resolution = truth.crime.resolution_type or ResolutionType.HOMICIDE
+    murderer_winner = "" if resolution is ResolutionType.SUICIDE else (proof.who.winner or "")
     return SolutionProof(
         case_id=public.case_id,
         case_version=public.case_version,
         solver_proof_version=proof.version,
         validation=validation,
-        winners=(proof.who.winner or "", proof.why.winner or "", proof.weapon.winner or ""),
+        winners=(murderer_winner, proof.why.winner or "", proof.weapon.winner or ""),
         time=time_proof,
         evidence_ids_used=proof.evidence_ids_used,
         who_evidence_ids=_dimension_evidence_ids(proof.who),

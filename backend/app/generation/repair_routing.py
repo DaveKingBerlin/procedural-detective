@@ -14,18 +14,25 @@ ACTUAL validator ownership — never from parsing issue-message strings:
   (PUBLIC_ROLE_TRUTH_LEAK /
    VICTIM_IN_SUSPECT_CANDIDATES /
    WITNESS_IN_SUSPECT_CANDIDATES /
-   MURDERER_NOT_SUSPECT_CANDIDATE) -> CASE_PEOPLE  (public persons/roles)
+   MURDERER_NOT_SUSPECT_CANDIDATE /
+   HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET) -> CASE_PEOPLE  (public persons/roles)
 
-  Phase40 refinement (§14): of those, the three CANDIDATE-INTEGRITY codes
+  Phase40 refinement (§14): of those, the CANDIDATE-INTEGRITY codes
   (VICTIM_IN_SUSPECT_CANDIDATES / WITNESS_IN_SUSPECT_CANDIDATES /
-  MURDERER_NOT_SUSPECT_CANDIDATE) elect ``candidate_integrity_only`` plans
-  when they are the ONLY owning defect. The driver then corrects the parsed
-  persons through the deterministic candidate-integrity projection with ZERO
-  CASE_PEOPLE provider calls, reuses the world when its weapon-evidence input
-  is unchanged (§18/§19), and still reruns the candidate-dependent evidence +
-  its activity logs (§16/§17). PUBLIC_ROLE_TRUTH_LEAK stays EXCLUSIVELY a
-  CASE_PEOPLE provider repair (the projection never rewrites public roles), so
-  genuine person/content defects still reach the provider (§41).
+  MURDERER_NOT_SUSPECT_CANDIDATE / HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET)
+  elect ``candidate_integrity_only`` plans when they are the ONLY owning
+  defect. The driver then corrects the parsed persons through the
+  deterministic candidate-integrity projection with ZERO CASE_PEOPLE provider
+  calls, reuses the world when its weapon-evidence input is unchanged
+  (§18/§19), and still reruns the candidate-dependent evidence + its activity
+  logs (§16/§17). PUBLIC_ROLE_TRUTH_LEAK stays EXCLUSIVELY a CASE_PEOPLE
+  provider repair (the projection never rewrites public roles), so genuine
+  person/content defects still reach the provider (§41).
+
+  Phase41 refinement: the truth-shape codes (HOMICIDE_MURDERER_MISSING /
+  SUICIDE_MURDERER_PRESENT / HOMICIDE_VICTIM_AS_MURDERER / SUICIDE_OPTION_
+  MISSING) are owned by CASE_TRUTH — the trusted crime shape itself is
+  impossible and only a fresh case can change it.
 - quality witness-coverage codes
   (WITNESS_STATEMENT_MISSING/EMPTY/
    UNKNOWN_WITNESS/WITNESS_ID_MISMATCH/
@@ -92,6 +99,7 @@ class RepairOwner(str, Enum):
     reused, as the driver already does).
     """
 
+    CASE_TRUTH = "CASE_TRUTH"        # the trusted truth/crime shape itself
     CASE_PEOPLE = "CASE_PEOPLE"      # public persons / roles / candidates
     EVIDENCE = "EVIDENCE"            # evidence facts + deterministic projection
     ACTIVITY_LOG = "ACTIVITY_LOG"    # per-evidence-item activity logs
@@ -99,6 +107,19 @@ class RepairOwner(str, Enum):
     ASSET_SPEC = "ASSET_SPEC"        # procedural ASSET_SPEC/ASSET_SPEC_REPAIR
     UNKNOWN = "UNKNOWN"              # safe full-rerun fallback
 
+
+# Phase41 — the truth-shape codes: the trusted resolution/crime shape itself
+# is internally impossible (HOMICIDE without a murderer, SUICIDE with one,
+# victim-as-murderer, a suicide truth with no public victim). Only a fresh
+# CASE_TRUTH regeneration can change the truth — owned by CASE_TRUTH.
+_CASE_TRUTH_QUALITY_CODES: frozenset[str] = frozenset(
+    {
+        "HOMICIDE_MURDERER_MISSING",
+        "SUICIDE_MURDERER_PRESENT",
+        "HOMICIDE_VICTIM_AS_MURDERER",
+        "SUICIDE_OPTION_MISSING",
+    }
+)
 
 # The four case-quality codes that live ENTIRELY in the public persons/roles
 # (public person role token, candidate role inconsistency, murderer not
@@ -110,21 +131,30 @@ _CASE_PEOPLE_QUALITY_CODES: frozenset[str] = frozenset(
         "VICTIM_IN_SUSPECT_CANDIDATES",
         "WITNESS_IN_SUSPECT_CANDIDATES",
         "MURDERER_NOT_SUSPECT_CANDIDATE",
+        # Phase41 — the murderer is not in the final homicide target universe:
+        # the deterministic projection (and its CASE_PEOPLE provider fallback)
+        # own the public-person membership fix.
+        "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET",
     }
 )
 
-# Phase40 — the THREE closed candidate-integrity codes the trusted
-# deterministic projection owns (Phase40-Fix.md §5/§14). A report whose ONLY
+# Phase40/41 — the closed candidate-integrity codes the trusted deterministic
+# projection owns (Phase40-Fix.md §5/§14 + Phase41.md §9). A report whose ONLY
 # owning defect is one of these elects the candidate-only repair path: the
 # driver corrects the parsed persons with ZERO CASE_PEOPLE provider calls
 # instead of a full provider regeneration. PUBLIC_ROLE_TRUTH_LEAK is
 # deliberately NOT here — the projection must never rewrite a public role, so
 # a truth-leak role always falls back to the canonical CASE_PEOPLE repair.
+# HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET is here (the "final-target ->
+# deterministic projection path" rule): the projection corrects what it can
+# and the driver falls back to the canonical CASE_PEOPLE provider repair when
+# the murderer's public role itself is the problem.
 _CANDIDATE_INTEGRITY_CODES: frozenset[str] = frozenset(
     {
         "VICTIM_IN_SUSPECT_CANDIDATES",
         "WITNESS_IN_SUSPECT_CANDIDATES",
         "MURDERER_NOT_SUSPECT_CANDIDATE",
+        "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET",
     }
 )
 
@@ -134,7 +164,10 @@ _CANDIDATE_INTEGRITY_CODES: frozenset[str] = frozenset(
 # WITNESS_STATEMENT_* defect is EVIDENCE-owned. A wrong witness ROLE surfaces
 # under the separate CASE_PEOPLE-owned codes above (PUBLIC_ROLE_TRUTH_LEAK /
 # WITNESS_IN_SUSPECT_CANDIDATES / ...), which force the case rerun — see the
-# module docstring for the full rationale.
+# module docstring for the full rationale. Phase41 adds
+# DECEPTIVE_CLAIM_UNCONTRADICTED: a deceptive claim's missing contradiction
+# path is an EVIDENCE-content defect (the evidence stage authors the
+# mechanical contradiction record).
 _WITNESS_COVERAGE_QUALITY_CODES: frozenset[str] = frozenset(
     {
         "WITNESS_STATEMENT_MISSING",
@@ -142,6 +175,7 @@ _WITNESS_COVERAGE_QUALITY_CODES: frozenset[str] = frozenset(
         "WITNESS_STATEMENT_UNKNOWN_WITNESS",
         "WITNESS_STATEMENT_WITNESS_ID_MISMATCH",
         "WITNESS_STATEMENT_SPEAKER_MISMATCH",
+        "DECEPTIVE_CLAIM_UNCONTRADICTED",
     }
 )
 
@@ -167,6 +201,8 @@ def _owner_for_code(code: str) -> RepairOwner:
     Every member of ``VALIDATOR_CODE_VOCABULARY`` is covered (the mapping is
     complete); any foreign token (defensize) falls back to ``UNKNOWN``.
     """
+    if code in _CASE_TRUTH_QUALITY_CODES:
+        return RepairOwner.CASE_TRUTH
     if code in _CASE_PEOPLE_QUALITY_CODES:
         return RepairOwner.CASE_PEOPLE
     if code in _WITNESS_COVERAGE_QUALITY_CODES:
@@ -345,9 +381,14 @@ class RepairPlan:
         """
         if not self.rerun_case:
             return self
-        # Remove the CASE_PEOPLE owner but keep every OTHER owner's flag —
-        # only the CASE_PEOPLE-driven force-invalidation is dropped.
-        owners = tuple(o for o in self.repair_owners if o is not RepairOwner.CASE_PEOPLE)
+        # Remove the CASE-affecting owners (CASE_PEOPLE + Phase41 CASE_TRUTH)
+        # but keep every OTHER owner's flag — only the case-driven
+        # force-invalidation is dropped.
+        owners = tuple(
+            o
+            for o in self.repair_owners
+            if o not in (RepairOwner.CASE_PEOPLE, RepairOwner.CASE_TRUTH)
+        )
         evidence_forced = RepairOwner.EVIDENCE in owners
         logs_forced = RepairOwner.ACTIVITY_LOG in owners or evidence_forced
         world_forced = RepairOwner.WORLD_GRAPH in owners
@@ -409,11 +450,16 @@ class RepairPlan:
         candidate_only = cls._is_candidate_integrity_only(codes, owners)
         evidence = RepairOwner.EVIDENCE in owners
         case = RepairOwner.CASE_PEOPLE in owners
+        # Phase41 — a CASE_TRUTH owner (impossible trusted truth shape) forces
+        # the case stage to rerun exactly like a CASE_PEOPLE defect: evidence
+        # and its activity logs are invalidated because the crime shape is the
+        # deduction input (§11 dependency closure).
+        truth_case = RepairOwner.CASE_TRUTH in owners
         act_log = RepairOwner.ACTIVITY_LOG in owners
         world = RepairOwner.WORLD_GRAPH in owners
         asset = RepairOwner.ASSET_SPEC in owners
-        rerun_world = case or world
-        recompose = case or world or asset
+        rerun_world = case or truth_case or world
+        recompose = case or truth_case or world or asset
         if candidate_only:
             # Phase40 §14/§18/§19 — candidate-integrity-only repair: the
             # trusted deterministic projection changes ONLY candidate
@@ -426,9 +472,9 @@ class RepairPlan:
         return cls(
             repair_owners=owners,
             validator_codes=codes,
-            rerun_case=case,
-            rerun_evidence=case or evidence,
-            rerun_activity_log=case or evidence or act_log,
+            rerun_case=case or truth_case,
+            rerun_evidence=case or truth_case or evidence,
+            rerun_activity_log=case or truth_case or evidence or act_log,
             rerun_world=rerun_world,
             recompose=recompose,
             candidate_integrity_only=candidate_only,
@@ -449,6 +495,7 @@ __all__ = [
 # validator-code vocabulary maps to exactly one of these owners (UNKNOWN is
 # the safe fallback). Kept as a tuple for deterministic iteration order.
 REPAIR_OWNER_VOCABULARY: tuple[RepairOwner, ...] = (
+    RepairOwner.CASE_TRUTH,
     RepairOwner.CASE_PEOPLE,
     RepairOwner.EVIDENCE,
     RepairOwner.ACTIVITY_LOG,

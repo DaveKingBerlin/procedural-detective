@@ -24,7 +24,8 @@ Severity ordering (documented; low -> high) used by ``repair_effectiveness``
     SOLVER_AMBIGUOUS                 5   solver/regeneration-class ambiguity
     PHASE35_QUALITY                  5   case-quality content defect
         (VICTIM_IN_SUSPECT_CANDIDATES / WITNESS_IN_SUSPECT_CANDIDATES /
-        MURDERER_NOT_SUSPECT_CANDIDATE / WITNESS_STATEMENT_*)
+        MURDERER_NOT_SUSPECT_CANDIDATE / WITNESS_STATEMENT_* /
+        the Phase41 resolution/final-target/deception codes)
     ASSET_SPEC_INVALID               6   asset-spec semantic failure
     PUBLIC_ROLE_TRUTH_LEAK           7   pre-reveal public truth-isolation
                                         violation (same tier as activity-log
@@ -65,6 +66,14 @@ QUALITY_VALIDATOR_CODES: frozenset[str] = frozenset(
         "WITNESS_STATEMENT_UNKNOWN_WITNESS",
         "WITNESS_STATEMENT_WITNESS_ID_MISMATCH",
         "WITNESS_STATEMENT_SPEAKER_MISMATCH",
+        # Phase41 — resolution / final-target integrity codes.
+        "HOMICIDE_MURDERER_MISSING",
+        "SUICIDE_MURDERER_PRESENT",
+        "HOMICIDE_VICTIM_AS_MURDERER",
+        "SUICIDE_OPTION_MISSING",
+        "FINAL_TARGET_UNIVERSE_EMPTY",
+        "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET",
+        "DECEPTIVE_CLAIM_UNCONTRADICTED",
     }
 )
 
@@ -118,6 +127,17 @@ _VALIDATOR_CODE_SEVERITY: Mapping[str, int] = {
     "WITNESS_STATEMENT_UNKNOWN_WITNESS": 5,
     "WITNESS_STATEMENT_WITNESS_ID_MISMATCH": 5,
     "WITNESS_STATEMENT_SPEAKER_MISMATCH": 5,
+    # Phase41 — truth-shape and final-target codes are targeted REPAIR-class
+    # defects (same tier as the Phase35 content defects; never numeric-7
+    # truth-leak tier — they describe internally-inconsistent trusted shapes,
+    # not pre-reveal public isolation violations).
+    "HOMICIDE_MURDERER_MISSING": 5,
+    "SUICIDE_MURDERER_PRESENT": 5,
+    "HOMICIDE_VICTIM_AS_MURDERER": 5,
+    "SUICIDE_OPTION_MISSING": 5,
+    "FINAL_TARGET_UNIVERSE_EMPTY": 5,
+    "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET": 5,
+    "DECEPTIVE_CLAIM_UNCONTRADICTED": 5,
     "PUBLIC_ROLE_TRUTH_LEAK": 7,
 }
 
