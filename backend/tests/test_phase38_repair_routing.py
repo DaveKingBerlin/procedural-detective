@@ -113,7 +113,8 @@ def test_mapping_covers_the_entire_closed_validator_vocabulary():
 
 def test_mapping_derived_from_real_validator_ownership():
     """The category mapping follows the ACTUAL validator ownership (Phase35
-    public-role/candidate codes -> CASE_PEOPLE; solver/truth -> EVIDENCE;
+    public-role/candidate codes -> CASE_PEOPLE; witness-coverage statements ->
+    EVIDENCE (DEF-095); solver/truth -> EVIDENCE;
     world -> WORLD_GRAPH; activity-log family -> ACTIVITY_LOG; asset spec ->
     ASSET_SPEC; floor/structural -> the UNKNOWN safe fallback)."""
     for code in (
@@ -121,13 +122,20 @@ def test_mapping_derived_from_real_validator_ownership():
         "VICTIM_IN_SUSPECT_CANDIDATES",
         "WITNESS_IN_SUSPECT_CANDIDATES",
         "MURDERER_NOT_SUSPECT_CANDIDATE",
+    ):
+        assert repair_owner_for_code(code) is RepairOwner.CASE_PEOPLE, code
+    # DEF-095 — the five witness-coverage codes are EVIDENCE-owned: the
+    # evidence stage authors the statement facts (including the driver's
+    # deterministic witness-statement projection); a wrong witness ROLE is
+    # reported under the separate CASE_PEOPLE-owned codes above.
+    for code in (
         "WITNESS_STATEMENT_MISSING",
         "WITNESS_STATEMENT_EMPTY",
         "WITNESS_STATEMENT_UNKNOWN_WITNESS",
         "WITNESS_STATEMENT_WITNESS_ID_MISMATCH",
         "WITNESS_STATEMENT_SPEAKER_MISMATCH",
     ):
-        assert repair_owner_for_code(code) is RepairOwner.CASE_PEOPLE, code
+        assert repair_owner_for_code(code) is RepairOwner.EVIDENCE, code
     assert repair_owner_for_code("SOLVER_AMBIGUOUS") is RepairOwner.EVIDENCE
     assert repair_owner_for_code("WORLD_ASSET_UNRESOLVED") is RepairOwner.WORLD_GRAPH
     for code in (
@@ -175,6 +183,35 @@ def test_quality_candidate_defect_owns_case_people():
         _quality_report("VICTIM_IN_SUSPECT_CANDIDATES", "WITNESS_IN_SUSPECT_CANDIDATES")
     )
     assert owners == (RepairOwner.CASE_PEOPLE,)
+
+
+def test_witness_statement_defect_owns_evidence_only():
+    """DEF-095 — every WITNESS_STATEMENT_* code routes to EVIDENCE ONLY: the
+    evidence stage authors witness-statement facts, so the repair is reachable
+    WITHOUT an expensive CASE/PEOPLE regeneration."""
+    for code in (
+        "WITNESS_STATEMENT_MISSING",
+        "WITNESS_STATEMENT_EMPTY",
+        "WITNESS_STATEMENT_UNKNOWN_WITNESS",
+        "WITNESS_STATEMENT_WITNESS_ID_MISMATCH",
+        "WITNESS_STATEMENT_SPEAKER_MISMATCH",
+    ):
+        assert owner_for_report(_quality_report(code)) == (RepairOwner.EVIDENCE,), code
+        assert REPAIR_OWNERS[code] is RepairOwner.EVIDENCE, code
+
+
+def test_witness_statement_missing_plan_reruns_evidence_not_case():
+    """DEF-095 regression — WITNESS_STATEMENT_MISSING reaches EVIDENCE so the
+    facts can be regenerated WITHOUT a full case regeneration; only the
+    evidence stage and its dependent activity logs are invalidated."""
+    plan = RepairPlan.from_report(_quality_report("WITNESS_STATEMENT_MISSING"))
+    assert plan.repair_owners == (RepairOwner.EVIDENCE,)
+    assert plan.rerun_case is False
+    assert plan.rerun_evidence is True
+    assert plan.rerun_activity_log is True
+    assert plan.rerun_world is False
+    assert plan.recompose is False
+    assert not plan.is_default_full_rerun
 
 
 def test_world_bucket_owns_world_graph():
@@ -286,6 +323,51 @@ def test_plan_deterministic_same_report_same_plan():
     first = RepairPlan.from_report(report)
     second = RepairPlan.from_report(report)
     assert first == second
+
+
+def test_with_case_reuse_never_returns_an_empty_noop_plan():
+    """DEF-097 (ADV-38-04) — a CASE_PEOPLE-only plan (e.g. a public-role
+    defect) has NOTHING to rerun once the case stage is excluded. Instead of a
+    silent empty no-op, ``with_case_reuse()`` FAILS SAFE to the documented
+    UNKNOWN full-rerun (the exact pre-Phase-38 behavior, with the case still
+    NOT regenerated)."""
+    plan = RepairPlan.from_report(_quality_report("PUBLIC_ROLE_TRUTH_LEAK"))
+    reused = plan.with_case_reuse()
+    # never an empty silent success: the safe full-rerun fallback is used.
+    assert reused.is_default_full_rerun
+    assert reused.repair_owners == (RepairOwner.UNKNOWN,)
+    assert reused.rerun_case is False  # the CASE stage is still NOT rerun
+    assert reused.rerun_evidence is True
+    assert reused.rerun_activity_log is True
+    assert reused.rerun_world is True
+    assert reused.recompose is True
+    assert not (not reused.repair_owners and not reused.rerun_evidence
+                and not reused.rerun_activity_log and not reused.rerun_world
+                and not reused.recompose)
+
+
+def test_with_case_reuse_keeps_non_case_owners_and_their_invalidations():
+    """DEF-097 control — when OTHER owners survive the case exclusion the plan
+    is NOT a no-op: the surviving owners' flags and dependency closure are
+    preserved exactly as documented."""
+    report = _quality_report(
+        "PUBLIC_ROLE_TRUTH_LEAK",  # CASE_PEOPLE-only member (drop the case)
+        "WITNESS_STATEMENT_MISSING",  # EVIDENCE member (kept)
+    )
+    plan = RepairPlan.from_report(report)
+    assert RepairOwner.CASE_PEOPLE in plan.repair_owners
+    assert RepairOwner.EVIDENCE in plan.repair_owners
+    reused = plan.with_case_reuse()
+    assert reused.repair_owners == (RepairOwner.EVIDENCE,)
+    assert reused.rerun_case is False
+    assert reused.rerun_evidence is True
+    assert reused.rerun_activity_log is True
+    assert reused.rerun_world is False
+    assert reused.recompose is False
+    assert not reused.is_default_full_rerun
+    # a witness-statement-only plan is already EVIDENCE-only: unchanged.
+    witness_only = RepairPlan.from_report(_quality_report("WITNESS_STATEMENT_EMPTY"))
+    assert witness_only.with_case_reuse() == witness_only
 
 
 # --------------------------------------------------------------------------- #

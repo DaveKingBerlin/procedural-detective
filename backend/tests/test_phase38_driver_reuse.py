@@ -201,6 +201,53 @@ def test_evidence_defect_reruns_evidence_and_logs_reuses_world():
     assert not any("case_people_v1" in p for p in new_calls)
 
 
+def test_witness_statement_defect_reruns_evidence_without_case_regeneration():
+    """DEF-095 — a WITNESS_STATEMENT_MISSING repair plan routes to EVIDENCE:
+    the statement facts are reachable through an evidence rerun (the driver's
+    deterministic witness-statement projection re-authors them) while the
+    CASE/PEOPLE parse is REUSED — zero ``case_people_v1`` calls, so a
+    witness-statement-only defect never forces an expensive case regeneration
+    (§8/§9/§33)."""
+    from app.generation.report import ValidationReport
+
+    transport = MockOllamaTransport(
+        posts=[
+            *_pass1_posts(),
+            _j(_evidence()),
+            *_alog_posts(_CRIME_CANONICAL),
+        ]
+    )
+    driver = _make_driver(transport)
+    attempt = _direct_attempt()
+
+    driver.run_into(attempt)
+    assert transport.call_count == 8
+
+    # The controller derives the plan from the validation report; the
+    # witness-coverage code elects the EVIDENCE owner only.
+    witness_plan = RepairPlan.from_report(
+        ValidationReport(quality_issues=("WITNESS_STATEMENT_MISSING",))
+    )
+    assert witness_plan.repair_owners == (RepairOwner.EVIDENCE,)
+    assert witness_plan.rerun_case is False
+    assert witness_plan.rerun_evidence is True
+
+    driver.run_into(attempt, repair_plan=witness_plan)
+    new_calls = transport.post_calls[8:]
+    # evidence + the four dependent activity logs; ZERO case/world/asset calls.
+    assert len(new_calls) == 5, f"evidence + 4 logs expected, got {len(new_calls)}"
+    assert "evidence_v1" in new_calls[0]
+    for prompt in new_calls[1:]:
+        assert "Canonical evidence time:" in prompt
+    assert not any("case_people_v1" in p for p in new_calls)
+    assert not any("world_requirements_v1" in p for p in new_calls)
+    assert not any("asset_spec_v1" in p for p in new_calls)
+    # the witness statement fact is present in the regenerated draft.
+    assert attempt.draft is not None
+    kinds = [getattr(f, "kind", None) for f in attempt.draft.evidence]
+    assert "witness_statement" in kinds, kinds
+
+
 def test_evidence_change_that_alters_weapon_input_reruns_world(monkeypatch):
     """§12 "do not reuse outputs whose inputs changed": when the regenerated
     evidence changes the weapon-evidence input the world depends on, the world

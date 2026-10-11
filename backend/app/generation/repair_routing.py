@@ -18,10 +18,26 @@ ACTUAL validator ownership — never from parsing issue-message strings:
 - quality witness-coverage codes
   (WITNESS_STATEMENT_MISSING/EMPTY/
    UNKNOWN_WITNESS/WITNESS_ID_MISMATCH/
-   SPEAKER_MISMATCH)               -> EVIDENCE (statement facts) + CASE_PEOPLE
-                                      (the witness ROLE lives in the public
-                                      person list; the statement lives in the
-                                      evidence stage)
+   SPEAKER_MISMATCH)               -> EVIDENCE  ONLY (DEF-095)
+
+  WHY EVIDENCE-only for witness-statement codes, per the ACTUAL validator
+  ownership (``case_quality.py::_witness_complete_issues``):
+
+  - every ``WITNESS_STATEMENT_*`` code fires on the EVIDENCE FACTS relative
+    to an EXISTING public ``role == "witness"`` person: the statement is
+    MISSING/EMPTY/unknown-id/mismatched. The evidence stage authors those
+    facts, and the driver's deterministic projection regenerates a canonical
+    witness statement for EVERY public witness (``ollama_driver``
+    ``_evidence_gap_facts``) — so an EVIDENCE rerun makes every
+    witness-statement defect reachable WITHOUT paying for a CASE/PEOPLE
+    regeneration.
+  - a WRONG witness ROLE is never reported through these codes: a
+    role/owner/candidate defect (role token leak, witness in the suspect
+    candidates, murderer not accuseable) surfaces under the separate
+    CASE_PEOPLE-owned codes above, which DO force the case rerun. Routing
+    witness coverage to CASE_PEOPLE as well would force an expensive case
+    regeneration for a defect the case output had no part in (§8/§9/§33
+    repair amplification).
 - solver ambiguity / truth mismatch -> EVIDENCE
 - activity-log family  -> ACTIVITY_LOG
 - asset spec family    -> ASSET_SPEC
@@ -86,9 +102,13 @@ _CASE_PEOPLE_QUALITY_CODES: frozenset[str] = frozenset(
     }
 )
 
-# The witness-coverage quality codes involve BOTH the public witness ROLE and
-# the evidence STATEMENT facts: the witness role cannot change without a case
-# rerun, and the statement content cannot change without an evidence rerun.
+# The witness-coverage quality codes (DEF-095): the evidence stage authors the
+# statement FACTS (including the deterministic witness-statement projection the
+# driver applies for every public role=='witness' person), so a
+# WITNESS_STATEMENT_* defect is EVIDENCE-owned. A wrong witness ROLE surfaces
+# under the separate CASE_PEOPLE-owned codes above (PUBLIC_ROLE_TRUTH_LEAK /
+# WITNESS_IN_SUSPECT_CANDIDATES / ...), which force the case rerun — see the
+# module docstring for the full rationale.
 _WITNESS_COVERAGE_QUALITY_CODES: frozenset[str] = frozenset(
     {
         "WITNESS_STATEMENT_MISSING",
@@ -124,8 +144,13 @@ def _owner_for_code(code: str) -> RepairOwner:
     if code in _CASE_PEOPLE_QUALITY_CODES:
         return RepairOwner.CASE_PEOPLE
     if code in _WITNESS_COVERAGE_QUALITY_CODES:
-        # witness role + statement content: both stages own the fix
-        return RepairOwner.CASE_PEOPLE
+        # DEF-095 — the evidence stage authors witness-statement facts (and
+        # the driver deterministically projects a canonical statement for
+        # every public witness); a wrong witness ROLE is reported under a
+        # separate CASE_PEOPLE-owned code. Witness coverage is therefore
+        # EVIDENCE-only — the fix is reachable WITHOUT an expensive case
+        # regeneration, §8/§9/§33.
+        return RepairOwner.EVIDENCE
     if code in _ACTIVITY_LOG_CODES:
         return RepairOwner.ACTIVITY_LOG
     if code == "SOLVER_AMBIGUOUS":
@@ -164,8 +189,8 @@ def owner_for_report(report: object) -> tuple[RepairOwner, ...]:
     - structural / safety buckets   -> UNKNOWN (cross-stage; safe full rerun)
     - world bucket                  -> WORLD_GRAPH
     - quality bucket                -> the per-code owner (CASE_PEOPLE for
-                                       role/candidate codes, CASE_PEOPLE +
-                                       EVIDENCE for witness-coverage codes)
+                                       role/candidate codes; EVIDENCE for
+                                       witness-coverage statements DEF-095)
     - solver non-unique / truth mismatch (``solver_result`` / ``validation``)
                                     -> EVIDENCE
 
@@ -271,6 +296,12 @@ class RepairPlan:
         The driver uses this for every repair owner that must NOT regenerate
         the case (the driver must never re-run CASE_TRUTH for an unrelated
         defect — that would regenerate the truth). Preserves every other flag.
+
+        DEF-097 (ADV-38-04) — a plan whose ONLY owner is CASE_PEOPLE would
+        become an EMPTY no-op here (nothing left to rerun). An empty plan would
+        silently consume a repair pass with zero work, so it FAILS SAFE to the
+        documented UNKNOWN full-rerun (``is_default_full_rerun`` is True; the
+        CASE stage is still NOT regenerated) — never a silent no-op.
         """
         if not self.rerun_case:
             return self
@@ -280,7 +311,7 @@ class RepairPlan:
         evidence_forced = RepairOwner.EVIDENCE in owners
         logs_forced = RepairOwner.ACTIVITY_LOG in owners or evidence_forced
         world_forced = RepairOwner.WORLD_GRAPH in owners
-        return RepairPlan(
+        result = RepairPlan(
             repair_owners=owners,
             validator_codes=self.validator_codes,
             rerun_case=False,
@@ -289,6 +320,14 @@ class RepairPlan:
             rerun_world=world_forced,
             recompose=world_forced or RepairOwner.ASSET_SPEC in owners,
         )
+        if not result.repair_owners and not (
+            result.rerun_evidence
+            or result.rerun_activity_log
+            or result.rerun_world
+            or result.recompose
+        ):
+            return type(self).default_full_rerun(self.validator_codes)
+        return result
 
     @classmethod
     def default_full_rerun(cls, validator_codes: tuple[str, ...]) -> "RepairPlan":
