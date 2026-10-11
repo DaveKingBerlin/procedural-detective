@@ -62,6 +62,26 @@ function fixturePath(): string {
   return join(process.cwd(), "src", "savegame", "fixtures", FIXTURE_NAME);
 }
 
+/**
+ * Phase 39 (DEF-101) — the committed CORPUS twin of the real regression file:
+ * `tests/fixtures/case_quality/generated/
+ * procedural-detective-case-CASE-swwU70RglW9I.ok.pdcase`. It must stay
+ * byte-identical to the frontend copy; a drift in either file is a test
+ * failure. Resolved TEST-RELATIVE (frontend/ is the vitest cwd, so the twin
+ * lives one level up under tests/).
+ */
+function corpusFixturePath(): string {
+  return join(
+    process.cwd(),
+    "..",
+    "tests",
+    "fixtures",
+    "case_quality",
+    "generated",
+    "procedural-detective-case-CASE-swwU70RglW9I.ok.pdcase",
+  );
+}
+
 function realText(): string {
   return JSON.stringify(realReplayFixture);
 }
@@ -372,6 +392,20 @@ describe("Phase 39 — real saved-replay fixture contract (SavegameV1)", () => {
     const digest = createHash("sha256").update(text, "utf8").digest("hex");
     expect(bytes).toBe(26_403);
     expect(digest).toBe("d633dd328d42025b3ebc08e79cfba2966c522b84ff6e7f2ef811ec72382ee9fa");
+  });
+
+  it("DEF-101 — the tests/ corpus twin is byte-identical and pinned (same 26,403 B, d633dd32…ee9fa)", () => {
+    const path = corpusFixturePath();
+    const bytes = statSync(path).size;
+    const text = readFileSync(path, "utf8");
+    const digest = createHash("sha256").update(text, "utf8").digest("hex");
+    // The corpus twin must stay exactly the real physical file — a drift or a
+    // re-sanitization of either copy is a test failure, never a silent change.
+    expect(bytes).toBe(26_403);
+    expect(digest).toBe("d633dd328d42025b3ebc08e79cfba2966c522b84ff6e7f2ef811ec72382ee9fa");
+    // And it must stay byte-identical to the frontend copy that the replay
+    // tests actually parse.
+    expect(text).toBe(readFileSync(fixturePath(), "utf8"));
   });
 
   it("parses as formatVersion 1 with the REAL witness + one OBSERVATION statement", () => {
