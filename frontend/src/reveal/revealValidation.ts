@@ -1,4 +1,9 @@
-import type { ExplanationPointDTO, RevealExplanationDimensionsDTO, RevealResponse } from "../api/types";
+import type {
+  ExplanationPointDTO,
+  ResolutionType,
+  RevealExplanationDimensionsDTO,
+  RevealResponse,
+} from "../api/types";
 import { ValidationError } from "../scene/validation";
 
 /**
@@ -43,13 +48,67 @@ function requireNonNegativeInteger(owner: Record<string, unknown>, field: string
   return value;
 }
 
-/** The accusation echo block shared by the reveal DTO (`player.accusation`). */
-function parseAccusation(raw: unknown): { murdererId: string; motiveId: string; weaponId: string; crimeTime: string } {
+/**
+ * Phase 41 — a reveal-truth person field (`murdererId` / `murdererName`) is a
+ * NON-NULL string for HOMICIDE/legacy, and for SUICIDE it must be ABSENT/null
+ * (a suicide case has NO murderer — the contract never encodes the victim as
+ * `murderer_id`, Phase 41 §3). A present-but-wrong primitive is malformed.
+ */
+function parseNullableTruthId(
+  owner: Record<string, unknown>,
+  field: string,
+  resolutionType: ResolutionType,
+  where: string,
+): string | null {
+  const value = owner[field];
+  if (resolutionType === "SUICIDE") {
+    if (value === undefined || value === null) return null;
+    throw new ValidationError(`${where}.${field} must be null for SUICIDE.`);
+  }
+  if (!isNonEmptyString(value)) {
+    throw new ValidationError(`${where}.${field} must be a non-empty string for HOMICIDE.`);
+  }
+  return value;
+}
+
+/** The accusation echo block shared by the reveal DTO (`player.accusation`).
+ *  Phase 41 — the echo may carry an OPTIONAL `resolutionType` (absent for
+ *  legacy homicide submissions) and `murdererId` is nullable (null ONLY for a
+ *  SUICIDE submission). */
+function parseAccusation(raw: unknown): {
+  resolutionType?: ResolutionType | null;
+  murdererId: string | null;
+  motiveId: string;
+  weaponId: string;
+  crimeTime: string;
+} {
   if (!isRecord(raw)) {
     throw new ValidationError("reveal.player.accusation must be an object.");
   }
+  const resolutionTypeRaw = raw.resolutionType;
+  let resolutionType: ResolutionType | null = null;
+  if (resolutionTypeRaw !== undefined && resolutionTypeRaw !== null) {
+    if (resolutionTypeRaw !== "HOMICIDE" && resolutionTypeRaw !== "SUICIDE") {
+      throw new ValidationError('reveal.player.accusation.resolutionType must be "HOMICIDE" or "SUICIDE".');
+    }
+    resolutionType = resolutionTypeRaw;
+  }
+  const murdererIdRaw = raw.murdererId;
+  let murdererId: string | null;
+  if (resolutionType === "SUICIDE") {
+    if (murdererIdRaw !== null) {
+      throw new ValidationError("reveal.player.accusation.murdererId must be null for SUICIDE.");
+    }
+    murdererId = null;
+  } else {
+    if (!isNonEmptyString(murdererIdRaw)) {
+      throw new ValidationError("reveal.player.accusation.murdererId must be a non-empty string.");
+    }
+    murdererId = murdererIdRaw;
+  }
   return {
-    murdererId: requireString(raw, "murdererId", "reveal.player.accusation"),
+    ...(resolutionType !== null ? { resolutionType } : {}),
+    murdererId,
     motiveId: requireString(raw, "motiveId", "reveal.player.accusation"),
     weaponId: requireString(raw, "weaponId", "reveal.player.accusation"),
     crimeTime: requireString(raw, "crimeTime", "reveal.player.accusation"),
@@ -107,6 +166,15 @@ export function parseRevealResponse(raw: unknown): RevealResponse {
   if (!isRecord(truthRaw)) {
     throw new ValidationError("reveal.truth must be an object.");
   }
+  // Phase 41 — the resolution type is authoritative and REQUIRED; a SUICIDE
+  // truth carries nullable murdererId/murdererName (no murderer exists).
+  const resolutionTypeRaw = truthRaw.resolutionType;
+  if (resolutionTypeRaw !== "HOMICIDE" && resolutionTypeRaw !== "SUICIDE") {
+    throw new ValidationError('reveal.truth.resolutionType must be "HOMICIDE" or "SUICIDE".');
+  }
+  const resolutionType = resolutionTypeRaw as ResolutionType;
+  const murdererId = parseNullableTruthId(truthRaw, "murdererId", resolutionType, "reveal.truth");
+  const murdererName = parseNullableTruthId(truthRaw, "murdererName", resolutionType, "reveal.truth");
 
   const playerRaw = raw.player;
   if (!isRecord(playerRaw)) {
@@ -151,8 +219,9 @@ export function parseRevealResponse(raw: unknown): RevealResponse {
     caseVersion,
     status: "REVEALED",
     truth: {
-      murdererId: requireString(truthRaw, "murdererId", "reveal.truth"),
-      murdererName: requireString(truthRaw, "murdererName", "reveal.truth"),
+      resolutionType,
+      murdererId,
+      murdererName,
       motiveId: requireString(truthRaw, "motiveId", "reveal.truth"),
       motiveLabel: requireString(truthRaw, "motiveLabel", "reveal.truth"),
       weaponId: requireString(truthRaw, "weaponId", "reveal.truth"),

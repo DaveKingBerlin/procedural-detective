@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { makeRevealResponse } from "../scene/testFixtures";
+import { makeRevealResponse, makeSuicideReveal } from "../scene/testFixtures";
 import { parseRevealResponse } from "./revealValidation";
 
 /**
@@ -83,6 +83,50 @@ describe("parseRevealResponse", () => {
 
   it("is deterministic: identical raw payloads parse to identical objects", () => {
     expect(parseRevealResponse(makeRevealResponse())).toEqual(parseRevealResponse(makeRevealResponse()));
+  });
+});
+
+describe("parseRevealResponse — Phase 41 resolution-aware truth", () => {
+  it("parses a SUICIDE truth with nullable murdererId/murdererName", () => {
+    const parsed = parseRevealResponse(makeSuicideReveal());
+    expect(parsed.truth.resolutionType).toBe("SUICIDE");
+    expect(parsed.truth.murdererId).toBeNull();
+    expect(parsed.truth.murdererName).toBeNull();
+    expect(parsed.player.accusation.resolutionType).toBe("SUICIDE");
+    expect(parsed.player.accusation.murdererId).toBeNull();
+    expect(parsed.truth.motiveLabel).toBe("Jealousy toward the victim");
+  });
+
+  it("requires resolutionType on the truth (fail closed when missing)", () => {
+    const raw = makeRevealResponse() as unknown as Record<string, unknown>;
+    const truth = raw.truth as Record<string, unknown>;
+    delete truth.resolutionType;
+    expect(() => parseRevealResponse(raw)).toThrow(/resolutionType/);
+  });
+
+  it("rejects an unknown resolutionType value", () => {
+    const raw = makeRevealResponse() as unknown as Record<string, unknown>;
+    (raw.truth as Record<string, unknown>).resolutionType = "ACCIDENT";
+    expect(() => parseRevealResponse(raw)).toThrow(/resolutionType/);
+  });
+
+  it("a HOMICIDE truth rejects a null murdererId (nullable ONLY for SUICIDE)", () => {
+    const raw = makeRevealResponse() as unknown as Record<string, unknown>;
+    (raw.truth as Record<string, unknown>).murdererId = null;
+    expect(() => parseRevealResponse(raw)).toThrow(/murdererId/);
+  });
+
+  it("a SUICIDE truth rejects a non-null murdererId", () => {
+    const raw = makeSuicideReveal() as unknown as Record<string, unknown>;
+    (raw.truth as Record<string, unknown>).murdererId = "suspect_alpha";
+    expect(() => parseRevealResponse(raw)).toThrow(/murdererId/);
+  });
+
+  it("a SUICIDE player accusation with a non-null murdererId is malformed", () => {
+    const raw = makeSuicideReveal() as unknown as Record<string, unknown>;
+    const accusation = (raw.player as Record<string, unknown>).accusation as Record<string, unknown>;
+    accusation.murdererId = "suspect_alpha";
+    expect(() => parseRevealResponse(raw)).toThrow(/murdererId/);
   });
 });
 
