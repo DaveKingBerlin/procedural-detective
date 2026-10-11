@@ -477,10 +477,14 @@ class GenerationController:
                     try:
                         self._driver.run_into(attempt)
                     except Exception as exc:  # noqa: BLE001 - provider path terminal
+                        code, deadline_clipped = self._classify_driver_failure(
+                            attempt, exc
+                        )
                         self._fail(
                             attempt,
                             _PROVIDER_FAILURE_REASON,
-                            code=getattr(exc, "code", None),
+                            code=code,
+                            deadline_clipped=deadline_clipped,
                         )
                         return
                     self._set_state(attempt, GenerationState.VALIDATING)
@@ -576,10 +580,14 @@ class GenerationController:
                                 repair_plan=repair_plan,
                             )
                         except Exception as exc:  # noqa: BLE001 - provider path terminal
+                            code, deadline_clipped = self._classify_driver_failure(
+                                attempt, exc
+                            )
                             self._fail(
                                 attempt,
                                 _PROVIDER_FAILURE_REASON,
-                                code=getattr(exc, "code", None),
+                                code=code,
+                                deadline_clipped=deadline_clipped,
                             )
                             return
                         emit_event(
@@ -666,10 +674,40 @@ class GenerationController:
 
     @staticmethod
     def _is_provider_timeout_code(code: GenerationFailureCode) -> bool:
+        # Phase38 — LOCAL_PROVIDER_TIMEOUT (the bridge/remote-client timeout)
+        # joins the deadline-first remap path: when the overall generation
+        # deadline was the binding bound, a local provider timeout is also a
+        # deadline-clipped timeout (§24-§26).
         return code in (
             GenerationFailureCode.PROVIDER_TIMEOUT,
             GenerationFailureCode.FRONTIER_TIMEOUT,
+            GenerationFailureCode.LOCAL_PROVIDER_TIMEOUT,
         )
+
+    def _classify_driver_failure(
+        self, attempt: AttemptRecord, exc: Exception
+    ) -> tuple[GenerationFailureCode | str | None, bool]:
+        """Deterministic driver-path failure classification (§26).
+
+        Stage-driver exceptions carry a string ``code`` (usually a
+        ``GenerationFailureCode`` value). For the timeout codes, when the
+        remaining generation deadline is the operative link (``_deadline_exhausted``),
+        the terminal code is remapped to ``GENERATION_DEADLINE_EXCEEDED`` with
+        the closed ``deadlineClipped`` marker — exactly like the generic
+        provider path, which the driver exceptions previously BYPASSED.
+        Returns ``(fail_code, deadline_clipped)``.
+        """
+        raw = getattr(exc, "code", None)
+        if isinstance(raw, GenerationFailureCode):
+            code: GenerationFailureCode | str | None = raw
+        else:
+            try:
+                code = GenerationFailureCode(str(raw))
+            except (TypeError, ValueError):
+                return raw, False
+        if self._is_provider_timeout_code(code) and self._deadline_exhausted(attempt):
+            return GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED, True
+        return code, False
 
     def _invoke_provider(
         self,
@@ -783,8 +821,10 @@ class GenerationController:
             # name stays tied to the UNDERLYING cause (a provider call that
             # timed out), while ``failureCode`` carries the final code.
             provider_timeout_occurred = self._is_provider_timeout_code(code)
+            clipped = False
             if provider_timeout_occurred and self._deadline_exhausted(attempt):
                 code = GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
+                clipped = True
             # Phase31A (Track A) — INTERNAL safe error classification. A
             # ``FrontierHttpError`` may carry a closed ``safe_error_class``
             # token (e.g. SCHEMA_REJECTED for a 400/422) + the sanitized
@@ -800,6 +840,10 @@ class GenerationController:
                 stage=stage.value,
                 provider=self._provider_name,
                 failureCode=code.value,
+                # Phase38 §25 — closed deadline-clipped metadata (only when the
+                # generation deadline was the binding limiter).
+                deadlineClipped=clipped or None,
+                timeoutSource=("GENERATION_DEADLINE" if clipped else None),
                 elapsedMs=int((time.perf_counter() - _t0) * 1000),
                 configuredProviderTimeoutMs=(
                     int(self._provider_timeout_seconds * 1000)
@@ -896,8 +940,10 @@ class GenerationController:
             # Phase30-fix DEF-A — deadline-first classification (see the
             # raised-``ProviderError`` path above).
             provider_timeout_occurred = self._is_provider_timeout_code(code)
+            clipped = False
             if provider_timeout_occurred and self._deadline_exhausted(attempt):
                 code = GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
+                clipped = True
             emit_event(
                 "provider.call.timeout" if provider_timeout_occurred else "provider.call.error",
                 caseId=attempt.case_id,
@@ -905,6 +951,9 @@ class GenerationController:
                 stage=stage.value,
                 provider=self._provider_name,
                 failureCode=code.value,
+                # Phase38 §25 — closed deadline-clipped metadata.
+                deadlineClipped=clipped or None,
+                timeoutSource=("GENERATION_DEADLINE" if clipped else None),
                 elapsedMs=int((time.perf_counter() - _t0) * 1000),
                 configuredProviderTimeoutMs=(
                     int(self._provider_timeout_seconds * 1000)
@@ -1096,6 +1145,7 @@ class GenerationController:
         reason: str,
         *,
         code: GenerationFailureCode | str | None = None,
+        deadline_clipped: bool = False,
     ) -> None:
         """Terminal-fail an attempt (FAILED is terminal, §32.3)."""
         if attempt.state in (GenerationState.PUBLISHED, GenerationState.FAILED):
@@ -1110,6 +1160,12 @@ class GenerationController:
             generationAttemptId=attempt.attempt_id,
             published=False,
             failureCode=attempt.failure_code,
+            # Phase38 §25 — closed deadline-clipped metadata when the generation
+            # deadline was the binding limiter (never internal ms/layers).
+            deadlineClipped=bool(deadline_clipped) or None,
+            timeoutSource=(
+                "GENERATION_DEADLINE" if deadline_clipped else None
+            ),
             providerCallCount=attempt.budget.calls if attempt.budget is not None else None,
             repairCount=attempt.budget.repair_passes if attempt.budget is not None else None,
             regenerationCount=attempt.budget.regenerations if attempt.budget is not None else None,

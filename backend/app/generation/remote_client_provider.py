@@ -195,6 +195,11 @@ class RemoteClientProvider:
                 failureCode=GenerationFailureCode.LOCAL_PROVIDER_TIMEOUT.value,
                 latencyMs=latency_ms,
                 reasonCode="JOB_TIMEOUT",
+                # Phase38 §23 — closed machine-readable timeout source: the
+                # SERVER-side job wait fired on the authoritative server budget
+                # (the deadline-clipped metadata lives on the controller's
+                # classification path; nothing raw is ever emitted).
+                timeoutSource="SERVER_PROVIDER_TIMEOUT",
             )
             raise self._typed(
                 "local provider timed out",

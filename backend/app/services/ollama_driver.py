@@ -104,6 +104,24 @@ def _remaining_ms(attempt: Any) -> int | None:
     return int(budget.remaining_seconds() * 1000)
 
 
+def _timeout_deadline_clip(attempt: Any) -> tuple[bool, str | None]:
+    """Phase38 §25 — closed deadline-clipped timeout metadata.
+
+    ``budget.remaining_seconds() <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS`` is
+    the exact ``controller._deadline_exhausted`` rule (the effective per-call
+    provider timeout was the deadline clamp, so a timeout at this point means
+    the GENERATION DEADLINE was the binding bound — not ordinary provider
+    slowness). Returns the closed ``(deadlineClipped, timeoutSource)`` pair;
+    never raw exception text, never timing internals.
+    """
+    budget = getattr(attempt, "budget", None)
+    if budget is None or not hasattr(budget, "remaining_seconds"):
+        return False, None
+    if budget.remaining_seconds() <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS:
+        return True, "GENERATION_DEADLINE"
+    return False, None
+
+
 def _structured_output_sent(provider: Any, *, provider_label: str) -> bool:
     """Truthfully report whether THIS completed call used a structured schema.
 
@@ -3949,6 +3967,7 @@ class OllamaStageDriver:
             )
         if result.timed_out:
             self._record_stage_timing(attempt, stage, elapsed_ms, "timeout")
+            clipped, source = _timeout_deadline_clip(attempt)
             emit_event(
                 "provider.call.timeout",
                 caseId=getattr(attempt, "case_id", None),
@@ -3956,6 +3975,11 @@ class OllamaStageDriver:
                 stage=stage.value,
                 provider=self._provider_label,
                 failureCode=GenerationFailureCode.PROVIDER_TIMEOUT.value,
+                # Phase38 §25 — closed deadline-clipped metadata (the controller
+                # classifies the terminal code deterministically; the event is
+                # tied to the UNDERLYING cause).
+                deadlineClipped=clipped or None,
+                timeoutSource=source,
                 elapsedMs=elapsed_ms,
                 configuredProviderTimeoutMs=configured_timeout_ms,
                 effectiveProviderTimeoutMs=int(effective_timeout * 1000),
