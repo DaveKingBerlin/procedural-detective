@@ -22,6 +22,7 @@ import { reExportV1, serializeSavegameV1 } from "../savegame/exportV1";
 import { parseSavegameV1, utf8ByteLength } from "../savegame/savegameV1";
 import { witnessStatementKey } from "../witness/witnessStatementStore";
 import ScenePage from "./scene";
+import { interviewWitness } from "../api/client";
 
 /**
  * Phase 39 — saved-replay witness interview state (DEF-045 regression).
@@ -536,5 +537,232 @@ describe("Phase 39 — same file loaded twice starts a fresh interview every loa
         mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
       ).toContain("Daniel Weber was near the luxury hotel suite around 21:18.");
     });
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// Phase 39 — §39/§15/§27: same-replay progress persists and asks stay idempotent
+// --------------------------------------------------------------------------- //
+
+describe("Phase 39 — same-replay witness progress is preserved and idempotent", () => {
+  it("navigating away and back keeps the asked question answered (§39 — never forget on reopen)", async () => {
+    await withNoNetwork(async () => {
+      const definition = realDefinition();
+      startReplay(definition);
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+
+      // Leave the witness panel (close / navigate away)…
+      click(mounted!.container, '[data-testid="witness-close"]');
+      await flushAsync();
+      expect(mounted!.container.querySelector('[data-testid="witness-panel"]')).toBeNull();
+
+      // …and return: the IN-MEMORY session still owns this replay's progress.
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+      expect(isAnswerRendered(mounted!.container, "OBSERVATION")).toBe(true);
+
+      // The cached answer is still available without any re-ask side effect.
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+      ).toContain("Daniel Weber was near the luxury hotel suite around 21:18.");
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+    });
+  });
+
+  it("re-ask OBSERVATION: same answer, exactly one discovery, exactly one notebook line (§15/§27)", async () => {
+    await withNoNetwork(async () => {
+      const definition = realDefinition();
+      startReplay(definition);
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+      ).toContain("Daniel Weber was near the luxury hotel suite around 21:18.");
+      expect(
+        mounted!.container.querySelector('[data-testid="discovered-entry-d_ev_witness_danielweber"]'),
+      ).not.toBeNull();
+      expect(
+        mounted!.container.querySelectorAll('[data-testid^="notebook-entry-witness-statements-"]'),
+      ).toHaveLength(1);
+
+      // Re-ask: cached -> the SAME answer, NO duplicate discovery/notebook.
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+      ).toContain("Daniel Weber was near the luxury hotel suite around 21:18.");
+      expect(
+        mounted!.container.querySelectorAll('[data-testid^="notebook-entry-witness-statements-"]'),
+      ).toHaveLength(1);
+      expect(
+        mounted!.container.querySelectorAll('[data-testid^="discovered-entry-"]'),
+      ).toHaveLength(1);
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+    });
+  });
+
+  it("all six questions are OFFERED; OBSERVATION grounds the saved statement, TIME answers neutral (§4/§25)", async () => {
+    await withNoNetwork(async () => {
+      const definition = realDefinition();
+      startReplay(definition);
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+
+      // QUESTION AVAILABILITY is a separate concept from interview progress:
+      // the panel always offers the six closed question types.
+      for (const questionType of ALL_QUESTION_TYPES) {
+        expect(
+          mounted!.container.querySelector(`[data-testid="witness-question-${questionType}"]`),
+        ).not.toBeNull();
+      }
+
+      // ANSWER AVAILABILITY: the explicit saved statement grounds OBSERVATION;
+      // the other five deterministically answer NEUTRAL.
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+      ).toContain("Daniel Weber was near the luxury hotel suite");
+      click(mounted!.container, '[data-testid="witness-question-TIME"]');
+      await flushAsync();
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+      ).toBe("No. Nothing stood out to me.");
+      // INTERVIEW PROGRESS stays independent: exactly the two ASKED questions.
+      expect(answeredMarkerCount(mounted!.container)).toBe(2);
+    });
+  });
+
+  it("the answered marker is accessible: aria-pressed + visible '· answered' text (§33)", async () => {
+    await withNoNetwork(async () => {
+      const definition = realDefinition();
+      startReplay(definition);
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+
+      const question = queryRequired<HTMLButtonElement>(
+        mounted!.container,
+        '[data-testid="witness-question-OBSERVATION"]',
+      );
+      expect(question.getAttribute("aria-pressed")).toBe("false");
+
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+
+      expect(
+        queryRequired(mounted!.container, '[data-testid="witness-question-OBSERVATION"]').getAttribute(
+          "aria-pressed",
+        ),
+      ).toBe("true");
+      const marker = mounted!.container.querySelector(
+        '[data-testid="witness-question-OBSERVATION-asked"]',
+      );
+      expect(marker).not.toBeNull();
+      expect(marker!.textContent).toContain("· answered");
+    });
+  });
+
+  it("witness answers NEVER expose ReplayTruthV1 (§9/§30/§31)", async () => {
+    await withNoNetwork(async () => {
+      const definition = realDefinition();
+      startReplay(definition);
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      // The honest player-safe statement IS rendered for the asked question.
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+      ).toContain("Daniel Weber was near the luxury hotel suite around 21:18.");
+
+      // The WITNESS ANSWER surfaces (the panel + the notebook Witness
+      // statements group) must never expose ReplayTruthV1. The "truth" values
+      // (Elena Fischer / Antique Brass Letter Opener / blackmail) appear in the
+      // PUBLIC candidate universe (the lawful accusation options) — the leak
+      // boundary is being proven HERE only on the answer sources.
+      const panelText = mounted!.container.querySelector('[data-testid="witness-panel"]')?.textContent ?? "";
+      const witnessGroupText =
+        mounted!.container.querySelector('[data-testid="notebook-group-witness-statements"]')?.textContent ??
+        "";
+      for (const target of [panelText, witnessGroupText]) {
+        expect(target).not.toContain("Elena Fischer");
+        expect(target).not.toContain("Antique Brass Letter Opener");
+        expect(target).not.toContain("blackmail over a hidden affair");
+      }
+
+      click(mounted!.container, '[data-testid="witness-question-TIME"]');
+      await flushAsync();
+      click(mounted!.container, '[data-testid="witness-question-LOCATION"]');
+      await flushAsync();
+      const panelTextAfterNeutrals =
+        mounted!.container.querySelector('[data-testid="witness-panel"]')?.textContent ?? "";
+      expect(panelTextAfterNeutrals).not.toContain("Elena Fischer");
+      expect(panelTextAfterNeutrals).not.toContain("Antique Brass Letter Opener");
+      expect(panelTextAfterNeutrals).not.toContain("blackmail over a hidden affair");
+    });
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// Phase 39 — live playthrough persistence is UNCHANGED (PT-* only)
+// --------------------------------------------------------------------------- //
+
+describe("Phase 39 — live playthrough witness persistence stays byte-identical", () => {
+  it("a live ask persists to pd_witness_statements_v1:PT-* and restores on reload (no replay)", async () => {
+    mountScene();
+    await flushAsync();
+    await waitForReady(mounted!.container);
+
+    // Live session (no replay active): Emily Reed is on the mocked bootstrap
+    // (witness id `witness_emily_reed`).
+    click(mounted!.container, '[data-testid="witness-witness_emily_reed"]');
+    await flushAsync();
+    click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+    await flushAsync();
+    expect(interviewWitness).toHaveBeenCalledTimes(1);
+    expect(answeredMarkerCount(mounted!.container)).toBe(1);
+
+    // The player-known cache IS persisted under the LIVE PT-* namespace.
+    const stored = window.localStorage.getItem("pd_witness_statements_v1:PT-test-0001");
+    expect(stored).not.toBeNull();
+    expect(stored).toContain("OBSERVATION");
+
+    // Reload the live playthrough: the bounded cache is RESTORED (same PT-*
+    // key) — the asked marker survives without any interview re-POST.
+    unmountScene();
+    mountScene();
+    await flushAsync();
+    await waitForReady(mounted!.container);
+    click(mounted!.container, '[data-testid="witness-witness_emily_reed"]');
+    await flushAsync();
+    expect(isAnswerRendered(mounted!.container, "OBSERVATION")).toBe(true);
+    expect(answeredMarkerCount(mounted!.container)).toBe(1);
+    expect(interviewWitness).toHaveBeenCalledTimes(1);
   });
 });
