@@ -104,20 +104,44 @@ def _remaining_ms(attempt: Any) -> int | None:
     return int(budget.remaining_seconds() * 1000)
 
 
-def _timeout_deadline_clip(attempt: Any) -> tuple[bool, str | None]:
+def _timeout_deadline_clip(
+    attempt: Any,
+    issued_timeout_seconds: float | None = None,
+    configured_timeout_seconds: float | None = None,
+) -> tuple[bool, str | None]:
     """Phase38 §25 — closed deadline-clipped timeout metadata.
 
-    ``budget.remaining_seconds() <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS`` is
-    the exact ``controller._deadline_exhausted`` rule (the effective per-call
-    provider timeout was the deadline clamp, so a timeout at this point means
-    the GENERATION DEADLINE was the binding bound — not ordinary provider
-    slowness). Returns the closed ``(deadlineClipped, timeoutSource)`` pair;
+    Phase38 DEF-094 — the classification compares the ACTUAL server-issued
+    effective per-call timeout against the configured provider timeout: when
+    the deadline was the binding bound (remaining deadline at dispatch below
+    the configured timeout) the issued budget is below ``configured - margin``,
+    so a timeout at that budget means the GENERATION DEADLINE was the binding
+    limiter — never ordinary provider slowness. This is robust against the
+    transport's documented reserve firing ~250ms early (remaining still >
+    0.1s) and against float epsilon at the exact boundary
+    (``remaining == 0.10000000000002274``). The legacy remaining-margin rule
+    (``budget.remaining_seconds() <= 0.1s``) is kept ONLY as the no-carrier
+    fallback. Returns the closed ``(deadlineClipped, timeoutSource)`` pair;
     never raw exception text, never timing internals.
     """
+    if issued_timeout_seconds is not None and configured_timeout_seconds is not None:
+        try:
+            issued = float(issued_timeout_seconds)
+            configured = float(configured_timeout_seconds)
+        except (TypeError, ValueError):
+            issued = None
+        if issued is not None and (
+            configured - PROVIDER_CALL_SAFETY_MARGIN_SECONDS - issued > 1e-9
+        ):
+            return True, "GENERATION_DEADLINE"
+        # An ample-deadline call issued the FULL configured timeout (or within
+        # the classification margin of it): an ordinary provider timeout,
+        # never a deadline clip.
+        return False, None
     budget = getattr(attempt, "budget", None)
     if budget is None or not hasattr(budget, "remaining_seconds"):
         return False, None
-    if budget.remaining_seconds() <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS:
+    if budget.remaining_seconds() <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS + 1e-9:
         return True, "GENERATION_DEADLINE"
     return False, None
 
@@ -2500,6 +2524,14 @@ class OllamaAssetSpecProvider:
             raise StageDriverProviderFailure(
                 "provider request timed out",
                 code=GenerationFailureCode.PROVIDER_TIMEOUT,
+                # Phase38 DEF-094 — carry the ACTUAL server-issued budget and
+                # the configured timeout so the controller classifies the
+                # deadline clip against the issued value.
+                issued_timeout_seconds=effective_timeout,
+                configured_timeout_seconds=(
+                    float(self._configured_timeout_seconds)
+                    if self._configured_timeout_seconds is not None else None
+                ),
             )
         if result.error is not None:
             code = infer_failure_code(result.error)
@@ -3923,6 +3955,16 @@ class OllamaStageDriver:
         try:
             result: ProviderResult = self._invoke(provider, request)
         except StageDriverProviderFailure as exc:
+            # Phase38 DEF-094 — a nested transport (remote-client bridge,
+            # direct Ollama, ...) that times out carries the ACTUAL budget it
+            # was dispatched with. Backfill the ACTUAL server-issued effective
+            # timeout + configured provider timeout when the carrier did not
+            # attach it, so the controller always classifies against the
+            # issued budget (robust to the transport reserve and float
+            # epsilon) — never a remaining-seconds float check.
+            if getattr(exc, "issued_timeout_seconds", None) is None:
+                exc.issued_timeout_seconds = effective_timeout
+                exc.configured_timeout_seconds = self._configured_provider_timeout()
             elapsed_ms = int((time.perf_counter() - _t0) * 1000)
             deadline_after_ms = _remaining_ms(attempt)
             self._record_stage_timing(attempt, stage, elapsed_ms, "error")
@@ -3967,7 +4009,11 @@ class OllamaStageDriver:
             )
         if result.timed_out:
             self._record_stage_timing(attempt, stage, elapsed_ms, "timeout")
-            clipped, source = _timeout_deadline_clip(attempt)
+            clipped, source = _timeout_deadline_clip(
+                attempt,
+                issued_timeout_seconds=effective_timeout,
+                configured_timeout_seconds=self._configured_provider_timeout(),
+            )
             emit_event(
                 "provider.call.timeout",
                 caseId=getattr(attempt, "case_id", None),
@@ -3994,6 +4040,12 @@ class OllamaStageDriver:
             raise StageDriverProviderFailure(
                 "provider request timed out",
                 code=GenerationFailureCode.PROVIDER_TIMEOUT,
+                # Phase38 DEF-094 — carry the ACTUAL server-issued budget and
+                # the configured provider timeout so the controller classifies
+                # the deadline clip against the issued value (robust to the
+                # reserve firing early and float epsilon at the boundary).
+                issued_timeout_seconds=effective_timeout,
+                configured_timeout_seconds=self._configured_provider_timeout(),
             )
         if result.error is not None:
             code = infer_failure_code(result.error)

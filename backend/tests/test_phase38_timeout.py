@@ -38,23 +38,37 @@ _PROMPT = (
 class _TimeoutRaisingDriver:
     """Scripted stage driver: consumes ``wait_seconds`` of the manual clock,
     then raises a provider TIMEOUT — the exact shape a real local-AI
-    (bridge/direct-ollama) call produces when its job budget expires."""
+    (bridge/direct-ollama) call produces when its job budget expires.
+
+    The ``issued_timeout_seconds`` / ``configured_timeout_seconds`` fields
+    mirror the Phase38 DEF-094 carrier the production driver attaches to every
+    timeout failure (the ACTUAL server-issued effective per-call budget + the
+    configured provider timeout). ``None`` models a no-carrier legacy carrier
+    (kept for the pre-DEF-094 margin-rule tests).
+    """
 
     def __init__(
         self,
         clock: ManualClock,
         code: GenerationFailureCode = GenerationFailureCode.LOCAL_PROVIDER_TIMEOUT,
         wait_seconds: float = 0.0,
+        issued_timeout_seconds: float | None = None,
+        configured_timeout_seconds: float | None = None,
     ) -> None:
         self._clock = clock
         self._code = code
         self._wait_seconds = wait_seconds
+        self._issued = issued_timeout_seconds
+        self._configured = configured_timeout_seconds
 
     def run_into(self, attempt, diagnostics=(), repair_plan=None) -> None:
         if self._wait_seconds:
             self._clock.advance(self._wait_seconds)
         raise StageDriverProviderFailure(
-            "local provider timed out", code=self._code
+            "local provider timed out",
+            code=self._code,
+            issued_timeout_seconds=self._issued,
+            configured_timeout_seconds=self._configured,
         )
 
 
@@ -220,6 +234,107 @@ def test_regular_provider_timeout_still_deadline_remaps_in_driver_path(caplog):
         for e in caplog.records
         if getattr(e, "pd_event", None) == "generation.failed"
     )
+
+
+def test_deadline_clipped_local_timeout_with_reserve_firing_early_is_deadline(
+    caplog,
+):
+    """DEF-094 (ADV-38-02) — the §37/§38 REAL SHAPE (a): the generation
+    deadline is nearly exhausted (remaining 6281ms) so the server issues an
+    effective per-call budget of 6181ms (``min(configured 180s, remaining -
+    100ms)``). The local bridge's documented 250ms inner reserve fires EARLY at
+    5.931s — leaving 0.35s (> 0.1s) of deadline at raise time. Classification
+    must compare the ACTUAL server-issued budget (6.181s < 180s configured)
+    and report GENERATION_DEADLINE_EXCEEDED + deadlineClipped — never an
+    ordinary LOCAL_PROVIDER_TIMEOUT."""
+    clock = ManualClock(start_time=0.0)
+    driver = _TimeoutRaisingDriver(
+        clock,
+        wait_seconds=5.931,  # the inner Ollama-HTTP read fires ~250ms early
+        issued_timeout_seconds=6.181,
+        configured_timeout_seconds=180.0,
+    )
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        # 300 - 6.281 = 293.719s elapsed before dispatch -> 6281ms remain.
+        _controller, record, _handle = _controller_for(
+            clock,
+            driver,
+            provider_timeout_seconds=180.0,
+            advance_before=300.0 - 6.281,
+        )
+    assert record.state is GenerationState.FAILED
+    assert record.failure_code == "GENERATION_DEADLINE_EXCEEDED"
+    failed = [
+        e for e in caplog.records
+        if getattr(e, "pd_event", None) == "generation.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].pd_fields["failureCode"] == "GENERATION_DEADLINE_EXCEEDED"
+    assert failed[0].pd_fields["deadlineClipped"] is True
+    assert failed[0].pd_fields["timeoutSource"] == "GENERATION_DEADLINE"
+
+
+def test_deadline_clipped_local_timeout_exact_boundary_is_deadline(caplog):
+    """DEF-094 (ADV-38-02) — the §37/§38 REAL SHAPE (b): the bridge OUTER wait
+    fires at the exact issued budget (6.181s), leaving
+    ``remaining == 0.10000000000002274`` (float epsilon ABOVE 0.1s). The old
+    ``remaining <= 0.1`` rule MISSED this; the issued-budget comparison
+    (6.181s < 180s) classifies it as GENERATION_DEADLINE_EXCEEDED."""
+    clock = ManualClock(start_time=0.0)
+    driver = _TimeoutRaisingDriver(
+        clock,
+        wait_seconds=6.181,  # the outer bridge job wait fires at the budget
+        issued_timeout_seconds=6.181,
+        configured_timeout_seconds=180.0,
+    )
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        _controller, record, _handle = _controller_for(
+            clock,
+            driver,
+            provider_timeout_seconds=180.0,
+            advance_before=300.0 - 6.281,
+        )
+    assert record.state is GenerationState.FAILED
+    assert record.failure_code == "GENERATION_DEADLINE_EXCEEDED"
+    failed = [
+        e for e in caplog.records
+        if getattr(e, "pd_event", None) == "generation.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].pd_fields["failureCode"] == "GENERATION_DEADLINE_EXCEEDED"
+    assert failed[0].pd_fields["deadlineClipped"] is True
+    assert failed[0].pd_fields["timeoutSource"] == "GENERATION_DEADLINE"
+
+
+def test_ordinary_timeout_with_full_issued_budget_stays_local_timeout(caplog):
+    """DEF-094 control: the server issued the FULL configured provider timeout
+    (180s == 180s — the deadline was NOT the binding bound; ample deadline
+    remained at dispatch). The provider's own timeout expires -> the canonical
+    LOCAL_PROVIDER_TIMEOUT is kept with NO deadline-clip marker."""
+    clock = ManualClock(start_time=0.0)
+    driver = _TimeoutRaisingDriver(
+        clock,
+        wait_seconds=0.0,
+        issued_timeout_seconds=180.0,
+        configured_timeout_seconds=180.0,
+    )
+    with caplog.at_level(logging.INFO, logger="procedural-detective"):
+        _controller, record, _handle = _controller_for(
+            clock,
+            driver,
+            provider_timeout_seconds=180.0,
+            advance_before=0.0,  # 300 s of deadline remain at dispatch
+        )
+    assert record.state is GenerationState.FAILED
+    assert record.failure_code == "LOCAL_PROVIDER_TIMEOUT"
+    failed = [
+        e for e in caplog.records
+        if getattr(e, "pd_event", None) == "generation.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].pd_fields["failureCode"] == "LOCAL_PROVIDER_TIMEOUT"
+    assert failed[0].pd_fields.get("deadlineClipped") is None
+    assert failed[0].pd_fields.get("timeoutSource") is None
 
 
 # --------------------------------------------------------------------------- #

@@ -91,6 +91,24 @@ def _remaining_ms(attempt: AttemptRecord) -> int | None:
 
 _PROVIDER_FAILURE_REASON = "provider failure: generator unavailable"
 
+# Phase38 DEF-094 — tolerance for comparing the ACTUAL server-issued effective
+# per-call timeout against the configured provider timeout minus the documented
+# classification margin. The issued value is ``min(configured, remaining -
+# margin)``; when the deadline was the binding bound
+# (``remaining < configured``) the issued float is BELOW ``configured - margin``
+# by more than this tiny bound, and the opposite case (ample deadline) issues
+# >= ``configured - margin`` — so a strict ``>`` comparison with this epsilon is
+# immune to float representation noise at the exact boundary.
+_BOUND_EPSILON = 1e-9
+
+# Phase38 DEF-098 — the safe event writer's fixed per-field item cap for
+# tuple/list fields (``app.core.observability.emit_event`` keeps at most 32
+# items per tuple). ``stageTimingTruncated`` marks an attempt whose recorded
+# stage-timing tokens exceed this cap, so §30 accounting is never SILENTLY
+# truncated (``stageTimingCount`` stays exact and reconciles with
+# ``providerCallCount``).
+_STAGE_TIMING_EVENT_ITEM_CAP = 32
+
 
 @dataclass(frozen=True)
 class GenerationHandle:
@@ -411,6 +429,9 @@ class GenerationController:
         attempt.state = GenerationState.PUBLISHED
         attempt.published = payload
         self._release_admission(attempt)
+        summary_summary, summary_count, summary_truncated = self._stage_timing_observability(
+            attempt
+        )
         emit_event(
             "generation.published",
             caseId=attempt.case_id,
@@ -431,7 +452,9 @@ class GenerationController:
             configuredCoreProviderCallBudget=(
                 attempt.budget.max_core_calls if attempt.budget is not None else None
             ),
-            stageTimingSummary=self._driver_stage_timing_summary(attempt),
+            stageTimingSummary=summary_summary,
+            stageTimingCount=summary_count,
+            stageTimingTruncated=summary_truncated or None,
         )
         return PublishResult(True, published=payload)
 
@@ -666,11 +689,64 @@ class GenerationController:
         provider timeout was the binding bound (ample deadline remains), the
         canonical provider-timeout code (``PROVIDER_TIMEOUT`` /
         ``FRONTIER_TIMEOUT``) is kept. Deterministic; never mutates state.
+
+        The remaining-seconds check here is the LEGACY no-carrier fallback
+        (Phase38 DEF-094). Providers/drivers that dispatch with an explicit
+        effective timeout attach it to the failure, and the robust
+        issued-budget comparison in ``_call_budget_was_deadline_clipped``
+        takes over — see ``_classify_driver_failure`` and ``_invoke_provider``.
         """
         budget = attempt.budget
         if budget is None:
             return False
-        return budget.remaining_seconds() <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS
+        return (
+            budget.remaining_seconds()
+            <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS + _BOUND_EPSILON
+        )
+
+    def _call_budget_was_deadline_clipped(
+        self,
+        attempt: AttemptRecord,
+        issued_timeout_seconds: float | None,
+        configured_timeout_seconds: float | None,
+    ) -> bool:
+        """Phase38 DEF-094 — robust deadline-clip classification.
+
+        Compares the ACTUAL server-issued effective per-call timeout against
+        the configured provider timeout. The server issues
+        ``min(configured, remaining - 0.1s)``; the generation deadline was the
+        BINDING bound exactly when the remaining deadline at dispatch was
+        below the configured timeout, which is exactly
+        ``issued < configured - margin`` (margin = the documented
+        classification reserve ``PROVIDER_CALL_SAFETY_MARGIN_SECONDS``):
+
+            issued = remaining - margin  (deadline clamp active)
+            issued < configured - margin  <=>  remaining < configured
+
+        So a timeout at that budget is ``GENERATION_DEADLINE_EXCEEDED`` even
+        when the transport's documented reserve fired ~250ms early (remaining
+        > 0.1s at raise time) or when float noise leaves
+        ``remaining == 0.10000000000002274 > 0.1`` at the exact boundary. An
+        attempt with ample deadline (``remaining >= configured`` — the issued
+        budget equals/approaches the full configured timeout) keeps the
+        canonical provider-timeout code.
+
+        Callers without an issued budget (no-carrier carriers, scalar paths
+        without a configured timeout) fall back to the legacy remaining-margin
+        rule (``_deadline_exhausted``), preserving the pre-DEF-094 behavior.
+        Deterministic; never mutates state.
+        """
+        if issued_timeout_seconds is not None and configured_timeout_seconds is not None:
+            try:
+                return (
+                    float(configured_timeout_seconds)
+                    - PROVIDER_CALL_SAFETY_MARGIN_SECONDS
+                    - float(issued_timeout_seconds)
+                    > _BOUND_EPSILON
+                )
+            except (TypeError, ValueError):
+                return False
+        return self._deadline_exhausted(attempt)
 
     @staticmethod
     def _is_provider_timeout_code(code: GenerationFailureCode) -> bool:
@@ -691,7 +767,9 @@ class GenerationController:
 
         Stage-driver exceptions carry a string ``code`` (usually a
         ``GenerationFailureCode`` value). For the timeout codes, when the
-        remaining generation deadline is the operative link (``_deadline_exhausted``),
+        ACTUAL server-issued per-call budget was clamped by the generation
+        deadline (the driver/providers attach the issued + configured timeout
+        pair; the legacy remaining-margin rule is the no-carrier fallback),
         the terminal code is remapped to ``GENERATION_DEADLINE_EXCEEDED`` with
         the closed ``deadlineClipped`` marker — exactly like the generic
         provider path, which the driver exceptions previously BYPASSED.
@@ -705,8 +783,15 @@ class GenerationController:
                 code = GenerationFailureCode(str(raw))
             except (TypeError, ValueError):
                 return raw, False
-        if self._is_provider_timeout_code(code) and self._deadline_exhausted(attempt):
-            return GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED, True
+        if self._is_provider_timeout_code(code):
+            issued = getattr(exc, "issued_timeout_seconds", None)
+            configured = getattr(exc, "configured_timeout_seconds", None)
+            if configured is None:
+                configured = self._provider_timeout_seconds
+            if self._call_budget_was_deadline_clipped(
+                attempt, issued, configured
+            ):
+                return GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED, True
         return code, False
 
     def _invoke_provider(
@@ -814,15 +899,17 @@ class GenerationController:
                     else GenerationFailureCode.PROVIDER_UNAVAILABLE
                 )
             # Phase30-fix DEF-A — deterministic classification: when the
-            # remaining generation deadline was the operative per-call bound
-            # (it is now exhausted down to the safety margin), a provider
+            # ACTUAL server-issued effective per-call budget was clamped by
+            # the generation deadline (it was the operative bound), a provider
             # timeout is classified as the generation-deadline failure;
             # otherwise the canonical provider-timeout code is kept. The event
             # name stays tied to the UNDERLYING cause (a provider call that
             # timed out), while ``failureCode`` carries the final code.
             provider_timeout_occurred = self._is_provider_timeout_code(code)
             clipped = False
-            if provider_timeout_occurred and self._deadline_exhausted(attempt):
+            if provider_timeout_occurred and self._call_budget_was_deadline_clipped(
+                attempt, effective_timeout, self._provider_timeout_seconds
+            ):
                 code = GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
                 clipped = True
             # Phase31A (Track A) — INTERNAL safe error classification. A
@@ -941,7 +1028,9 @@ class GenerationController:
             # raised-``ProviderError`` path above).
             provider_timeout_occurred = self._is_provider_timeout_code(code)
             clipped = False
-            if provider_timeout_occurred and self._deadline_exhausted(attempt):
+            if provider_timeout_occurred and self._call_budget_was_deadline_clipped(
+                attempt, effective_timeout, self._provider_timeout_seconds
+            ):
                 code = GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED
                 clipped = True
             emit_event(
@@ -1154,6 +1243,9 @@ class GenerationController:
         attempt.reason = reason
         attempt.failure_code = public_failure_code(code) or infer_failure_code(reason).value
         attempt.state = GenerationState.FAILED
+        summary_summary, summary_count, summary_truncated = self._stage_timing_observability(
+            attempt
+        )
         emit_event(
             "generation.failed",
             caseId=attempt.case_id,
@@ -1180,7 +1272,9 @@ class GenerationController:
             ),
             deadlineRemainingMs=_remaining_ms(attempt),
             totalElapsedMs=self._elapsed_ms(attempt),
-            stageTimingSummary=self._driver_stage_timing_summary(attempt),
+            stageTimingSummary=summary_summary,
+            stageTimingCount=summary_count,
+            stageTimingTruncated=summary_truncated or None,
         )
         _dt(
             "attempt.fail reason=%r state=%s calls=%s deadlineRemainingMs=%s"
@@ -1205,14 +1299,44 @@ class GenerationController:
 
     def _driver_stage_timing_summary(self, attempt: AttemptRecord) -> tuple[str, ...]:
         """Bounded safe timing summary exposed by structured stage drivers."""
+        return self._stage_timing_observability(attempt)[0]
+
+    def _stage_timing_observability(
+        self, attempt: AttemptRecord
+    ) -> tuple[tuple[str, ...], int, bool]:
+        """Phase38 DEF-098 — lossless-or-explicit stage-timing accounting.
+
+        Returns ``(emitted_summary, stageTimingCount, stageTimingTruncated)``:
+
+        - ``emitted_summary`` is sliced to the attempt's LEGAL provider-call
+          envelope (``budget.max_calls``; the driver's recorder caps there
+          too), so the driver-level summary is loss-less and always reconciles
+          with ``providerCallCount`` (one token per REAL budgeted call).
+        - ``stageTimingCount`` is the EXACT recorded token count (an integer,
+          never truncated by the safe event writer).
+        - ``stageTimingTruncated`` is True exactly when the event writer's
+          bounded per-field item cap (32) drops any recorded token from the
+          emitted tuple — so a >32-call attempt is EXPLICITLY marked, never
+          silently truncated (§30 accounting stays reconcilable at scale).
+        """
         getter = getattr(self._driver, "stage_timing_summary", None)
         if not callable(getter):
-            return ()
+            return (), 0, False
         try:
             summary = tuple(getter(attempt.attempt_id))
         except Exception:  # noqa: BLE001 - observability never breaks lifecycle
-            return ()
-        return tuple(str(item)[:120] for item in summary[:32])
+            return (), 0, False
+        count = len(summary)
+        budget = attempt.budget
+        max_calls = getattr(budget, "max_calls", None) if budget is not None else None
+        cap = max_calls if isinstance(max_calls, int) and max_calls > 0 else _STAGE_TIMING_EVENT_ITEM_CAP
+        # The safe event writer keeps at most ``_STAGE_TIMING_EVENT_ITEM_CAP``
+        # items per tuple field, so the emitted summary is capped there too;
+        # anything trimmed is EXPLICITLY marked below (never silent).
+        cap = min(cap, _STAGE_TIMING_EVENT_ITEM_CAP)
+        emitted = tuple(str(item)[:120] for item in summary[:cap])
+        truncated = count > len(emitted)
+        return emitted, count, truncated
 
     def _release_admission(self, attempt: AttemptRecord) -> None:
         if attempt._admission_released:
