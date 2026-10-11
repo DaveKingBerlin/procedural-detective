@@ -1202,7 +1202,14 @@
       "murdererName": "Emily Reed",
       "resolutionType": "HOMICIDE",
       "weaponId": "kitchen_knife",
-      "weaponName": "Kitchen Knife"
+      "weaponName": "Kitchen Knife",
+      "witnessDeceptions": [
+        {
+          "witnessId": "emily_reed",
+          "witnessName": "Emily Reed",
+          "deceptionReason": "SELF_PROTECTION"
+        }
+      ]
     },
     "scene": {
       "environmentId": "apartment",

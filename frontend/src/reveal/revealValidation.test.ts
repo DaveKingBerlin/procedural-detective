@@ -128,6 +128,76 @@ describe("parseRevealResponse — Phase 41 resolution-aware truth", () => {
     accusation.murdererId = "suspect_alpha";
     expect(() => parseRevealResponse(raw)).toThrow(/murdererId/);
   });
+
+  it("Phase 41 (ADV-41-03) — a REAL server-shaped SUICIDE reveal parses (resolutionType on player.accusation + null murderer)", () => {
+    // The exact CORRECTED server DTO for a SUICIDE playthrough: the player
+    // accusation block echoes `resolutionType:"SUICIDE"` + `murdererId:null`
+    // (never ""), and the truth block carries the closed resolution with null
+    // murderer labels. Pre-fix the strict parser rejected the ""/missing
+    // resolution shapes this replaces.
+    const serverReveal = JSON.parse(
+      JSON.stringify({
+        playthroughId: "PT-suicide-01",
+        caseId: "CASE-suicide-01",
+        caseVersion: 1,
+        status: "REVEALED",
+        truth: {
+          resolutionType: "SUICIDE",
+          murdererId: null,
+          murdererName: null,
+          motiveId: "motive_beta",
+          motiveLabel: "Jealousy toward the victim",
+          weaponId: "weapon_beta",
+          weaponName: "Letter opener",
+          crimeTime: "2026-09-11T21:45:00+02:00",
+          witnessDeceptions: [
+            { witnessId: "witness_cora", witnessName: "Cora Blake", deceptionReason: "HIDE_UNRELATED_SECRET" },
+          ],
+        },
+        player: {
+          accusation: {
+            resolutionType: "SUICIDE",
+            murdererId: null,
+            motiveId: "motive_beta",
+            weaponId: "weapon_beta",
+            crimeTime: "21:45:00",
+          },
+        },
+        result: {
+          murdererCorrect: true,
+          motiveCorrect: true,
+          weaponCorrect: true,
+          timeCorrect: true,
+          overall: "solved",
+        },
+        score: { correctDimensions: 4, totalDimensions: 4 },
+        timeline: [],
+        explanation: { evidence: [], dimensions: { who: [], why: [], weapon: [], when: [] } },
+      }),
+    );
+    const parsed = parseRevealResponse(serverReveal);
+    expect(parsed.truth.resolutionType).toBe("SUICIDE");
+    expect(parsed.truth.murdererId).toBeNull();
+    expect(parsed.truth.murdererName).toBeNull();
+    expect(parsed.player.accusation.resolutionType).toBe("SUICIDE");
+    expect(parsed.player.accusation.murdererId).toBeNull();
+    // The post-reveal deceptive-witness block survives the trust boundary.
+    expect(parsed.truth.witnessDeceptions).toEqual([
+      { witnessId: "witness_cora", witnessName: "Cora Blake", deceptionReason: "HIDE_UNRELATED_SECRET" },
+    ]);
+  });
+
+  it("Phase 41 (ADV-41-03) — a HOMICIDE/LEGACY reveal keeps the unchanged player-accusation echo", () => {
+    // A HOMICIDE/legacy reveal has NO resolutionType on the player block and a
+    // NON-EMPTY murdererId; the parser must keep accepting it byte-identically.
+    const parsed = parseRevealResponse(makeRevealResponse());
+    expect("resolutionType" in parsed.player.accusation).toBe(false);
+    expect(parsed.player.accusation.murdererId).toBe("suspect_alpha");
+    const empty = makeRevealResponse() as unknown as Record<string, unknown>;
+    const accusation = (empty.player as Record<string, unknown>).accusation as Record<string, unknown>;
+    accusation.murdererId = ""; // the SUICIDE-era "" sentinel must NOT be accepted on a non-SUICIDE block
+    expect(() => parseRevealResponse(empty)).toThrow(/murdererId/);
+  });
 });
 
 describe("parseRevealResponse — Phase 18C optional dimensions block", () => {
@@ -182,5 +252,49 @@ describe("parseRevealResponse — Phase 18C optional dimensions block", () => {
     };
     const parsed = parseRevealResponse(raw);
     expect(Object.keys(parsed.explanation.dimensions!.who[0]).sort()).toEqual(["evidenceId", "point", "title"]);
+  });
+});
+
+describe("parseRevealResponse — Phase 41 witnessDeceptions block (ADV-41-04)", () => {
+  function withDeceptions(witnessDeceptions: unknown): unknown {
+    const raw = makeSuicideReveal() as unknown as Record<string, unknown>;
+    (raw.truth as Record<string, unknown>).witnessDeceptions = witnessDeceptions;
+    return raw;
+  }
+
+  it("an ABSENT witnessDeceptions block (no liar / pre-41 server) parses fine — never throws", () => {
+    const raw = makeSuicideReveal() as unknown as Record<string, unknown>;
+    delete (raw.truth as Record<string, unknown>).witnessDeceptions;
+    const parsed = parseRevealResponse(raw);
+    expect(parsed.truth.witnessDeceptions).toBeUndefined();
+  });
+
+  it("a present block with valid entries is preserved (post-reveal only)", () => {
+    const parsed = parseRevealResponse(
+      withDeceptions([
+        { witnessId: "witness_cora", witnessName: "Cora Blake", deceptionReason: "HIDE_UNRELATED_SECRET" },
+        { witnessId: "witness_dan", witnessName: "Dan Wu", deceptionReason: null },
+      ]),
+    );
+    expect(parsed.truth.witnessDeceptions).toEqual([
+      { witnessId: "witness_cora", witnessName: "Cora Blake", deceptionReason: "HIDE_UNRELATED_SECRET" },
+      { witnessId: "witness_dan", witnessName: "Dan Wu", deceptionReason: null },
+    ]);
+  });
+
+  it("a malformed entry fails closed (never silently dropped)", () => {
+    expect(() => parseRevealResponse(withDeceptions("nope"))).toThrow(/array/);
+    expect(() => parseRevealResponse(withDeceptions([{ witnessId: "a" }]))).toThrow(/witnessName/);
+    expect(() => parseRevealResponse(withDeceptions([{ witnessName: "B", witnessId: "a", deceptionReason: 42 }]))).toThrow(/deceptionReason/);
+    expect(() => parseRevealResponse(withDeceptions([{ witnessName: "B", witnessId: "a", truthfulness: "DECEPTIVE" }]))).toThrow(/not an allowed key/);
+  });
+
+  it("an absent deceptionReason is legal (the reason is OPTIONAL on the server DTO)", () => {
+    const parsed = parseRevealResponse(
+      withDeceptions([{ witnessId: "witness_cora", witnessName: "Cora Blake" }]),
+    );
+    expect(parsed.truth.witnessDeceptions).toEqual([
+      { witnessId: "witness_cora", witnessName: "Cora Blake", deceptionReason: null },
+    ]);
   });
 });

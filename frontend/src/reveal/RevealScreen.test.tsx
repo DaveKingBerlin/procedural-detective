@@ -188,6 +188,60 @@ describe("Phase 41 — SUICIDE reveal rendering", () => {
   });
 });
 
+describe("Phase 41 — witness-deceptions block (ADV-41-04, post-reveal only)", () => {
+  it("renders the deceptive-witness explanations as inert plain text when present", () => {
+    const reveal = makeSuicideReveal({
+      truth: {
+        resolutionType: "SUICIDE",
+        murdererId: null,
+        murdererName: null,
+        motiveId: "motive_beta",
+        motiveLabel: "Jealousy toward the victim",
+        weaponId: "weapon_beta",
+        weaponName: "Letter opener",
+        crimeTime: CANNED_REVEAL_CRIME_TIME,
+        witnessDeceptions: [
+          { witnessId: "witness_cora", witnessName: "Cora Blake", deceptionReason: "HIDE_UNRELATED_SECRET" },
+        ],
+      },
+    });
+    const html = markup(reveal);
+    expect(html).toContain('data-testid="reveal-deceptions"');
+    expect(html).toContain("Witness deceits");
+    expect(html).toContain("Cora Blake");
+    expect(html).toContain("HIDE_UNRELATED_SECRET");
+    // Inert: hostile-looking reasons stay escaped text, never markup.
+    const hostile = makeSuicideReveal({
+      truth: {
+        resolutionType: "SUICIDE",
+        murdererId: null,
+        murdererName: null,
+        motiveId: "motive_beta",
+        motiveLabel: "x",
+        weaponId: "weapon_beta",
+        weaponName: "y",
+        crimeTime: CANNED_REVEAL_CRIME_TIME,
+        witnessDeceptions: [
+          { witnessId: "w1", witnessName: "<script>alert(1)</script>", deceptionReason: "<img/src=x>" },
+        ],
+      },
+    });
+    const hostileHtml = markup(hostile);
+    expect(hostileHtml).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(hostileHtml).not.toContain("<script>");
+    expect(hostileHtml).not.toContain("<img");
+  });
+
+  it("renders NO deceptions block when the reveal carries none (or null)", () => {
+    expect(markup(makeSuicideReveal())).not.toContain('data-testid="reveal-deceptions"');
+    const nullBlock = makeSuicideReveal() as unknown as Record<string, unknown>;
+    (nullBlock.truth as Record<string, unknown>).witnessDeceptions = null;
+    expect(markup(nullBlock as unknown as Parameters<typeof RevealScreen>[0]["reveal"])).not.toContain(
+      'data-testid="reveal-deceptions"',
+    );
+  });
+});
+
 describe("reveal markup surface", () => {
   it("exposes the reveal-screen test id and the truth/player/result sections", () => {
     const html = markup(makeRevealResponse());

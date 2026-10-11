@@ -196,6 +196,32 @@ describe("Phase 41 — witness-murderer replay", () => {
     expect(reloaded.replayTruth.murdererId).toBe("emily_reed");
     expect(reloaded.candidates.finalTargets?.length).toBe(4);
   });
+
+  it("the witness murderer's DECEPTION is preserved by re-export and surfaces ONLY at reveal (ADV-41-04)", () => {
+    // A real export of a witness-murderer case carries the OPTIONAL
+    // witnessDeceptions list (the lying witness IS the killer, SELF_PROTECTION).
+    const definition = witnessDefinition();
+    expect(definition.replayTruth.witnessDeceptions).toEqual([
+      { witnessId: "emily_reed", witnessName: "Emily Reed", deceptionReason: "SELF_PROTECTION" },
+    ]);
+    // Pre-reveal: the fresh bootstrap never leaks the deception list.
+    const state = new FreshReplayState(definition);
+    const bootstrap = JSON.stringify(state.freshBootstrap());
+    expect(bootstrap).not.toContain("witnessDeceptions");
+    expect(bootstrap).not.toContain("SELF_PROTECTION");
+    // Post-reveal: the deceptions surface exactly like the server reveal DTO.
+    state.submitAccusation({
+      resolutionType: "HOMICIDE",
+      murdererId: "emily_reed",
+      motiveId: "cover_up_embezzlement",
+      weaponId: "kitchen_knife",
+      crimeTime: "22:17:00",
+    });
+    const reveal = state.getReveal();
+    expect(reveal.truth.witnessDeceptions).toEqual([
+      { witnessId: "emily_reed", witnessName: "Emily Reed", deceptionReason: "SELF_PROTECTION" },
+    ]);
+  });
 });
 
 describe("Phase 41 — wrong-theory verdicts (§21)", () => {
