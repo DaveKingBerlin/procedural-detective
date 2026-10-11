@@ -13,12 +13,15 @@ import type {
   WitnessInterviewResponse,
   WitnessListEntryDTO,
   WitnessQuestionType,
+  WitnessStatementDTO,
   WorldObjectDTO,
 } from "../api/types";
 import { REPLAY_CASE_VERSION, buildReplayReveal } from "./replayTruth";
 import { isValidAccusationTime } from "./savegameTime";
 import type { ReplayTruthV1, SavedCaseDefinition, SavegameEvidenceRecordV1 } from "./savegameV1";
 import { REPLAY_CASE_ID, REPLAY_PLAYTHROUGH_ID } from "./savegameV1";
+import type { AskedWitnessStatement } from "../witness/witnessModel";
+import { witnessQuestionKey } from "../witness/witnessModel";
 
 /**
  * Phase 32 — the browser-LOCAL replay runtime (ADR-003 §1 / Phase32 §4/§12).
@@ -83,6 +86,18 @@ export class FreshReplayState {
   private accusation: SubmittedAccusationDTO | null = null;
   private phase: ReplayPhase = "PLAYING";
   private cachedReveal: RevealResponse | null = null;
+  /**
+   * Phase 39 (DEF-099) — the asked interview questions of THIS replay, keyed
+   * by `witnessQuestionKey(witnessId, questionType)`. This is the per-replay
+   * in-memory source of interview progress: it survives full-route remounts
+   * WITHIN the same replay (so /scene -> /accuse -> /scene keeps the asked
+   * markers + notebook "Witness statements" group), yet it is recreated
+   * EMPTY by every fresh `startReplay` (a new `FreshReplayState`) — so
+   * loading the same `.pdcase` again always starts a fresh interview
+   * (§10/§40). It is NEVER written to localStorage (§19) and never serialized
+   * into SavegameV1 (§11).
+   */
+  private readonly askedStatements = new Map<string, AskedWitnessStatement>();
 
   constructor(definition: SavedCaseDefinition) {
     this.worldObjects = definition.scene.worldObjects;
@@ -247,7 +262,11 @@ export class FreshReplayState {
   /** One closed interview question: the saved deterministic statement for the
    *  exact recorded (witness, question), or the frozen neutral answer. A
    *  statement-grounded question discovers its record (newly-discovered flow
-   *  exactly mirrors the live interview). */
+   *  exactly mirrors the live interview). Phase 39 (DEF-099) — every asked
+   *  question (grounded or neutral) is ALSO recorded into this replay's
+   *  in-memory asked set, so a full-route remount within the same replay can
+   *  rehydrate the rebuilt `InvestigationSession` with the exact same
+   *  answered markers (§39). */
   interviewWitness(witnessId: string, questionType: WitnessQuestionType): WitnessInterviewResponse {
     const witness = this.witnesses.find((entry) => entry.witnessId === witnessId);
     const displayName = witness?.displayName ?? witnessId;
@@ -259,23 +278,56 @@ export class FreshReplayState {
         const newly = !this.discovered.has(statementRecordId);
         this.discovered.add(statementRecordId);
         this.read.add(statementRecordId);
+        const statement = this.statementDtoOf(record);
+        this.recordAsked(witnessId, displayName, questionType, statement, statementRecordId);
         return {
           witnessId,
           displayName,
           questionType,
-          statement: this.statementDtoOf(record),
+          statement,
           discovery: { newlyDiscovered: newly, record: this.toReadDto(record) },
         };
       }
     }
 
+    const neutral = { summary: REPLAY_NEUTRAL_SUMMARY, observations: [] };
+    this.recordAsked(witnessId, displayName, questionType, neutral, null);
     return {
       witnessId,
       displayName,
       questionType,
-      statement: { summary: REPLAY_NEUTRAL_SUMMARY, observations: [] },
+      statement: neutral,
       discovery: null,
     };
+  }
+
+  /**
+   * Phase 39 (DEF-099) — snapshot of THIS replay's asked witness statements
+   * (the per-replay in-memory interview progress). The scene route rehydrates
+   * a rebuilt `InvestigationSession` from this on every boot of a REPLAY
+   * (never from localStorage), so asked markers and the notebook "Witness
+   * statements" group survive full-route remounts within the same replay.
+   * Empty on every fresh `startReplay` (§10/§40).
+   */
+  askedWitnessStatementsSnapshot(): readonly AskedWitnessStatement[] {
+    return [...this.askedStatements.values()];
+  }
+
+  /** Record ONE asked (witness, question) with the deterministic answer. */
+  private recordAsked(
+    witnessId: string,
+    displayName: string,
+    questionType: WitnessQuestionType,
+    statement: WitnessStatementDTO,
+    evidenceId: string | null,
+  ): void {
+    this.askedStatements.set(witnessQuestionKey(witnessId, questionType), {
+      witnessId,
+      displayName,
+      questionType,
+      statement,
+      evidenceId,
+    });
   }
 
   /* ------------------------- accusation ---------------------------------- */

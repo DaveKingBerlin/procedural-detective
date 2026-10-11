@@ -416,11 +416,19 @@ export default function ScenePage() {
         // Phase 39 — a SAVED REPLAY NEVER restores witness statements from
         // storage: the `.pdcase` proves the case can give answers, never that
         // THIS player already asked them (§4/§26). Every load of the same file
-        // starts a fresh investigation with empty interview progress (§10/§40);
-        // same-replay navigation still preserves progress because the in-memory
-        // `InvestigationSession` survives route navigation (§39). Live
-        // playthroughs keep the restore below (their `PT-*` cache).
-        if (!isReplayActive()) {
+        // starts a fresh investigation with empty interview progress (§10/§40).
+        //
+        // Phase 39 (DEF-099) — a full-route remount WITHIN the same replay
+        // (/scene -> /accuse -> /scene) rebuilds `InvestigationSession`, whose
+        // asked cache is per-instance. So the rebuild rehydrates its asked set
+        // from the PER-REPLAY in-memory state (`FreshReplayState.askedStatements`
+        // — which survives remounts but starts empty on every fresh
+        // `startReplay`), never from localStorage. Live playthroughs keep the
+        // PT-* storage restore below (§39 parity: live remembers across a full
+        // remount/reload via its own cache, replay remembers within the replay).
+        if (replay !== undefined) {
+          session.restoreAskedWitnessStatements(replay.state.askedWitnessStatementsSnapshot());
+        } else {
           session.restoreAskedWitnessStatements(
             loadWitnessStatements(replayOrLivePlaythroughId(), session.witnessesSnapshot()),
           );

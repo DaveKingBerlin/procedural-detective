@@ -580,6 +580,72 @@ describe("Phase 39 — same-replay witness progress is preserved and idempotent"
     });
   });
 
+  it("a FULL route remount within the same replay preserves asked markers, notebook group and discoveries (§39/DEF-099)", async () => {
+    await withNoNetwork(async () => {
+      const definition = realDefinition();
+      startReplay(definition);
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+      expect(
+        mounted!.container.querySelectorAll('[data-testid^="notebook-entry-witness-statements-"]'),
+      ).toHaveLength(1);
+      expect(
+        mounted!.container.querySelector('[data-testid="discovered-entry-d_ev_witness_danielweber"]'),
+      ).not.toBeNull();
+
+      // FULL route remount WITHOUT clearReplay — exactly what
+      // /scene -> /accuse ("Back to the investigation", accuse.tsx) -> /scene
+      // produces: ScenePage unmounts and remounts while the replay stays
+      // active in memory. Pre-fix this reset the asked markers AND emptied the
+      // notebook witness-statements group (DEF-099 / ADV-39-01).
+      unmountScene();
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+
+      // The rebuilt InvestigationSession rehydrated its asked set from the
+      // PER-REPLAY in-memory state (never localStorage): markers + notebook
+      // "Witness statements" group preserved, and the discovered summary still
+      // lists the statement's evidence (the discovery lives in the replay
+      // state, which survived the remount).
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+      expect(isAnswerRendered(mounted!.container, "OBSERVATION")).toBe(true);
+      expect(
+        mounted!.container.querySelectorAll('[data-testid^="notebook-entry-witness-statements-"]'),
+      ).toHaveLength(1);
+      expect(
+        mounted!.container.querySelector('[data-testid="discovered-entry-d_ev_witness_danielweber"]'),
+      ).not.toBeNull();
+
+      // Idempotence after the remount: re-ask OBSERVATION -> SAME answer,
+      // discoveries 1 -> 1, notebook 1 -> 1, and the replay namespace is
+      // never written (§15/§27/§19).
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+      ).toContain("Daniel Weber was near the luxury hotel suite around 21:18.");
+      expect(
+        mounted!.container.querySelectorAll('[data-testid^="discovered-entry-"]'),
+      ).toHaveLength(1);
+      expect(
+        mounted!.container.querySelectorAll('[data-testid^="notebook-entry-witness-statements-"]'),
+      ).toHaveLength(1);
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+      expect(
+        window.localStorage.getItem(witnessStatementKey(replayStorageNamespace(definition))),
+      ).toBeNull();
+    });
+  });
+
   it("re-ask OBSERVATION: same answer, exactly one discovery, exactly one notebook line (§15/§27)", async () => {
     await withNoNetwork(async () => {
       const definition = realDefinition();
