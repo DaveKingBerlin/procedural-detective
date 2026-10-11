@@ -207,17 +207,6 @@ def test_evidence_change_that_alters_weapon_input_reruns_world(monkeypatch):
     IS re-run even though the plan's owner is EVIDENCE-only (runtime closure)."""
     import app.services.ollama_driver as driver_module
 
-    real = driver_module._weapon_evidence_id
-
-    def fake(attempt: Any, evidence_spec: Any) -> str:
-        if evidence_spec is None:
-            return ""
-        # Deterministic per-evidence-object identity: a recleaned evidence
-        # object gets a NEW weapon-evidence id (the input the world prompt
-        # depends on).
-        return f"W-{id(evidence_spec)}"
-
-    monkeypatch.setattr(driver_module, "_weapon_evidence_id", fake)
     transport = MockOllamaTransport(
         posts=[
             *_pass1_posts(),
@@ -228,6 +217,18 @@ def test_evidence_change_that_alters_weapon_input_reruns_world(monkeypatch):
         ]
     )
     driver = _make_driver(transport)
+
+    def fake(attempt: Any, evidence_spec: Any) -> str:
+        # Deterministic runtime identity (never using ``id()``, which the
+        # allocator could reuse for a fresh object): the weapon-evidence input
+        # CHANGES exactly once the attempt already has a world record — i.e.
+        # on the SECOND pass the regenerated evidence is a NEW input for the
+        # cached world to compare against.
+        if driver._world_cache.get(str(attempt.attempt_id)):
+            return "W-CHANGED"
+        return "W-v1"
+
+    monkeypatch.setattr(driver_module, "_weapon_evidence_id", fake)
     attempt = _direct_attempt()
 
     driver.run_into(attempt)
