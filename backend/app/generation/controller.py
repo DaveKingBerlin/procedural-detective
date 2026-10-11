@@ -61,6 +61,7 @@ from app.generation.validation_codes import (
     repair_effectiveness,
     validation_failure_codes,
 )
+from app.generation.repair_routing import RepairPlan
 from app.core.observability import emit_event
 
 _PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
@@ -562,12 +563,17 @@ class GenerationController:
                         deadlineRemainingMs=_remaining_ms(attempt),
                     )
                     if self._driver is not None:
-                        # driver repair: re-run the affected stages with the
-                        # sanitized validation diagnostics (state stays
+                        # Phase38 driver repair: compute the deterministic
+                        # repair plan from the CURRENT validation report
+                        # (closed validator-code owner mapping) and re-run ONLY
+                        # the stages that can change the defect (state stays
                         # VALIDATING; we re-validate on the next loop pass).
+                        repair_plan = RepairPlan.from_report(report)
                         try:
                             self._driver.run_into(
-                                attempt, diagnostics=report.repair_diagnostics
+                                attempt,
+                                diagnostics=report.repair_diagnostics,
+                                repair_plan=repair_plan,
                             )
                         except Exception as exc:  # noqa: BLE001 - provider path terminal
                             self._fail(
@@ -584,6 +590,9 @@ class GenerationController:
                             providerCallCount=attempt.budget.calls,
                             regenerationCount=attempt.budget.regenerations,
                             deadlineRemainingMs=_remaining_ms(attempt),
+                            repairOwners=tuple(
+                                owner.value for owner in repair_plan.repair_owners
+                            ),
                         )
                         continue
                     self._set_state(attempt, GenerationState.REPAIRING)
@@ -1057,7 +1066,9 @@ class GenerationController:
         """Reset staged outputs for a full regeneration (§32.2/§32.5).
 
         Keeps locked constraints, prompt, seed, attempt/case identity and the
-        per-attempt budget; only generated stage material is discarded.
+        per-attempt budget; only generated stage material is discarded. The
+        stage driver's per-attempt validated-output caches are cleared too
+        (evidence/logs/world must rebuild against the same cached case).
         """
         attempt.stage_outputs = {}
         attempt.stage_done = set()
@@ -1066,6 +1077,12 @@ class GenerationController:
         attempt._phase3_cache = None
         attempt.solver_proof = None
         attempt.last_validation = None
+        reset_cache = getattr(self._driver, "reset_attempt_cache", None)
+        if callable(reset_cache):
+            try:
+                reset_cache(attempt.attempt_id)
+            except Exception:  # noqa: BLE001 - cache reset never breaks lifecycle
+                pass
 
     def _set_state(
         self, attempt: AttemptRecord, target: GenerationState

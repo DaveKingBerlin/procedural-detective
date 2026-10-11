@@ -2021,6 +2021,7 @@ class OllamaAssetSpecProvider:
         timeout_provider: Callable[[], float] | None = None,
         metrics_provider: Callable[[], Any] | None = None,
         provider_label: str = "ollama",
+        record_stage_timing: Callable[[Any, int, str], None] | None = None,
     ) -> None:
         self._provider = provider
         self._attempt_id = attempt_id
@@ -2032,6 +2033,11 @@ class OllamaAssetSpecProvider:
         self._configured_timeout_seconds = configured_timeout_seconds
         self._timeout_provider = timeout_provider
         self._metrics_provider = metrics_provider
+        # Phase38 §30 — the driver's bounded stage-timing recorder (per-call
+        # closed ``stage:ms:outcome`` tokens; never prompts/responses), so the
+        # ASSET_SPEC / ASSET_SPEC_REPAIR calls appear in ``stageTimingSummary``
+        # exactly like every other driver stage.
+        self._record_stage_timing = record_stage_timing
         # Phase 19 Fix C: the budget consumer may be bucket-aware
         # (``consumer(object_id)`` -> ASSET:<objectId> accounting) or a legacy
         # zero-arg consumer (tests/older callers) â€” introspected once here.
@@ -2456,6 +2462,9 @@ class OllamaAssetSpecProvider:
                 )
             )
         if result.timed_out:
+            self._record_roundtrip_timing(
+                stage, int((time.perf_counter() - _t0) * 1000), "timeout"
+            )
             emit_event(
                 "provider.call.timeout",
                 generationAttemptId=self._attempt_id,
@@ -2476,6 +2485,9 @@ class OllamaAssetSpecProvider:
             )
         if result.error is not None:
             code = infer_failure_code(result.error)
+            self._record_roundtrip_timing(
+                stage, int((time.perf_counter() - _t0) * 1000), "error"
+            )
             emit_event(
                 "provider.call.error",
                 generationAttemptId=self._attempt_id,
@@ -2495,6 +2507,9 @@ class OllamaAssetSpecProvider:
                 code=infer_failure_code(result.error),
             )
         if result.content is None:
+            self._record_roundtrip_timing(
+                stage, int((time.perf_counter() - _t0) * 1000), "error"
+            )
             emit_event(
                 "provider.call.error",
                 generationAttemptId=self._attempt_id,
@@ -2513,6 +2528,9 @@ class OllamaAssetSpecProvider:
                 "provider returned an invalid response",
                 code=GenerationFailureCode.PROVIDER_INVALID_RESPONSE,
             )
+        self._record_roundtrip_timing(
+            stage, int((time.perf_counter() - _t0) * 1000), "success"
+        )
         emit_event(
             "provider.call.complete",
             generationAttemptId=self._attempt_id,
@@ -2536,6 +2554,19 @@ deadlineRemainingMs=(
             regenerationCount=getattr(budget, "regenerations", None),
         )
         return result.content
+
+    def _record_roundtrip_timing(
+        self, stage: GenerationStage, elapsed_ms: int, outcome: str
+    ) -> None:
+        """Phase38 §30 — record ONE safe stage-timing token for an
+        ASSET_SPEC / ASSET_SPEC_REPAIR round-trip (only closed stage names,
+        integer milliseconds and closed outcomes; never prompts/responses)."""
+        if self._record_stage_timing is None:
+            return
+        try:
+            self._record_stage_timing(stage, max(0, int(elapsed_ms)), outcome)
+        except Exception:  # noqa: BLE001 - observability never breaks generation
+            pass
 
     def _effective_timeout(self) -> float:
         if self._timeout_provider is None:
@@ -2663,10 +2694,22 @@ class OllamaStageDriver:
             if self._provider_label == "ollama"
             else None
         )
-        # Phase17 Wave-2: parsed CASE/PEOPLE outputs cached per attempt id so a
-        # second pass (repair/regeneration) never re-pays the case call â€” the
+# Phase17 Wave-2: parsed CASE/PEOPLE outputs cached per attempt id so a
+        # second pass (repair/regeneration) never re-pays the case call — the
         # public world the evidence was regenerated against stays identical.
         self._case_outputs: dict[str, tuple[Any, Any]] = {}
+        # Phase38 — per-attempt VALIDATED-stage reuse caches. Only closed parsed
+        # canonical objects and public evidence ids are cached (never prompts,
+        # never raw provider responses, never hidden content). Each stage is
+        # keyed by an attempt id and cleared on a FULL regeneration (see
+        # ``reset_attempt_cache``), so unaffected validated stages are reused
+        # across targeted repairs while changed upstream inputs invalidate
+        # their dependents.
+        self._evidence_cache: dict[str, tuple[Any, tuple[Any, ...]]] = {}  # attempt_id -> (EvidenceSetSpec after projection, extra_rules)
+        self._activity_cache: dict[
+            str, dict[str, tuple[tuple[Any, ...], str]]
+        ] = {}                                      # attempt_id -> {evidence_id: (entries, canonical)}
+        self._world_cache: dict[str, tuple[Any, Any, str]] = {}  # attempt_id -> (world_reqs, composition, weapon_evidence_id)
         # Phase17 Wave-2: audit trace of the deterministic evidence completion
         # (sanitized "id: injected fact kind" lines; never serialized/served â€”
         # read by the smoke CLI and operator tests).
@@ -2685,6 +2728,22 @@ class OllamaStageDriver:
         """Return at most 32 safe timing tokens for final lifecycle events."""
         return tuple(self._stage_timings.get(str(attempt_id), ())[:32])
 
+    def reset_attempt_cache(self, attempt_id: str) -> None:
+        """Discard the per-attempt validated-stage caches for a full
+        regeneration (the controller calls this exactly when a regeneration
+        discards the staged outputs).
+
+        The parsed CASE/PEOPLE cache is deliberately KEPT: Phase17 Wave-2
+        regeneration semantics make regeneration free of the case call (the
+        evidence loop keeps its room under the call budget). Only the
+        evidence / activity-log / world outputs — which regeneration MUST
+        rebuild against the same case — are dropped.
+        """
+        aid = str(attempt_id)
+        self._evidence_cache.pop(aid, None)
+        self._activity_cache.pop(aid, None)
+        self._world_cache.pop(aid, None)
+
     def _record_stage_timing(
         self, attempt: Any, stage: GenerationStage, elapsed_ms: int, outcome: str
     ) -> None:
@@ -2695,7 +2754,12 @@ class OllamaStageDriver:
 
     # -- public driver entry points (controller lifecycle) -------------------
 
-    def run_into(self, attempt: Any, diagnostics: tuple[str, ...] = ()) -> None:
+    def run_into(
+        self,
+        attempt: Any,
+        diagnostics: tuple[str, ...] = (),
+        repair_plan: Any = None,
+    ) -> None:
         """Fresh (or repair) staged run; sets ``attempt.draft`` on success.
 
         Provider-level failures raise ``StageDriverProviderFailure`` (the
@@ -2703,18 +2767,34 @@ class OllamaStageDriver:
         ``attempt.deferred_structural`` populated and ``attempt.draft`` set to
         whatever assembled, so ``pipeline.validate_draft`` classifies them via
         the EXISTING controller.
+
+        ``repair_plan`` is a Phase38 ``RepairPlan`` (closed owner set). When
+        absent this is the PRE-Phase-38 full rerun (evidence + logs + world +
+        composition, cached case reused) — byte-identical behavior for every
+        legacy caller. When present the driver reruns ONLY the owning stages
+        and reuses the unaffected validated outputs (never reusing an output
+        whose inputs changed).
         """
         from app.generation import pipeline
+        from app.generation.repair_routing import RepairPlan
+
+        if repair_plan is None:
+            repair_plan = RepairPlan.default_full_rerun(diagnostics)
 
         _t0 = time.perf_counter()
         if _PD_DEV_TRACE:
             _dt(
-                "driver.run_into.start repairDiagnostics=%d deadlineRemainingMs=%s"
-                % (len(diagnostics), _dt_remaining(attempt))
+                "driver.run_into.start repairDiagnostics=%d deadlineRemainingMs=%s "
+                "planOwners=%s"
+                % (
+                    len(diagnostics),
+                    _dt_remaining(attempt),
+                    ",".join(o.value for o in repair_plan.repair_owners),
+                )
             )
         deferred: list[str] = []
         provider = self._provider_factory()
-        # Phase 22 â€” bind the remote-client provider to the attempt's creator
+        # Phase 22 — bind the remote-client provider to the attempt's creator
         # session scope so it can select the right bridge (a no-op for every
         # other provider; ollama behavior is byte-identical).
         if self._session_scope is not None and hasattr(provider, "bind_session_scope"):
@@ -2724,14 +2804,31 @@ class OllamaStageDriver:
         locked_map = self._locked_map(attempt)
         id_sheet = _locked_id_sheet(attempt)
 
-        # --- 1. CASE/PEOPLE (cached across repair/regeneration passes) ------
+        # --- 1. CASE/PEOPLE ---------------------------------------------------
+        # Cached across repair passes EXCEPT when the repair owner is the
+        # CASE/PEOPLE data itself (a Phase35 public-role/candidate/witness
+        # defect): the driver then REGENERATES the stage so the owner data can
+        # actually change — while PRESERVING CaseTruth secrecy: the original
+        # crime (truth) is kept, only the PUBLIC output is replaced (§15).
         cached_case = self._case_outputs.get(attempt.attempt_id)
-        if cached_case is not None:
+        rerun_case = bool(repair_plan.rerun_case)
+        if cached_case is not None and not rerun_case:
             crime, public = cached_case
         else:
             case_prompt = prompts.build_case_people_prompt(
                 attempt.prompt, locked_map, id_sheet=id_sheet
             )
+            if cached_case is not None and rerun_case:
+                # Phase35 §37 — the bounded safe CASE-QUALITY FIX CONTEXT (never
+                # truth): allowed person ids + PUBLIC roles + witness/candidate
+                # ids + the safe quality issue codes. The driver path, exactly
+                # like the generic REPAIR stage, receives the fix context.
+                try:
+                    case_prompt = (
+                        f"{case_prompt}\n\n{pipeline.case_quality_repair_context(attempt)}"
+                    )
+                except Exception:  # noqa: BLE001 - guidance never breaks generation
+                    pass
             parsed_case = self._stage_parse(
                 provider,
                 attempt,
@@ -2742,99 +2839,133 @@ class OllamaStageDriver:
                 "case_people",
                 deferred,
             )
-            crime, public = (parsed_case or (None, None))
-            if crime is not None and public is not None:
-                # Only a VALID parsed case is cached (a broken first pass must
-                # be re-tried); the cache makes regeneration free of the case
-                # call so the 8-call budget has room for the evidence loop.
+            new_crime, new_public = (parsed_case or (None, None))
+            if new_crime is not None and new_public is not None:
+                # A broken FIRST pass must be re-tried; only a VALID parsed
+                # case is cached (the cache makes regeneration free of the case
+                # call so the 8-call budget has room for the evidence loop).
+                if cached_case is not None and rerun_case:
+                    # PHASE35 case repair: adopt ONLY the regenerated PUBLIC
+                    # (roles/candidates can change); the locked-solver truth
+                    # stays the ORIGINAL crime — secret, immutable, and the
+                    # evaluation semantic for the re-validated draft.
+                    old_crime, _old_public = cached_case
+                    crime, public = old_crime, new_public
+                else:
+                    crime, public = new_crime, new_public
                 self._case_outputs[attempt.attempt_id] = (crime, public)
+            elif cached_case is not None:
+                # A broken re-run falls back to the cached parse (unchanged
+                # default); validation still re-runs and may classify again.
+                crime, public = cached_case
+            else:
+                crime, public = None, None
 
-        # --- 2. EVIDENCE ----------------------------------------------------
-        approved_material = _approved_public_material(public)
-        deduction_seed = _deduction_seed(attempt, crime, public)
-        is_rerun = cached_case is not None
-        deduction_feedback = self._evidence_feedback(attempt, diagnostics, is_rerun)
-        evidence_prompt = prompts.build_evidence_prompt(
-            attempt.prompt,
-            locked_map,
-            id_sheet=id_sheet,
-            approved_people=approved_material,
-            deduction_seed=deduction_seed,
-            deduction_feedback=deduction_feedback,
-        )
-        evidence_spec, evidence_trace = self._evidence_stage_parse(
-            provider,
-            attempt,
-            evidence_prompt,
-            budget_consumer,
-        )
-
-        # --- 2b. deterministic evidence completion (Phase17 Wave-2) ----------
-        # app-owned projection: policy-sanitizes contradictory model facts and
-        # closes ONLY the solver-critical gaps; facts reference the model's
-        # own public tokens + locked ids + locked canonical time; still fully
-        # solver-validated. Never hides, never fakes, never bypasses the
-        # solver.
-        projection_started = time.perf_counter()
-        completed_spec, extra_rules, injected = _evidence_gap_facts(
-            attempt, crime, public, evidence_spec
-        )
-        if evidence_spec is None:
-            # The rejected raw evidence is never retained in ``deferred`` and
-            # never enters the draft.  The existing driver-owned projection is
-            # the local recovery path; normal draft/solver validation below
-            # remains the authority for whether it can publish.
-            emit_event(
-                "evidence.local_projection.used",
-                generationAttemptId=getattr(attempt, "attempt_id", None),
-                reasonCode=GenerationFailureCode.STRUCTURED_OUTPUT_INVALID.value,
-                originalStage=GenerationStage.EVIDENCE.value,
-                providerCallCount=getattr(attempt.budget, "calls", None),
-                projectionValid=completed_spec is not None,
-                elapsedMs=int((time.perf_counter() - projection_started) * 1000),
+        # --- 2. EVIDENCE ------------------------------------------------------
+        # Reused when (a) the case is unchanged, (b) the plan did not invalidate
+        # evidence and (c) a validated projection exists (Phase38 §12/§33).
+        cached_evidence = self._evidence_cache.get(attempt.attempt_id)
+        evidence_was_rerun = cached_evidence is None or repair_plan.rerun_evidence
+        if cached_evidence is not None and not repair_plan.rerun_evidence:
+            evidence_spec, extra_rules = cached_evidence
+            evidence_trace: dict[str, Any] = {}
+        else:
+            approved_material = _approved_public_material(public)
+            deduction_seed = _deduction_seed(attempt, crime, public)
+            is_rerun = cached_case is not None
+            deduction_feedback = self._evidence_feedback(attempt, diagnostics, is_rerun)
+            evidence_prompt = prompts.build_evidence_prompt(
+                attempt.prompt,
+                locked_map,
+                id_sheet=id_sheet,
+                approved_people=approved_material,
+                deduction_seed=deduction_seed,
+                deduction_feedback=deduction_feedback,
             )
-        projection_result = (
-            "NOT_USED"
-            if evidence_spec is not None
-            else "LOCAL_PROJECTION_ACCEPTED"
-            if completed_spec is not None
-            else "LOCAL_PROJECTION_REJECTED"
-        )
-        emit_event(
-            "evidence.structured_output.completed",
-            caseId=getattr(attempt, "case_id", None),
-            generationAttemptId=getattr(attempt, "attempt_id", None),
-            stage=GenerationStage.EVIDENCE.value,
-            structuredOutput=evidence_trace.get("structuredOutput"),
-            responseBytes=evidence_trace.get("responseBytes"),
-            topLevelType=evidence_trace.get("topLevelType"),
-            topLevelKeys=evidence_trace.get("topLevelKeys"),
-            expectedSchemaId=_EVIDENCE_EXPECTED_SCHEMA_ID,
-            collectionField=_EVIDENCE_COLLECTION_FIELD,
-            candidateItemCount=evidence_trace.get("candidateItemCount"),
-            parseSuccess=evidence_trace.get("parseSuccess"),
-            validatorCode=evidence_trace.get("validatorCode"),
-            adapterProjectionResult=projection_result,
-        )
-        self.last_evidence_injections = tuple(injected)
-        self.last_evidence_completed = bool(injected or extra_rules)
-        if completed_spec is not None:
-            evidence_spec = completed_spec
-        self.last_evidence_summary = _evidence_set_summary(evidence_spec)
+            evidence_spec, evidence_trace = self._evidence_stage_parse(
+                provider,
+                attempt,
+                evidence_prompt,
+                budget_consumer,
+            )
 
-        # --- 2c. Phase 19J â€” ACTIVITY_LOG generation (driver-internal stage)
+            # --- 2b. deterministic evidence completion (Phase17 Wave-2) -------
+            # app-owned projection: policy-sanitizes contradictory model facts
+            # and closes ONLY the solver-critical gaps; facts reference the
+            # model's own public tokens + locked ids + locked canonical time;
+            # still fully solver-validated. Never hides, never fakes, never
+            # bypasses the solver.
+            projection_started = time.perf_counter()
+            completed_spec, extra_rules, injected = _evidence_gap_facts(
+                attempt, crime, public, evidence_spec
+            )
+            if evidence_spec is None:
+                # The rejected raw evidence is never retained in ``deferred``
+                # and never enters the draft. The existing driver-owned
+                # projection is the local recovery path; normal draft/solver
+                # validation below remains the authority for whether it can
+                # publish.
+                emit_event(
+                    "evidence.local_projection.used",
+                    generationAttemptId=getattr(attempt, "attempt_id", None),
+                    reasonCode=GenerationFailureCode.STRUCTURED_OUTPUT_INVALID.value,
+                    originalStage=GenerationStage.EVIDENCE.value,
+                    providerCallCount=getattr(attempt.budget, "calls", None),
+                    projectionValid=completed_spec is not None,
+                    elapsedMs=int((time.perf_counter() - projection_started) * 1000),
+                )
+            projection_result = (
+                "NOT_USED"
+                if evidence_spec is not None
+                else "LOCAL_PROJECTION_ACCEPTED"
+                if completed_spec is not None
+                else "LOCAL_PROJECTION_REJECTED"
+            )
+            emit_event(
+                "evidence.structured_output.completed",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                stage=GenerationStage.EVIDENCE.value,
+                structuredOutput=evidence_trace.get("structuredOutput"),
+                responseBytes=evidence_trace.get("responseBytes"),
+                topLevelType=evidence_trace.get("topLevelType"),
+                topLevelKeys=evidence_trace.get("topLevelKeys"),
+                expectedSchemaId=_EVIDENCE_EXPECTED_SCHEMA_ID,
+                collectionField=_EVIDENCE_COLLECTION_FIELD,
+                candidateItemCount=evidence_trace.get("candidateItemCount"),
+                parseSuccess=evidence_trace.get("parseSuccess"),
+                validatorCode=evidence_trace.get("validatorCode"),
+                adapterProjectionResult=projection_result,
+            )
+            self.last_evidence_injections = tuple(injected)
+            self.last_evidence_completed = bool(injected or extra_rules)
+            if completed_spec is not None:
+                evidence_spec = completed_spec
+            self.last_evidence_summary = _evidence_set_summary(evidence_spec)
+            if evidence_spec is not None:
+                # Only a VALID post-projection evidence is cached (a rejected
+                # projection must re-run like today).
+                self._evidence_cache[attempt.attempt_id] = (
+                    evidence_spec, tuple(extra_rules),
+                )
+
+        # --- 2c. Phase 19J — ACTIVITY_LOG generation (driver-internal stage)
         # Triggered ONLY when a published evidence fact requires an
         # ACTIVITY_LOG representation (kind -> renderType == ACTIVITY_LOG) AND
         # carries a time-bearing observed_at; everything else costs ZERO extra
-        # provider calls (Phase19J Â§4). Each triggered fact performs ONE
+        # provider calls (Phase19J §4). Each triggered fact performs ONE
         # bounded CORE-bucket provider call (+ at most
         # MAX_ACTIVITY_LOG_REPAIR_PASSES bounded repair calls on validation
         # failure). Generated logs are validated HERE and persisted into the
         # fact's public ``presentation.events`` BEFORE world composition /
         # publication, so gameplay/interaction/reload call ZERO providers and
         # the published case contains the final accepted log (Phase19J
-        # Â§3/Â§18/Â§19).
+        # §3/§18/§19).
         if evidence_spec is not None:
+            # Phase38 §13 — when the plan does not invalidate the activity-log
+            # stage, every per-item validated log is REUSED (never re-paid);
+            # otherwise the affected stage is regenerated.
+            reuse_validated_logs = not repair_plan.rerun_activity_log and not evidence_was_rerun
             evidence_spec = self._activity_log_stage(
                 provider,
                 attempt,
@@ -2842,80 +2973,108 @@ class OllamaStageDriver:
                 public,
                 evidence_spec,
                 budget_consumer,
+                reuse_validated_logs=reuse_validated_logs,
             )
 
         # --- 3. WORLD_REQUIREMENTS --------------------------------------------
         weapon_evidence_id = _weapon_evidence_id(attempt, evidence_spec)
-        world_prompt = prompts.build_world_requirements_prompt(
-            attempt.prompt,
-            locked_map,
-            id_sheet=id_sheet,
-            weapon_evidence_id=weapon_evidence_id,
-        )
-        # Phase 19 Fix A: the DETERMINISTIC prompt extractor is the
-        # authoritative fallback for a rejected LLM environmentHint (the user
-        # prompt's "Location: ..." line). This is LOCAL â€” zero provider calls.
-        from app.world.extract import extract_world_requirements
-
-        deterministic_hint = None
-        try:
-            deterministic_world = extract_world_requirements(
-                attempt.prompt, attempt.locked
+        cached_world = self._world_cache.get(attempt.attempt_id)
+        if cached_world is not None:
+            cached_world_reqs, cached_composition, cached_weapon_evidence_id = cached_world
+        else:
+            cached_world_reqs, cached_composition, cached_weapon_evidence_id = (
+                None, None, None,
             )
-            deterministic_hint = (
-                deterministic_world.environment_hint
-                if deterministic_world is not None
-                else None
-            )
-        except Exception:  # noqa: BLE001 - extraction never breaks generation
-            deterministic_hint = None
-        world_reqs = WorldRequirements()
-        parsed_world = self._stage_parse(
-            provider,
-            attempt,
-            GenerationStage.WORLD_GRAPH,
-            world_prompt,
-            budget_consumer,
-            lambda content: parse_world_requirements(
-                content,
-                canonical_fallback=deterministic_hint,
-                case_id=getattr(attempt, "case_id", None),
-                attempt_id=getattr(attempt, "attempt_id", None),
-            ),
-            "world_requirements",
-            deferred,
+        world_inputs_changed = cached_world is not None and (
+            cached_weapon_evidence_id != weapon_evidence_id
         )
-        if parsed_world is not None:
-            world_reqs = parsed_world
-
-        # Phase 19E Â§2 â€” DETERMINISTIC WEAPON-LOCK INJECTION (the GENERAL
-        # rule, no fork/whitelist special-casing): the CaseTruth-declared
-        # weapon is a REQUIRED semantic world object regardless of what the
-        # model's world stage returned and regardless of catalog membership.
-        # Local merge, zero provider calls.
-        world_reqs = inject_locked_weapon_request(world_reqs, attempt)
-
-        # --- 4. world composition (Environment Resolver + Oracle + placer) ---
-        spec_adapter = (
-            self._spec_adapter(provider, attempt, budget_consumer)
-            if self._spec_provider is None
-            else self._spec_provider
+        rerun_world_flag = (
+            repair_plan.rerun_world
+            or world_inputs_changed
+            or (cached_world is None)
         )
-        composition = self._compose_world(attempt, world_reqs, spec_adapter, deferred)
+        if cached_world is not None and not rerun_world_flag and not repair_plan.recompose:
+            # Unaffected validated world + composition reused (zero provider
+            # calls for the world graph AND the procedural-asset path).
+            world_reqs = cached_world_reqs
+            composition = cached_composition
+        else:
+            if rerun_world_flag:
+                world_prompt = prompts.build_world_requirements_prompt(
+                    attempt.prompt,
+                    locked_map,
+                    id_sheet=id_sheet,
+                    weapon_evidence_id=weapon_evidence_id,
+                )
+                # Phase 19 Fix A: the DETERMINISTIC prompt extractor is the
+                # authoritative fallback for a rejected LLM environmentHint
+                # (the user prompt's "Location: ..." line). LOCAL — zero calls.
+                from app.world.extract import extract_world_requirements
 
-        # Phase 19 Fix C: a procedural-asset-count ceiling or the failed-asset
-        # threshold that was hit INSIDE the asset provider is a terminal,
-        # narrow cause (never repaired, never published). The provider records
-        # the flag because the composer must keep its degrade-safe contract.
-        if getattr(spec_adapter, "procedural_asset_ceiling_hit", False):
-            raise StageDriverProviderFailure(
-                "procedural asset count ceiling exceeded",
-                code=GenerationFailureCode.MAX_PROCEDURAL_ASSETS_EXCEEDED,
+                deterministic_hint = None
+                try:
+                    deterministic_world = extract_world_requirements(
+                        attempt.prompt, attempt.locked
+                    )
+                    deterministic_hint = (
+                        deterministic_world.environment_hint
+                        if deterministic_world is not None
+                        else None
+                    )
+                except Exception:  # noqa: BLE001 - extraction never breaks generation
+                    deterministic_hint = None
+                world_reqs = WorldRequirements()
+                parsed_world = self._stage_parse(
+                    provider,
+                    attempt,
+                    GenerationStage.WORLD_GRAPH,
+                    world_prompt,
+                    budget_consumer,
+                    lambda content: parse_world_requirements(
+                        content,
+                        canonical_fallback=deterministic_hint,
+                        case_id=getattr(attempt, "case_id", None),
+                        attempt_id=getattr(attempt, "attempt_id", None),
+                    ),
+                    "world_requirements",
+                    deferred,
+                )
+                if parsed_world is not None:
+                    world_reqs = parsed_world
+
+                # Phase 19E §2 — DETERMINISTIC WEAPON-LOCK INJECTION (the
+                # GENERAL rule, no fork/whitelist special-casing): the
+                # CaseTruth-declared weapon is a REQUIRED semantic world object
+                # regardless of catalog membership. Local merge, zero calls.
+                world_reqs = inject_locked_weapon_request(world_reqs, attempt)
+            else:
+                # ASSET_SPEC-only repair: reuse the validated world graph and
+                # recompose (the procedural-asset path re-runs).
+                world_reqs = cached_world_reqs
+
+            # --- 4. world composition (Environment Resolver + Asset Oracle) ---
+            spec_adapter = (
+                self._spec_adapter(provider, attempt, budget_consumer)
+                if self._spec_provider is None
+                else self._spec_provider
             )
-        if getattr(spec_adapter, "failed_asset_threshold_hit", False):
-            raise StageDriverProviderFailure(
-                "maximum failed assets exceeded",
-                code=GenerationFailureCode.MAX_FAILED_ASSETS_EXCEEDED,
+            composition = self._compose_world(attempt, world_reqs, spec_adapter, deferred)
+
+            # Phase 19 Fix C: a procedural-asset-count ceiling or the
+            # failed-asset threshold hit INSIDE the asset provider is a
+            # terminal, narrow cause (never repaired, never published).
+            if getattr(spec_adapter, "procedural_asset_ceiling_hit", False):
+                raise StageDriverProviderFailure(
+                    "procedural asset count ceiling exceeded",
+                    code=GenerationFailureCode.MAX_PROCEDURAL_ASSETS_EXCEEDED,
+                )
+            if getattr(spec_adapter, "failed_asset_threshold_hit", False):
+                raise StageDriverProviderFailure(
+                    "maximum failed assets exceeded",
+                    code=GenerationFailureCode.MAX_FAILED_ASSETS_EXCEEDED,
+                )
+            self._world_cache[attempt.attempt_id] = (
+                world_reqs, composition, weapon_evidence_id,
             )
 
         # --- 4b. deterministic placement-evidence projection + reconciliation
@@ -2947,9 +3106,9 @@ class OllamaStageDriver:
                 extra_travel_rules=tuple(extra_rules),
             )
         except SemanticObjectResolutionError as exc:
-            # Phase 19 Fix B.3 â€” fail closed with a SANITIZED typed message
+            # Phase 19 Fix B.3 — fail closed with a SANITIZED typed message
             # (public identifiers only) and a canonical code; never publish a
-            # case with a dangling weapon/evidence id. Phase 26C5 Â§15: the
+            # case with a dangling weapon/evidence id. Phase 26C5 §15: the
             # precise WORLD_ASSET_UNRESOLVED code (not the generic
             # VALIDATION_FAILED) makes the asset-resolution boundary
             # root-cause-obvious in internal logs.
@@ -2958,7 +3117,7 @@ class OllamaStageDriver:
                 code=GenerationFailureCode.WORLD_ASSET_UNRESOLVED,
             ) from None
         attempt._phase3_cache = None
-        # Phase 19 Fix C Â§8/Â§13 â€” sanitized monotonic accounting snapshot
+        # Phase 19 Fix C §8/§13 — sanitized monotonic accounting snapshot
         # (structure only; never raw prompts / truth / provider responses).
         budget = getattr(attempt, "budget", None)
         if budget is not None and hasattr(budget, "snapshot"):
@@ -3018,6 +3177,8 @@ class OllamaStageDriver:
         public: Any,
         evidence_spec: Any,
         budget_consumer: Callable[[str | None], bool],
+        *,
+        reuse_validated_logs: bool = False,
     ) -> Any:
         """Phase19J Â§4 trigger + generation walk over the composed evidence.
 
@@ -3030,8 +3191,17 @@ class OllamaStageDriver:
         ``ACTIVITY_LOG_v1`` version marker.
 
         Solver isolation (Phase19J Â§27/Â§28): ONLY the public presentation is
-        enriched â€” canonical propositions (the solver input) are untouched, so
+        enriched — canonical propositions (the solver input) are untouched, so
         the solver signature is byte-identical with and without the rich log.
+
+        Phase38 §13 (activity-log granularity): every successfully validated
+        log is cached per evidence item (public id only). When
+        ``reuse_validated_logs`` is True AND a cached validated entry exists
+        for an item whose upstream canonical time is unchanged, that item is
+        REUSED (zero provider calls) instead of regenerated — the exact rule
+        "do not reuse outputs whose inputs changed". A defect owner that
+        invalidates the logs (evidence change / case change / activity-log
+        owner) regenerates the affected items.
         """
         from app.domain.activity_log import (
             ACTIVITY_LOG_VERSION_MARKER,
@@ -3084,6 +3254,7 @@ class OllamaStageDriver:
         persons, weapons, motives, location_ids, location_names = (
             self._activity_log_forbidden_tokens(attempt, crime, public)
         )
+        per_item_cache = self._activity_cache.setdefault(str(attempt.attempt_id), {})
         enriched: list[Any] = []
         for item in getattr(evidence_spec, "evidence", ()) or ():
             kind = str(getattr(item, "kind", "") or "")
@@ -3098,10 +3269,26 @@ class OllamaStageDriver:
                 # no time-bearing evidence -> no log requirement -> no call
                 enriched.append(item)
                 continue
+            item_id = str(getattr(item, "id", "") or "")
+            cached_entry = per_item_cache.get(item_id)
+            if (
+                reuse_validated_logs
+                and cached_entry is not None
+                and cached_entry[1] == canonical
+            ):
+                # Phase38 reuse: the item's upstream canonical time is
+                # unchanged and a fully validated log exists — re-attach it
+                # without any provider call.
+                enriched.append(
+                    _with_activity_log_events(
+                        item, cached_entry[0], ACTIVITY_LOG_VERSION_MARKER
+                    )
+                )
+                continue
             entries = self._generate_activity_log(
                 provider,
                 attempt,
-                str(getattr(item, "id", "") or ""),
+                item_id,
                 canonical,
                 person_names=persons,
                 weapon_names=weapons,
@@ -3112,6 +3299,9 @@ class OllamaStageDriver:
                 after_minutes=after,
                 budget_consumer=budget_consumer,
             )
+            # Only a SUCCESSFULLY validated entry may be reused later
+            # (``_generate_activity_log`` raises on terminal failure).
+            per_item_cache[item_id] = (entries, canonical)
             enriched.append(_with_activity_log_events(item, entries, ACTIVITY_LOG_VERSION_MARKER))
         return EvidenceSetSpec(evidence=tuple(enriched))
 
@@ -3623,6 +3813,13 @@ class OllamaStageDriver:
         return "\n".join(lines)
 
     def _spec_adapter(self, provider: Any, attempt: Any, budget: Callable[[], bool]) -> Any:
+        # Phase38 §30 — the driver's safe stage-timing recorder is wired into
+        # the asset-spec round-trip so ASSET_SPEC / ASSET_SPEC_REPAIR appear in
+        # ``stageTimingSummary`` exactly like every other provider stage
+        # (closing the reconcilability gap in the real provider-call count).
+        def _record(stage: GenerationStage, elapsed_ms: int, outcome: str) -> None:
+            self._record_stage_timing(attempt, stage, elapsed_ms, outcome)
+
         return OllamaAssetSpecProvider(
             provider=provider,
             attempt_id=attempt.attempt_id,
@@ -3634,6 +3831,7 @@ class OllamaStageDriver:
             timeout_provider=lambda: self._effective_timeout(attempt),
             metrics_provider=lambda: attempt.budget,
             provider_label=self._provider_label,
+            record_stage_timing=_record,
         )
 
     def _call(

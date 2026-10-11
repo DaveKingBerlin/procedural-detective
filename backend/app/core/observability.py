@@ -118,6 +118,17 @@ _SAFE_FIELDS = frozenset(
         "codesUnchanged",
         "validatorCodesBefore",
         "validatorCodesAfter",
+        # Phase38 — closed timeout-source observability (§23/§25): a closed
+        # vocabulary token for the timeout layer that fired and a boolean
+        # deadline-clip marker (deciding "the generation deadline was the
+        # binding limiter"). NEVER raw exception text, milliseconds windows or
+        # internal layers.
+        "timeoutSource",
+        "deadlineClipped",
+        # Phase38 — the closed repair-owner tuple for the running repair (the
+        # stage(s) a controller repair invalidated/reran — §31). Closed owner
+        # tokens only; never diagnostics/free text.
+        "repairOwners",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})
