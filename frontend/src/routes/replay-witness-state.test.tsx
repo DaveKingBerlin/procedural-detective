@@ -465,3 +465,76 @@ describe("Phase 39 — fresh saved replay starts with ZERO answered witness ques
     ).not.toBeNull();
   });
 });
+
+// --------------------------------------------------------------------------- //
+// Phase 39 — §10/§40: the SAME file loaded a second time never leaks progress
+// --------------------------------------------------------------------------- //
+
+describe("Phase 39 — same file loaded twice starts a fresh interview every load", () => {
+  it("Load #1 asks OBSERVATION; Load #2 starts with 0 answered markers and an empty notebook group", async () => {
+    await withNoNetwork(async () => {
+      const definition = realDefinition();
+      const namespace = replayStorageNamespace(definition);
+
+      // ---- Load #1: fresh replay -> ask exactly one question. ----
+      startReplay(definition);
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+      expect(answeredMarkerCount(mounted!.container)).toBe(0);
+
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+      expect(
+        mounted!.container.querySelector(
+          '[data-testid="notebook-group-witness-statements-list"]',
+        )!.querySelectorAll("li"),
+      ).toHaveLength(1);
+
+      // A replay must NEVER persist interview progress into the per-file
+      // namespace — the in-memory session is the only owner (§14/§19).
+      expect(window.localStorage.getItem(witnessStatementKey(namespace))).toBeNull();
+
+      // ---- Leave the replay, then load the SAME file again. ----
+      unmountScene();
+      clearReplay();
+
+      startReplay(definition);
+      mountScene();
+      await flushAsync();
+      await waitForReady(mounted!.container);
+      click(mounted!.container, '[data-testid="witness-daniel_weber"]');
+      await flushAsync();
+
+      // Load #2 MUST be fresh: zero answered markers (§10) and zero notebook
+      // witness lines — nothing from Load #1 may bleed in.
+      expect(answeredMarkerCount(mounted!.container)).toBe(0);
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-answer-hint"]'),
+      ).not.toBeNull();
+      const freshGroup = mounted!.container.querySelector(
+        '[data-testid="notebook-group-witness-statements"]',
+      );
+      expect(freshGroup).not.toBeNull();
+      expect(
+        mounted!.container.querySelectorAll('[data-testid^="notebook-entry-witness-statements-"]'),
+      ).toHaveLength(0);
+      expect(
+        mounted!.container.querySelector(
+          '[data-testid="notebook-group-witness-statements-empty"]',
+        ),
+      ).not.toBeNull();
+
+      // Asking on Load #2 still works and marks that NEW interview progress.
+      click(mounted!.container, '[data-testid="witness-question-OBSERVATION"]');
+      await flushAsync();
+      expect(answeredMarkerCount(mounted!.container)).toBe(1);
+      expect(
+        mounted!.container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+      ).toContain("Daniel Weber was near the luxury hotel suite around 21:18.");
+    });
+  });
+});
