@@ -52,8 +52,29 @@ class InvalidOutput(OllamaClientError):
 
 
 def _effective_timeout_ms(timeout_ms: int) -> int:
-    margin = min(5_000, int(timeout_ms) // 2)
-    return max(300, int(timeout_ms) - margin)
+    """The LOCAL Ollama HTTP/body-read budget for ONE job.
+
+    Phase38 timeout contract (§19-§22, single-authority): ``timeoutMs`` is the
+    SERVER-ISSUED authoritative per-job budget. The bridge's outer wait owns
+    the FULL budget (``bridge_client._effective_job_timeout_seconds``); this
+    inner HTTP read subtracts exactly ONE small, bounded, documented cleanup
+    reserve — never an implicit 50% cut — so a timed-out job still leaves the
+    bridge enough time to cancel Ollama, serialize the failure and deliver the
+    FAILED frame before the outer wait fires. The floor keeps degenerate tiny
+    server budgets usable (and the previous ``max(300, ...)`` behavior for
+    tiny windows is preserved).
+    """
+    return max(OLLAMA_HTTP_MIN_TIMEOUT_MS, int(timeout_ms) - OLLAMA_HTTP_READ_RESERVE_MS)
+
+
+# The single documented transport cleanup reserve (milliseconds) that the
+# LOCAL Ollama read subtracts from the server-issued job budget. Small and
+# bounded; owned by exactly one layer (the Ollama HTTP read). The bridge's
+# outer wait keeps the rest of ``timeoutMs``.
+OLLAMA_HTTP_READ_RESERVE_MS = 250
+# The documented floor for the inner HTTP read (any smaller server budget is
+# already effectively unusable; the outer wait still bounds the whole job).
+OLLAMA_HTTP_MIN_TIMEOUT_MS = 300
 
 
 # The documented minimum Ollama version whose ``/api/chat`` ``format`` field
@@ -274,4 +295,6 @@ __all__ = [
     "OllamaUnavailable",
     "ProviderTimeout",
     "_effective_timeout_ms",
+    "OLLAMA_HTTP_READ_RESERVE_MS",
+    "OLLAMA_HTTP_MIN_TIMEOUT_MS",
 ]
