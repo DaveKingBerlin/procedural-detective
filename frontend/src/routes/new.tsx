@@ -19,9 +19,11 @@ import { GenerationProviderSelector } from "../journey/GenerationProviderSelecto
 import {
   FRONTIER_SUBMIT_REQUIRED_MESSAGE,
   bridgePairedSelection,
+  buildProviderOffers,
   hasGenerationProviderOffer,
   isFrontierSubmitReady,
   persistGenerationSelection,
+  recoverTransportSelection,
   resolveProviderSelection,
   type GenerationProviderSelection,
 } from "../journey/generationProvider";
@@ -128,10 +130,38 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
       setProviderSelection(null);
       return;
     }
-    // Resolve once the DTO arrives: a valid sessionStorage choice, else the
-    // server default, else the first still-available provider. A later
-    // capabilities refresh must never overwrite a user's explicit choice.
-    setProviderSelection((current) => current ?? resolveProviderSelection(capabilities, undefined));
+    // Resolve on DTO arrival (valid sessionStorage choice, else server
+    // default, else first still-available provider). Phase 42 §6 — a
+    // capability REFRESH (or initial arrival) must also RECOVER a stale
+    // selection: a selected transport (or provider offer) that became
+    // unavailable is deterministically resolved to a valid available selection
+    // (visible UI + persisted value + staged request can never diverge and can
+    // never stay checked+disabled). An otherwise-valid explicit choice is
+    // preserved (a refresh never overwrites it).
+    setProviderSelection((current) => {
+      if (current === null) return resolveProviderSelection(capabilities, undefined);
+      const recoveredTransport = recoverTransportSelection(current, capabilities);
+      if (recoveredTransport !== null) {
+        persistGenerationSelection(recoveredTransport, undefined);
+        return recoveredTransport;
+      }
+      // Provider-offer DISCARD-IF-STALE parity on refresh: a provider OFFER
+      // that is no longer available is also recovered (the initialization path
+      // already follows this rule inside resolveProviderSelection; this closes
+      // the refresh-time gap).
+      const offers = buildProviderOffers(capabilities);
+      const offerStillAvailable = offers.some(
+        (offer) => offer.id === current.generationProvider && offer.available,
+      );
+      if (!offerStillAvailable) {
+        const resolved = resolveProviderSelection(capabilities, undefined);
+        if (resolved !== null) {
+          persistGenerationSelection(resolved, undefined);
+          return resolved;
+        }
+      }
+      return current;
+    });
   }, [capabilities]);
 
   /**
@@ -158,8 +188,15 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     ) {
       explicitChoiceSincePairingStartedRef.current = true;
     }
-    setProviderSelection(next);
-    persistGenerationSelection(next, undefined);
+    // Phase 42 §6 — route-level recovery gate for EVERY user selection change:
+    // a selection that references an unavailable transport is deterministically
+    // recovered BEFORE being stored/rendered, so the visible radio and the
+    // staged request share the SAME valid selection (never checked+disabled,
+    // never a silent backend-only rewrite).
+    const recovered = recoverTransportSelection(next, capabilities);
+    const finalSelection = recovered ?? next;
+    setProviderSelection(finalSelection);
+    persistGenerationSelection(finalSelection, undefined);
   };
 
   /**
@@ -257,36 +294,43 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     // resolved (transport/model travel only for the Ollama provider). The
     // pre-25 / older-server journey stays byte-identical (no selection keys).
     if (hasGenerationProviderOffer(capabilities) && providerSelection !== null) {
-      params.generationProvider = providerSelection.generationProvider;
-      if (providerSelection.generationProvider === "ollama") {
-        if (providerSelection.ollamaTransport !== null) {
-          params.ollamaTransport = providerSelection.ollamaTransport;
+      // Phase 42 §6 — staging can NEVER emit an unavailable transport: the
+      // route's recovery gate keeps the visible selection valid everywhere,
+      // and this defense-in-depth recovery (SAME deterministic oracle) makes
+      // the staged request incapable of diverging from a valid selection even
+      // if a stale value ever reached this point.
+      const stagedSelection =
+        recoverTransportSelection(providerSelection, capabilities) ?? providerSelection;
+      params.generationProvider = stagedSelection.generationProvider;
+      if (stagedSelection.generationProvider === "ollama") {
+        if (stagedSelection.ollamaTransport !== null) {
+          params.ollamaTransport = stagedSelection.ollamaTransport;
         }
-        if (providerSelection.ollamaModel !== "") {
-          params.ollamaModel = providerSelection.ollamaModel;
+        if (stagedSelection.ollamaModel !== "") {
+          params.ollamaModel = stagedSelection.ollamaModel;
         }
       }
       // Phase 30 — a COMPLETE Frontier selection travels in-memory: the
       // trusted provider id + model (non-secret) and — inside JourneyParams
       // ONLY, never any persistence surface — the user's API key (§15/§24).
-      if (providerSelection.generationProvider === "frontier") {
+      if (stagedSelection.generationProvider === "frontier") {
         if (
-          typeof providerSelection.frontierProviderId === "string" &&
-          providerSelection.frontierProviderId !== ""
+          typeof stagedSelection.frontierProviderId === "string" &&
+          stagedSelection.frontierProviderId !== ""
         ) {
-          params.frontierProviderId = providerSelection.frontierProviderId;
+          params.frontierProviderId = stagedSelection.frontierProviderId;
         }
         if (
-          typeof providerSelection.frontierModel === "string" &&
-          providerSelection.frontierModel.trim() !== ""
+          typeof stagedSelection.frontierModel === "string" &&
+          stagedSelection.frontierModel.trim() !== ""
         ) {
-          params.frontierModel = providerSelection.frontierModel.trim();
+          params.frontierModel = stagedSelection.frontierModel.trim();
         }
         if (
-          typeof providerSelection.frontierApiKey === "string" &&
-          providerSelection.frontierApiKey !== ""
+          typeof stagedSelection.frontierApiKey === "string" &&
+          stagedSelection.frontierApiKey !== ""
         ) {
-          params.frontierApiKey = providerSelection.frontierApiKey;
+          params.frontierApiKey = stagedSelection.frontierApiKey;
         }
       }
     }

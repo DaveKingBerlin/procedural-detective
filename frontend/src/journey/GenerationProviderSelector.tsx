@@ -203,94 +203,141 @@ export function GenerationProviderSelector({
 
   return (
     <div className="generation-provider" data-testid="generation-provider-selector">
-      <p className="generation-provider-heading">AI Provider</p>
-      {offers.map((offer) => {
-        const disabledForOffer = disabled || !offer.available;
-        const reason =
-          providerReasonLabel(offer.reason) ??
-          (offer.available ? null : PROVIDER_UNAVAILABLE_LABEL);
-        return (
-          <label
-            key={offer.id}
-            className={`provider-option${currentId === offer.id ? " provider-option--active" : ""}`}
-            data-testid={`generation-provider-${offer.id}`}
-          >
-            <input
-              type="radio"
-              name="generation-provider"
-              value={offer.id}
-              checked={currentId === offer.id}
-              disabled={disabledForOffer}
-              onChange={() => selectProvider(offer.id)}
-            />
-            <span className="provider-option-label">{offer.label}</span>
-            {offer.id === "fake" && <span className="provider-option-subtitle">{FAKE_PROVIDER_SUBTITLE}</span>}
-            {!offer.available && reason !== null && (
-              <span className="provider-option-reason" data-testid={`generation-provider-${offer.id}-reason`}>
-                {reason}
-              </span>
-            )}
-          </label>
-        );
-      })}
+      {/* Phase 42 §7 — the AI Provider radio group is a semantic fieldset +
+          legend; each offer is ONE VERTICAL row (§3). Native radios keep the
+          keyboard navigation and disabled semantics. */}
+      <fieldset
+        className="generation-provider-fieldset"
+        data-testid="generation-provider-group"
+      >
+        <legend className="generation-provider-heading">AI Provider</legend>
+        <div className="generation-provider-options">
+          {offers.map((offer) => {
+            const disabledForOffer = disabled || !offer.available;
+            const reason =
+              providerReasonLabel(offer.reason) ??
+              (offer.available ? null : PROVIDER_UNAVAILABLE_LABEL);
+            const optionClass = [
+              "provider-option",
+              disabledForOffer ? "provider-option--disabled" : null,
+              currentId === offer.id ? "provider-option--active" : null,
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <label
+                key={offer.id}
+                className={optionClass}
+                data-testid={`generation-provider-${offer.id}`}
+              >
+                <input
+                  type="radio"
+                  name="generation-provider"
+                  value={offer.id}
+                  checked={currentId === offer.id}
+                  disabled={disabledForOffer}
+                  onChange={() => selectProvider(offer.id)}
+                />
+                <span className="provider-option-copy">
+                  <span className="provider-option-label">{offer.label}</span>
+                  {offer.id === "fake" && (
+                    <span className="provider-option-subtitle">{FAKE_PROVIDER_SUBTITLE}</span>
+                  )}
+                  {!offer.available && reason !== null && (
+                    <span className="provider-option-reason" data-testid={`generation-provider-${offer.id}-reason`}>
+                      {reason}
+                    </span>
+                  )}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      </fieldset>
 
       {ollamaActive && (
         <div className="generation-ollama" data-testid="generation-ollama-controls">
-          <p className="generation-ollama-transport-heading">{OLLAMA_TRANSPORT_HEADING}</p>
-          {serverTransport !== undefined && (
-            <label
-              className="provider-option provider-option--transport"
-              data-testid="generation-ollama-transport-server"
-            >
-              <input
-                type="radio"
-                name="generation-ollama-transport"
-                value="server"
-                checked={currentTransport === "server"}
-                disabled={disabled || !serverTransport.available}
-                onChange={() => selectTransport("server")}
-              />
-              <span className="provider-option-label">{OLLAMA_TRANSPORT_SERVER_LABEL}</span>
-              {/* Phase 26C1 §5 — availability is DISPLAY-ONLY, shown independently
-                  of the (authoritative) selected transport. */}
-              <span
-                className="provider-option-availability"
-                data-testid="generation-ollama-transport-server-availability"
-              >
-                {serverTransport.available
-                  ? "Available"
-                  : (providerReasonLabel(serverTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
-              </span>
-            </label>
-          )}
-          {bridgeTransport !== undefined && (
-            <label
-              className="provider-option provider-option--transport"
-              data-testid="generation-ollama-transport-bridge"
-            >
-              <input
-                type="radio"
-                name="generation-ollama-transport"
-                value="bridge"
-                checked={currentTransport === "bridge"}
-                disabled={disabled || !bridgeTransport.available}
-                onChange={() => selectTransport("bridge")}
-              />
-              <span className="provider-option-label">{OLLAMA_TRANSPORT_BRIDGE_LABEL}</span>
-              {/* Phase 26C1 §5 — availability is DISPLAY-ONLY, shown independently
-                  of the (authoritative) selected transport. */}
-              <span
-                className="provider-option-availability"
-                data-testid="generation-ollama-transport-bridge-availability"
-              >
-                {bridgeTransport.connected === true
-                  ? "Connected"
-                  : bridgeTransport.available
-                    ? "Not connected"
-                    : (providerReasonLabel(bridgeTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
-              </span>
-            </label>
-          )}
+          {/* Phase 42 §3/§4/§7 — the Connection transport group is its own
+              fieldset + legend; each transport is ONE VERTICAL row with the
+              availability line UNDER the label. An unavailable transport is
+              natively disabled AND visually dimmed (provider-option--disabled)
+              — never a CSS-only disable, never replaced by a div. */}
+          <fieldset
+            className="generation-ollama-transport-fieldset"
+            data-testid="generation-ollama-transport-group"
+          >
+            <legend className="generation-ollama-transport-heading">{OLLAMA_TRANSPORT_HEADING}</legend>
+            <div className="generation-ollama-transport-options">
+              {serverTransport !== undefined && (
+                <label
+                  className={[
+                    "provider-option",
+                    "provider-option--transport",
+                    disabled || !serverTransport.available ? "provider-option--disabled" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  data-testid="generation-ollama-transport-server"
+                >
+                  <input
+                    type="radio"
+                    name="generation-ollama-transport"
+                    value="server"
+                    checked={currentTransport === "server"}
+                    disabled={disabled || !serverTransport.available}
+                    onChange={() => selectTransport("server")}
+                  />
+                  <span className="provider-option-copy">
+                    <span className="provider-option-label">{OLLAMA_TRANSPORT_SERVER_LABEL}</span>
+                    {/* Phase 42 §3 — availability is its OWN muted line under
+                        the label (previously crammed inline beside it). */}
+                    <span
+                      className="provider-option-availability"
+                      data-testid="generation-ollama-transport-server-availability"
+                    >
+                      {serverTransport.available
+                        ? "Available"
+                        : (providerReasonLabel(serverTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
+                    </span>
+                  </span>
+                </label>
+              )}
+              {bridgeTransport !== undefined && (
+                <label
+                  className={[
+                    "provider-option",
+                    "provider-option--transport",
+                    disabled || !bridgeTransport.available ? "provider-option--disabled" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  data-testid="generation-ollama-transport-bridge"
+                >
+                  <input
+                    type="radio"
+                    name="generation-ollama-transport"
+                    value="bridge"
+                    checked={currentTransport === "bridge"}
+                    disabled={disabled || !bridgeTransport.available}
+                    onChange={() => selectTransport("bridge")}
+                  />
+                  <span className="provider-option-copy">
+                    <span className="provider-option-label">{OLLAMA_TRANSPORT_BRIDGE_LABEL}</span>
+                    <span
+                      className="provider-option-availability"
+                      data-testid="generation-ollama-transport-bridge-availability"
+                    >
+                      {bridgeTransport.connected === true
+                        ? "Connected"
+                        : bridgeTransport.available
+                          ? "Not connected"
+                          : (providerReasonLabel(bridgeTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
+                    </span>
+                  </span>
+                </label>
+              )}
+            </div>
+          </fieldset>
           {showBridgeControls && (
             <p
               className="generation-ollama-bridge-status"

@@ -27,6 +27,7 @@ import {
   parseGenerationProviders,
   persistGenerationSelection,
   providerReasonLabel,
+  recoverTransportSelection,
   resolveProviderSelection,
   sanitizeFrontierApiKey,
   setFrontierModel,
@@ -248,15 +249,15 @@ describe("resolveProviderSelection — §10 selection resolution", () => {
     expect(selection?.generationProvider).toBe("fake");
   });
 
-  it("Phase 26C1 — an unavailable STORED transport stays SELECTED (no silent fallback to the valid side)", () => {
+  it("Phase 42 §6 — an unavailable STORED transport RECOVERS to the deterministic available side (revises Phase 26C1 verbatim-preservation)", () => {
     const storage = fakeStorage();
     setGenerationProvider("ollama", storage);
     setOllamaTransport("bridge", storage);
     const selection = resolveProviderSelection(CAPS_WITH_PROVIDERS, storage);
     expect(selection?.ollamaTransport).toBe("bridge"); // bridge still available
-    // Now make the bridge unavailable: the stored bridge transport is
-    // AUTHORITATIVE and is preserved verbatim (tests 12 — never rewritten to
-    // the available server side, never silently switched).
+    // Now make the bridge unavailable: the stale stored bridge RECOVERS to the
+    // deterministic natural fallback (server — the only available side). The
+    // UI must never start from a checked+disabled selection (Phase 42 §6).
     const bridgeDown: GenerationCapabilitiesResponse = {
       modes: [],
       defaultProvider: "ollama",
@@ -273,7 +274,7 @@ describe("resolveProviderSelection — §10 selection resolution", () => {
       ],
     };
     const selection2 = resolveProviderSelection(bridgeDown, storage);
-    expect(selection2?.ollamaTransport).toBe("bridge");
+    expect(selection2?.ollamaTransport).toBe("server");
   });
 
   it("uses the first still-available provider when neither default nor stored fit", () => {
@@ -444,7 +445,7 @@ describe("toCreateCaseGeneration — the flat POST /cases block", () => {
   });
 });
 
-describe("Phase 26C1 — the SELECTED transport is authoritative (§1-§8)", () => {
+describe("Phase 26C1/42 — the SELECTED transport is authoritative while AVAILABLE and recovers when stale (§1-§8, §6)", () => {
   /** Ollama capabilities with the fake/frontier offer and chosen transports. */
   function ollamaCaps(transports: {
     server: { available: boolean; connected?: boolean; reason?: string | null };
@@ -660,34 +661,36 @@ describe("Phase 26C1 — the SELECTED transport is authoritative (§1-§8)", () 
     expect(resolveProviderSelection(BOTH_AVAILABLE, storage)?.ollamaTransport).toBe("server");
   });
 
-  it("unavailable Bridge stays selected, NO Server fallback (§8.12)", () => {
+  it("Phase 42 §6 — an unavailable selected Bridge RECOVERS to the available Server side (§8.12 revised)", () => {
     const storage = fakeStorage();
     persistGenerationSelection(
       { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "hermes3:8b" },
       storage,
     );
     const selection = resolveProviderSelection(BRIDGE_UNAVAILABLE, storage);
-    expect(selection?.ollamaTransport).toBe("bridge");
-    // The serialized payload still carries the SELECTED transport — no silent
-    // rewrite, no fallback.
+    // Recovery (Phase 42 §6): the stale bridge is replaced by the deterministic
+    // available fallback (server) — never left checked+disabled, never staged
+    // verbatim in an impossible state.
+    expect(selection?.ollamaTransport).toBe("server");
     expect(toCreateCaseGeneration(selection)).toEqual({
       generationProvider: "ollama",
-      ollamaTransport: "bridge",
+      ollamaTransport: "server",
       ollamaModel: "hermes3:8b",
     });
   });
 
-  it("unavailable Server stays selected, NO Bridge fallback (§8.13)", () => {
+  it("Phase 42 §6 — an unavailable selected Server RECOVERS to the available Bridge side (§8.13 revised)", () => {
     const storage = fakeStorage();
     persistGenerationSelection(
       { generationProvider: "ollama", ollamaTransport: "server", ollamaModel: "hermes3:8b" },
       storage,
     );
     const selection = resolveProviderSelection(SERVER_UNAVAILABLE, storage);
-    expect(selection?.ollamaTransport).toBe("server");
+    // Recovery: server is gone, so the single available side (bridge) wins.
+    expect(selection?.ollamaTransport).toBe("bridge");
     expect(toCreateCaseGeneration(selection)).toEqual({
       generationProvider: "ollama",
-      ollamaTransport: "server",
+      ollamaTransport: "bridge",
       ollamaModel: "hermes3:8b",
     });
   });
@@ -713,6 +716,128 @@ describe("Phase 26C1 — the SELECTED transport is authoritative (§1-§8)", () 
       ),
     ).toBe("server");
     expect(defaultOllamaTransport(undefined)).toBeNull();
+  });
+});
+
+describe("Phase 42 §6 — recoverTransportSelection (deterministic stale-selection recovery)", () => {
+  /** Ollama caps where ONLY server is available (bridge down). */
+  const SERVER_ONLY: GenerationCapabilitiesResponse = {
+    modes: [],
+    defaultProvider: "ollama",
+    providers: [
+      {
+        id: "ollama",
+        available: true,
+        defaultModel: "qwen2.5:1.5b",
+        transports: {
+          server: { available: true, reason: null },
+          bridge: { available: false, reason: "not_connected" },
+        },
+      },
+    ],
+  };
+
+  /** Ollama caps where ONLY bridge is available (server off). */
+  const BRIDGE_ONLY: GenerationCapabilitiesResponse = {
+    ...SERVER_ONLY,
+    providers: [
+      {
+        id: "ollama",
+        available: true,
+        defaultModel: "qwen2.5:1.5b",
+        transports: {
+          server: { available: false, reason: "not_configured" },
+          bridge: { available: true, reason: null },
+        },
+      },
+    ],
+  };
+
+  /** Ollama caps where BOTH transports are unavailable. */
+  const BOTH_DOWN: GenerationCapabilitiesResponse = {
+    ...SERVER_ONLY,
+    providers: [
+      {
+        id: "ollama",
+        available: true,
+        defaultModel: "qwen2.5:1.5b",
+        transports: {
+          server: { available: false, reason: "not_configured" },
+          bridge: { available: false, reason: "not_connected" },
+        },
+      },
+    ],
+  };
+
+  const BOTH_UP: GenerationCapabilitiesResponse = CAPS_WITH_PROVIDERS;
+
+  it("returns null when the current transport is still available (no recovery needed)", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    };
+    expect(recoverTransportSelection(selection, BOTH_UP)).toBeNull();
+  });
+
+  it("a stale Bridge recovers to the deterministic available Server side", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    };
+    const recovered = recoverTransportSelection(selection, SERVER_ONLY);
+    expect(recovered).not.toBeNull();
+    expect(recovered?.ollamaTransport).toBe("server");
+    // Every non-transport field is preserved.
+    expect(recovered?.ollamaModel).toBe("hermes3:8b");
+    expect(recovered?.generationProvider).toBe("ollama");
+  });
+
+  it("a stale Server recovers to the deterministic available Bridge side", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "hermes3:8b",
+    };
+    expect(recoverTransportSelection(selection, BRIDGE_ONLY)?.ollamaTransport).toBe("bridge");
+  });
+
+  it("neither transport available -> recovers to null (the documented fail-closed path is preserved)", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    };
+    expect(recoverTransportSelection(selection, BOTH_DOWN)?.ollamaTransport).toBeNull();
+  });
+
+  it("a null transport is left alone (no-usable-transport fail-closed selection is never rewritten)", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: null,
+      ollamaModel: "",
+    };
+    expect(recoverTransportSelection(selection, BOTH_UP)).toBeNull();
+  });
+
+  it("non-ollama selections are never rewritten by this helper", () => {
+    expect(
+      recoverTransportSelection(
+        { generationProvider: "fake", ollamaTransport: null, ollamaModel: "" },
+        BOTH_UP,
+      ),
+    ).toBeNull();
+  });
+
+  it("an absent/offline capabilities DTO returns null (no offer -> the provider-level DISCARD-IF-STALE rule owns it)", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "",
+    };
+    expect(recoverTransportSelection(selection, null)).toBeNull();
+    expect(recoverTransportSelection(selection, { modes: [{ id: "demo", available: true }] })).toBeNull();
   });
 });
 
