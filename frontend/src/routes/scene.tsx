@@ -177,10 +177,15 @@ export default function ScenePage() {
     setToast(feedback.toast);
     setRecordPanel(feedback.record);
     setInteractionError(feedback.error?.message ?? null);
-    // When the panel opens from an object interaction, carry the PUBLIC
-    // object context (registry label + color) so the panel can identify the
-    // selected object and show its small-evidence preview (Phase 8_1 D).
-    if (feedback.record !== null) {
+    // Phase 42 §15/§17 — EVERY inspectable result (an evidence record OR a
+    // NEUTRAL inspection) becomes an inspection target: the object is selected
+    // + focused and the panel context is derived from the (possibly
+    // evidence-free) object. For a neutral object the evidence panel stays
+    // closed (record === null) and the FocusInspection overlay shows the
+    // object name + a neutral state — no invented evidence, no fabricated
+    // description (§17/§23). A FAILED interaction (feedback.error) never
+    // selects anything.
+    if (feedback.error === null) {
       setPanelContext(evidencePreviewFor(session?.sceneModel ?? null, feedback.objectId) ?? null);
       // Phase 15: persistent selected-object focus (3D emissive/ring + list).
       setSelectedObjectId(feedback.objectId);
@@ -600,10 +605,15 @@ export default function ScenePage() {
 
   // Phase 18B: the currently focused evidence object (derived from the
   // selection — the same "which panel is open" state that drives the 3D ring).
+  // Phase 42 §14 — EVERY published/selectable world object is a valid focus
+  // target: the former `&& o.interactionWorks` filter is GONE so a neutral
+  // object (table/lamp/door/vase/victim) enters the same inspection surface.
+  // Membership mirrors the 3D onPick dispatch (`publishedObjectIds` == every
+  // object in `model.worldObjects`).
   const focusedWorldObject =
     selectedObjectId === null || status.status !== "ready"
       ? null
-      : status.model.worldObjects.find((o) => o.objectId === selectedObjectId && o.interactionWorks) ?? null;
+      : status.model.worldObjects.find((o) => o.objectId === selectedObjectId) ?? null;
 
   // Forensic focus follows the selection. The glue's setObjectFocus is
   // idempotent (same id = no-op) and presentation-only: it never re-dispatches

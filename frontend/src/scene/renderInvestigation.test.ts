@@ -558,7 +558,14 @@ describe("Phase 15 — persistent selected-object focus", () => {
     result.dispose();
   });
 
-  it("selection never touches non-interactable objects (no ring)", () => {
+  // Phase 42 §14/§21 — the selection now tracks EVERY published object (the
+  // route calls setObjectSelected for neutral objects too). The persistent
+  // ring/emissive focus affordance is documented as interactable-only: a
+  // neutral object is selected with PANEL-ONLY presentation (no ring mesh,
+  // no emissive) — a deterministic, consistent choice that keeps switching
+  // table -> lamp -> knife correct while never drawing a ring under a
+  // decorative object.
+  it("Phase 42 §21 — the selection tracks a NON-interactable object with PANEL-ONLY presentation (no ring)", () => {
     const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
@@ -1172,12 +1179,22 @@ describe("Phase 18B — forensic focus mode (camera + state machine)", () => {
     result.dispose();
   });
 
-  it("a focus request for a NON-interactable object is refused (no session)", () => {
+  // Phase 42 §14/§21 — EVERY published/selectable object enters focus now: a
+  // NON-interactable (but published) object like vase_01 opens a focus session
+  // (focusFramingFor needs only position/scale/renderScale, which every
+  // published object carries — Phase 42 §15). The neutral object gets the
+  // panel/camera focus; only the interactable-only ring/emissive affordance
+  // stays absent.
+  it("Phase 42 §14 — a focus request for ANY published object (incl. non-interactable decorative objects) opens a focus session", () => {
     const result = createInvestigationScene(NOOP_CANVAS, knifeModel(), nullEngineOptions());
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
-    result.setObjectFocus("vase_01"); // non-interactable -> no focus session
-    expect(result.isObjectFocused()).toBe(false);
+    result.setObjectFocus("vase_01"); // non-interactable BUT published
+    expect(result.isObjectFocused()).toBe(true);
+    expect(result.getFocusedObjectId()).toBe("vase_01");
+    const snapshot = result.getFocusSnapshot();
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.framing).toBeDefined();
     result.dispose();
   });
 

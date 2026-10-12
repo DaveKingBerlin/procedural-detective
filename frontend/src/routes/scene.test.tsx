@@ -416,6 +416,161 @@ describe("Phase 19F — /scene accessibility fallback (universal inspectable but
     expect(toastText(container())).toBe("Nothing relevant was found on the Vase.");
     expect(container().querySelector('[data-testid^="discovered-entry-"]')).toBeNull();
     expect(container().querySelector('[data-testid="object-inspected-vase_01"]')).not.toBeNull();
+    // Phase 42 §14 — the 3D pick of a NEUTRAL object also opens the unified
+    // inspection target (focus surface) — one pipeline for every selectable
+    // object.
+    expect(container().querySelector('[data-testid="focus-inspection"]')).not.toBeNull();
+    expect(container().querySelector('[data-testid="focus-inspection-name"]')?.textContent).toBe(
+      "Vase",
+    );
+  });
+
+  it("Phase 42 §30 — the scene fixture covers 1 special + 1 evidence-bearing + 1 neutral object", async () => {
+    await flushAsync();
+    await waitForReady(container());
+
+    const world = holders.bootstrap!.scene.worldObjects;
+    const byId = new Map(world.map((o) => [o.objectId, o]));
+    // SPECIAL: the knife (interaction inspect + evidence-linked placement).
+    expect(byId.get("kitchen_knife")?.interaction).toBe("inspect");
+    expect(byId.get("kitchen_knife")?.evidenceId).toBe("forensic_knife_match_01");
+    // EVIDENCE-BEARING: the laptop (read interaction + evidence).
+    expect(byId.get("apartment_laptop")?.interaction).toBe("read");
+    expect(byId.get("apartment_laptop")?.evidenceId).toBe("email_thomas_01");
+    // NEUTRAL: the table/lamp (empty interaction, no evidence).
+    expect(byId.get("apartment_table")?.interaction).toBe("");
+    expect(byId.get("apartment_table")?.evidenceId).toBeNull();
+    expect(byId.get("apartment_lamp")?.interaction).toBe("");
+    expect(byId.get("apartment_lamp")?.evidenceId).toBeNull();
+  });
+
+  it("Phase 42 §31 — clicking the KNIFE opens the unified inspection while the special discovery behavior is preserved", async () => {
+    await flushAsync();
+    await waitForReady(container());
+
+    clickObject(container(), "kitchen_knife");
+    await flushAsync();
+
+    // Special-object behavior layered on top: discovery + evidence panel.
+    expect(toastText(container())).toBe("Discovered: Kitchen knife");
+    expect(container().querySelector('[data-testid="evidence-panel"]')).not.toBeNull();
+    expect(container().querySelector('[data-testid="discovered-entry-forensic_knife_match_01"]')).not.toBeNull();
+    // AND the unified inspection target opens with the correct name.
+    expect(container().querySelector('[data-testid="focus-inspection"]')).not.toBeNull();
+    expect(container().querySelector('[data-testid="focus-inspection-name"]')?.textContent).toBe(
+      "Kitchen knife",
+    );
+    // Close works for the special object too (one close path, §22).
+    act(() => {
+      container().querySelector<HTMLElement>('[data-testid="focus-close"]')!.click();
+    });
+    await flushAsync();
+    expect(container().querySelector('[data-testid="focus-inspection"]')).toBeNull();
+  });
+
+  it("Phase 42 §32 — clicking the TABLE opens inspection: correct name, focus active, close works, NO evidence invented (PRIMARY)", async () => {
+    await flushAsync();
+    await waitForReady(container());
+
+    clickObject(container(), "apartment_table");
+    await flushAsync();
+
+    // The inspection surface opens with the SEMANTIC name — no invented
+    // description, no fabricated evidence (§17).
+    expect(container().querySelector('[data-testid="focus-inspection"]')).not.toBeNull();
+    expect(container().querySelector('[data-testid="focus-inspection-name"]')?.textContent).toBe(
+      "Table",
+    );
+    // Focus state active on the selector surface.
+    expect(container().querySelector('[data-testid="object-apartment_table"]')?.getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    // Neutral stays neutral: no evidence panel, no discovered entries.
+    expect(container().querySelector('[data-testid="evidence-panel"]')).toBeNull();
+    expect(container().querySelector('[data-testid^="discovered-entry-"]')).toBeNull();
+    expect(container().textContent).toContain("Nothing discovered yet");
+
+    // Close inspection restores the world (surface unmounts, §22).
+    act(() => {
+      container().querySelector<HTMLElement>('[data-testid="focus-close"]')!.click();
+    });
+    await flushAsync();
+    expect(container().querySelector('[data-testid="focus-inspection"]')).toBeNull();
+  });
+
+  it("Phase 42 §32 — clicking the LAMP opens the same inspection (focus active, no invented evidence)", async () => {
+    await flushAsync();
+    await waitForReady(container());
+
+    clickObject(container(), "apartment_lamp");
+    await flushAsync();
+
+    expect(container().querySelector('[data-testid="focus-inspection"]')).not.toBeNull();
+    expect(container().querySelector('[data-testid="focus-inspection-name"]')?.textContent).toBe(
+      "Lamp",
+    );
+    expect(container().querySelector('[data-testid="evidence-panel"]')).toBeNull();
+    expect(container().querySelector('[data-testid^="discovered-entry-"]')).toBeNull();
+  });
+
+  it("Phase 42 §33 — 3D pick and accessibility-list activation produce the SAME inspection state for one ordinary object", async () => {
+    await flushAsync();
+    await waitForReady(container());
+
+    // Activate the table through the 3D scene (onPick) first.
+    act(() => {
+      holders.lastOnPick?.("apartment_table");
+    });
+    await flushAsync();
+    expect(container().querySelector('[data-testid="focus-inspection-name"]')?.textContent).toBe(
+      "Table",
+    );
+    expect(container().querySelector('[data-testid="object-apartment_table"]')?.getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+
+    // Close, then activate the SAME object through the accessibility list.
+    act(() => {
+      container().querySelector<HTMLElement>('[data-testid="focus-close"]')!.click();
+    });
+    await flushAsync();
+    clickObject(container(), "apartment_table");
+    await flushAsync();
+
+    // Identical selected/inspection state (one shared pipeline, §19/§20).
+    expect(container().querySelector('[data-testid="focus-inspection-name"]')?.textContent).toBe(
+      "Table",
+    );
+    expect(container().querySelector('[data-testid="object-apartment_table"]')?.getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
+
+  it("Phase 42 §35 — switching table -> lamp clears the stale focus and updates the inspection (no mixed state)", async () => {
+    await flushAsync();
+    await waitForReady(container());
+
+    clickObject(container(), "apartment_table");
+    await flushAsync();
+    expect(container().querySelector('[data-testid="focus-inspection-name"]')?.textContent).toBe(
+      "Table",
+    );
+
+    clickObject(container(), "apartment_lamp");
+    await flushAsync();
+
+    // Exactly ONE inspection surface, now for the lamp — the stale Table
+    // focus is cleared, the panel updates without per-object cleanup.
+    expect(container().querySelectorAll('[data-testid="focus-inspection"]')).toHaveLength(1);
+    expect(container().querySelector('[data-testid="focus-inspection-name"]')?.textContent).toBe(
+      "Lamp",
+    );
+    expect(container().querySelector('[data-testid="object-apartment_lamp"]')?.getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(
+      container().querySelector('[data-testid="object-apartment_table"]')?.getAttribute("aria-pressed"),
+    ).toBe("false");
   });
 });
 
