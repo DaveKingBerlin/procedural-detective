@@ -567,7 +567,7 @@ def _deduction_seed(attempt: Any, crime: Any, public: Any) -> str:
     only, never conclusions, never the hidden answer. Empty when the parsed
     case cannot seed (the model then works from the generic contract).
     """
-    from app.domain.eligibility import SUSPECT_ELIGIBLE
+    from app.domain.eligibility import final_homicide_target_ids
     from app.generation.constraints import normalize_identity
 
     if crime is None:
@@ -584,11 +584,15 @@ def _deduction_seed(attempt: Any, crime: Any, public: Any) -> str:
         timeline = _evidence_timeline(canonical)
     except (TypeError, ValueError):
         return ""
+    # Phase41A — every NON-MURDERER FINAL HOMICIDE TARGET (public suspects AND
+    # witnesses, victim excluded) gets the impossible-opportunity exclusion, so
+    # classic suspect cases stay uniquely solvable once witnesses enter the WHO
+    # candidate universe and a witness-murderer case becomes uniquely solvable
+    # (all other targets excluded, murderer viable).
     other_suspects = sorted(
-        p.person_id
-        for p in (getattr(public, "persons", ()) or ())
-        if SUSPECT_ELIGIBLE in (getattr(p, "affordances", ()) or ())
-        and p.person_id != murderer_id
+        target
+        for target in final_homicide_target_ids(public)
+        if target != murderer_id
     )
     other_motives = sorted(
         m.motive_id
@@ -727,7 +731,7 @@ def _evidence_gap_facts(
     - ``notes`` â€” sanitized audit lines (evidence id + fact kind) listing
       exactly what was built and why (the operator/QA trace; never served).
     """
-    from app.domain.eligibility import SUSPECT_ELIGIBLE
+    from app.domain.eligibility import final_homicide_target_ids
     from app.generation.constraints import normalize_identity
     from app.generation.schemas import EvidenceSetSpec, PropSpec, TravelRuleSpec
 
@@ -762,12 +766,28 @@ def _evidence_gap_facts(
         p.person_id: getattr(p, "name", None)
         for p in (getattr(public, "persons", ()) or ())
     }
+    # Phase41A — the impossible-opportunity enumeration covers every OTHER
+    # FINAL HOMICIDE TARGET (public suspects AND witnesses, victim excluded),
+    # not only ``SUSPECT_ELIGIBLE`` suspects (REQUIREMENTS 31.1.1A / 31.10):
+    # once witnesses enter the WHO candidate universe they need evidence-backed
+    # exclusions too, and a witness-murderer case becomes uniquely solvable
+    # (every other target excluded, murderer viable).
     other_suspects = sorted(
-        p.person_id
-        for p in (getattr(public, "persons", ()) or ())
-        if SUSPECT_ELIGIBLE in (getattr(p, "affordances", ()) or ())
-        and p.person_id != murderer_id
+        target
+        for target in final_homicide_target_ids(public)
+        if target != murderer_id
     )
+    # The hidden statement-level witness-truthfulness stamps (Phase41A): the
+    # driver stamps a bounded deterministic set per seed (guilty witness
+    # SELF_PROTECTION / truthful; innocent PROTECT_OTHER / HIDE_UNRELATED_SECRET),
+    # which the evidence algebra consumes for statement text + contradiction
+    # records. Pure; derived from ``attempt._witness_truthfulness``.
+    from app.domain.witness_truth import WitnessStatementTruth
+
+    _stamped_deceptive: dict[str, str] = {}  # witness_id -> reason
+    for entry in (getattr(attempt, "_witness_truthfulness", ()) or ()):
+        if isinstance(entry, WitnessStatementTruth) and entry.truthfulness == "DECEPTIVE":
+            _stamped_deceptive[entry.witness_id] = entry.deception_reason or ""
     other_motives = sorted(
         m.motive_id
         for m in (getattr(public, "motives", ()) or ())
@@ -795,6 +815,12 @@ def _evidence_gap_facts(
 
     def _person_label(person_id: str) -> str:
         return persons.get(person_id) or person_id
+
+    def _location_label(location_id: str) -> str:
+        for loc in (getattr(public, "locations", ()) or ()):
+            if str(getattr(loc, "location_id", "") or "") == str(location_id):
+                return str(getattr(loc, "name", "") or "") or location_id
+        return location_id
 
     # ---- WHEN (bounds the feasible window; canonical tick stays inside) ----
     for eid, ptype, person, title, description in (
@@ -840,7 +866,15 @@ def _evidence_gap_facts(
         )
         notes.append(f"{eid}: canonical {ptype} ({observed_at})")
 
-    # ---- impossible-opportunity for every OTHER suspect --------------------
+    # ---- impossible-opportunity for every OTHER FINAL HOMICIDE TARGET -------
+    # Phase41A (REQUIREMENTS 31.1.1A / 31.10): every non-murderer final target
+    # (public suspects AND witnesses) gets an evidence-backed distant
+    # observation, so the WHO solver — which iterates the final target
+    # universe — keeps ONLY the murderer viable. A DECEPTIVE INNOCENT witness
+    # gets the observation as a ``d_ev_contradict_<wid>`` access/visual record
+    # instead: that same distant observation is BOTH the impossible-opportunity
+    # exclusion AND the DISCOVERABLE contradiction path for their deliberate
+    # claim (they claimed to be at the scene; the record places them elsewhere).
     travel_notes: list[str] = []
     for suspect in other_suspects:
         distant = _canonical_distant_location(travel_lookup, non_scene_locations, scene_id)
@@ -858,11 +892,28 @@ def _evidence_gap_facts(
             travel_notes.append(
                 f"travel rule {distant}->{scene_id}={_DEFAULT_DISTANT_TRAVEL_SECONDS}s added"
             )
-        eid = f"d_ev_opp_{normalize_identity(suspect) or 'suspect'}"
+        deceptive_innocent = suspect in _stamped_deceptive and suspect != murderer_id
+        eid = (
+            f"d_ev_contradict_{normalize_identity(suspect) or 'witness'}"
+            if deceptive_innocent
+            else f"d_ev_opp_{normalize_identity(suspect) or 'suspect'}"
+        )
+        kind = "view_record" if deceptive_innocent else "cctv"
+        location_label = _location_label(distant)
+        description = (
+            f"An access/visual record places {_person_label(suspect)} at "
+            f"{location_label} away from the scene at the crime time — "
+            "contradicting their claim."
+            if deceptive_innocent
+            else (
+                f"A monitoring log places {_person_label(suspect)} at a "
+                "location away from the scene at the crime time."
+            )
+        )
         extras.append(
             _canonical_evidence_item(
                 eid=eid,
-                kind="cctv",
+                kind=kind,
                 propositions=(
                     _canonical_prop(
                         "PERSON_OBSERVED_AT_LOCATION",
@@ -873,13 +924,14 @@ def _evidence_gap_facts(
                     ),
                 ),
                 title="Person logged away from the scene",
-                description=(
-                    f"A monitoring log places {_person_label(suspect)} at a "
-                    "location away from the scene at the crime time."
-                ),
+                description=description,
             )
         )
-        notes.append(f"{eid}: canonical PERSON_OBSERVED_AT_LOCATION for {suspect} (opportunity exclusion)")
+        notes.append(
+            f"{eid}: canonical PERSON_OBSERVED_AT_LOCATION for {suspect} "
+            "(opportunity exclusion"
+            + (" + deceptive contradiction)" if deceptive_innocent else ")")
+        )
 
     # ---- presence + alibi for the LOCKED person (HOMICIDE only) -----------
     # A SUICIDE truth has no murderer: the self-inflicted outcome is evidenced
@@ -1058,24 +1110,22 @@ def _evidence_gap_facts(
     # grounds TIME + LOCATION + OBSERVATION, not only OBSERVATION). No golden
     # names, no story copying, no random text; deterministic and bounded.
     #
-    # Phase41 (§11-§14): a witness whose hidden statement-level truthfulness is
-    # DECEPTIVE (the driver stamps ``crime.witness_truthfulness`` for a
-    # HOMICIDE witness murderer — SELF_PROTECTION) gets a PLAYER-VISIBLE
-    # deceptive statement text and a deterministic MECHANICAL contradiction
-    # record (an access/view record placing the witness at the scene at the
-    # crime time) so the claim is always discoverably checkable. The
+    # Phase41 (§11-§14) + Phase41A (§16-§18): a witness whose hidden
+    # statement-level truthfulness is DECEPTIVE gets a PLAYER-VISIBLE deceptive
+    # statement text and a deterministic MECHANICAL contradiction record so the
+    # claim is always discoverably checkable. The GUILTY deceptive witness (the
+    # HOMICIDE witness murderer — SELF_PROTECTION) claims to have left the
+    # scene and is contradicted by a scene access/visual record. An INNOCENT
+    # deceptive witness (PROTECT_OTHER / HIDE_UNRELATED_SECRET) falsely claims
+    # to have BEEN at the scene and is contradicted by the distant access/visual
+    # record the opportunity algebra already injected for them. The
     # solver-promoted facts (PERSON_OBSERVED_AT_LOCATION / ALIBI_TIME_CLAIM /
     # MOTIVE_LINKED_TO_PERSON) remain deterministic WORLD facts — the claim
     # text is never a deduction premise.
     from app.generation.evidence_facts import (
+        deceptive_presence_statement_text,
         deceptive_statement_text,
     )
-    from app.domain.witness_truth import WitnessStatementTruth
-
-    _stamped_deceptive: dict[str, str] = {}  # witness_id -> reason
-    for entry in (getattr(attempt, "_witness_truthfulness", ()) or ()):
-        if isinstance(entry, WitnessStatementTruth) and entry.truthfulness == "DECEPTIVE":
-            _stamped_deceptive[entry.witness_id] = entry.deception_reason or ""
 
     clock_token = _driver_clock_token(canonical)
     scene_label = _driver_scene_label(public, scene_id)
@@ -1097,8 +1147,20 @@ def _evidence_gap_facts(
         from app.generation.schemas import EvidenceSpec as _CanonicalEvidenceSpec
 
         deceptive = wid in _stamped_deceptive
-        if deceptive and scene_label and clock_token:
+        is_murderer = wid == murderer_id
+        if deceptive and is_murderer and scene_label and clock_token:
+            # GUILTY deceptive witness (the witness murderer, SELF_PROTECTION):
+            # claims to have left the scene early; contradicted by a scene
+            # access/visual record (below).
             statement, description = deceptive_statement_text(
+                wid, str(wname), scene_label, clock_token
+            )
+        elif deceptive and scene_label and clock_token:
+            # INNOCENT deceptive witness (Phase41A §17): falsely claims to have
+            # BEEN at the scene; the discoverable contradiction is the distant
+            # access/visual record already injected by the opportunity algebra
+            # (``d_ev_contradict_<wid>`` — see the OTHER-TARGETS loop).
+            statement, description = deceptive_presence_statement_text(
                 wid, str(wname), scene_label, clock_token
             )
         elif scene_label and clock_token:
@@ -1138,10 +1200,14 @@ def _evidence_gap_facts(
             )
         )
         notes.append(f"{eid}: canonical witness statement for {wid}")
-        # Phase41 — the DISCOVERABLE contradiction path of the deceptive claim:
-        # a mechanical access/view record placing the witness at the scene at
-        # the crime time (the player never has to guess truthfulness).
-        if deceptive:
+        # Phase41 — the DISCOVERABLE contradiction path of the GUILTY deceptive
+        # claim: a mechanical access/view record placing the WITNESS MURDERER
+        # at the scene at the crime time (the player never has to guess
+        # truthfulness). An INNOCENT deceptive witness's contradiction record
+        # was already injected by the OTHER-TARGETS opportunity algebra
+        # (``d_ev_contradict_<wid>`` at a distant location) — it MUST NOT be
+        # re-placed at the scene here (that would contradict their exclusion).
+        if deceptive and is_murderer:
             cont_eid = f"d_ev_contradict_{normalize_identity(wid) or 'witness'}"
             if not any(str(getattr(e, "id", "")) == cont_eid for e in extras):
                 extras.append(
@@ -3426,18 +3492,24 @@ class OllamaStageDriver:
 # -- Phase 41 -- deterministic deceptive-witness stamping ----------------
 
     def _stamp_witness_truthfulness(self, attempt: Any, crime: Any, public: Any) -> None:
-        """Phase41 — stamp the hidden statement-level witness truthfulness onto
-        the attempt (§11-§14).
+        """Phase41 + Phase41A — stamp the hidden statement-level witness
+        truthfulness onto the attempt (§11-§14, §16-§18).
 
-        The map is derived DETERMINISTICALLY from ``(crime, public)``:
-        a HOMICIDE witness murderer lies to protect themselves
-        (``SELF_PROTECTION``). Pure and idempotent. ``pipeline.assemble``
-        lifts the stamp into ``CaseTruth.witness_truthfulness``; it is NEVER
-        part of the serialized draft and NEVER a public DTO / telemetry field.
+        The map is derived DETERMINISTICALLY from ``(crime, public, seed)``:
+        a HOMICIDE witness murderer MAY lie to protect themselves
+        (``SELF_PROTECTION``) and a bounded innocent-witness deception branch
+        (``PROTECT_OTHER`` / ``HIDE_UNRELATED_SECRET``) is reachable across
+        seeds — the case generation ``attempt.seed`` selects the branch with a
+        pure ``seed -> stamps`` function. Pure and idempotent.
+        ``pipeline.assemble`` lifts the stamp into
+        ``CaseTruth.witness_truthfulness``; it is NEVER part of the serialized
+        draft and NEVER a public DTO / telemetry field.
         """
         from app.generation import evidence_facts
 
-        stamped = evidence_facts.deceptive_witness_truths(crime, public)
+        stamped = evidence_facts.deceptive_witness_truths(
+            crime, public, seed=getattr(attempt, "seed", None)
+        )
         attempt._witness_truthfulness = tuple(stamped)
 
     def _project_candidate_integrity(

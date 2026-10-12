@@ -775,20 +775,23 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
         universe_issues.append("candidate universes unavailable: public case incomplete")
     else:
         universes = derive_universes(public)
-        # Phase41 (§15/§32): "suspect universe is empty" must NOT force a
-        # REGENERATE for a SUICIDE case — an empty investigative suspect
-        # universe is legitimately possible when the end-game is the
+        # Phase41 (§15/§32) + Phase41A (§3/§5): an empty INVESTIGATIVE suspect
+        # universe must NOT force a REGENERATE for a SUICIDE case — an empty
+        # suspect universe is legitimately possible when the end-game is the
         # victim-suicide option (the final target universe + the suicide
-        # option provide the resolution). HOMICIDE still requires an
-        # investigative universe (the deduction needs some suspect to solve).
+        # option provide the resolution). HOMICIDE still requires a non-empty
+        # FINAL HOMICIDE TARGET universe (REQUIREMENTS 31.1.1A / 31.10): the
+        # WHO solver needs at least one suspect-or-witness target to solve —
+        # a zero-suspect-but-witnesses HOMICIDE is LEGAL (final targets are
+        # the deduction universe and a witness can be the murderer).
         from app.domain.resolution import ResolutionType
 
         if truth is not None:
             is_suicide = truth.crime.resolution_type is ResolutionType.SUICIDE
         else:
             is_suicide = False
-        if not universes.suspect_ids and not is_suicide:
-            universe_issues.append("suspect universe is empty")
+        if not universes.homicide_target_ids and not is_suicide:
+            universe_issues.append("final homicide target universe is empty")
         if not universes.motive_ids:
             universe_issues.append("motive universe is empty")
         if not universes.weapon_ids:
