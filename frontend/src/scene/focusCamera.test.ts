@@ -125,6 +125,34 @@ describe("focusCloseKey — ESC wiring (pure)", () => {
   });
 });
 
+describe("clampFocusRadius — P42-ADV-05 defensive boundary handling", () => {
+  it("clamps +Infinity to the safe MAXIMUM (not the minimum — wrong-direction floor is gone)", () => {
+    expect(clampFocusRadius(Infinity)).toBe(FOCUS_RADIUS_MAX);
+    // An overflowing extent (1e308 * 1.6) must ULTRA-zoom OUT, never in.
+    expect(clampFocusRadius(Number.MAX_VALUE * 1.6)).toBe(FOCUS_RADIUS_MAX);
+  });
+
+  it("clamps -Infinity to the safe MINIMUM", () => {
+    expect(clampFocusRadius(-Infinity)).toBe(FOCUS_RADIUS_MIN);
+  });
+
+  it("NaN handling is unchanged (no crash; resolves to the safe minimum)", () => {
+    expect(clampFocusRadius(NaN)).toBe(FOCUS_RADIUS_MIN);
+    expect(clampFocusRadius(Number.NaN)).toBe(FOCUS_RADIUS_MIN);
+  });
+
+  it("huge finite values clamp to the maximum (existing behavior preserved)", () => {
+    expect(clampFocusRadius(1e6)).toBe(FOCUS_RADIUS_MAX);
+    expect(clampFocusRadius(999)).toBe(FOCUS_RADIUS_MAX);
+  });
+
+  it("zero and negative values clamp to the minimum (existing behavior preserved)", () => {
+    expect(clampFocusRadius(0)).toBe(FOCUS_RADIUS_MIN);
+    expect(clampFocusRadius(-5)).toBe(FOCUS_RADIUS_MIN);
+    expect(clampFocusRadius(0.001)).toBe(FOCUS_RADIUS_MIN);
+  });
+});
+
 describe("perf probe — focusTransitionTickCount", () => {
   it("reports the exact deterministic tick count for a fixed step", () => {
     // e.g. 18ms frames -> ceil(900/18) = 50 ticks (reported as the measured

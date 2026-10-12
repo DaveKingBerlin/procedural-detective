@@ -66,9 +66,19 @@ export const FOCUS_ORBIT_RATE = 0.22;
  */
 export const FOCUS_BG_LIGHT_SCALE = 0.62;
 
-/** Clamp a computed focus radius into the safe [min, max] framing window. */
+/**
+ * Clamp a computed focus radius into the safe [min, max] framing window.
+ *
+ * P42-ADV-05: a NON-FINITE radius no longer floors every value to the minimum.
+ * +Infinity (an overflowing extent such as `1e308 * 1.6`) clamps to the safe
+ * MAXIMUM so the camera zooms OUT, not into a ULTRA-close-up; -Infinity clamps
+ * to the minimum (the nearest bound by direction); NaN keeps the unchanged
+ * defensive fallback (safe minimum — never crashes, never leaks NaN).
+ */
 export function clampFocusRadius(radius: number): number {
-  if (!Number.isFinite(radius)) return FOCUS_RADIUS_MIN;
+  if (Number.isNaN(radius)) return FOCUS_RADIUS_MIN;
+  if (radius === Infinity) return FOCUS_RADIUS_MAX;
+  if (radius === -Infinity) return FOCUS_RADIUS_MIN;
   return Math.max(FOCUS_RADIUS_MIN, Math.min(FOCUS_RADIUS_MAX, radius));
 }
 
