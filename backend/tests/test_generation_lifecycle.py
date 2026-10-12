@@ -226,8 +226,9 @@ def test_05_repair_succeeds_after_malformed_public_world():
     record = controller.attempt(handle.attempt_id)
     assert record.state is GenerationState.PUBLISHED
     assert record.budget.repair_passes == 1
-    # The repaired payload is the FULL golden draft (evidence restored).
-    assert len(record.published.evidence) == 16
+    # The repaired payload is the FULL golden draft (evidence restored;
+    # Phase41A adds the witness opportunity exclusion cctv_emily_bar_01).
+    assert len(record.published.evidence) == 17
 
 
 def test_06_repair_budget_exhausted_fails():
@@ -463,7 +464,7 @@ def test_26_golden_published_full_assertion_list():
 
     # structural/safety validation exercised (golden round-trip)
     assert all(isinstance(fact, EvidenceFact) for fact in published.evidence)
-    assert len(published.evidence) == 16
+    assert len(published.evidence) == 17
     assert published.locked == GOLDEN_LOCKED
 
     # admission released after publication

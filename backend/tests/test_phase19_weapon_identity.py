@@ -105,8 +105,9 @@ def _load_objects(record):
 def test_driver_medium_semantic_weapon_identity_preserved():
     record, transport = _run(_medium_posts(), prompt=MEDIUM_PROMPT)
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 7  # case + evidence + 4 activity logs + world
-    assert record.budget.calls == 7
+    # case + evidence + 5 activity logs (Phase41A witness opportunity) + world.
+    assert transport.call_count == 8
+    assert record.budget.calls == 8
     # the environment canonicalized from the user/LLM hint.
     assert record.draft.scene.environment_id == "hotel_suite"
 

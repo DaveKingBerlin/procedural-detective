@@ -212,15 +212,16 @@ def test_deterministic_local_repairs_cost_zero_calls():
 def test_driver_environment_formatting_costs_zero_extra_calls():
     """A format-only environmentHint failure never spends a provider call
     (the full driver is exercised in test_phase19_environment; this proves the
-    budget counters stay at the 7-call path: case/evidence + 4 Phase 19J
-    activity logs + world — environment canonicalization adds zero calls)."""
+    budget counters stay at the 8-call path: case/evidence + 5 Phase 19J
+    activity logs + world — Phase41A adds the witness opportunity exclusion;
+    environment canonicalization adds zero calls)."""
     from test_phase19_environment import _hotel_suite_prompt, _staged
 
     record, transport = _run(_staged(True), prompt=_hotel_suite_prompt())
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 7
-    assert record.budget.calls == 7
-    assert record.budget.core_calls == 7
+    assert transport.call_count == 8
+    assert record.budget.calls == 8
+    assert record.budget.core_calls == 8
     assert record.budget.asset_calls == 0
 
 
@@ -354,11 +355,12 @@ def test_catalog_only_case_is_low_call():
     ]
     record, transport = _run(posts, prompt=_KNIFE_PROMPT)
     assert record.state is GenerationState.PUBLISHED
-    # case + evidence + 4 Phase 19J activity logs + world (kitchen knife is
-    # catalog-resolved: no ASSET_SPEC call).
-    assert transport.call_count == 7
-    assert record.budget.calls == 7
-    assert record.budget.core_calls == 7
+    # case + evidence + 5 Phase 19J activity logs + world (kitchen knife is
+    # catalog-resolved: no ASSET_SPEC call; Phase41A adds the witness
+    # opportunity exclusion).
+    assert transport.call_count == 8
+    assert record.budget.calls == 8
+    assert record.budget.core_calls == 8
     assert record.budget.asset_calls == 0
     assert record.budget.procedural_asset_count == 0
 
@@ -391,8 +393,8 @@ def test_no_infinite_asset_retry_loop_and_failed_asset_bounded():
     assert record.state is GenerationState.PUBLISHED
     assert record.published is not None
     # exactly 1 initial + bounded repairs; never a loop beyond the budget.
-    assert transport.call_count == 7 + 1 + MAX_SPEC_REPAIR_PASSES
-    assert record.budget.calls == 7 + 1 + MAX_SPEC_REPAIR_PASSES
+    assert transport.call_count == 8 + 1 + MAX_SPEC_REPAIR_PASSES
+    assert record.budget.calls == 8 + 1 + MAX_SPEC_REPAIR_PASSES
     # the REQUIRED weapon is represented by the trusted fallback, never dropped
     assert any(
         p.object_id == "bronze_ceremonial_ice_pick"
@@ -627,9 +629,10 @@ def test_ollamaprovider_compatible_with_budgeted_controller():
     )
     record = controller.attempt(handle.attempt_id)
     assert record.state is GenerationState.PUBLISHED
-    # 7 core calls: case + evidence + 4 Phase 19J activity logs + world.
-    assert record.budget.calls == 7
-    assert record.budget.core_calls == 7
+    # 8 core calls: case + evidence + 5 Phase 19J activity logs (Phase41A adds
+    # the witness opportunity exclusion) + world.
+    assert record.budget.calls == 8
+    assert record.budget.core_calls == 8
     assert record.budget.asset_calls == 0
 
 
@@ -693,12 +696,13 @@ def test_ri09_activity_log_roundtrip_core_budget_unchanged():
     posts.append(ICEPICK_SPEC)
     record, transport = _run(posts)
     assert record.state is GenerationState.PUBLISHED
-    # 1 case + 1 evidence + 3 (when_obs round trip) + 3 (other logs) + 1 world
-    # = 9 CORE calls; the ASSET_SPEC call goes to the independent per-asset
-    # bucket (1 asset call). Total transport calls = 10.
-    assert transport.call_count == 10
-    assert record.budget.calls == 10
-    assert record.budget.core_calls == 9
+    # 1 case + 1 evidence + 3 (when_obs round trip) + 4 (the other Phase-41A
+    # activity-log items incl. the witness opportunity) + 1 world = 10 CORE
+    # calls; the ASSET_SPEC call goes to the independent per-asset bucket
+    # (1 asset call). Total transport calls = 11.
+    assert transport.call_count == 11
+    assert record.budget.calls == 11
+    assert record.budget.core_calls == 10
     assert record.budget.asset_calls == 1
     # the 3-call bounded activity-log round trip itself consumed EXACTLY 3
     # CORE calls (never a hidden or free pass).
@@ -707,7 +711,7 @@ def test_ri09_activity_log_roundtrip_core_budget_unchanged():
         for i in range(transport.call_count)
         if "activity_log" in transport.prompt_of_call(i)[:80]
     )
-    assert log_calls == 3 + 3
+    assert log_calls == 3 + 4
 
 
 __all__ = ["_tracker"]

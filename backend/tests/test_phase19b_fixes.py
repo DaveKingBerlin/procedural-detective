@@ -573,11 +573,12 @@ def test_adv216_driver_object_named_core_attributed_to_asset_bucket():
     ]
     record, _transport = _run(posts, prompt=_KITCHEN_KNIFE_PROMPT)
     assert record.state is GenerationState.PUBLISHED
-    # 7 core calls: case + evidence + 4 Phase 19J activity logs + world.
-    assert record.budget.core_calls == 7
+    # 8 core calls: case + evidence + 5 Phase 19J activity logs (Phase41A adds
+    # the witness opportunity exclusion) + world.
+    assert record.budget.core_calls == 8
     assert record.budget.asset_calls == 1
     assert record.budget.asset_calls_by_object == {"core": 1}
-    assert record.budget.calls == 8
+    assert record.budget.calls == 9
 
 
 # --------------------------------------------------------------------------- #
