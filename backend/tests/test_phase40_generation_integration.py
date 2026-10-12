@@ -392,6 +392,12 @@ def test_repair_context_omits_the_invalid_candidate_set_for_candidate_codes():
     # the closed rules ARE the guidance
     assert "REQUIRED CANDIDATE-INTEGRITY RULES" in context
     assert "victim" in context and "witness" in context
+    # FIX-3 (ADV-41A-03): the murderer guidance is FINAL-TARGET based, never
+    # suspect-only — a witness killer must NOT be instructed to gain
+    # SUSPECT_ELIGIBLE.
+    assert "FINAL HOMICIDE TARGET" in context
+    assert "true killer MUST remain a SUSPECT_ELIGIBLE" not in context
+    assert "MUST NOT be given SUSPECT_ELIGIBLE" in context
 
     # control — a PUBLIC_ROLE_TRUTH_LEAK-only report still prints the valid
     # current accuseable set (no candidate-integrity defect present).

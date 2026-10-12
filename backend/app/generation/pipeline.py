@@ -546,8 +546,11 @@ def case_quality_repair_context(attempt: AttemptRecord) -> str:
                              "SUSPECT_ELIGIBLE")
                 lines.append("- a public 'witness' person must NEVER carry "
                              "SUSPECT_ELIGIBLE")
-                lines.append("- the true killer MUST remain a SUSPECT_ELIGIBLE "
-                             "candidate while keeping an ordinary public role")
+                lines.append("- the true killer MUST remain a FINAL HOMICIDE "
+                             "TARGET (an ordinary public-role suspect OR "
+                             "witness in the final-target universe) — a "
+                             "witness killer keeps role 'witness' and MUST NOT "
+                             "be given SUSPECT_ELIGIBLE")
                 lines.append("- keep every already-valid suspect candidate "
                              "unchanged; remove ONLY the impossible "
                              "victim/witness SUSPECT_ELIGIBLE tokens")
