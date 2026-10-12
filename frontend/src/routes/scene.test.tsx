@@ -572,6 +572,32 @@ describe("Phase 19F — /scene accessibility fallback (universal inspectable but
       container().querySelector('[data-testid="object-apartment_table"]')?.getAttribute("aria-pressed"),
     ).toBe("false");
   });
+
+  it("P42-ADV-06 — opening a NEUTRAL-object inspection from the accessibility list keeps keyboard focus predictable and returns it on close", async () => {
+    await flushAsync();
+    await waitForReady(container());
+
+    // A keyboard/list activation puts focus on the TABLE list button, then
+    // opens its (neutral) inspection from the accessibility fallback.
+    const tableButton = objectButton(container(), "apartment_table");
+    tableButton.focus();
+    clickObject(container(), "apartment_table");
+    await flushAsync();
+
+    // The inspection surface opens and autoFocus keeps focus inside it on the
+    // native Close button (the previously-intended activation behavior).
+    expect(container().querySelector('[data-testid="focus-inspection"]')).not.toBeNull();
+    expect(document.activeElement?.getAttribute("data-testid")).toBe("focus-close");
+
+    // Closing the inspection returns focus to the activating control — never
+    // stranded in the removed overlay, never dropped to <body>.
+    act(() => {
+      container().querySelector<HTMLElement>('[data-testid="focus-close"]')!.click();
+    });
+    await flushAsync();
+    expect(container().querySelector('[data-testid="focus-inspection"]')).toBeNull();
+    expect(document.activeElement).toBe(tableButton);
+  });
 });
 
 describe("Phase 32 DEF-045 — replay notebook/pin restore uses the PER-FILE namespace", () => {
