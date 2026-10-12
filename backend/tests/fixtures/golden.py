@@ -332,6 +332,26 @@ def golden_evidence() -> list[EvidenceFact]:
             reliability=Reliability.HIGH,
             title="Bar CCTV shows Anna at 22:14:30",
         ),
+        # Phase41A — the only public WITNESS is a FINAL HOMICIDE TARGET, so the
+        # widened WHO candidate universe (REQUIREMENTS 31.1.1A / 31.10)
+        # includes emily_reed. A distant observation with a public travel rule
+        # evidence-excludes her exactly like the other non-murderer targets,
+        # keeping the golden murderer (thomas_reed) uniquely deducible.
+        _fact(
+            "cctv_emily_bar_01",
+            "cctv_observation",
+            (
+                TypedProposition(
+                    type=PERSON_OBSERVED_AT_LOCATION,
+                    person_id="emily_reed",
+                    location_id=BAR,
+                    observed_at="2026-09-11T22:15:00+02:00",
+                    uncertainty_seconds=30,
+                ),
+            ),
+            reliability=Reliability.HIGH,
+            title="Bar CCTV shows Emily at 22:15",
+        ),
         _fact(
             "motive_audit_01",
             "financial",

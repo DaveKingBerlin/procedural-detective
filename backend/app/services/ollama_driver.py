@@ -567,7 +567,7 @@ def _deduction_seed(attempt: Any, crime: Any, public: Any) -> str:
     only, never conclusions, never the hidden answer. Empty when the parsed
     case cannot seed (the model then works from the generic contract).
     """
-    from app.domain.eligibility import SUSPECT_ELIGIBLE
+    from app.domain.eligibility import final_homicide_target_ids
     from app.generation.constraints import normalize_identity
 
     if crime is None:
@@ -584,11 +584,15 @@ def _deduction_seed(attempt: Any, crime: Any, public: Any) -> str:
         timeline = _evidence_timeline(canonical)
     except (TypeError, ValueError):
         return ""
+    # Phase41A — every NON-MURDERER FINAL HOMICIDE TARGET (public suspects AND
+    # witnesses, victim excluded) gets the impossible-opportunity exclusion, so
+    # classic suspect cases stay uniquely solvable once witnesses enter the WHO
+    # candidate universe and a witness-murderer case becomes uniquely solvable
+    # (all other targets excluded, murderer viable).
     other_suspects = sorted(
-        p.person_id
-        for p in (getattr(public, "persons", ()) or ())
-        if SUSPECT_ELIGIBLE in (getattr(p, "affordances", ()) or ())
-        and p.person_id != murderer_id
+        target
+        for target in final_homicide_target_ids(public)
+        if target != murderer_id
     )
     other_motives = sorted(
         m.motive_id
@@ -727,7 +731,7 @@ def _evidence_gap_facts(
     - ``notes`` â€” sanitized audit lines (evidence id + fact kind) listing
       exactly what was built and why (the operator/QA trace; never served).
     """
-    from app.domain.eligibility import SUSPECT_ELIGIBLE
+    from app.domain.eligibility import final_homicide_target_ids
     from app.generation.constraints import normalize_identity
     from app.generation.schemas import EvidenceSetSpec, PropSpec, TravelRuleSpec
 
@@ -762,12 +766,28 @@ def _evidence_gap_facts(
         p.person_id: getattr(p, "name", None)
         for p in (getattr(public, "persons", ()) or ())
     }
+    # Phase41A — the impossible-opportunity enumeration covers every OTHER
+    # FINAL HOMICIDE TARGET (public suspects AND witnesses, victim excluded),
+    # not only ``SUSPECT_ELIGIBLE`` suspects (REQUIREMENTS 31.1.1A / 31.10):
+    # once witnesses enter the WHO candidate universe they need evidence-backed
+    # exclusions too, and a witness-murderer case becomes uniquely solvable
+    # (every other target excluded, murderer viable).
     other_suspects = sorted(
-        p.person_id
-        for p in (getattr(public, "persons", ()) or ())
-        if SUSPECT_ELIGIBLE in (getattr(p, "affordances", ()) or ())
-        and p.person_id != murderer_id
+        target
+        for target in final_homicide_target_ids(public)
+        if target != murderer_id
     )
+    # The hidden statement-level witness-truthfulness stamps (Phase41A): the
+    # driver stamps a bounded deterministic set per seed (guilty witness
+    # SELF_PROTECTION / truthful; innocent PROTECT_OTHER / HIDE_UNRELATED_SECRET),
+    # which the evidence algebra consumes for statement text + contradiction
+    # records. Pure; derived from ``attempt._witness_truthfulness``.
+    from app.domain.witness_truth import WitnessStatementTruth
+
+    _stamped_deceptive: dict[str, str] = {}  # witness_id -> reason
+    for entry in (getattr(attempt, "_witness_truthfulness", ()) or ()):
+        if isinstance(entry, WitnessStatementTruth) and entry.truthfulness == "DECEPTIVE":
+            _stamped_deceptive[entry.witness_id] = entry.deception_reason or ""
     other_motives = sorted(
         m.motive_id
         for m in (getattr(public, "motives", ()) or ())
@@ -795,6 +815,12 @@ def _evidence_gap_facts(
 
     def _person_label(person_id: str) -> str:
         return persons.get(person_id) or person_id
+
+    def _location_label(location_id: str) -> str:
+        for loc in (getattr(public, "locations", ()) or ()):
+            if str(getattr(loc, "location_id", "") or "") == str(location_id):
+                return str(getattr(loc, "name", "") or "") or location_id
+        return location_id
 
     # ---- WHEN (bounds the feasible window; canonical tick stays inside) ----
     for eid, ptype, person, title, description in (
@@ -840,12 +866,28 @@ def _evidence_gap_facts(
         )
         notes.append(f"{eid}: canonical {ptype} ({observed_at})")
 
-    # ---- impossible-opportunity for every OTHER suspect --------------------
+    # ---- impossible-opportunity for every OTHER FINAL HOMICIDE TARGET -------
+    # Phase41A (REQUIREMENTS 31.1.1A / 31.10): every non-murderer final target
+    # (public suspects AND witnesses) gets an evidence-backed distant
+    # observation (kind ``cctv``) so the WHO solver — which iterates the final
+    # target universe — keeps ONLY the murderer viable.
+    #
+    # FIX-1 (ADV-41A-02): this record is shaped EXACTLY like any other
+    # opportunity/observation item — the SAME neutral ``d_ev_opp_<id>`` id
+    # namespace, ``cctv`` kind, title and description — for truthful AND
+    # deceptive witnesses alike. A deceptive INNOCENT witness's discoverable
+    # contradiction IS this ordinary distant record, so nothing in the public
+    # evidence can reveal deceptive-vs-truthful status; the
+    # ``DECEPTIVE_CLAIM_UNCONTRADICTED`` gate still finds it because
+    # ``mechanical_contradiction_fact_ids`` matches ANY mechanical record
+    # referencing the witness (Phase41A §26/§63, REQUIREMENTS §47A.4).
     travel_notes: list[str] = []
+    opportunity_location: dict[str, str] = {}
     for suspect in other_suspects:
         distant = _canonical_distant_location(travel_lookup, non_scene_locations, scene_id)
         if distant is None:
             continue
+        opportunity_location[suspect] = distant
         if (distant, scene_id) not in travel_lookup:
             extra_rules.append(
                 TravelRuleSpec(
@@ -858,7 +900,7 @@ def _evidence_gap_facts(
             travel_notes.append(
                 f"travel rule {distant}->{scene_id}={_DEFAULT_DISTANT_TRAVEL_SECONDS}s added"
             )
-        eid = f"d_ev_opp_{normalize_identity(suspect) or 'suspect'}"
+        eid = f"d_ev_opp_{normalize_identity(suspect) or 'target'}"
         extras.append(
             _canonical_evidence_item(
                 eid=eid,
@@ -879,7 +921,10 @@ def _evidence_gap_facts(
                 ),
             )
         )
-        notes.append(f"{eid}: canonical PERSON_OBSERVED_AT_LOCATION for {suspect} (opportunity exclusion)")
+        notes.append(
+            f"{eid}: canonical PERSON_OBSERVED_AT_LOCATION for {suspect} "
+            "(opportunity exclusion)"
+        )
 
     # ---- presence + alibi for the LOCKED person (HOMICIDE only) -----------
     # A SUICIDE truth has no murderer: the self-inflicted outcome is evidenced
@@ -1058,24 +1103,29 @@ def _evidence_gap_facts(
     # grounds TIME + LOCATION + OBSERVATION, not only OBSERVATION). No golden
     # names, no story copying, no random text; deterministic and bounded.
     #
-    # Phase41 (§11-§14): a witness whose hidden statement-level truthfulness is
-    # DECEPTIVE (the driver stamps ``crime.witness_truthfulness`` for a
-    # HOMICIDE witness murderer — SELF_PROTECTION) gets a PLAYER-VISIBLE
-    # deceptive statement text and a deterministic MECHANICAL contradiction
-    # record (an access/view record placing the witness at the scene at the
-    # crime time) so the claim is always discoverably checkable. The
+    # Phase41 (§11-§14) + Phase41A (§16-§18): a witness whose hidden
+    # statement-level truthfulness is DECEPTIVE gets a PLAYER-VISIBLE deceptive
+    # statement text; the contradiction path is an ORDINARY deterministic
+    # mechanical observation (never a special leak-marked record). The GUILTY
+    # deceptive witness (the HOMICIDE witness murderer — SELF_PROTECTION)
+    # claims to have left the scene and is contradicted by the ordinary scene
+    # ``d_ev_presence`` record. An INNOCENT deceptive witness (PROTECT_OTHER /
+    # HIDE_UNRELATED_SECRET) falsely claims to have BEEN at the scene and is
+    # contradicted by the ordinary distant ``d_ev_opp_<wid>`` opportunity
+    # record. FIX-1 (ADV-41A-02): BOTH contradiction records are shaped exactly
+    # like the evidence a truthful witness carries (neutral id/kind/title/
+    # description), so the public DTO can never reveal deceptive-vs-truthful
+    # status (§26/§63, REQUIREMENTS §47A.4). FIX-2 (ADV-41A-01): a TRUTHFUL
+    # non-murderer witness states where the deterministic model actually places
+    # them (the same distant location as their opportunity observation), so a
+    # truthful statement never contradicts its own published evidence. The
     # solver-promoted facts (PERSON_OBSERVED_AT_LOCATION / ALIBI_TIME_CLAIM /
     # MOTIVE_LINKED_TO_PERSON) remain deterministic WORLD facts — the claim
     # text is never a deduction premise.
     from app.generation.evidence_facts import (
+        deceptive_presence_statement_text,
         deceptive_statement_text,
     )
-    from app.domain.witness_truth import WitnessStatementTruth
-
-    _stamped_deceptive: dict[str, str] = {}  # witness_id -> reason
-    for entry in (getattr(attempt, "_witness_truthfulness", ()) or ()):
-        if isinstance(entry, WitnessStatementTruth) and entry.truthfulness == "DECEPTIVE":
-            _stamped_deceptive[entry.witness_id] = entry.deception_reason or ""
 
     clock_token = _driver_clock_token(canonical)
     scene_label = _driver_scene_label(public, scene_id)
@@ -1097,9 +1147,42 @@ def _evidence_gap_facts(
         from app.generation.schemas import EvidenceSpec as _CanonicalEvidenceSpec
 
         deceptive = wid in _stamped_deceptive
-        if deceptive and scene_label and clock_token:
+        is_murderer = wid == murderer_id
+        # FIX-2 (ADV-41A-01): a TRUTHFUL non-murderer witness states where the
+        # deterministic model actually places them — the SAME distant location
+        # as their published opportunity observation — so their statement never
+        # contradicts their own evidence. Only a stamped DECEPTIVE witness makes
+        # a deliberately contradictory claim.
+        truthful_location_id = (
+            None if is_murderer else opportunity_location.get(wid)
+        )
+        truthful_location_label = (
+            _location_label(truthful_location_id) if truthful_location_id else ""
+        )
+        if deceptive and is_murderer and scene_label and clock_token:
+            # GUILTY deceptive witness (the witness murderer, SELF_PROTECTION):
+            # claims to have left the scene early; contradicted by the ordinary
+            # scene-presence observation (``d_ev_presence``), discoverable like
+            # any other record (no special/marked contradiction record).
             statement, description = deceptive_statement_text(
                 wid, str(wname), scene_label, clock_token
+            )
+        elif deceptive and scene_label and clock_token:
+            # INNOCENT deceptive witness (Phase41A §17): falsely claims to have
+            # BEEN at the scene; the discoverable contradiction is the ordinary
+            # distant ``d_ev_opp_<wid>`` opportunity observation (neutral shape).
+            statement, description = deceptive_presence_statement_text(
+                wid, str(wname), scene_label, clock_token
+            )
+        elif truthful_location_label and clock_token:
+            # Truthful non-murderer witness: consistent with their published
+            # distant opportunity observation (same location).
+            statement = (
+                f"As {wname}, I was at the {truthful_location_label} around "
+                f"{clock_token} and noticed a few things from there."
+            )
+            description = (
+                f"{wname} was at the {truthful_location_label} around {clock_token}."
             )
         elif scene_label and clock_token:
             statement = (
@@ -1138,42 +1221,6 @@ def _evidence_gap_facts(
             )
         )
         notes.append(f"{eid}: canonical witness statement for {wid}")
-        # Phase41 — the DISCOVERABLE contradiction path of the deceptive claim:
-        # a mechanical access/view record placing the witness at the scene at
-        # the crime time (the player never has to guess truthfulness).
-        if deceptive:
-            cont_eid = f"d_ev_contradict_{normalize_identity(wid) or 'witness'}"
-            if not any(str(getattr(e, "id", "")) == cont_eid for e in extras):
-                extras.append(
-                    _CanonicalEvidenceSpec(
-                        id=cont_eid,
-                        kind="view_record",
-                        propositions=(
-                            _canonical_prop(
-                                "PERSON_OBSERVED_AT_LOCATION",
-                                person_id=wid,
-                                location_id=scene_id,
-                                observed_at=timeline["presence"],
-                                uncertainty_seconds=60,
-                            ),
-                        ),
-                        source_ref={"kind": "record", "sourceId": f"record_{cont_eid}"},
-                        reliability="high",
-                        presentation={
-                            "title": "Access log",
-                            "description": (
-                                f"Building access log: {wname}'s keycard "
-                                f"registered at the {scene_label} at "
-                                f"{clock_token}."
-                            ),
-                        },
-                        discoverable=True,
-                    )
-                )
-                notes.append(
-                    f"{cont_eid}: canonical contradiction record for {wid} "
-                    "(deceptive claim)"
-                )
 
     if travel_notes:
         notes.append("; ".join(travel_notes))
@@ -3426,18 +3473,24 @@ class OllamaStageDriver:
 # -- Phase 41 -- deterministic deceptive-witness stamping ----------------
 
     def _stamp_witness_truthfulness(self, attempt: Any, crime: Any, public: Any) -> None:
-        """Phase41 — stamp the hidden statement-level witness truthfulness onto
-        the attempt (§11-§14).
+        """Phase41 + Phase41A — stamp the hidden statement-level witness
+        truthfulness onto the attempt (§11-§14, §16-§18).
 
-        The map is derived DETERMINISTICALLY from ``(crime, public)``:
-        a HOMICIDE witness murderer lies to protect themselves
-        (``SELF_PROTECTION``). Pure and idempotent. ``pipeline.assemble``
-        lifts the stamp into ``CaseTruth.witness_truthfulness``; it is NEVER
-        part of the serialized draft and NEVER a public DTO / telemetry field.
+        The map is derived DETERMINISTICALLY from ``(crime, public, seed)``:
+        a HOMICIDE witness murderer MAY lie to protect themselves
+        (``SELF_PROTECTION``) and a bounded innocent-witness deception branch
+        (``PROTECT_OTHER`` / ``HIDE_UNRELATED_SECRET``) is reachable across
+        seeds — the case generation ``attempt.seed`` selects the branch with a
+        pure ``seed -> stamps`` function. Pure and idempotent.
+        ``pipeline.assemble`` lifts the stamp into
+        ``CaseTruth.witness_truthfulness``; it is NEVER part of the serialized
+        draft and NEVER a public DTO / telemetry field.
         """
         from app.generation import evidence_facts
 
-        stamped = evidence_facts.deceptive_witness_truths(crime, public)
+        stamped = evidence_facts.deceptive_witness_truths(
+            crime, public, seed=getattr(attempt, "seed", None)
+        )
         attempt._witness_truthfulness = tuple(stamped)
 
     def _project_candidate_integrity(
@@ -4735,14 +4788,18 @@ class OllamaStageDriver:
                     new_objects.append(_enhance_weapon(attempt, obj))
         objects = [*objects, *new_objects]
 
-        # Phase41 (FIX-3, ADV-41-05) — DISCOVERABLE deceptive-witness
-        # contradiction records. Every generated contradiction record (an
-        # access-log/view-record placing a lying witness at the scene) is
-        # bound to an app-owned INSPECTABLE camera placement so the player can
-        # discover it through the ordinary object-interaction path BEFORE
-        # accusation (``project_discovery`` refuses evidence with no
-        # placement). The camera is INSPECTABLE-only — it never enters the
-        # weapon universe or the suspect candidates.
+        # FIX-3 (ADV-41-05) / FIX-1 (ADV-41A-02) — DISCOVERABLE witness
+        # observations. Every mechanical observation referencing a public
+        # witness (the ordinary ``d_ev_opp_<wid>`` distant opportunity record,
+        # and ``d_ev_presence`` for a witness murderer) is bound to an
+        # app-owned INSPECTABLE camera placement, so the player can discover it
+        # through the ordinary object-interaction path BEFORE accusation
+        # (``project_discovery`` refuses evidence with no placement). The
+        # binding is witness-uniform and id-prefix-independent — a deceptive
+        # witness's contradiction is just an ordinary observation, so nothing
+        # in the world can reveal deceptive-vs-truthful status. The camera is
+        # INSPECTABLE-only — it never enters the weapon universe or the suspect
+        # candidates.
         contradiction_objects, contradiction_placements = _contradiction_world_placements(
             evidence_spec, public, kit
         )
@@ -4903,25 +4960,31 @@ def _when_activity_log_evidence_id(evidence_spec: Any) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# Phase41 (FIX-3, ADV-41-05) — DISCOVERABLE deceptive-witness contradiction
+# FIX-3 (ADV-41-05) / FIX-1 (ADV-41A-02) — DISCOVERABLE witness observations
 # --------------------------------------------------------------------------- #
 #
 # A materially deceptive witness claim must always be checkable BEFORE
-# accusation (Phase41 §14). The DRIVER generates the contradiction record
-# (``d_ev_contradict_<wid>``, a mechanical ``view_record`` access log) inside
-# ``_evidence_gap_facts``, but that record is only ``discoverable`` ON PAPER:
-# without a world placement linking it, ``InvestigationService.discover_evidence``
-# 404s ("evidence is not reachable") and the lie can never be challenged.
+# accusation (Phase41 §14). The DRIVER's canonical algebra already emits an
+# ORDINARY mechanical observation for every relevant person (``d_ev_opp_<wid>``
+# distant opportunity exclusions; ``d_ev_presence`` scene presence for the
+# murderer). FIX-1 removed the special ``d_ev_contradict_*`` leak-marked record
+# entirely: the contradiction IS one of those ordinary observations.
 #
-# The driver therefore injects an app-owned CCTV/access-reader placement bound
-# to EVERY discoverable mechanical contradiction record that attributes a
-# public WITNESS, so the player can inspect the camera and discover the record
-# through the ordinary object-interaction path. The camera is INSPECTABLE-only
-# (never a POTENTIAL_WEAPON, never a suspect candidate) and is a registered
-# logical asset (``CAMERA_HALL_01``) — deterministic, zero provider calls, and
-# the exact same placement/evidence contract the world graph validates.
+# Such a record is only ``discoverable`` ON PAPER: without a world placement
+# linking it, ``InvestigationService.discover_evidence`` 404s ("evidence is not
+# reachable") and a lie could never be challenged. The driver therefore injects
+# an app-owned CCTV/access-reader placement bound to every discoverable
+# mechanical observation that references a public WITNESS, so the player can
+# inspect the camera and discover the record through the ordinary
+# object-interaction path. The binding rule is id-prefix-independent and
+# witness-uniform (every witness — truthful or deceptive — gets exactly one
+# bound camera), so the public world can never reveal deceptive-vs-truthful
+# status. The camera is INSPECTABLE-only (never a POTENTIAL_WEAPON, never a
+# suspect candidate) and is a registered logical asset (``CAMERA_HALL_01``) —
+# deterministic, zero provider calls, and the exact same placement/evidence
+# contract the world graph validates.
 
-# The registered world asset bound to each contradiction record (a CCTV /
+# The registered world asset bound to each witness-observation record (a CCTV /
 # security camera). ``CAMERA_HALL_01`` is already in the frozen AssetRegistry
 # (``app.generation.safety.AssetRegistry``) so no registry/catalog change is
 # needed and the world-graph asset-reference gate stays green.
@@ -4929,19 +4992,19 @@ _CONTRADICTION_ASSET_ID = "CAMERA_HALL_01"
 
 
 def _contradiction_record_ids(evidence_spec: Any, public: Any) -> tuple[str, ...]:
-    """Sorted ids of the DISCOVERABLE mechanical contradiction records of a
-    driver evidence set.
+    """Sorted ids of the DISCOVERABLE mechanical observations that reference a
+    public WITNESS — the neutral, id-prefix-independent contradiction surface.
 
-    The DRIVER is the sole generator of contradiction records
-    (``_evidence_gap_facts``): exactly one per deceptive witness, under the
-    deterministic id namespace ``d_ev_contradict_<wid>`` (the ids the FIX-3
-    review names — ``d_ev_contradict_*``). The namespace is the precise
-    discriminator: other mechanical-kind facts that reference the same person
-    (``d_ev_presence`` — a witness killer's scene presence — and the
-    ``d_ev_opp_*`` opportunity exclusions for suspects) are the deduction
-    algebra, NOT contradiction records, and must never be re-placed as
-    cameras. The public-witness-role check is kept as a defensive second
-    guard.
+    FIX-1 (ADV-41A-02): the driver no longer stamps any public leak marker on a
+    deception contradiction. ANY mechanical observation (``cctv`` /
+    ``view_record`` …) that references a public witness is a placement-
+    discoverable contradiction candidate: a deceptive INNOCENT witness is
+    contradicted by their ordinary distant ``d_ev_opp_<wid>`` observation and a
+    deceptive GUILTY witness (the witness murderer) by their ordinary
+    ``d_ev_presence`` scene observation. Truthful witnesses carry the SAME
+    ordinary records (every witness gets exactly one bound camera), so the
+    placement set can never distinguish deceptive from truthful status
+    (REQUIREMENTS §47A.4 / Phase41A §26/§63).
     """
     from app.generation.evidence_facts import MECHANICAL_CONTRADICTION_KINDS
 
@@ -4953,8 +5016,6 @@ def _contradiction_record_ids(evidence_spec: Any, public: Any) -> tuple[str, ...
     hits: set[str] = set()
     for item in (getattr(evidence_spec, "evidence", ()) or ()):
         item_id = str(getattr(item, "id", ""))
-        if not item_id.startswith("d_ev_contradict_"):
-            continue
         if str(getattr(item, "kind", "") or "") not in MECHANICAL_CONTRADICTION_KINDS:
             continue
         if getattr(item, "discoverable", True) is False:
@@ -5005,13 +5066,14 @@ def _contradiction_world_placements(
     evidence_spec: Any, public: Any, kit: Any
 ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     """The app-owned camera ``(objects, placements)`` binding every discoverable
-    witness-contradiction record to a world placement (FIX-3).
+    witness-observation record to a world placement (FIX-3 / FIX-1).
 
     Deterministic and bounded: exactly one INSPECTABLE camera object +
-    placement per contradiction record (the driver stamps at most one
-    deceptive witness — the witness murderer — so normally a single pair).
-    Each placement carries ``interaction="inspect"`` and the contradiction
-    ``evidence_id`` so ``project_discovery`` / the interact gate surface it.
+    placement per witness-referencing mechanical observation (normally one per
+    public witness). Each placement carries ``interaction="inspect"`` and the
+    observation ``evidence_id`` so ``project_discovery`` / the interact gate
+    surface it. The binding is uniform across truthful and deceptive witnesses,
+    so the injected world can never leak truthfulness (FIX-1, ADV-41A-02).
     """
     from app.generation.constraints import normalize_identity
     from app.generation.schemas import ObjectSpec, PlacementSpec

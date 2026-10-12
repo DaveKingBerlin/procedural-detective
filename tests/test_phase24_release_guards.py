@@ -489,8 +489,10 @@ def test_ci_fake_world_is_golden_with_laptop_linked_to_activity_log() -> None:
 def test_requirements_md_sha256_unchanged() -> None:
     import hashlib
 
+    # Phase41A authorized the narrow REQUIREMENTS change (§31.1.1A / §31.10 /
+    # §63 rule 17 / witness-deception rule); the NEW hash is canonical.
     digest = hashlib.sha256((REPO_ROOT / "REQUIREMENTS.md").read_bytes()).hexdigest()
-    assert digest == "b2e568c029b02de79a74c43bb0e2ecd4d44a7fbec65d7de191a890a6dec9970d"
+    assert digest == "ba3dfec2ca08069bef21137286def9e6e9c45aaab80cdea424400c522a909678"
 
 
 def test_run_all_includes_phase24_checks() -> None:

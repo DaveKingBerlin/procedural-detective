@@ -521,8 +521,9 @@ def test_adv239_decorative_over_ceiling_never_fails_a_publishable_case():
     )
     assert record.state is GenerationState.PUBLISHED, record.reason
     assert record.solver_proof.weapon.winner == "fork"
-    # 7 core (case/evidence/4 activity logs/world) + 6 asset.
-    assert record.budget.calls == 13
+    # 8 core (case/evidence/5 activity logs/world, Phase41A witness opportunity)
+    # + 6 asset.
+    assert record.budget.calls == 14
     assert record.published is not None
     assert record.published.draft.composition_notes
     assert all("left out" in note for note in record.published.draft.composition_notes)

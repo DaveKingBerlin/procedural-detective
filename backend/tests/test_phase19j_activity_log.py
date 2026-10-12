@@ -805,12 +805,13 @@ def test_driver_run_makes_bounded_activity_log_calls_and_persists_events():
 
     record, transport = driver_run(_staged())
     assert record.state is GenerationState.PUBLISHED
-    # the four time-bearing cctv facts each get ONE bounded activity-log call
+    # the five time-bearing cctv facts each get ONE bounded activity-log call
+    # (Phase41A adds the witness opportunity exclusion d_ev_opp_lisakoenig).
     alog_calls = [
         i for i in range(transport.call_count)
         if "activity_log" in transport.prompt_of_call(i)[:120]
     ]
-    assert len(alog_calls) == 4
+    assert len(alog_calls) == 5
     payload = json.loads(
         serialize_published_payload(
             record.published, seed=1, prompt="j19", model="mock", title="J19"
@@ -962,8 +963,9 @@ def test_activity_log_window_zero_is_honored_not_coerced():
         return epoch_to_iso(tick + delta_seconds, offset)
 
     posts = [_j(_case_people()), _j(_evidence())]
-    # four time-bearing cctv facts, each with a log inside [canonical, +60min]
-    for anchor in (iso(-10), iso(-120), iso(-120), iso(-20)):
+    # five time-bearing cctv facts (Phase41A adds the witness opportunity
+    # exclusion), each with a log inside [canonical, +60min]
+    for anchor in (iso(-10), iso(-120), iso(-120), iso(-120), iso(-20)):
         posts.append(_j(_alog_forward_entries(anchor)))
     posts.append(_j(_world()))
     posts.append(ICEPICK_SPEC)
@@ -1660,8 +1662,10 @@ def test_ri15_requirements_md_byte_identical():
 
     path = Path(__file__).resolve().parents[2] / "REQUIREMENTS.md"
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    # Pinned to the Phase-41A canonical REQUIREMENTS hash (31.1.1A / 31.10 /
+    # Rule 17), replacing the pre-Phase-41A ``b2e568c0...`` value.
     assert digest == (
-        "b2e568c029b02de79a74c43bb0e2ecd4d44a7fbec65d7de191a890a6dec9970d"
+        "ba3dfec2ca08069bef21137286def9e6e9c45aaab80cdea424400c522a909678"
     )
 
 

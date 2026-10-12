@@ -646,10 +646,10 @@ def test_c4_global_budget_resets_per_generation_attempt():
     global counter starts at zero on the second controller attempt too."""
     record1, t1 = _run_global_ceiling(derive_global_call_budget_default())
     assert record1.state is GenerationState.PUBLISHED
-    assert record1.budget.calls == 13
+    assert record1.budget.calls == 15
     record2, _t2 = _run_global_ceiling(derive_global_call_budget_default())
     assert record2.state is GenerationState.PUBLISHED
-    assert record2.budget.calls == 13
+    assert record2.budget.calls == 15
     assert record2.budget.calls == record2.budget.core_calls + record2.budget.asset_calls
 
 
@@ -680,7 +680,7 @@ def test_c4_concurrent_attempts_remain_isolated():
         assert not isinstance(result, Exception), result
         record, _transport = result
         assert record.state is GenerationState.PUBLISHED, key
-        assert record.budget.calls == 13, key
+        assert record.budget.calls == 15, key
         assert record.budget.calls == (
             record.budget.core_calls + record.budget.asset_calls
         ), key
@@ -771,9 +771,9 @@ def test_c4_c3_live_12_to_13_world_graph_regression_stays_green():
     record, transport = _run_live(max_core_llm_calls=derive_core_call_budget_default())
     assert record.state is GenerationState.PUBLISHED
     assert record.failure_code is None
-    assert transport.call_count == 13
-    assert record.budget.calls == 13
-    assert record.budget.core_calls == 13
+    assert transport.call_count == 15
+    assert record.budget.calls == 15
+    assert record.budget.core_calls == 15
     assert record.budget.asset_calls == 0
     assert record.budget.calls < record.budget.max_calls  # envelope allows it
 

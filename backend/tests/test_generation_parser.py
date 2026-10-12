@@ -235,7 +235,7 @@ def test_golden_public_world_parses():
 def test_golden_evidence_parses():
     spec = parse_stage(EVIDENCE, GOLDEN_STAGE_PAYLOADS[EVIDENCE])
     assert spec is not None
-    assert len(spec.evidence) == 16
+    assert len(spec.evidence) == 17
 
 
 def test_golden_world_graph_parses():
@@ -593,7 +593,7 @@ def test_full_draft_golden_parses():
     draft = parse_full_draft(GOLDEN_FULL_DRAFT)
     assert draft is not None
     assert len(draft.persons) == 6
-    assert len(draft.evidence) == 16
+    assert len(draft.evidence) == 17
     assert len(draft.world_graph.placements) == 9
 
 

@@ -627,11 +627,13 @@ def test_9_24_parse_shape_reset_after_parseable_pass():
 # --------------------------------------------------------------------------- #
 
 
-def _other_anchors(crime_canonical: str) -> tuple[str, str, str]:
-    """The canonical instants of the REMAINING three activity-log evidence
-    facts (d_ev_opp_* x2, d_ev_presence) in driver evidence order."""
+def _other_anchors(crime_canonical: str) -> tuple[str, str, str, str]:
+    """The canonical instants of the REMAINING FOUR activity-log evidence
+    facts (d_ev_opp_* x3 — Phase41A includes the witness opportunity exclusion
+    — and d_ev_presence) in driver evidence order."""
     tick, offset = parse_iso8601(crime_canonical)
     return (
+        epoch_to_iso(tick - 120, offset),
         epoch_to_iso(tick - 120, offset),
         epoch_to_iso(tick - 120, offset),
         epoch_to_iso(tick - 20, offset),

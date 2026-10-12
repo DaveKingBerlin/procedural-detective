@@ -75,7 +75,7 @@ def _direct_attempt(attempt_id: str = "GA-p38-reuse-000001") -> AttemptRecord:
 
 
 def _pass1_posts() -> list[str]:
-    """The exact 8 posts of one unharmed driver pass (case, evidence, 4 logs,
+    """The exact 9 posts of one unharmed driver pass (case, evidence, 5 logs,
     world, ASSET_SPEC)."""
     return [
         _j(_case_people()),
@@ -129,7 +129,7 @@ def _evidence_plan() -> RepairPlan:
 
 def test_activity_log_only_defect_reruns_logs_and_reuses_evidence_and_world():
     """Activity-log-only repair: NO evidence, NO case, NO world and NO asset
-    provider calls — only the four affected activity-log items re-run."""
+    provider calls — only the five affected activity-log items re-run."""
     transport = MockOllamaTransport(
         posts=[*_pass1_posts(), *_alog_posts(_CRIME_CANONICAL)]
     )
@@ -137,12 +137,12 @@ def test_activity_log_only_defect_reruns_logs_and_reuses_evidence_and_world():
     attempt = _direct_attempt()
 
     driver.run_into(attempt)
-    assert transport.call_count == 8  # the clean Core baseline (3 + 4 logs + asset)
-    assert len(driver._activity_cache[attempt.attempt_id]) == 4
+    assert transport.call_count == 9  # the clean Core baseline (3 + 5 logs + asset)
+    assert len(driver._activity_cache[attempt.attempt_id]) == 5
 
     driver.run_into(attempt, repair_plan=_log_plan())
-    new_calls = transport.post_calls[8:]
-    assert len(new_calls) == 4, f"{len(new_calls)} log calls expected, got {len(new_calls)}"
+    new_calls = transport.post_calls[9:]
+    assert len(new_calls) == 5, f"{len(new_calls)} log calls expected, got {len(new_calls)}"
     for prompt in new_calls:
         assert "Canonical evidence time:" in prompt, "only activity-log calls re-run"
         assert "evidence_v1" not in prompt
@@ -164,10 +164,10 @@ def test_world_graph_defect_reruns_world_and_reuses_evidence_logs():
     attempt = _direct_attempt()
 
     driver.run_into(attempt)
-    assert transport.call_count == 8
+    assert transport.call_count == 9
 
     driver.run_into(attempt, repair_plan=_world_plan())
-    new_calls = transport.post_calls[8:]
+    new_calls = transport.post_calls[9:]
     # world + the re-composed ASSET_SPEC (the generated-asset cache does not
     # memoize across compositions — pre-existing composer behavior).
     assert len(new_calls) == 2, f"world+asset expected, got {new_calls}"
@@ -188,11 +188,11 @@ def test_evidence_defect_reruns_evidence_and_logs_reuses_world():
     attempt = _direct_attempt()
 
     driver.run_into(attempt)
-    assert transport.call_count == 8
+    assert transport.call_count == 9
 
     driver.run_into(attempt, repair_plan=_evidence_plan())
-    new_calls = transport.post_calls[8:]
-    assert len(new_calls) == 5, f"evidence + 4 logs expected, got {len(new_calls)}"
+    new_calls = transport.post_calls[9:]
+    assert len(new_calls) == 6, f"evidence + 5 logs expected, got {len(new_calls)}"
     assert "evidence_v1" in new_calls[0]
     for prompt in new_calls[1:]:
         assert "Canonical evidence time:" in prompt
@@ -221,7 +221,7 @@ def test_witness_statement_defect_reruns_evidence_without_case_regeneration():
     attempt = _direct_attempt()
 
     driver.run_into(attempt)
-    assert transport.call_count == 8
+    assert transport.call_count == 9
 
     # The controller derives the plan from the validation report; the
     # witness-coverage code elects the EVIDENCE owner only.
@@ -233,9 +233,9 @@ def test_witness_statement_defect_reruns_evidence_without_case_regeneration():
     assert witness_plan.rerun_evidence is True
 
     driver.run_into(attempt, repair_plan=witness_plan)
-    new_calls = transport.post_calls[8:]
-    # evidence + the four dependent activity logs; ZERO case/world/asset calls.
-    assert len(new_calls) == 5, f"evidence + 4 logs expected, got {len(new_calls)}"
+    new_calls = transport.post_calls[9:]
+    # evidence + the five dependent activity logs; ZERO case/world/asset calls.
+    assert len(new_calls) == 6, f"evidence + 5 logs expected, got {len(new_calls)}"
     assert "evidence_v1" in new_calls[0]
     for prompt in new_calls[1:]:
         assert "Canonical evidence time:" in prompt
@@ -279,12 +279,12 @@ def test_evidence_change_that_alters_weapon_input_reruns_world(monkeypatch):
     attempt = _direct_attempt()
 
     driver.run_into(attempt)
-    assert transport.call_count == 8
+    assert transport.call_count == 9
     driver.run_into(attempt, repair_plan=_evidence_plan())
-    new_calls = transport.post_calls[8:]
-    # evidence + 4 logs + world + re-composed asset (the changed input
+    new_calls = transport.post_calls[9:]
+    # evidence + 5 logs + world + re-composed asset (the changed input
     # invalidates the cached world)
-    assert len(new_calls) == 7, f"evidence+logs+world+asset expected, got {new_calls}"
+    assert len(new_calls) == 8, f"evidence+logs+world+asset expected, got {new_calls}"
     assert "evidence_v1" in new_calls[0]
     assert any("world_requirements_v1" in p for p in new_calls)
 
@@ -320,13 +320,13 @@ def test_per_item_log_reuse_when_evidence_unchanged():
     driver = _make_driver(transport)
     attempt = _direct_attempt()
     driver.run_into(attempt)
-    assert transport.call_count == 8
+    assert transport.call_count == 9
     per_item = driver._activity_cache[attempt.attempt_id]
-    assert len(per_item) == 4
+    assert len(per_item) == 5
     # A non-log repair pass after another world rerun reuses EVERY per-item log.
     driver.run_into(attempt, repair_plan=_world_plan())
     driver.run_into(attempt, repair_plan=_world_plan())
-    new_calls = transport.post_calls[8:]
+    new_calls = transport.post_calls[9:]
     # two world passes -> world + asset each; ZERO activity-log provider calls.
     assert len(new_calls) == 4, f"only world+asset calls expected, got {new_calls}"
     assert new_calls[0] == new_calls[2], new_calls

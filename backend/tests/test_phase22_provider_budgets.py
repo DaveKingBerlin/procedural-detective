@@ -69,18 +69,20 @@ def stack(tmp_path_factory):
 def _scripts(unknown=True):
     """The SAME canned stage data as the ollama driver suite (procedural world
     card => outputs consumed per dispatched job), including the Phase 19J
-    activity-log responses for the four time-bearing cctv facts."""
+    activity-log responses for the FIVE time-bearing cctv facts (Phase41A adds
+    the witness opportunity exclusion for ``lisa_koenig``)."""
     from app.domain.time_interval import epoch_to_iso, parse_iso8601
     from test_ollama_driver import ICEPICK_SPEC, _alog, _case_people, _evidence
     from test_ollama_driver import _known_world, _world
 
     def _activity_log_dicts():
-        """The four activity-log cassettes as DICTS (bridge structuredOutput)."""
+        """The FIVE activity-log cassettes as DICTS (bridge structuredOutput)."""
         tick, offset = parse_iso8601("2026-09-11T23:42:00+02:00")
         anchors = (
             epoch_to_iso(tick - 10, offset),   # d_ev_when_obs
             epoch_to_iso(tick - 120, offset),  # d_ev_opp_marcus_fischer
             epoch_to_iso(tick - 120, offset),  # d_ev_opp_sophie_hoffmann
+            epoch_to_iso(tick - 120, offset),  # d_ev_opp_lisakoenig (Phase41A)
             epoch_to_iso(tick - 20, offset),   # d_ev_presence
         )
         return [_alog(anchor) for anchor in anchors]
@@ -132,9 +134,10 @@ def _service_run(database_url, *, cassette, prompt=_PROMPT):
 
 
 def test_bridge_procedural_world_budget_equals_local_equivalent(database_url):
-    """Ice-pick procedural world via the bridge: 8 provider calls consumed by
+    """Ice-pick procedural world via the bridge: 9 provider calls consumed by
     the SAME hierarchical BudgetTracker buckets as the local Ollama run
-    (case/evidence + 4 Phase 19J activity logs + world + 1 ASSET_SPEC)."""
+    (case/evidence + 5 Phase 19J activity logs — Phase41A adds the witness
+    opportunity exclusion — + world + 1 ASSET_SPEC)."""
     upgrade_db(database_url)
     record, sock, _service = _service_run(
         database_url, cassette=_scripts(unknown=True)["procedural"]
@@ -143,8 +146,8 @@ def test_bridge_procedural_world_budget_equals_local_equivalent(database_url):
 
     assert record.state is GenerationState.PUBLISHED
     budget = record.budget
-    assert budget.calls == 8
-    assert budget.core_calls == 7
+    assert budget.calls == 9
+    assert budget.core_calls == 8
     assert budget.asset_calls == 1
     assert budget.procedural_asset_count == 1
     assert budget.failed_asset_count == 0
@@ -154,14 +157,15 @@ def test_bridge_procedural_world_budget_equals_local_equivalent(database_url):
         for frame in sock.sent_frames
         if __import__("json").loads(frame).get("type") == "job"
     ]
-    assert len(job_frames) == 8
+    assert len(job_frames) == 9
     assert budget.calls == len(job_frames)
 
 
 def test_bridge_catalog_world_budget_three_calls(database_url):
-    """A catalog-resolved world runs exactly SEVEN provider calls (case/
-    evidence + 4 Phase 19J activity logs + world; no hidden asset call;
-    capability/health probes are separate infrastructure)."""
+    """A catalog-resolved world runs exactly EIGHT provider calls (case/
+    evidence + 5 Phase 19J activity logs + world — Phase41A adds the witness
+    opportunity exclusion; no hidden asset call; capability/health probes are
+    separate infrastructure)."""
     upgrade_db(database_url)
     catalog_prompt = (
         "Victim: Dr. Anna Weiss\nMurderer: Paul Becker\nMotive: stolen research data\n"
@@ -173,8 +177,8 @@ def test_bridge_catalog_world_budget_three_calls(database_url):
         prompt=catalog_prompt,
     )
     assert record.state.value == "PUBLISHED"
-    assert record.budget.calls == 7
-    assert record.budget.core_calls == 7
+    assert record.budget.calls == 8
+    assert record.budget.core_calls == 8
     assert record.budget.asset_calls == 0
     assert record.budget.procedural_asset_count == 0
 
@@ -206,8 +210,8 @@ def test_budget_snapshot_bridge_matches_ollama_driver(database_url):
     ollama_snapshot = ollama_record.budget.snapshot()
 
     assert bridge_snapshot == ollama_snapshot
-    assert bridge_snapshot["globalCallCount"] == 8
-    assert bridge_snapshot["coreCallCount"] == 7
+    assert bridge_snapshot["globalCallCount"] == 9
+    assert bridge_snapshot["coreCallCount"] == 8
     assert bridge_snapshot["assetCallCount"] == 1
 
 
@@ -255,7 +259,9 @@ def test_api_generation_provider_call_count_matches_local(stack):
     body = response.json()
     assert response.status_code == 201, body
     assert body["status"] == "PUBLISHED"
-    assert len(bridge.jobs) == 8
+    # 9 jobs: case + evidence + 5 Phase-19J activity logs (Phase41A adds the
+    # witness opportunity exclusion) + world + ASSET_SPEC.
+    assert len(bridge.jobs) == 9
 
     # Capability / health probes right after the generation consume NOTHING.
     probe = httpx.get(
@@ -264,7 +270,7 @@ def test_api_generation_provider_call_count_matches_local(stack):
         timeout=30,
     )
     assert probe.status_code == 200
-    assert bridge.job_count == 8  # probes never dispatched a job
+    assert bridge.job_count == 9  # probes never dispatched a job
     bridge.close()
 
 

@@ -3,21 +3,24 @@
 Backend regression + budget-alignment suite.
 
 Reproduces, deterministically (MockOllamaTransport / canned fixtures, NO real
-LLM, NO wall-clock sleeps), the exact live 12→13 failure:
+LLM, NO wall-clock sleeps), the live Hard-case repair pattern under the
+post-Phase-41A canonical algebra. The historical 12→13 ZeroHeadroom failure
+pinned the exact sequence:
 
     call 1   case_truth
     call 2   evidence
     call 3   activity_log
     call 4   activity_log
     call 5   activity_log_repair
-    call 6   activity_log
-    call 7   activity_log_repair
-    call 8   activity_log
-    call 9   activity_log_repair
-    call 10  activity_log
-    call 11  activity_log_repair
+    ...
     call 12  activity_log
     call 13  world_graph   <-- PRE-fix rejected; POST-fix permitted
+
+Post-Phase-41A the canonical algebra is the 5-suspect-plus-witness shape: the
+witness ``lisa_koenig`` now receives an impossible-opportunity exclusion too,
+so when_obs + 5 opportunity logs (4 suspects + the witness) + presence = 7
+time-bearing cctv facts (one bounded ACTIVITY_LOG round-trip each), and the
+live queue grows to 15 staged CORE calls.
 
 and pins the new DERIVED global CORE-budget model (Option A):
 
@@ -27,13 +30,14 @@ and pins the new DERIVED global CORE-budget model (Option A):
     total_passes            = 1 + MAX_REPAIR_PASSES + MAX_FULL_REGENERATIONS = 4
     default                 = 155 × 4 = 620
 
-The 6 live activity logs correspond to 5 eligible suspects; the PARSED-CASE
-legal maximum is MAX_CHARACTERS + 1 = 9 (all 8 persons eligible) — the spec's
-"6 logs" text was the live-observed count, not the source-derived bound — and
-the RAW-MODEL-EVIDENCE fallback (case-stage parse failure) is bounded by
-MAX_EVIDENCE_ITEMS = 50 facts, the binding path (adversarial F1a). The
-derivation also covers every controller repair/regeneration pass (F1b), and
-``Settings`` rejects any override below the derived legal maximum (F3).
+The 7 live activity logs correspond to the 5-suspect-plus-witness algebra
+(4 SUSPECT_ELIGIBLE suspects + the Phase41A witness exclusion + presence); the
+PARSED-CASE legal maximum stays ``MAX_CHARACTERS + 1 = 9`` (a safe upper bound
+over the 8-person cap) and the RAW-MODEL-EVIDENCE fallback (case-stage parse
+failure) is bounded by MAX_EVIDENCE_ITEMS = 50 facts, the binding path
+(adversarial F1a). The derivation also covers every controller
+repair/regeneration pass (F1b), and ``Settings`` rejects any override below the
+derived legal maximum (F3).
 """
 
 from __future__ import annotations
@@ -87,8 +91,9 @@ KNIFE_PROMPT = (
 
 
 def _case_people_five_eligible(weapon="kitchen_knife"):
-    """The live Hard world shape: FIVE SUSPECT_ELIGIBLE persons -> the
-    canonical evidence algebra produces when_obs + 4 opp + presence = 6
+    """The live Hard world shape: FIVE SUSPECT_ELIGIBLE persons PLUS the
+    witness lisa_koenig -> the canonical evidence algebra produces when_obs +
+    5 opp (4 suspects + the witness exclusion, Phase41A) + presence = 7
     time-bearing cctv facts (one bounded ACTIVITY_LOG round-trip each)."""
     people = _case_people(weapon=weapon)
     people["persons"] = list(people["persons"]) + [
@@ -132,9 +137,10 @@ def _log_without_canonical(anchor: str) -> str:
 
 
 def _live_posts() -> list[str]:
-    """The EXACT live 12→13 response queue (case, evidence, 6 logs with 4
-    repairs, world). PRE-fix call 13 (world_graph) is blocked by the 12 cap;
-    POST-fix it is permitted and the run publishes."""
+    """The EXACT live 13→14 response queue (case, evidence, 7 logs with 5
+    repairs — Phase41A adds the witness opportunity exclusion, world).
+    PRE-fix call 13 (world_graph) is blocked by the 12 cap; POST-fix it is
+    permitted and the run publishes."""
     when_obs, opp, presence = _six_log_anchors()
     return [
         _j(_case_people_five_eligible()),
@@ -148,7 +154,9 @@ def _live_posts() -> list[str]:
         _j(_alog(opp)),
         _log_without_canonical(opp),              # log 5 (1 repair)
         _j(_alog(opp)),
-        _j(_alog(presence)),                      # log 6 (valid)
+        _log_without_canonical(opp),              # log 6 (1 repair)
+        _j(_alog(opp)),
+        _j(_alog(presence)),                      # log 7 (valid)
         _j(_known_world()),                       # world_graph
     ]
 
@@ -231,18 +239,19 @@ def test_live_12_to_13_pre_fix_world_graph_rejected_core_12():
 
 
 def test_live_12_to_13_post_fix_derived_budget_world_graph_permitted():
-    """POST-fix (derived default 32): the SAME exact 12-call sequence then
-    proceeds to world_graph (call 13), generation continues and PUBLISHES."""
+    """POST-fix (derived default): the EXACT live sequence (13 staged core
+    calls + world = 14; Phase41A adds the witness opportunity log) proceeds to
+    world_graph and PUBLISHES."""
     derived = derive_core_call_budget_default()
     record, transport = _run_live(max_core_llm_calls=derived)
     assert record.state is GenerationState.PUBLISHED
     assert record.published is not None
     assert record.failure_code is None
-    assert transport.call_count == 13
-    assert record.budget.calls == 13
-    assert record.budget.core_calls == 13
-    # call 13 IS world_graph (not privileged; simply now within the budget).
-    assert _stage_of(transport.prompt_of_call(12)) == "world_requirements_v1"
+    assert transport.call_count == 15
+    assert record.budget.calls == 15
+    assert record.budget.core_calls == 15
+    # call 15 IS world_graph (not privileged; simply now within the budget).
+    assert _stage_of(transport.prompt_of_call(14)) == "world_requirements_v1"
 
 
 def test_live_13_calls_have_budget_headroom_then_fail_closed_at_plus_one():
@@ -276,35 +285,15 @@ def test_live_13_calls_have_budget_headroom_then_fail_closed_at_plus_one():
 
 
 def test_normal_hard_path_fits_within_derived_budget():
-    """6-log Hard world with NO repairs (6 initial logs + case + evidence +
-    world = 9 calls) fits the derived budget and publishes."""
+    """7-log Hard world (Phase41A adds the witness opportunity exclusion) with
+    NO repairs (7 initial logs + case + evidence + world = 10 calls) fits the
+    derived budget and publishes."""
     when_obs, opp, presence = _six_log_anchors()
     posts = [
         _j(_case_people_five_eligible()),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
         _j(_alog(when_obs)),
         _j(_alog(opp)),
-        _j(_alog(opp)),
-        _j(_alog(opp)),
-        _j(_alog(opp)),
-        _j(_alog(presence)),
-        _j(_known_world()),
-    ]
-    record, transport = _run_live(max_core_llm_calls=derive_core_call_budget_default(), posts=posts)
-    assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 9
-    assert record.budget.core_calls == 9
-    assert record.budget.core_calls <= derive_core_call_budget_default()
-
-
-def test_hard_path_with_1_repair_fits():
-    """One bounded activity-log repair (10 calls) fits the derived budget."""
-    when_obs, opp, presence = _six_log_anchors()
-    posts = [
-        _j(_case_people_five_eligible()),
-        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
-        _j(_alog(when_obs)),
-        _log_without_canonical(opp),  # log 2 -> repair
         _j(_alog(opp)),
         _j(_alog(opp)),
         _j(_alog(opp)),
@@ -316,10 +305,33 @@ def test_hard_path_with_1_repair_fits():
     assert record.state is GenerationState.PUBLISHED
     assert transport.call_count == 10
     assert record.budget.core_calls == 10
+    assert record.budget.core_calls <= derive_core_call_budget_default()
+
+
+def test_hard_path_with_1_repair_fits():
+    """One bounded activity-log repair (11 calls) fits the derived budget."""
+    when_obs, opp, presence = _six_log_anchors()
+    posts = [
+        _j(_case_people_five_eligible()),
+        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
+        _j(_alog(when_obs)),
+        _log_without_canonical(opp),  # log 2 -> repair
+        _j(_alog(opp)),
+        _j(_alog(opp)),
+        _j(_alog(opp)),
+        _j(_alog(opp)),
+        _j(_alog(opp)),
+        _j(_alog(presence)),
+        _j(_known_world()),
+    ]
+    record, transport = _run_live(max_core_llm_calls=derive_core_call_budget_default(), posts=posts)
+    assert record.state is GenerationState.PUBLISHED
+    assert transport.call_count == 11
+    assert record.budget.core_calls == 11
 
 
 def test_hard_path_with_3_repairs_fits():
-    """Three bounded activity-log repairs (12 calls) fit the derived budget."""
+    """Three bounded activity-log repairs (13 calls) fit the derived budget."""
     when_obs, opp, presence = _six_log_anchors()
     posts = [
         _j(_case_people_five_eligible()),
@@ -332,13 +344,14 @@ def test_hard_path_with_3_repairs_fits():
         _log_without_canonical(opp),
         _j(_alog(opp)),
         _j(_alog(opp)),
+        _j(_alog(opp)),
         _j(_alog(presence)),
         _j(_known_world()),
     ]
     record, transport = _run_live(max_core_llm_calls=derive_core_call_budget_default(), posts=posts)
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 12
-    assert record.budget.core_calls == 12
+    assert transport.call_count == 13
+    assert record.budget.core_calls == 13
 
 
 def test_full_legal_per_item_repair_maximum_fits():
@@ -353,14 +366,18 @@ def test_full_legal_per_item_repair_maximum_fits():
         _j(_case_people_five_eligible()),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
     ]
-    for anchor in (when_obs, opp, opp, opp, opp, presence):
-        posts += [_log_without_canonical(anchor), _log_without_canonical(anchor), _j(_alog(anchor))]
+    for anchor in (when_obs, opp, opp, opp, opp, opp, presence):
+        posts += [
+            _log_without_canonical(anchor),
+            _log_without_canonical(anchor),
+            _j(_alog(anchor)),
+        ]
     posts.append(_j(_known_world()))
     record, transport = _run_live(max_core_llm_calls=derive_core_call_budget_default(), posts=posts)
     assert record.state is GenerationState.PUBLISHED
-    # 2 fixed + 6 logs × 3 calls + world = 21 calls.
-    assert transport.call_count == 2 + 6 * (1 + MAX_ACTIVITY_LOG_REPAIR_PASSES) + 1 == 21
-    assert record.budget.core_calls == 21
+    # 2 fixed + 7 logs * 3 calls (Phase41A witness exclusion) + world = 24 calls.
+    assert transport.call_count == 2 + 7 * (1 + MAX_ACTIVITY_LOG_REPAIR_PASSES) + 1 == 24
+    assert record.budget.core_calls == 24
     assert record.budget.core_calls <= derive_core_call_budget_default()
 
 
@@ -535,12 +552,14 @@ def test_f1b_repair_pass_reruns_logs_inside_derived_budget():
         _j(_alog(opp)),
         _j(_alog(opp)),
         _j(_alog(opp)),
+        _j(_alog(opp)),
         _j(_alog(presence)),
         "<not-json>",  # pass-1 world (strict-parse failure -> repair)
         "<not-json>",  # pass-1 world bounded retry (still fails)
         # ---- repair pass (case cached; evidence + logs + world re-burn) ----
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
         _j(_alog(when_obs)),
+        _j(_alog(opp)),
         _j(_alog(opp)),
         _j(_alog(opp)),
         _j(_alog(opp)),
@@ -553,10 +572,11 @@ def test_f1b_repair_pass_reruns_logs_inside_derived_budget():
     )
     assert record.state is GenerationState.PUBLISHED
     assert record.budget.repair_passes == 1
-    # pass 1: case + evidence + 6 logs + world×2 = 10; pass 2: evidence + 6
-    # logs + world = 8 (the case was CACHED) → 18 CORE calls in one attempt.
-    assert transport.call_count == 18
-    assert record.budget.core_calls == 18
+    # pass 1: case + evidence + 7 logs (Phase41A witness exclusion) + world×2
+    # = 11; pass 2: evidence + 7 logs + world = 9 (the case was CACHED) →
+    # 20 CORE calls in one attempt.
+    assert transport.call_count == 20
+    assert record.budget.core_calls == 20
     assert record.budget.core_calls <= derive_core_call_budget_default()
 
 
@@ -757,6 +777,7 @@ def test_failed_calls_count_against_budget():
         _j(_alog(opp)),
         _j(_alog(opp)),
         _j(_alog(opp)),
+        _j(_alog(opp)),
         _j(_alog(presence)),
         _j(_known_world()),
     ]
@@ -774,12 +795,12 @@ def test_failed_calls_count_against_budget():
     record = controller.attempt(handle.attempt_id)
     assert record.state is GenerationState.FAILED
     assert record.failure_code == "PROVIDER_TIMEOUT"
-    # case + evidence + 6 logs = 8 reservations BEFORE the world call; the
-    # world call's own reservation (the 9th) is granted BEFORE the provider
-    # invoke, so it COUNTS even though the call times out (monotonic, no
-    # refund).
-    assert record.budget.core_calls == 9
-    assert record.budget.calls == 9
+    # case + evidence + 7 logs (Phase41A witness exclusion) = 9 reservations
+    # BEFORE the world call; the world call's own reservation (the 10th) is
+    # granted BEFORE the provider invoke, so it COUNTS even though the call
+    # times out (monotonic, no refund).
+    assert record.budget.core_calls == 10
+    assert record.budget.calls == 10
 
 
 def test_parse_failed_calls_count_against_budget():
@@ -794,6 +815,7 @@ def test_parse_failed_calls_count_against_budget():
         _j(_case_people_five_eligible()),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
         _j(_alog(when_obs)),
+        _j(_alog(opp)),
         _j(_alog(opp)),
         _j(_alog(opp)),
         _j(_alog(opp)),
@@ -816,10 +838,11 @@ def test_parse_failed_calls_count_against_budget():
     )
     handle = controller.start_generation(KNIFE_PROMPT, anonymous_quota_session_id=session.session_id)
     record = controller.attempt(handle.attempt_id)
-    # 8 pre-world + 2 world (initial + bounded retry) = 10 consumed calls; the
-    # run then continues (repair or publish) without refunding anything.
-    assert record.budget.core_calls >= 10
-    assert record.budget.calls >= 10
+    # 9 pre-world (case/evidence + 7 Phase-41A logs) + 2 world (initial +
+    # bounded retry) = 11 consumed calls; the run then continues (repair or
+    # publish) without refunding anything.
+    assert record.budget.core_calls >= 11
+    assert record.budget.calls >= 11
 
 
 # --------------------------------------------------------------------------- #
@@ -908,7 +931,7 @@ def test_budget_resets_per_generation_attempt():
     handle1 = controller.start_generation(KNIFE_PROMPT, anonymous_quota_session_id=session.session_id)
     record1 = controller.attempt(handle1.attempt_id)
     assert record1.state is GenerationState.PUBLISHED
-    assert record1.budget.calls == 13
+    assert record1.budget.calls == 15
 
     transport2 = MockOllamaTransport(posts=_live_posts())
     driver2 = _make_driver(transport2)
@@ -920,7 +943,7 @@ def test_budget_resets_per_generation_attempt():
     record2 = controller2.attempt(handle2.attempt_id)
     # the second controller's first attempt starts fresh at 0 calls.
     assert record2.state is GenerationState.PUBLISHED
-    assert record2.budget.calls == 13
+    assert record2.budget.calls == 15
 
 
 def test_concurrent_attempts_do_not_share_counters():
@@ -950,7 +973,7 @@ def test_concurrent_attempts_do_not_share_counters():
         assert not isinstance(result, Exception), result
         record, _transport = result
         assert record.state is GenerationState.PUBLISHED, key
-        assert record.budget.calls == 13, key
+        assert record.budget.calls == 15, key
 
 
 # --------------------------------------------------------------------------- #
@@ -993,6 +1016,7 @@ def test_bridge_and_direct_use_identical_global_accounting(database_url):
         _iso(tick - 120, _off),
         _iso(tick - 120, _off),
         _iso(tick - 120, _off),
+        _iso(tick - 120, _off),
         _iso(tick - 20, _off),
     )
     cassette = [
@@ -1024,8 +1048,9 @@ def test_bridge_and_direct_use_identical_global_accounting(database_url):
         loop_thread.close()
         store.dispose()
 
-    # Direct path: the SAME derived cap + the SAME 6 valid activity logs
-    # (2 fixed + 6 logs + world = 9 calls — a canonical-equivalent run).
+    # Direct path: the SAME derived cap + the SAME 7 valid activity logs
+    # (Phase41A adds the witness opportunity exclusion; 2 fixed + 7 logs +
+    # world = 10 calls — a canonical-equivalent run).
     valid_posts = [
         _j(_case_people_five_eligible()),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
@@ -1037,8 +1062,8 @@ def test_bridge_and_direct_use_identical_global_accounting(database_url):
     )
     assert direct_record.state is GenerationState.PUBLISHED
     assert direct_record.budget.snapshot() == bridge_snapshot
-    assert bridge_snapshot["globalCallCount"] == 9
-    assert bridge_snapshot["coreCallCount"] == 9
+    assert bridge_snapshot["globalCallCount"] == 10
+    assert bridge_snapshot["coreCallCount"] == 10
     assert bridge_snapshot["assetCallCount"] == 0
 
 
@@ -1138,10 +1163,10 @@ def test_world_graph_is_not_privileged_or_bypassed():
     derived = derive_core_call_budget_default()
     post_record, t2 = _run_live(max_core_llm_calls=derived)
     assert post_record.state is GenerationState.PUBLISHED
-    assert t2.call_count == 13
-    assert _stage_of(t2.prompt_of_call(12)) == "world_requirements_v1"
+    assert t2.call_count == 15
+    assert _stage_of(t2.prompt_of_call(14)) == "world_requirements_v1"
     # both observations are consistent: world_graph counted as a normal call.
-    assert post_record.budget.core_calls == 13
+    assert post_record.budget.core_calls == 15
 
 
 def test_derived_budget_auto_updates_when_canonical_constant_changes(monkeypatch):

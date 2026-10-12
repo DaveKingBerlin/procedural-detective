@@ -181,15 +181,15 @@ def _staged(bad_hint: bool):
 
 @pytest.mark.parametrize("bad_hint", (True, False))
 def test_driver_pathlike_hint_cost_zero_extra_calls_and_falls_back(bad_hint):
-    """A path-like (or canonical) environmentHint costs the SAME seven calls
-    (case/evidence + 4 Phase 19J activity logs + world): the local
-    canonicalization/fallback NEVER consumes a provider call and NEVER enters
-    the remote-repair path."""
+    """A path-like (or canonical) environmentHint costs the SAME eight calls
+    (case/evidence + 5 Phase 19J activity logs + world, Phase41A adds the
+    witness opportunity exclusion): the local canonicalization/fallback NEVER
+    consumes a provider call and NEVER enters the remote-repair path."""
     posts = _staged(bad_hint)
     record, transport = _run(posts, prompt=_hotel_suite_prompt())
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 7
-    assert record.budget.calls == 7
+    assert transport.call_count == 8
+    assert record.budget.calls == 8
     assert record.deferred_structural == ()
     # the user-prompt location (hotel suite) is authoritative after the local
     # repair; the rejected path token NEVER reaches a kit/file lookup.
@@ -209,7 +209,7 @@ def test_driver_canonicalized_spelling_costs_zero_extra_calls(caplog):
     with caplog.at_level(logging.INFO, logger="procedural-detective"):
         record, transport = _run(posts, prompt=_hotel_suite_prompt())
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 7
+    assert transport.call_count == 8
     assert record.draft.scene.environment_id == "hotel_suite"
     events = [
         getattr(event, "pd_event", None)
@@ -235,7 +235,7 @@ def test_driver_rejected_hint_without_user_location_uses_default_kit():
     ]
     record, transport = _run(posts, prompt=prompt)
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 7
+    assert transport.call_count == 8
     assert record.draft.scene.environment_id == "apartment"
 
 

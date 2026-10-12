@@ -148,10 +148,13 @@ def _when_obs_canonical() -> str:
     return epoch_to_iso(tick - 10, offset)
 
 
-def _other_anchors(crime_canonical: str) -> tuple[str, str, str]:
-    """Canonical instants of the REMAINING three activity-log evidence facts."""
+def _other_anchors(crime_canonical: str) -> tuple[str, str, str, str]:
+    """Canonical instants of the REMAINING FOUR activity-log evidence facts
+    (d_ev_opp_* x3 including the Phase41A witness opportunity exclusion +
+    d_ev_presence)."""
     tick, offset = parse_iso8601(crime_canonical)
     return (
+        epoch_to_iso(tick - 120, offset),
         epoch_to_iso(tick - 120, offset),
         epoch_to_iso(tick - 120, offset),
         epoch_to_iso(tick - 20, offset),
@@ -470,8 +473,9 @@ def test_10_12_repair_attempts_stay_bounded():
     record, transport = _run_chain(normal_entries=21, repair1_entries=18)
     assert record.state is GenerationState.PUBLISHED
     alog_calls = _activity_log_calls(transport)
-    # failing fact: normal(1) + repair#1(1) = 2; each other fact: 1 → total 5
-    assert len(alog_calls) == 5
+    # failing fact: normal(1) + repair#1(1) = 2; each other fact: 1 → total 6
+    # (Phase41A adds the witness opportunity exclusion).
+    assert len(alog_calls) == 6
 
 
 def test_10_13_observability_fields_are_safe(caplog):

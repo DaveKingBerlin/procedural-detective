@@ -227,12 +227,13 @@ def test_weapon_generalization_matrix(weapon, world_names, include_spec, render_
         *_alog_posts('2026-09-11T23:42:00+02:00'),
         _j(_world_with(*world_names, excluded=not world_names)),
     ]
-    # case + evidence + 4 Phase 19J activity logs + world (+ procedural
-    # spec when the weapon is unknown -> ASSET_SPEC).
-    expected_calls = 7
+    # case + evidence + 5 Phase 19J activity logs (Phase41A adds the witness
+    # opportunity exclusion) + world (+ procedural spec when the weapon is
+    # unknown -> ASSET_SPEC).
+    expected_calls = 8
     if include_spec:
         posts.append(spec)
-        expected_calls = 8
+        expected_calls = 9
     record, transport = _run(posts, prompt=_weapon_prompt(weapon))
     _assert_weapon_contract(record, weapon_id, render_prefix)
     # provider-call impact: budgets UNCHANGED — only the staged calls were
@@ -679,10 +680,11 @@ def test_provider_call_impact_stays_within_budget_for_rich_worlds():
     assert record.state is GenerationState.PUBLISHED
     assert record.solver_proof.weapon.winner == "fork"
     budget = record.budget
-    # exactly the staged calls: 7 core (case/evidence/4 activity logs/world)
-    # + 4 ASSET_SPEC (procedural assets are their own bucket).
-    assert budget.calls == 11
-    assert budget.core_calls == 7
+    # exactly the staged calls: 8 core (case/evidence/5 activity logs — Phase41A
+    # adds the witness opportunity exclusion/world) + 4 ASSET_SPEC (procedural
+    # assets are their own bucket).
+    assert budget.calls == 12
+    assert budget.core_calls == 8
     assert budget.core_calls <= (budget.max_core_calls or budget.core_calls)
     assert budget.calls < 128  # MAX_LLM_CALLS_PER_GENERATION ceiling untouched
     from app.generation import pipeline

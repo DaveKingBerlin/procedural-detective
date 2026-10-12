@@ -147,7 +147,13 @@ def test_golden_unique_evidence_backed_solution():
     assert who.winner == "thomas_reed"
     assert who.viable == ("thomas_reed",)
     assert set(who.unknown_remaining) == set()
-    assert {e.candidate_id for e in who.excluded} == {"anna_karlsson", "michael_carter"}
+    # Phase41A — the WHO universe is the FINAL HOMICIDE TARGET universe, so the
+    # public witness (emily_reed) is a candidate and is evidence-excluded too.
+    assert {e.candidate_id for e in who.excluded} == {
+        "anna_karlsson",
+        "emily_reed",
+        "michael_carter",
+    }
     for exclusion in who.excluded:
         assert all(o.effect is RuleEffect.EXCLUDE_SUSPECT for o in exclusion.rule_outcomes)
         assert all(o.necessary_for_candidate for o in exclusion.rule_outcomes)

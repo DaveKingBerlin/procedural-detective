@@ -83,6 +83,7 @@ def test_unknown_never_eliminates_end_to_end():
             # Remove everything that drives exclusions or support.
             "cctv_michael_office_01",
             "cctv_anna_bar_01",
+            "cctv_emily_bar_01",
             "motive_no_affair_01",
             "motive_no_robbery_01",
             "forensic_letter_opener_01",

@@ -47,25 +47,25 @@ Issue codes are CLOSED and safe (never statement text, never murderer names in
 diagnostics; the codes themselves are the repair guidance — §37 bounded
 context carries the allowed ids separately).
 
-PHASE 41 (§10 / ADV-41-07) — ``MURDERER_NOT_SUSPECT_CANDIDATE`` NARROWING
-RATIONALE: Phase41 retired the Phase-40 UNIVERSAL "murderer must be in the
-SUSPECT_ELIGIBLE candidate universe" rule and replaced it with the FINAL
-TARGET invariant (``HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET`` — the murderer must
-be a public suspect OR witness, never the victim). The ``MURDERER_NOT_SUSPECT_
-CANDIDATE`` code is deliberately RETAINED in a NARROWED form: it now fires ONLY
-for a public ``role=suspect`` murderer that is missing from the derived
-``SUSPECT_ELIGIBLE`` universe. The narrowing is CORRECT because the frozen
-REQUIREMENTS (§17 "exactly one remaining suspect after deterministic
-deduction"; §31.1 candidate universes = public eligibility predicates) tie the
-DEDUCTION universe to ``SUSPECT_ELIGIBLE`` — a classical investigative suspect
-who is also the hidden killer MUST be a valid deduction candidate, so its
+PHASE 41 + PHASE 41A — ``MURDERER_NOT_SUSPECT_CANDIDATE`` NARROWING RATIONALE:
+Phase41 retired the Phase-40 UNIVERSAL "murderer must be in the SUSPECT_ELIGIBLE
+candidate universe" rule and replaced it with the FINAL TARGET invariant
+(``HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET`` — the murderer must be a public
+suspect OR witness, never the victim). Phase41A then widened the DEDUCTION
+universe itself (REQUIREMENTS 31.1.1A / 31.10 — the murderer SHALL be selected
+from and deduced over the FINAL HOMICIDE TARGET universe: public suspects AND
+witnesses; ``SuspectUniverse`` remains the INVESTIGATIVE universe).
+``MURDERER_NOT_SUSPECT_CANDIDATE`` therefore keeps its NARROWED Phase-41 form:
+it fires ONLY for a public ``role=suspect`` murderer that is missing from the
+derived ``SUSPECT_ELIGIBLE`` universe — a classical investigative suspect who
+is also the hidden killer MUST be an investigative suspect candidate, so its
 absence is an investigative-integrity defect. A WITNESS murderer is
-deliberately NOT covered: a witness is a final homicide target but is never a
-``SUSPECT_ELIGIBLE`` deduction candidate (extending the deduction universe to
-witnesses would drift the frozen REQUIREMENTS), so the witness-murderer shape
-is governed by the PRIMARY ``HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET``
+deliberately NOT covered by this code: a witness is a final homicide target
+without ``SUSPECT_ELIGIBLE`` (and without needing it), and the witness-murderer
+shape is governed by the PRIMARY ``HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET``
 invariant alone (a witness murderer IS a final target and therefore never
-fires that code either).
+fires that code either — this validator never double-reports a witness
+murderer).
 """
 
 from __future__ import annotations

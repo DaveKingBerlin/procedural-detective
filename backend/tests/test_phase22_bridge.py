@@ -432,7 +432,7 @@ def test_ws_job_dispatch_result_and_late_duplicate_discard(stack):
     seen = [job["schemaId"] for job in bridge.jobs]
     assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1",
                     "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1",
-                    "ACTIVITY_LOG_v1", "WORLD_REQUIREMENTS_v1", "ASSET_SPEC_v1"]
+                    "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1", "WORLD_REQUIREMENTS_v1", "ASSET_SPEC_v1"]
     # Registry-level discard semantics.
     registry = stack["server"].app.state.bridge_registry
     conn = registry.lookup_for_scope(
@@ -468,13 +468,14 @@ def test_integration_full_generation_publishes_with_same_solver(stack):
     assert body.get("failureCode") is None
     assert body["caseId"]
     # The bridge saw EXACTLY the authoritative stage jobs: case/evidence +
-    # the four Phase 19J activity logs + the world + the ASSET_SPEC call
-    # (8 for this instrumental world).
+    # the five Phase 19J activity logs (Phase41A adds the witness opportunity
+    # exclusion) + the world + the ASSET_SPEC call (9 for this instrumental
+    # world).
     seen = [job["schemaId"] for job in bridge.jobs]
-    assert len(bridge.jobs) == 8
+    assert len(bridge.jobs) == 9
     assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1", "ACTIVITY_LOG_v1",
                      "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1",
-                     "WORLD_REQUIREMENTS_v1", "ASSET_SPEC_v1"]
+                     "ACTIVITY_LOG_v1", "WORLD_REQUIREMENTS_v1", "ASSET_SPEC_v1"]
     # Every dispatched job carried an AUTHORITATIVE schema id (strict contract)
     # and a bounded timeoutMs.
     for job in bridge.jobs:
@@ -559,8 +560,8 @@ def test_integration_catalog_world_three_calls_no_asset_spec(stack):
     seen = [job["schemaId"] for job in bridge.jobs]
     assert seen == ["CASE_PEOPLE_v1", "EVIDENCE_v1",
                      "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1",
-                     "ACTIVITY_LOG_v1", "WORLD_REQUIREMENTS_v1"]
-    assert len(bridge.jobs) == 7
+                     "ACTIVITY_LOG_v1", "ACTIVITY_LOG_v1", "WORLD_REQUIREMENTS_v1"]
+    assert len(bridge.jobs) == 8
     bridge.close()
 
 
@@ -795,7 +796,7 @@ def test_reconnect_after_connection_drop_restores_availability(stack):
     result = _generate(stack, token)
     assert result.json()["status"] == "PUBLISHED"
     before = bridge.job_count
-    assert before == 8
+    assert before == 9  # 5 phase-19J activity logs after Phase41A
     # Drop the socket and reconnect with the bridge token (bridge_hello).
     bridge.close()
     time.sleep(0.2)
@@ -810,7 +811,7 @@ def test_reconnect_after_connection_drop_restores_availability(stack):
     # stale ones never revive, §18).
     result2 = _generate(stack, token)
     assert result2.json()["status"] == "PUBLISHED"
-    assert bridge2.job_count == 8
+    assert bridge2.job_count == 9
     bridge2.close()
 
 
@@ -1007,7 +1008,7 @@ def test_adv248_reconnect_before_detach_no_zombie_integration(stack):
     # A generation dispatched to S is served by B — NEVER by A's dead socket.
     result = _generate(stack, token)
     assert result.json()["status"] == "PUBLISHED"
-    assert bridge_b.job_count == 8
+    assert bridge_b.job_count == 9
     assert bridge_a.job_count == 0  # A never served the generation
     bridge_b.close()
 
@@ -1069,7 +1070,7 @@ def test_pairing_does_not_serve_other_sessions_bridge(stack):
     r2 = _generate(stack, t2)
     assert r1.json()["status"] == "PUBLISHED"
     assert r2.json()["status"] == "PUBLISHED"
-    assert b1.job_count == 8 and b2.job_count == 8
+    assert b1.job_count == 9 and b2.job_count == 9
     # Cross-session replies: b1 answers a JOB id dispatched to b2's session —
     # the server discards it (no waiter with that id on b1's connection) and
     # the b2 generation is unaffected.
@@ -1109,7 +1110,7 @@ def test_second_binding_for_same_scope_supersedes_old_socket(stack):
     assert registry.lookup_for_scope(scope).bridge_session_id == ack2["bridgeSessionId"]
     result = _generate(stack, token)
     assert result.json()["status"] == "PUBLISHED"
-    assert bridge2.job_count == 8
+    assert bridge2.job_count == 9
     bridge1.close()
     bridge2.close()
 
