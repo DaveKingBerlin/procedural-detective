@@ -363,11 +363,25 @@ def solve_who(
     feasible_time: IntervalSet,
     universes: CandidateUniverses | None = None,
 ) -> CandidateDimensionResult:
-    """Deterministic murderer deduction over the suspect universe.
+    """Deterministic murderer deduction over the FINAL HOMICIDE TARGET universe.
 
-    ``feasible_time`` is the WHEN solver's FeasibleCrimeTimeSet. A suspect is
+    Phase41A widening (REQUIREMENTS 31.10): the WHO candidate universe is the
+    final homicide target universe (``CandidateUniverses.homicide_target_ids``
+    — public suspects AND witnesses, victim excluded), NOT the investigative
+    suspect universe. Every target is evaluated identically; the opportunity/
+    alibi/motive-support rule semantics are UNCHANGED — only the candidate
+    roster widens, which lets a public witness (role ``witness``, no
+    ``SUSPECT_ELIGIBLE``) become the deterministic winner when all other
+    targets are evidence-backed excluded.
+
+    ``feasible_time`` is the WHEN solver's FeasibleCrimeTimeSet. A candidate is
     eliminated ONLY through evidence-backed contradictions of necessary
     conditions (impossible opportunity). Unknown alternatives remain viable.
+
+    Backward safety: when a caller supplies a ``CandidateUniverses`` without a
+    populated ``homicide_target_ids`` (empty), the solver falls back to
+    ``suspect_ids`` (the pre-Phase-41A candidate universe) so legacy callers
+    keep their exact behavior.
     """
     evidence = tuple(evidence)
     ensure_solver_input(public, evidence)
@@ -377,6 +391,11 @@ def solve_who(
             f"WHEN solver); got {type(feasible_time).__name__}."
         )
     universes = universes if universes is not None else derive_universes(public)
+    candidate_universe = (
+        universes.homicide_target_ids
+        if getattr(universes, "homicide_target_ids", ())
+        else universes.suspect_ids
+    )
 
     scene = public.scene_location_id
     evaluations: dict[str, _SuspectEvaluation] = {}
@@ -386,23 +405,25 @@ def solve_who(
     supported: list[str] = []
     unknown: list[str] = []
 
-    for suspect_id in universes.suspect_ids:
-        evaluation = _evaluate_suspect(public, evidence, suspect_id, scene, feasible_time)
-        evaluations[suspect_id] = evaluation
+    for candidate_id in candidate_universe:
+        evaluation = _evaluate_suspect(public, evidence, candidate_id, scene, feasible_time)
+        evaluations[candidate_id] = evaluation
         all_outcomes.extend(evaluation.outcomes)
         if evaluation.excluded:
             excluded.append(
                 Exclusion(
-                    candidate_id=suspect_id,
-                    rule_outcomes=tuple(o for o in evaluation.outcomes if o.permits_elimination()),
+                    candidate_id=candidate_id,
+                    rule_outcomes=tuple(
+                        o for o in evaluation.outcomes if o.permits_elimination()
+                    ),
                 )
             )
         else:
-            viable.append(suspect_id)
+            viable.append(candidate_id)
             if evaluation.supported:
-                supported.append(suspect_id)
+                supported.append(candidate_id)
             else:
-                unknown.append(suspect_id)
+                unknown.append(candidate_id)
 
     viable_sorted = tuple(sorted(viable))
     supported_sorted = tuple(sorted(supported))
@@ -410,11 +431,11 @@ def solve_who(
     unique = (
         len(viable_sorted) == 1
         and len(unknown_sorted) == 0
-        and len(excluded) == len(universes.suspect_ids) - 1
+        and len(excluded) == len(candidate_universe) - 1
     )
     return CandidateDimensionResult(
         dimension=DIMENSION_SUSPECT,
-        universe=universes.suspect_ids,
+        universe=candidate_universe,
         viable=viable_sorted,
         supported=supported_sorted,
         excluded=tuple(excluded),

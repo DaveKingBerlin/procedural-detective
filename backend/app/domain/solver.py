@@ -50,6 +50,10 @@ def solve_case(public: PublicCase, evidence: Iterable[EvidenceFact]) -> SolverPr
     universes: CandidateUniverses = derive_universes(public)
 
     when = solve_when(public, evidence)
+    # Phase41A — the WHO solver derives its candidate universe from
+    # ``CandidateUniverses.homicide_target_ids`` (the final homicide target
+    # universe: public suspects AND witnesses, victim excluded, REQUIREMENTS
+    # 31.1.1A / 31.10), falling back to the suspect universe only when empty.
     who = solve_who(public, evidence, when.feasible, universes)
     why = solve_why(public, evidence, universes)
     weapon = solve_weapon(public, evidence, universes)

@@ -117,16 +117,26 @@ def _unique_sorted(values: Iterable[str]) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class CandidateUniverses:
-    """Immutable snapshot of the three candidate universes.
+    """Immutable snapshot of the candidate universes.
 
     ``__eq__`` is exact value equality and is tested against independently
     re-derived eligibility sets (REQUIREMENTS 31.1.4 / 65.1).
+
+    ``suspect_ids`` / ``motive_ids`` / ``weapon_ids`` keep their Phase-3
+    semantics byte-identical (REQUIREMENTS 31.1.1-31.1.3). Phase41A adds the
+    truth-independent ``homicide_target_ids`` — the FINAL HOMICIDE TARGET
+    universe (REQUIREMENTS 31.1.1A): every public suspect AND witness, victim
+    excluded, sorted/deduped, derived from public roles only. It is the WHO
+    solver's candidate universe (REQUIREMENTS 31.10) while ``suspect_ids``
+    remains the INVESTIGATIVE universe (suspect display / suspect-specific
+    opportunity evidence / suspect gameplay affordances).
     """
 
     eligibility_version: str = ELIGIBILITY_VERSION
     suspect_ids: tuple[str, ...] = field(default_factory=tuple)
     motive_ids: tuple[str, ...] = field(default_factory=tuple)
     weapon_ids: tuple[str, ...] = field(default_factory=tuple)
+    homicide_target_ids: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not isinstance(self.eligibility_version, str) or not self.eligibility_version:
@@ -134,6 +144,7 @@ class CandidateUniverses:
         object.__setattr__(self, "suspect_ids", _unique_sorted(self.suspect_ids))
         object.__setattr__(self, "motive_ids", _unique_sorted(self.motive_ids))
         object.__setattr__(self, "weapon_ids", _unique_sorted(self.weapon_ids))
+        object.__setattr__(self, "homicide_target_ids", _unique_sorted(self.homicide_target_ids))
 
 
 def derive_universes(
@@ -145,4 +156,5 @@ def derive_universes(
         suspect_ids=suspect_universe(public),
         motive_ids=motive_universe(public),
         weapon_ids=weapon_universe(public),
+        homicide_target_ids=final_homicide_target_ids(public),
     )
