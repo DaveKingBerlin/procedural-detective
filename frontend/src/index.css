@@ -497,8 +497,16 @@ a {
      no fixed height — a panel can never force horizontal overflow. The box
      is a flex COLUMN holding two stable regions (questions above, answer
      below); `overflow: hidden` lets the two regions contain their own
-     scrolling instead of an answer ever overlapping the questions. */
-  width: min(24rem, calc(100% - 2rem));
+     scrolling instead of an answer ever overlapping the questions.
+     Phase 42 §9 — responsive min/preferred/max width: 20rem is the usable
+     floor, 30rem the preferred/max desktop width (wider than the old 24rem
+     so long question labels + '· answered' fit on one row), and the
+     `calc(100vw - 2rem)` soft cap guarantees no width can exceed the
+     viewport (no horizontal page scroll on any screen). Fixed-position %
+     behaves as vw, so the cap is written as vw for clarity. */
+  min-width: min(20rem, calc(100vw - 2rem));
+  width: min(30rem, calc(100vw - 2rem));
+  max-width: 30rem;
   max-height: calc(100% - 2rem);
   display: flex;
   flex-direction: column;
@@ -582,10 +590,17 @@ a {
 }
 
 .witness-question-item {
+  /* Phase 42 §10 — the question button takes the flexible width and the
+     '· answered' marker stays right-aligned on the SAME row
+     (space-between, no unconditional wrap). On narrow screens graceful
+     behavior comes from the button's own wrapping (min-width:0 +
+     overflow-wrap:anywhere), so the marker is never pushed to a second
+     line while the row itself never overflows horizontally (§11). */
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.4rem;
-  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .witness-question-button {
@@ -618,6 +633,9 @@ a {
   color: var(--ok);
   font-size: 0.82rem;
   white-space: nowrap;
+  /* Phase 42 §10 — never shrink the marker: it stays intact and right-aligned
+     on its row while the flexible question button absorbs the width loss. */
+  flex-shrink: 0;
 }
 
 /* Lower region of the panel — the SINGLE derived answer, a flex sibling of
