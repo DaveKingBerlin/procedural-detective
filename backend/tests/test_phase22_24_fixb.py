@@ -224,7 +224,7 @@ def test_b1_first_job_result_delivery_keeps_socket(stack):
         body = result.json()
         assert body["status"] == "PUBLISHED", body  # provider future resolved success
         assert body.get("failureCode") is None  # never BRIDGE_DISCONNECTED
-        assert bridge.job_count == 8
+        assert bridge.job_count == 9
         # No SOCKET_CLOSED caused by successful result handling.
         assert bridge.close_code is None, bridge.close_code
         status = bridge_status(stack["base_url"], token)["remoteLocalAi"]
@@ -232,7 +232,9 @@ def test_b1_first_job_result_delivery_keeps_socket(stack):
         # The socket is usable for a follow-up job.
         result2 = _generate(stack, token)
         assert result2.json()["status"] == "PUBLISHED"
-        assert bridge.job_count == 16
+        # 9 jobs per generation: 5 Phase-19J activity logs (Phase41A witness
+        # opportunity exclusion) + case/evidence/world/asset.
+        assert bridge.job_count == 18
         assert bridge.close_code is None
     finally:
         bridge.close()
@@ -272,8 +274,9 @@ def test_b2_three_sequential_generations_one_pairing(stack):
             for job in bridge.jobs:
                 seen_jobs.add(job["jobId"])
         assert len(set(case_ids)) == 3  # three distinct published cases
-        assert bridge.job_count == 24  # 3 x 8 authoritative-stage jobs
-        assert len(seen_jobs) == 24  # every dispatched job id is distinct
+        # 3 x 9 authoritative-stage jobs (Phase41A adds a 5th activity log).
+        assert bridge.job_count == 27
+        assert len(seen_jobs) == 27  # every dispatched job id is distinct
     finally:
         bridge.close()
 
