@@ -497,8 +497,16 @@ a {
      no fixed height — a panel can never force horizontal overflow. The box
      is a flex COLUMN holding two stable regions (questions above, answer
      below); `overflow: hidden` lets the two regions contain their own
-     scrolling instead of an answer ever overlapping the questions. */
-  width: min(24rem, calc(100% - 2rem));
+     scrolling instead of an answer ever overlapping the questions.
+     Phase 42 §9 — responsive min/preferred/max width: 20rem is the usable
+     floor, 30rem the preferred/max desktop width (wider than the old 24rem
+     so long question labels + '· answered' fit on one row), and the
+     `calc(100vw - 2rem)` soft cap guarantees no width can exceed the
+     viewport (no horizontal page scroll on any screen). Fixed-position %
+     behaves as vw, so the cap is written as vw for clarity. */
+  min-width: min(20rem, calc(100vw - 2rem));
+  width: min(30rem, calc(100vw - 2rem));
+  max-width: 30rem;
   max-height: calc(100% - 2rem);
   display: flex;
   flex-direction: column;
@@ -582,10 +590,17 @@ a {
 }
 
 .witness-question-item {
+  /* Phase 42 §10 — the question button takes the flexible width and the
+     '· answered' marker stays right-aligned on the SAME row
+     (space-between, no unconditional wrap). On narrow screens graceful
+     behavior comes from the button's own wrapping (min-width:0 +
+     overflow-wrap:anywhere), so the marker is never pushed to a second
+     line while the row itself never overflows horizontally (§11). */
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.4rem;
-  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .witness-question-button {
@@ -618,6 +633,9 @@ a {
   color: var(--ok);
   font-size: 0.82rem;
   white-space: nowrap;
+  /* Phase 42 §10 — never shrink the marker: it stays intact and right-aligned
+     on its row while the flexible question button absorbs the width loss. */
+  flex-shrink: 0;
 }
 
 /* Lower region of the panel — the SINGLE derived answer, a flex sibling of
@@ -1236,6 +1254,146 @@ button {
 
 .new-case-demo {
   margin: 1.1rem 0 0;
+}
+
+/* ======================================================================
+ * Phase 42 — AI Provider / Connection selector (§3/§4/§7).
+ *
+ * Both radio groups become semantic <fieldset>+<legend> blocks whose options
+ * are stacked ONE PER ROW (vertical flex columns). An unavailable option is
+ * natively disabled AND visually dimmed (`--disabled`: reduced opacity +
+ * muted text) — never a CSS-only disable. The availability text lives on its
+ * own muted line UNDER the label, never inline with it. All tokens/radii come
+ * from the existing design system (--panel/--border/--muted/--accent).
+ * ==================================================================== */
+
+.generation-provider-fieldset,
+.generation-ollama-transport-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.55rem 0.8rem 0.75rem;
+  margin: 0.3rem 0;
+  min-width: 0;
+}
+
+.generation-provider-heading,
+.generation-ollama-transport-heading {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+  padding: 0 0.2rem;
+}
+
+/* One offer / one transport per ROW — never a horizontal rail (§3). */
+.generation-provider-options,
+.generation-ollama-transport-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.4rem;
+  min-width: 0;
+}
+
+.provider-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+  min-width: 0;
+}
+
+.provider-option:hover:not(.provider-option--disabled) {
+  border-color: var(--accent);
+}
+
+.provider-option:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.provider-option input[type="radio"] {
+  margin: 0.2rem 0 0;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* Phase 42 §4 — an unavailable option is DIMmed (paired with the native
+   disabled attribute on the radio — never a CSS-only disable). */
+.provider-option--disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.provider-option--disabled .provider-option-label,
+.provider-option--disabled .provider-option-subtitle,
+.provider-option-availability {
+  color: var(--muted);
+}
+
+.provider-option--active .provider-option-label {
+  color: var(--accent);
+}
+
+.provider-option-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.provider-option-label {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.provider-option-subtitle,
+.provider-option-reason {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+/* Phase 42 §3 — the availability/status line is its OWN muted line under the
+   label (block, never inline-crammed next to the radio label). */
+.provider-option-availability {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.generation-ollama-bridge-status {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.5rem 0 0;
+}
+
+.generation-ollama-model {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-top: 0.6rem;
+}
+
+.generation-ollama-model + input {
+  background: #0d1016;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  max-width: 16rem;
+  margin-top: 0.25rem;
+}
+
+.generation-ollama-model + input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* ------------------------ generation progress ------------------------ */

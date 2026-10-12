@@ -483,8 +483,16 @@ export function createInvestigationScene(
     };
 
     const enterFocus = (objectId: string): void => {
+      // Phase 42 §14/§15/§21 — EVERY published/selectable world object can
+      // enter focus, not just `interactables` (interactionWorks). The former
+      // `interactables.has(objectId)` gate skipped table/lamp/door/vase/victim.
+      // `focusFramingFor` needs only position/scale/renderScale which every
+      // published object carries, so the camera transition/framing is safe
+      // for all of them. Presentation decision (§21): a neutral object gets
+      // the panel + camera focus; only the interactable-only ring/emissive
+      // affordance stays absent (deterministic, consistent).
       const worldObject = model.worldObjects.find((o) => o.objectId === objectId);
-      if (!worldObject || !interactables.has(objectId)) return; // only interactables focus
+      if (!worldObject || !publishedObjectIds.has(objectId)) return; // only published objects focus
       exitFocus(); // a re-focus first restores the world camera exactly
       const saved = readCameraState();
       const framing = focusFramingFor(saved, worldObject);

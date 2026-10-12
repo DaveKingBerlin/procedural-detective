@@ -33,14 +33,16 @@ import { isUnsafeDisplayString, safeDisplay } from "./generationMode";
 *   - resolves the effective browser selection (sessionStorage preference,
  *     otherwise the server `defaultProvider`, otherwise the FIRST still-
  *     available provider in server order) WITH the Phase 26C1 authoritative-
- *     selection rule: the PROVIDER follows DISCARD-IF-STALE semantics (a
- *     stored provider that is no longer available is IGNORED and the server
- *     default / first valid available provider is chosen instead — a stale
- *     value is never submitted, §10.1), while the SELECTED TRANSPORT is
- *     AUTHORITATIVE and is preserved verbatim even when its transport is
- *     currently unavailable (no silent rewrite to the other transport; the UI
- *     shows the unavailable state, §2/§4/§7). Only when NO stored transport
- *     exists does the deterministic no-preference default apply
+ *     selection rule AS REVISED BY Phase 42 §6: the PROVIDER follows
+ *     DISCARD-IF-STALE semantics (a stored provider that is no longer
+ *     available is IGNORED and the server default / first valid available
+ *     provider is chosen instead — a stale value is never submitted, §10.1),
+ *     and the SELECTED TRANSPORT is authoritative WHILE IT REMAINS AVAILABLE
+ *     (an explicit choice is never recomputed from capability noise) but
+ *     RECOVERS to the deterministic natural fallback (`defaultOllamaTransport`)
+ *     when it becomes unavailable — never left checked+disabled, never staged
+ *     verbatim (§6). Only when NO stored transport exists does the
+ *     deterministic no-preference default apply
  *     (`defaultOllamaTransport`);
  *   - persists ONLY the three NON-SECRET preference keys in sessionStorage
  *     (generationProvider / ollamaTransport / ollamaModel). NEVER a
@@ -824,6 +826,76 @@ export function defaultOllamaTransport(
 }
 
 /**
+ * Phase 42 §6 — deterministic STALE-SELECTION RECOVERY.
+ *
+ * When the CURRENT selection references an Ollama transport that is no longer
+ * AVAILABLE (a persisted preference that went stale, or a refreshed capability
+ * DTO that dropped the transport), the UI must recover to a valid available
+ * selection instead of ever leaving a checked+disabled radio — and the visible
+ * control and the serialized request must never diverge.
+ *
+ * Returns a replacement selection (a NEW object with the transport replaced by
+ * the {@link defaultOllamaTransport} natural fallback oracle) or null when the
+ * selection is already valid (or has nothing to recover):
+ *   - a null selection (the route still loading / no selection resolved) -> null;
+ *   - non-ollama selections -> null (this helper owns the transport only);
+ *   - `ollamaTransport === null` -> P42-ADV-04: the null-transport selection
+ *     resolves to null in the BOTH-unavailable fail-closed path, and it also
+ *     never re-picks while BOTH transports are available (an explicit
+ *     user unselect is preserved). ONLY when EXACTLY ONE transport becomes
+ *     available does it deterministically re-pick that transport in-session
+ *     (Phase 42 §6 — a reachable mode that the capability DTO now reports
+ *     available must not stay unselected until the user clicks);
+ *   - the current transport is still available -> null;
+ *   - otherwise -> `{...selection, ollamaTransport: defaultOllamaTransport(...)}`
+ *     (the oracle may itself resolve to null when NO transport is usable —
+ *     again the documented fail-closed path, now reached explicitly).
+ *
+ * The route owns WHICH selections flow through this gate: selection
+ * initialization (resolveProviderSelection), every capability refresh and
+ * every user selection change (`onChange` / stageJourney in /new); the
+ * GenerationProviderSelector applies the SAME oracle at render time so even a
+ * stale selection handed to it by a parent can never paint a checked+disabled
+ * radio (P42-ADV-03). This deliberately REVISES the Phase 26C1 "preserve
+ * verbatim even when unavailable" rule in favor of Phase 42 §6.
+ */
+export function recoverTransportSelection(
+  selection: GenerationProviderSelection | null,
+  capabilities: GenerationCapabilitiesResponse | null,
+): GenerationProviderSelection | null {
+  if (selection === null || selection.generationProvider !== "ollama") return null;
+  const ollama = buildProviderOffers(capabilities).find((offer) => offer.id === "ollama");
+  if (ollama === undefined) return null; // no offer -> the provider-level DISCARD-IF-STALE rule owns it
+  if (selection.ollamaTransport === null) {
+    // P42-ADV-04 — a null transport (both-down fail-closed OR an explicit
+    // unselect) is re-picked ONLY when exactly one transport is available:
+    //   - exactly one available -> deterministic recovery to that transport;
+    //   - both available -> an explicit unselect is preserved (never re-picked);
+    //   - both unavailable -> the documented fail-closed null stays untouched.
+    const serverAvailable = ollama.transports.server.available === true;
+    const bridgeAvailable = ollama.transports.bridge.available === true;
+    if (serverAvailable !== bridgeAvailable) {
+      return { ...selection, ollamaTransport: serverAvailable ? "server" : "bridge" };
+    }
+    return null;
+  }
+  if (isOllamaTransportAvailable(selection.ollamaTransport, ollama)) return null;
+  const fallback = defaultOllamaTransport(ollama);
+  if (fallback === selection.ollamaTransport) return null;
+  return { ...selection, ollamaTransport: fallback };
+}
+
+/** True when the closed transport id is an AVAILABLE side of the given offer. */
+function isOllamaTransportAvailable(
+  transport: OllamaTransportId,
+  offer: GenerationProviderOffer,
+): boolean {
+  return transport === "server"
+    ? offer.transports.server.available === true
+    : offer.transports.bridge.available === true;
+}
+
+/**
  * Phase 26C1 §3 — the selection a SUCCESSFUL Bridge pairing implies: the
  * Ollama provider with the Bridge transport (selected + persisted `bridge`).
  *
@@ -869,12 +941,14 @@ export function bridgePairedSelection(
  *   3. otherwise the FIRST still-available provider in the server's own
  *      order;
  *   4. otherwise the deterministic `fake` offer (the historical default).
- * For Ollama the TRANSPORT is authoritative (Phase 26C1): the stored
- * preference — `server` or `bridge` — is preserved verbatim even when that
- * transport is currently unavailable (§2/§4); only with NO stored transport
- * does `defaultOllamaTransport` apply. The model defaults to the configured
- * `defaultModel` when no (valid) stored model exists — model names are NEVER
- * hard-coded here (§2).
+ * For Ollama the TRANSPORT is authoritative while AVAILABLE (Phase 26C1) and
+ * RECOVERS when it goes unavailable (Phase 42 §6): a stored preference —
+ * `server` or `bridge` — is preserved verbatim ONLY while that transport is
+ * still available (an explicit choice is never recomputed from capability
+ * noise); an unavailable stored transport is deterministically recovered to
+ * `defaultOllamaTransport` so the UI never starts from a checked+disabled
+ * selection. The model defaults to the configured `defaultModel` when no
+ * (valid) stored model exists — model names are NEVER hard-coded here (§2).
  * ==================================================================== */
 
 /**
@@ -914,14 +988,20 @@ export function resolveProviderSelection(
   if (provider === "ollama") {
     const ollama = offers.find((offer) => offer.id === "ollama");
     if (ollama !== undefined) {
-      // Phase 26C1 §2/§4/§7 — the SELECTED transport is authoritative and is
-      // preserved VERBATIM, including when its transport is currently
-      // unavailable (no silent rewrite to the other side; the UI shows the
-      // unavailable state instead). Only when NO stored preference exists
-      // does the deterministic no-preference default apply.
+      // Phase 26C1 §2/§4/§7 + Phase 42 §6 — the SELECTED transport is
+      // authoritative WHILE IT IS STILL AVAILABLE (an explicit choice is never
+      // recomputed from capability noise). A stored transport that is no
+      // longer AVAILABLE is RECOVERED to the deterministic natural fallback
+      // instead of being preserved verbatim in a checked+disabled state —
+      // this REVISES the Phase 26C1 "preserve verbatim even when unavailable"
+      // rule in favor of Phase 42 §6 (the UI never starts from — or stages —
+      // an unavailable transport). Only when NO stored preference exists does
+      // the deterministic no-preference default apply.
       const storedTransport = getOllamaTransport(storage);
       ollamaTransport =
-        storedTransport !== null ? storedTransport : defaultOllamaTransport(ollama);
+        storedTransport !== null && isOllamaTransportAvailable(storedTransport, ollama)
+          ? storedTransport
+          : defaultOllamaTransport(ollama);
       // Model: stored (non-empty) preference first, else the CONFIGURED
       // default model from the capabilities API — never a hard-coded name.
       const storedModel = getOllamaModel(storage);

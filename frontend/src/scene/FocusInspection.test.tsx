@@ -144,6 +144,35 @@ describe("FocusInspection — interaction (jsdom)", () => {
     expect(button.getAttribute("aria-label")).toBe("Close inspection");
   });
 
+  it("P42-ADV-06 — unmounting the inspection RETURNS focus to the activating control (no stranded keyboard focus)", () => {
+    // Simulate a keyboard/list activation: a real focusable opener button.
+    const opener = document.createElement("button");
+    opener.textContent = "Table";
+    document.body.appendChild(opener);
+    try {
+      opener.focus();
+      expect(document.activeElement).toBe(opener);
+
+      // A list activation opens the inspection: on its FIRST render the
+      // opener is captured, then autoFocus moves focus into the surface.
+      let localRoot: Root | null = null;
+      act(() => {
+        localRoot = createRoot(container);
+        localRoot.render(<FocusInspection label="Table" badges={CATALOG_BADGES} onClose={() => {}} />);
+      });
+      expect(document.activeElement).toBe(closeButton());
+
+      // Closing (unmounting) returns focus to the activating control — the SAME
+      // focus-return contract the WitnessPanel already provides.
+      act(() => {
+        localRoot?.unmount();
+      });
+      expect(document.activeElement).toBe(opener);
+    } finally {
+      opener.remove();
+    }
+  });
+
   it("the mounted DOM still contains the semantic label + badges (no proc.* leak)", () => {
     mount("Bronze Ceremonial Ice Pick", PROC_BADGES);
     expect(container.textContent).toContain("Bronze Ceremonial Ice Pick");

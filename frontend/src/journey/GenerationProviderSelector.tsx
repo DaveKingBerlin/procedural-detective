@@ -23,6 +23,7 @@ import {
   getOllamaTransport,
   hasGenerationProviderOffer,
   providerReasonLabel,
+  recoverTransportSelection,
   sanitizeFrontierApiKey,
   type GenerationProviderSelection,
 } from "./generationProvider";
@@ -99,6 +100,22 @@ export function GenerationProviderSelector({
   // boolean only controls whether the password input is redacted on screen.
   const [showKey, setShowKey] = useState(false);
 
+  /**
+   * Phase 42 §6 / P42-ADV-03 — render-time recovery. The parent route may hand
+   * this controlled selector a STALE selection for the one committing frame
+   * before its recovery effect runs (a capabilities refresh that dropped the
+   * selected transport). Re-applying the SAME deterministic oracle at render
+   * time means the radios this component paints can never be simultaneously
+   * checked and disabled — the first paint already accounts for availability —
+   * and every handler below emits selections built from the EFFECTIVE
+   * (recovered) value, so the visible control and the resulting serialized
+   * request always agree. In steady state the recovery is a no-op
+   * (the route already recovered before painting), so behavior stays
+   * byte-identical to Phase 42 HEAD.
+   */
+  const effectiveSelection: GenerationProviderSelection | null =
+    recoverTransportSelection(selection, capabilities) ?? selection;
+
   const ollamaOffer = offers.find((offer) => offer.id === "ollama");
   const frontierOffer = offers.find((offer) => offer.id === "frontier");
   const firstAvailable = offers.find((offer) => offer.available);
@@ -110,11 +127,11 @@ export function GenerationProviderSelector({
   const defaultAvailable =
     defaultProviderId !== null && offers.some((offer) => offer.id === defaultProviderId && offer.available);
   const currentId =
-    selection?.generationProvider ??
+    effectiveSelection?.generationProvider ??
     (defaultAvailable ? (defaultProviderId as GenerationProviderId) : firstAvailable?.id ?? "fake");
 
   const selectProvider = (id: GenerationProviderId) => {
-    if (disabled || selection === null) return;
+    if (disabled || effectiveSelection === null) return;
     if (id === "ollama") {
       // Phase 26C1 §2/§7/§8 — the transport is NEVER recomputed from
       // availability once a choice exists: keep the current selection's
@@ -130,12 +147,12 @@ export function GenerationProviderSelector({
       // INVALID_GENERATION_PROVIDER, and the user sees the frozen safe
       // `invalidGenerationProvider` copy on submit (src/journey/demoFlow.ts).
       const transport =
-        selection.ollamaTransport ?? getOllamaTransport() ?? defaultOllamaTransport(ollamaOffer);
+        effectiveSelection.ollamaTransport ?? getOllamaTransport() ?? defaultOllamaTransport(ollamaOffer);
       onChange({
         generationProvider: "ollama",
         ollamaTransport: transport,
         ollamaModel:
-          selection.ollamaModel !== "" ? selection.ollamaModel : (ollamaOffer?.defaultModel ?? ""),
+          effectiveSelection.ollamaModel !== "" ? effectiveSelection.ollamaModel : (ollamaOffer?.defaultModel ?? ""),
       });
     } else {
       // Phase 30 §24 — a NON-frontier selection carries NO frontier fields on
@@ -147,13 +164,13 @@ export function GenerationProviderSelector({
   };
 
   const selectTransport = (transport: OllamaTransportId) => {
-    if (disabled || selection === null) return;
-    onChange({ ...selection, ollamaTransport: transport });
+    if (disabled || effectiveSelection === null) return;
+    onChange({ ...effectiveSelection, ollamaTransport: transport });
   };
 
   const onModelChange = (model: string) => {
-    if (disabled || selection === null) return;
-    onChange({ ...selection, ollamaModel: model });
+    if (disabled || effectiveSelection === null) return;
+    onChange({ ...effectiveSelection, ollamaModel: model });
   };
 
   // Phase 30 — Frontier BYOK handlers. The KEY is the only sensitive piece:
@@ -161,35 +178,35 @@ export function GenerationProviderSelector({
   // cleared when the provider changes (a key belongs to ONE provider account)
   // and dropped entirely when the user switches away from Frontier.
   const selectFrontierProvider = (frontierProviderId: string) => {
-    if (disabled || selection === null) return;
-    if (frontierProviderId === selection.frontierProviderId) return;
+    if (disabled || effectiveSelection === null) return;
+    if (frontierProviderId === effectiveSelection.frontierProviderId) return;
     // Documented decision (§24): switching the Frontier PROVIDER clears the
     // re-entered API key (each provider account owns a different key); the
     // non-secret model preference and the generic cost acknowledgement are
     // preserved — only the key is sensitive here.
-    onChange({ ...selection, frontierProviderId, frontierApiKey: "" });
+    onChange({ ...effectiveSelection, frontierProviderId, frontierApiKey: "" });
   };
 
   const onFrontierKeyChange = (key: string) => {
-    if (disabled || selection === null) return;
-    onChange({ ...selection, frontierApiKey: sanitizeFrontierApiKey(key) });
+    if (disabled || effectiveSelection === null) return;
+    onChange({ ...effectiveSelection, frontierApiKey: sanitizeFrontierApiKey(key) });
   };
 
   const onFrontierModelChange = (frontierModel: string) => {
-    if (disabled || selection === null) return;
-    onChange({ ...selection, frontierModel });
+    if (disabled || effectiveSelection === null) return;
+    onChange({ ...effectiveSelection, frontierModel });
   };
 
   const onFrontierAckChange = (frontierAck: boolean) => {
-    if (disabled || selection === null) return;
-    onChange({ ...selection, frontierAck });
+    if (disabled || effectiveSelection === null) return;
+    onChange({ ...effectiveSelection, frontierAck });
   };
 
   // Phase 26C1 §5/§7 — the visible transport IS the selection's transport and
   // nothing else: a null selection means NO transport radio is checked (the
   // serialized payload omits the transport on that documented path), so the
   // visible control can never diverge from what will be posted.
-  const currentTransport: OllamaTransportId | null = selection?.ollamaTransport ?? null;
+  const currentTransport: OllamaTransportId | null = effectiveSelection?.ollamaTransport ?? null;
 
   const ollamaActive = currentId === "ollama" && ollamaOffer !== undefined;
   const serverTransport = ollamaOffer?.transports.server;
@@ -203,94 +220,141 @@ export function GenerationProviderSelector({
 
   return (
     <div className="generation-provider" data-testid="generation-provider-selector">
-      <p className="generation-provider-heading">AI Provider</p>
-      {offers.map((offer) => {
-        const disabledForOffer = disabled || !offer.available;
-        const reason =
-          providerReasonLabel(offer.reason) ??
-          (offer.available ? null : PROVIDER_UNAVAILABLE_LABEL);
-        return (
-          <label
-            key={offer.id}
-            className={`provider-option${currentId === offer.id ? " provider-option--active" : ""}`}
-            data-testid={`generation-provider-${offer.id}`}
-          >
-            <input
-              type="radio"
-              name="generation-provider"
-              value={offer.id}
-              checked={currentId === offer.id}
-              disabled={disabledForOffer}
-              onChange={() => selectProvider(offer.id)}
-            />
-            <span className="provider-option-label">{offer.label}</span>
-            {offer.id === "fake" && <span className="provider-option-subtitle">{FAKE_PROVIDER_SUBTITLE}</span>}
-            {!offer.available && reason !== null && (
-              <span className="provider-option-reason" data-testid={`generation-provider-${offer.id}-reason`}>
-                {reason}
-              </span>
-            )}
-          </label>
-        );
-      })}
+      {/* Phase 42 §7 — the AI Provider radio group is a semantic fieldset +
+          legend; each offer is ONE VERTICAL row (§3). Native radios keep the
+          keyboard navigation and disabled semantics. */}
+      <fieldset
+        className="generation-provider-fieldset"
+        data-testid="generation-provider-group"
+      >
+        <legend className="generation-provider-heading">AI Provider</legend>
+        <div className="generation-provider-options">
+          {offers.map((offer) => {
+            const disabledForOffer = disabled || !offer.available;
+            const reason =
+              providerReasonLabel(offer.reason) ??
+              (offer.available ? null : PROVIDER_UNAVAILABLE_LABEL);
+            const optionClass = [
+              "provider-option",
+              disabledForOffer ? "provider-option--disabled" : null,
+              currentId === offer.id ? "provider-option--active" : null,
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <label
+                key={offer.id}
+                className={optionClass}
+                data-testid={`generation-provider-${offer.id}`}
+              >
+                <input
+                  type="radio"
+                  name="generation-provider"
+                  value={offer.id}
+                  checked={currentId === offer.id}
+                  disabled={disabledForOffer}
+                  onChange={() => selectProvider(offer.id)}
+                />
+                <span className="provider-option-copy">
+                  <span className="provider-option-label">{offer.label}</span>
+                  {offer.id === "fake" && (
+                    <span className="provider-option-subtitle">{FAKE_PROVIDER_SUBTITLE}</span>
+                  )}
+                  {!offer.available && reason !== null && (
+                    <span className="provider-option-reason" data-testid={`generation-provider-${offer.id}-reason`}>
+                      {reason}
+                    </span>
+                  )}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      </fieldset>
 
       {ollamaActive && (
         <div className="generation-ollama" data-testid="generation-ollama-controls">
-          <p className="generation-ollama-transport-heading">{OLLAMA_TRANSPORT_HEADING}</p>
-          {serverTransport !== undefined && (
-            <label
-              className="provider-option provider-option--transport"
-              data-testid="generation-ollama-transport-server"
-            >
-              <input
-                type="radio"
-                name="generation-ollama-transport"
-                value="server"
-                checked={currentTransport === "server"}
-                disabled={disabled || !serverTransport.available}
-                onChange={() => selectTransport("server")}
-              />
-              <span className="provider-option-label">{OLLAMA_TRANSPORT_SERVER_LABEL}</span>
-              {/* Phase 26C1 §5 — availability is DISPLAY-ONLY, shown independently
-                  of the (authoritative) selected transport. */}
-              <span
-                className="provider-option-availability"
-                data-testid="generation-ollama-transport-server-availability"
-              >
-                {serverTransport.available
-                  ? "Available"
-                  : (providerReasonLabel(serverTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
-              </span>
-            </label>
-          )}
-          {bridgeTransport !== undefined && (
-            <label
-              className="provider-option provider-option--transport"
-              data-testid="generation-ollama-transport-bridge"
-            >
-              <input
-                type="radio"
-                name="generation-ollama-transport"
-                value="bridge"
-                checked={currentTransport === "bridge"}
-                disabled={disabled || !bridgeTransport.available}
-                onChange={() => selectTransport("bridge")}
-              />
-              <span className="provider-option-label">{OLLAMA_TRANSPORT_BRIDGE_LABEL}</span>
-              {/* Phase 26C1 §5 — availability is DISPLAY-ONLY, shown independently
-                  of the (authoritative) selected transport. */}
-              <span
-                className="provider-option-availability"
-                data-testid="generation-ollama-transport-bridge-availability"
-              >
-                {bridgeTransport.connected === true
-                  ? "Connected"
-                  : bridgeTransport.available
-                    ? "Not connected"
-                    : (providerReasonLabel(bridgeTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
-              </span>
-            </label>
-          )}
+          {/* Phase 42 §3/§4/§7 — the Connection transport group is its own
+              fieldset + legend; each transport is ONE VERTICAL row with the
+              availability line UNDER the label. An unavailable transport is
+              natively disabled AND visually dimmed (provider-option--disabled)
+              — never a CSS-only disable, never replaced by a div. */}
+          <fieldset
+            className="generation-ollama-transport-fieldset"
+            data-testid="generation-ollama-transport-group"
+          >
+            <legend className="generation-ollama-transport-heading">{OLLAMA_TRANSPORT_HEADING}</legend>
+            <div className="generation-ollama-transport-options">
+              {serverTransport !== undefined && (
+                <label
+                  className={[
+                    "provider-option",
+                    "provider-option--transport",
+                    disabled || !serverTransport.available ? "provider-option--disabled" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  data-testid="generation-ollama-transport-server"
+                >
+                  <input
+                    type="radio"
+                    name="generation-ollama-transport"
+                    value="server"
+                    checked={currentTransport === "server"}
+                    disabled={disabled || !serverTransport.available}
+                    onChange={() => selectTransport("server")}
+                  />
+                  <span className="provider-option-copy">
+                    <span className="provider-option-label">{OLLAMA_TRANSPORT_SERVER_LABEL}</span>
+                    {/* Phase 42 §3 — availability is its OWN muted line under
+                        the label (previously crammed inline beside it). */}
+                    <span
+                      className="provider-option-availability"
+                      data-testid="generation-ollama-transport-server-availability"
+                    >
+                      {serverTransport.available
+                        ? "Available"
+                        : (providerReasonLabel(serverTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
+                    </span>
+                  </span>
+                </label>
+              )}
+              {bridgeTransport !== undefined && (
+                <label
+                  className={[
+                    "provider-option",
+                    "provider-option--transport",
+                    disabled || !bridgeTransport.available ? "provider-option--disabled" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  data-testid="generation-ollama-transport-bridge"
+                >
+                  <input
+                    type="radio"
+                    name="generation-ollama-transport"
+                    value="bridge"
+                    checked={currentTransport === "bridge"}
+                    disabled={disabled || !bridgeTransport.available}
+                    onChange={() => selectTransport("bridge")}
+                  />
+                  <span className="provider-option-copy">
+                    <span className="provider-option-label">{OLLAMA_TRANSPORT_BRIDGE_LABEL}</span>
+                    <span
+                      className="provider-option-availability"
+                      data-testid="generation-ollama-transport-bridge-availability"
+                    >
+                      {bridgeTransport.connected === true
+                        ? "Connected"
+                        : bridgeTransport.available
+                          ? "Not connected"
+                          : (providerReasonLabel(bridgeTransport.reason) ?? PROVIDER_UNAVAILABLE_LABEL)}
+                    </span>
+                  </span>
+                </label>
+              )}
+            </div>
+          </fieldset>
           {showBridgeControls && (
             <p
               className="generation-ollama-bridge-status"
@@ -310,7 +374,7 @@ export function GenerationProviderSelector({
             maxLength={256}
             autoComplete="off"
             spellCheck={false}
-            value={selection?.ollamaModel ?? (ollamaOffer?.defaultModel ?? "")}
+            value={effectiveSelection?.ollamaModel ?? (ollamaOffer?.defaultModel ?? "")}
             disabled={disabled}
             onChange={(event) => onModelChange(event.target.value)}
           />
@@ -337,7 +401,7 @@ export function GenerationProviderSelector({
           <select
             id="generation-frontier-provider-select"
             data-testid="generation-frontier-provider-select"
-            value={selection?.frontierProviderId ?? ""}
+            value={effectiveSelection?.frontierProviderId ?? ""}
             disabled={disabled}
             onChange={(event) => selectFrontierProvider(event.target.value)}
           >
@@ -360,7 +424,7 @@ export function GenerationProviderSelector({
             maxLength={512}
             autoComplete="new-password"
             spellCheck={false}
-            value={selection?.frontierApiKey ?? ""}
+            value={effectiveSelection?.frontierApiKey ?? ""}
             disabled={disabled}
             onChange={(event) => onFrontierKeyChange(event.target.value)}
           />
@@ -383,7 +447,7 @@ export function GenerationProviderSelector({
             maxLength={256}
             autoComplete="off"
             spellCheck={false}
-            value={selection?.frontierModel ?? ""}
+            value={effectiveSelection?.frontierModel ?? ""}
             disabled={disabled}
             onChange={(event) => onFrontierModelChange(event.target.value)}
           />
@@ -395,7 +459,7 @@ export function GenerationProviderSelector({
               type="checkbox"
               name="generation-frontier-cost-ack"
               data-testid="generation-frontier-ack-checkbox"
-              checked={selection?.frontierAck === true}
+              checked={effectiveSelection?.frontierAck === true}
               disabled={disabled}
               onChange={(event) => onFrontierAckChange(event.target.checked)}
             />

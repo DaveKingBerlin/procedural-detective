@@ -419,16 +419,17 @@ describe("/new — Phase 26C1 the VISIBLE transport drives the SERIALIZED payloa
     expect(getJourneyParams()?.ollamaTransport).toBe("bridge");
   });
 
-  // Phase 26C1 LOW (test gap) — a route-level submit chain for a stored but
-  // UNAVAILABLE selected transport through stageJourney: the transport is
-  // AUTHORITATIVE (§2/§4/§7) — it stays checked + honestly labelled in the UI,
-  // and staging carries it VERBATIM (no availability gate ever omits it).
-  it("an unavailable SELECTED Bridge is checked + disabled in the UI and STILL staged — staging never drops the transport (accepted test gap)", async () => {
+  // Phase 42 §6 (test gap REVISED) — a route-level recovery chain for a stored
+  // but UNAVAILABLE selected transport: the selection RECOVERS to a valid
+  // available mode at initialization (resolveProviderSelection) and the
+  // recovered value is what the UI shows AND what staging posts. The UI is
+  // NEVER left checked+disabled and the POST body never silently diverges.
+  it("an unavailable SELECTED Bridge RECOVERS to the available Server side — visible control and staging both show it (§6)", async () => {
     sessionStorage.setItem(GENERATION_PROVIDER_STORAGE_KEY, "ollama");
     sessionStorage.setItem(OLLAMA_TRANSPORT_STORAGE_KEY, "bridge");
     sessionStorage.setItem(GENERATION_MODEL_STORAGE_KEY, "hermes3:8b");
     // The bridge transport now reports unavailable / not-connected while the
-    // SELECTED transport preference stays bridge.
+    // stored transport preference stays bridge.
     const bridgeDown: GenerationCapabilitiesResponse = {
       ...DEFAULT_OLLAMA,
       providers: [
@@ -444,28 +445,177 @@ describe("/new — Phase 26C1 the VISIBLE transport drives the SERIALIZED payloa
       ],
     };
     await mountWith(bridgeDown);
-    // Visible control: the selected-but-unavailable Bridge stays CHECKED and
-    // is shown as unavailable ("not connected"), NOT hidden and NOT rewritten
-    // to the available Server side.
-    expect(checkedTransport()).toBe("bridge");
+    // Recovery: the once-selected-but-unavailable Bridge is replaced by the
+    // deterministic available fallback (Server) in the VISIBLE control.
+    expect(checkedTransport()).toBe("server");
     const bridgeInput = container.querySelector<HTMLInputElement>(
       '[data-testid="generation-ollama-transport-bridge"] input[type="radio"]',
     );
     expect(bridgeInput).not.toBeNull();
     expect(bridgeInput?.disabled).toBe(true);
-    expect(bridgeInput?.checked).toBe(true);
+    expect(bridgeInput?.checked).toBe(false);
     const availability =
       container.querySelector('[data-testid="generation-ollama-transport-bridge-availability"]')
         ?.textContent ?? "";
     expect(availability).toContain("not connected");
-    // Full staging chain: /new -> stageJourney -> JourneyParams. The staging
-    // path copies the selection unconditionally — the unavailable transport
-    // is preserved, not dropped by any availability gate.
+    // Full staging chain: /new -> stageJourney -> JourneyParams. The recovered
+    // (available) transport is staged — never the dead bridge.
     typePrompt("A body in the library at midnight.");
     submit();
     expect(getJourneyParams()?.generationProvider).toBe("ollama");
-    expect(getJourneyParams()?.ollamaTransport).toBe("bridge");
+    expect(getJourneyParams()?.ollamaTransport).toBe("server");
     expect(getJourneyParams()?.ollamaModel).toBe("hermes3:8b");
+  });
+
+  // P42-ADV-03 — the ONE-frame checked+disabled transient must be structurally
+  // impossible: even the first paint that combines a stale persisted selection
+  // with freshly-refreshed capabilities already accounts for availability, so
+  // no committed render across mount + refresh can ever show a radio that is
+  // simultaneously checked="" and disabled="".
+  it("P42-ADV-03 — across mount and refresh the selector NEVER paints a radio that is both checked and disabled (first-paint invariant)", async () => {
+    const bridgeDown: GenerationCapabilitiesResponse = {
+      ...DEFAULT_OLLAMA,
+      providers: [
+        ...DEFAULT_OLLAMA.providers!.slice(0, 1),
+        {
+          ...DEFAULT_OLLAMA.providers![1],
+          transports: {
+            server: { available: true, reason: null },
+            bridge: { available: false, reason: "not_connected" },
+          },
+        },
+        ...DEFAULT_OLLAMA.providers!.slice(2),
+      ],
+    };
+    // Stale persisted state: the user's stored transport is the now-unavailable
+    // bridge; the fresh capabilities DTO reports it down. The route mounts with
+    // these directly (the provider offer is already present at first render).
+    sessionStorage.setItem(GENERATION_PROVIDER_STORAGE_KEY, "ollama");
+    sessionStorage.setItem(OLLAMA_TRANSPORT_STORAGE_KEY, "bridge");
+
+    function assertNeverBothCheckedAndDisabled(scope: HTMLElement): void {
+      const radios = Array.from(
+        scope.querySelectorAll<HTMLInputElement>('input[name="generation-ollama-transport"]'),
+      );
+      expect(radios.length).toBeGreaterThan(0);
+      for (const radio of radios) {
+        expect(
+          radio.checked && radio.disabled,
+          `a radio must never be simultaneously checked and disabled (value=${radio.value})`,
+        ).toBe(false);
+      }
+    }
+
+    await mountWith(bridgeDown);
+    assertNeverBothCheckedAndDisabled(container);
+    // The recovered available Server side is what the very first committed
+    // render selects — never the stale (now disabled) bridge.
+    expect(checkedTransport()).toBe("server");
+
+    // A refresh to the SAME fresh capabilities must keep the invariant too.
+    await refreshWith(bridgeDown);
+    assertNeverBothCheckedAndDisabled(container);
+    expect(checkedTransport()).toBe("server");
+
+    // And the full staging chain posts the available transport.
+    typePrompt("A body in the library at midnight.");
+    submit();
+    expect(getJourneyParams()?.ollamaTransport).toBe("server");
+  });
+
+  // P42-ADV-04 — a null-transport selection (both transports unavailable,
+  // fail-closed) must deterministically re-pick a transport that becomes
+  // available in-session; an EXPLICIT working choice is never re-picked; the
+  // fail-closed staged body still never emits an unavailable transport.
+  it("P42-ADV-04 — both transports down -> refresh recovers to the single available transport (visible + persisted + staged)", async () => {
+    const bothDown: GenerationCapabilitiesResponse = {
+      ...DEFAULT_OLLAMA,
+      providers: [
+        ...DEFAULT_OLLAMA.providers!.slice(0, 1),
+        {
+          ...DEFAULT_OLLAMA.providers![1],
+          transports: {
+            server: { available: false, reason: "not_configured" },
+            bridge: { available: false, reason: "not_connected" },
+          },
+        },
+        ...DEFAULT_OLLAMA.providers!.slice(2),
+      ],
+    };
+    const serverOnly: GenerationCapabilitiesResponse = {
+      ...DEFAULT_OLLAMA,
+      providers: [
+        ...DEFAULT_OLLAMA.providers!.slice(0, 1),
+        {
+          ...DEFAULT_OLLAMA.providers![1],
+          transports: {
+            server: { available: true, reason: null },
+            bridge: { available: false, reason: "not_connected" },
+          },
+        },
+        ...DEFAULT_OLLAMA.providers!.slice(2),
+      ],
+    };
+    await mountWith(bothDown);
+    // Fail-closed: no transport selected, both radios disabled/unchecked.
+    expect(checkedTransport()).toBeNull();
+    const radios = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="generation-ollama-transport"]'),
+    );
+    expect(radios.length).toBe(2);
+    expect(radios.every((radio) => radio.disabled)).toBe(true);
+
+    // A refresh re-enables the Server transport: the null selection
+    // DETERMINISTICALLY re-picks it in-session — no click required.
+    await refreshWith(serverOnly);
+    expect(checkedTransport()).toBe("server");
+    // Refresh-time recovery writes the re-picked transport back to storage.
+    expect(sessionStorage.getItem(OLLAMA_TRANSPORT_STORAGE_KEY)).toBe("server");
+
+    typePrompt("A body in the library at midnight.");
+    submit();
+    expect(getJourneyParams()?.generationProvider).toBe("ollama");
+    expect(getJourneyParams()?.ollamaTransport).toBe("server");
+  });
+
+  it("P42-ADV-04 — an explicitly chosen WORKING transport is never re-picked by a refresh (user choice preserved)", async () => {
+    await mountWith(DEFAULT_OLLAMA);
+    clickRadio("generation-ollama-transport-bridge");
+    expect(checkedTransport()).toBe("bridge");
+    // A refresh with both transports available again must NOT re-pick: the
+    // null-recovery rule only ever repairs a null/unavailable selection.
+    await refreshWith(DEFAULT_OLLAMA);
+    expect(checkedTransport()).toBe("bridge");
+    typePrompt("A body in the library at midnight.");
+    submit();
+    expect(getJourneyParams()?.ollamaTransport).toBe("bridge");
+  });
+
+  it("P42-ADV-04 — both transports remain unavailable: the fail-closed staged body still omits the transport (no fabricated fallback)", async () => {
+    const bothDown: GenerationCapabilitiesResponse = {
+      ...DEFAULT_OLLAMA,
+      providers: [
+        ...DEFAULT_OLLAMA.providers!.slice(0, 1),
+        {
+          ...DEFAULT_OLLAMA.providers![1],
+          transports: {
+            server: { available: false, reason: "not_configured" },
+            bridge: { available: false, reason: "not_connected" },
+          },
+        },
+        ...DEFAULT_OLLAMA.providers!.slice(2),
+      ],
+    };
+    await mountWith(bothDown);
+    expect(checkedTransport()).toBeNull();
+    // A refresh while both remain unavailable keeps the documented fail-closed
+    // null — no fabrication, the user can still click once any side enables.
+    await refreshWith(bothDown);
+    expect(checkedTransport()).toBeNull();
+    typePrompt("A body in the library at midnight.");
+    submit();
+    expect(getJourneyParams()?.generationProvider).toBe("ollama");
+    expect(getJourneyParams()?.ollamaTransport).toBeUndefined();
   });
 });
 

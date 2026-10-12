@@ -1,11 +1,16 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it, afterEach, beforeEach } from "vitest";
+import { describe, expect, it, afterEach, beforeEach, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { GenerationCapabilitiesResponse } from "../api/types";
 import { GenerationProviderSelector } from "./GenerationProviderSelector";
-import type { GenerationProviderSelection } from "./generationProvider";
+import {
+  recoverTransportSelection,
+  type GenerationProviderSelection,
+} from "./generationProvider";
 
 declare global {
   /** Enabled by test harnesses to activate React's act() support. */
@@ -301,7 +306,7 @@ describe("GenerationProviderSelector — Phase 26C1 the VISIBLE transport is the
     expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
   });
 
-  it("an unavailable SELECTED Bridge stays checked + disabled and shows its unavailable state (§8.12)", () => {
+  it("Phase 42 §6 — a stale SELECTED Bridge is recovered BEFORE rendering: the recovered Server is checked, Bridge stays disabled/not-connected (§8.12 revised)", () => {
     const caps: GenerationCapabilitiesResponse = {
       modes: [],
       defaultProvider: "ollama",
@@ -317,16 +322,73 @@ describe("GenerationProviderSelector — Phase 26C1 the VISIBLE transport is the
         },
       ],
     };
-    const markup = render(caps, { generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "" });
-    expect(markup).toContain(TRANSPORT_CHECKED_BRIDGE);
-    expect(markup).not.toContain(TRANSPORT_CHECKED_SERVER);
+    // The ROUTE recovery gate resolves the stale stored bridge to the
+    // deterministic available fallback before this controlled selector ever
+    // renders — the selector never displays checked+disabled.
+    const stale: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "",
+    };
+    const recovered = recoverTransportSelection(stale, caps);
+    expect(recovered?.ollamaTransport).toBe("server");
+    const markup = render(caps, recovered!);
+    expect(markup).toContain(TRANSPORT_CHECKED_SERVER);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
     const bridgeBlock = markup.match(/data-testid="generation-ollama-transport-bridge"[\s\S]*?<\/label>/)?.[0] ?? "";
-    expect(bridgeBlock).toContain('checked=""');
     expect(bridgeBlock).toContain('disabled=""');
-    expect(markup).toContain("not connected");
+    expect(bridgeBlock).not.toContain('checked=""');
+    expect(markup).toContain("not connected"); // the availability line stays honest
   });
 
-  it("an unavailable SELECTED Server stays checked + disabled and shows its unavailable state (§8.13)", () => {
+  it("P42-ADV-03 — a STALE selection handed DIRECTLY with fresh caps never paints a radio that is both checked and disabled (first-paint invariant)", () => {
+    const caps: GenerationCapabilitiesResponse = {
+      modes: [],
+      defaultProvider: "ollama",
+      providers: [
+        {
+          id: "ollama",
+          label: "Ollama",
+          available: true,
+          transports: {
+            server: { available: true },
+            bridge: { available: false, reason: "not_connected" },
+          },
+        },
+      ],
+    };
+    // A parent re-render paints the freshly-refreshed DTO while its recovery
+    // effect has NOT run yet — this commit hands the OLD (stale) selection
+    // (bridge selected) with the NEW caps (bridge down). The FIRST paint must
+    // already account for availability: the recoverable Server radio is checked
+    // and NO radio can ever carry checked="" and disabled="" in the same frame.
+    const stale: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    };
+    const markup = render(caps, stale);
+    expect(markup).toContain(TRANSPORT_CHECKED_SERVER);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
+    const transportRadios = markup.match(/<input[^>]*name="generation-ollama-transport"[^>]*>/g) ?? [];
+    expect(transportRadios.length).toBeGreaterThan(0);
+    for (const tag of transportRadios) {
+      expect(
+        tag.includes('checked=""') && tag.includes('disabled=""'),
+        `a radio must never be simultaneously checked and disabled: ${tag}`,
+      ).toBe(false);
+    }
+    // The bridge availability line stays honest (disabled + reason, unchecked).
+    const bridgeBlock = markup.match(/data-testid="generation-ollama-transport-bridge"[\s\S]*?<\/label>/)?.[0] ?? "";
+    expect(bridgeBlock).toContain('disabled=""');
+    expect(bridgeBlock).not.toContain('checked=""');
+    expect(markup).toContain("not connected");
+    // Steady-state behavior is intact: the effective (recovered) selection is
+    // what the oracle returns and what the route would persist.
+    expect(recoverTransportSelection(stale, caps)?.ollamaTransport).toBe("server");
+  });
+
+  it("Phase 42 §6 — a stale SELECTED Server is recovered BEFORE rendering: the recovered Bridge is checked, Server stays disabled/not-configured (§8.13 revised)", () => {
     const caps: GenerationCapabilitiesResponse = {
       modes: [],
       defaultProvider: "ollama",
@@ -342,15 +404,20 @@ describe("GenerationProviderSelector — Phase 26C1 the VISIBLE transport is the
         },
       ],
     };
-    const markup = render(caps, { generationProvider: "ollama", ollamaTransport: "server", ollamaModel: "" });
-    expect(markup).toContain(TRANSPORT_CHECKED_SERVER);
-    expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
+    const stale: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "server",
+      ollamaModel: "",
+    };
+    const recovered = recoverTransportSelection(stale, caps);
+    expect(recovered?.ollamaTransport).toBe("bridge");
+    const markup = render(caps, recovered!);
+    expect(markup).toContain(TRANSPORT_CHECKED_BRIDGE);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_SERVER);
     const serverBlock = markup.match(/data-testid="generation-ollama-transport-server"[\s\S]*?<\/label>/)?.[0] ?? "";
-    expect(serverBlock).toContain('checked=""');
     expect(serverBlock).toContain('disabled=""');
-    // The frozen reason copy (never a raw diagnostic) is shown next to the
-    // selected-but-unavailable transport.
-    expect(markup).toContain("not configured");
+    expect(serverBlock).not.toContain('checked=""');
+    expect(markup).toContain("not configured"); // the frozen reason copy stays visible
   });
 
   it("availability is displayed independently of the selection (§5)", () => {
@@ -387,6 +454,208 @@ describe("GenerationProviderSelector — Phase 26C1 the VISIBLE transport is the
     });
     expect(connectedMarkup).toMatch(
       /data-testid="generation-ollama-transport-bridge-availability"[\s\S]*?>Connected<\/span>/,
+    );
+  });
+});
+
+describe("GenerationProviderSelector — Phase 42 §7 accessibility semantics (fieldset + legend + native radios)", () => {
+  it("wraps the AI Provider radio group in a fieldset with a legend", () => {
+    const markup = render(CAPS, FAKE_SELECTION);
+    expect(markup).toMatch(/<fieldset[\s\S]*?<legend[\s\S]*?>AI Provider<\/legend>/);
+    expect(markup).toMatch(/<\/fieldset>/);
+    // The provider radios stay NATIVE radio inputs (never replaced by divs).
+    expect(markup).toContain('<input type="radio" name="generation-provider"');
+  });
+
+  it("wraps the Ollama transport radio group in its own fieldset with the Connection legend", () => {
+    const caps: GenerationCapabilitiesResponse = {
+      modes: [],
+      defaultProvider: "ollama",
+      providers: [
+        {
+          id: "ollama",
+          label: "Ollama",
+          available: true,
+          transports: {
+            server: { available: true },
+            bridge: { available: true, connected: false, reason: "not_connected" },
+          },
+        },
+      ],
+    };
+    const markup = render(caps, OLLAMA_SELECTION);
+    expect(markup).toMatch(/<fieldset[\s\S]*?<legend[\s\S]*?>Connection<\/legend>/);
+    // Native radio inputs exist for both transports (attribute order is not
+    // assumed — each attribute is asserted independently).
+    expect(markup).toMatch(/<input[^>]*type="radio"[^>]*name="generation-ollama-transport"[^>]*value="server"[^>]*>/);
+    expect(markup).toMatch(/<input[^>]*type="radio"[^>]*name="generation-ollama-transport"[^>]*value="bridge"[^>]*>/);
+  });
+});
+
+describe("GenerationProviderSelector — Phase 42 §4/§26 native disabled presentation", () => {
+  const SERVER_DOWN_CAPS: GenerationCapabilitiesResponse = {
+    modes: [],
+    defaultProvider: "ollama",
+    providers: [
+      {
+        id: "ollama",
+        label: "Ollama",
+        available: true,
+        defaultModel: "qwen2.5:1.5b",
+        manualModelEntry: true,
+        transports: {
+          server: { available: false, reason: "not_configured" },
+          bridge: { available: true, connected: false, reason: "not_connected" },
+        },
+      },
+    ],
+  };
+
+  const SERVER_UP_CAPS: GenerationCapabilitiesResponse = {
+    ...SERVER_DOWN_CAPS,
+    providers: [
+      {
+        id: "ollama",
+        label: "Ollama",
+        available: true,
+        defaultModel: "qwen2.5:1.5b",
+        manualModelEntry: true,
+        transports: {
+          server: { available: true, reason: null },
+          bridge: { available: true, connected: false, reason: "not_connected" },
+        },
+      },
+    ],
+  };
+
+  let container: HTMLDivElement;
+  let root: ReturnType<typeof createRoot>;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    container.remove();
+    sessionStorage.clear();
+  });
+
+  function mount(caps: GenerationCapabilitiesResponse, selection: GenerationProviderSelection): void {
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <GenerationProviderSelector
+          capabilities={caps}
+          selection={selection}
+          onChange={() => {}}
+        />,
+      );
+    });
+  }
+
+  function serverRadio(): HTMLInputElement {
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-testid="generation-ollama-transport-server"] input[type="radio"]',
+    );
+    if (!input) throw new Error("server transport radio not found");
+    return input;
+  }
+
+  it("Server / Direct AVAILABLE -> enabled and selectable (§26)", () => {
+    mount(SERVER_UP_CAPS, {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "",
+    });
+    const server = serverRadio();
+    expect(server.disabled).toBe(false);
+    // The label row carries NO dimmed state.
+    const row = container.querySelector('[data-testid="generation-ollama-transport-server"]');
+    expect(row?.className).not.toContain("provider-option--disabled");
+  });
+
+  it("Server / Direct UNAVAILABLE -> native disabled (not clickable, keyboard cannot activate) + dimmed row (§26)", () => {
+    mount(SERVER_DOWN_CAPS, {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "",
+    });
+    const server = serverRadio();
+    expect(server.disabled).toBe(true);
+    const row = container.querySelector('[data-testid="generation-ollama-transport-server"]');
+    expect(row?.className).toContain("provider-option--disabled");
+    // A click on a natively-disabled radio cannot activate/emit a change.
+    const onChange = vi.fn();
+    // Re-mount with a spy so we can prove zero selection changes from the click.
+    act(() => {
+      root.unmount();
+      root = createRoot(container);
+      root.render(
+        <GenerationProviderSelector
+          capabilities={SERVER_DOWN_CAPS}
+          selection={{ generationProvider: "ollama", ollamaTransport: "bridge", ollamaModel: "" }}
+          onChange={onChange}
+        />,
+      );
+    });
+    act(() => {
+      serverRadio().click();
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("GenerationProviderSelector — Phase 42 §27 vertical layout (structural CSS contract, not pixels)", () => {
+  const css = readFileSync(join(process.cwd(), "src", "index.css"), "utf8")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+
+  function rule(selectorPattern: string): string {
+    const source = selectorPattern.replace(/\s*\n\s*/g, "\\s*");
+    const match = new RegExp(`${source}\\s*\\{([^}]*)\\}`).exec(css);
+    if (!match) throw new Error(`missing shipped rule matching ${selectorPattern}`);
+    return match[1];
+  }
+
+  it("the provider option wrapper is a vertical flex column (one offer per row) (§3/§27)", () => {
+    // Both option wrappers share ONE shipped rule (selector list) — resolve
+    // the share block for the provider side.
+    const wrapper = rule(`\\.generation-provider-options[^{]*`);
+    expect(wrapper).toMatch(/display\s*:\s*flex/);
+    expect(wrapper).toMatch(/flex-direction\s*:\s*column/);
+    expect(wrapper).toMatch(/gap\s*:/);
+  });
+
+  it("the transport option wrapper is a vertical flex column (one connection per row) (§3/§27)", () => {
+    const wrapper = rule(`\\.generation-ollama-transport-options[^{]*`);
+    expect(wrapper).toMatch(/display\s*:\s*flex/);
+    expect(wrapper).toMatch(/flex-direction\s*:\s*column/);
+    expect(wrapper).toMatch(/gap\s*:/);
+  });
+
+  it("the availability text is a muted line (separate row/block, not inline with the label) (§3)", () => {
+    const availability = rule(`\\.provider-option-availability`);
+    // The shared selector list applies the muted COLOR...
+    expect(availability).toMatch(/color\s*:\s*var\(--muted\)/);
+    // ...and the DEDICATED standalone rule makes it a BLOCK line (the
+    // first-match above resolves to the shared selector list, so the block
+    // declaration is asserted against the full sheet).
+    expect(css).toMatch(/\.provider-option-availability\s*\{\s*display\s*:\s*block/);
+  });
+
+  it("an unavailable option is dimmed only alongside the native disabled attribute (§4 visual state)", () => {
+    const disabled = rule(`\\.provider-option--disabled`);
+    expect(disabled).toMatch(/opacity\s*:\s*0?\.5/);
+    expect(disabled).toMatch(/cursor\s*:\s*not-allowed/);
+    // The muted text color is applied to the row's label/subtitle children
+    // (see the shared selector list below the main dimmed rule).
+    expect(css).toMatch(
+      /\.provider-option--disabled\s*\.provider-option-label[^{]*\{\s*color\s*:\s*var\(--muted\)/,
     );
   });
 });

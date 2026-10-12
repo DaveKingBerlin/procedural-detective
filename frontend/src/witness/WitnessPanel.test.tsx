@@ -851,14 +851,19 @@ describe("WitnessPanel — CSS contract (Phase 26: questions always above the si
     return match[1];
   }
 
-  it("the panel box is viewport-bounded at 360px with a normal vertical flex flow (no min-width, no horizontal overflow)", () => {
+  it("the panel box is viewport-bounded with a responsive min/preferred/max width and a normal vertical flex flow (no horizontal overflow)", () => {
     const panel = rule(`\\.witness-panel`);
-    expect(panel).toMatch(/width\s*:\s*min\(24rem,\s*calc\(100%\s*-\s*2rem\)\)/);
+    // Phase 42 §9 — responsive width (min 20rem / preferred 30rem / max 30rem
+    // with a soft viewport cap): it fits common desktop viewports without
+    // covering the whole scene, stays responsive on narrow screens, and the
+    // `calc(100vw - 2rem)` bound means no width can force horizontal scroll.
+    expect(panel).toMatch(/min-width\s*:\s*min\(20rem,\s*calc\(100vw\s*-\s*2rem\)\)/);
+    expect(panel).toMatch(/width\s*:\s*min\(30rem,\s*calc\(100vw\s*-\s*2rem\)\)/);
+    expect(panel).toMatch(/max-width\s*:\s*30rem/);
     expect(panel).toMatch(/max-height\s*:\s*calc\(100%\s*-\s*2rem\)/);
     expect(panel).toMatch(/display\s*:\s*flex/);
     expect(panel).toMatch(/flex-direction\s*:\s*column/);
     expect(panel).toMatch(/overflow\s*:\s*hidden/);
-    expect(panel).not.toMatch(/min-width/);
   });
 
   it("questions and answer are flex-flow regions that scroll INSIDE the panel — the answer is NEVER absolutely/fixed positioned", () => {
@@ -888,6 +893,24 @@ describe("WitnessPanel — CSS contract (Phase 26: questions always above the si
     expect(button).toMatch(/overflow-wrap\s*:\s*anywhere/);
   });
 
+  it("Phase 42 §10 — the question ROW keeps the button flexible and the answered marker on the SAME row (space-between, no forced wrap)", () => {
+    const item = rule(`\\.witness-question-item`);
+    expect(item).toMatch(/display\s*:\s*flex/);
+    expect(item).toMatch(/align-items\s*:\s*center/);
+    expect(item).toMatch(/justify-content\s*:\s*space-between/);
+    expect(item).toMatch(/gap\s*:/);
+    // The question button owns the flexible width and wraps internally
+    // (min-width:0 + overflow-wrap:anywhere) instead of pushing the marker
+    // onto a second line.
+    const button = rule(`\\.witness-question-button`);
+    expect(button).toMatch(/flex\s*:\s*1\s+1\s+auto/);
+    expect(button).toMatch(/min-width\s*:\s*0/);
+    expect(button).toMatch(/overflow-wrap\s*:\s*anywhere/);
+    // The answered marker stays nowrap + right-aligned on its row.
+    const asked = rule(`\\.witness-question-asked`);
+    expect(asked).toMatch(/white-space\s*:\s*nowrap/);
+  });
+
   it("statement text wraps inside its box — no horizontal page overflow", () => {
     const summary = rule(`\\.witness-statement-summary`);
     expect(summary).toMatch(/overflow-wrap\s*:\s*anywhere/);
@@ -900,5 +923,97 @@ describe("WitnessPanel — CSS contract (Phase 26: questions always above the si
   it("the hostile-name heading still wraps (overflow-wrap on the panel name)", () => {
     const name = rule(`\\.witness-panel-name`);
     expect(name).toMatch(/overflow-wrap\s*:\s*anywhere/);
+  });
+});
+
+describe("WitnessPanel — Phase 42 §28 long-question row structure", () => {
+  let container: HTMLDivElement;
+  let root: Root | null = null;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+    container.remove();
+  });
+
+  function mount(
+    overrides: Partial<Parameters<typeof WitnessPanel>[0]> = {},
+  ): void {
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <WitnessPanel
+          witness={EMILY}
+          askedQuestions={[]}
+          statementCache={new Map()}
+          onAsk={async () => okOutcome("TIME", makeEmilyTimeStatement())}
+          onClose={() => {}}
+          {...overrides}
+        />,
+      );
+    });
+  }
+
+  it("the long 'Did you notice any unusual objects?' question + its answered marker render in the SAME row structure (§28)", () => {
+    mount({ askedQuestions: ["OBJECT"], statementCache: new Map() });
+    const longQuestion = "Did you notice any unusual objects?";
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="witness-question-OBJECT"]',
+    );
+    expect(button?.textContent?.trim()).toBe(longQuestion);
+    const marker = container.querySelector<HTMLElement>(
+      '[data-testid="witness-question-OBJECT-asked"]',
+    );
+    expect(marker?.textContent).toContain("· answered");
+    // STRUCTURAL assertion (no brittle pixel widths): the question button and
+    // the answered marker are SIBLINGS inside ONE `.witness-question-item`
+    // row — the layout keeps the marker on the SAME row as the question.
+    const row = button?.closest<HTMLElement>(".witness-question-item");
+    expect(row).not.toBeNull();
+    expect(row?.contains(marker)).toBe(true);
+    // Exactly the six question rows still exist (no duplicate/forced state).
+    const rows = container.querySelectorAll<HTMLElement>(".witness-question-item");
+    expect(rows.length).toBe(6);
+  });
+
+  it("the long question stays clickable and answers normally even when pre-marked answered (§29 no interview-semantics change)", async () => {
+    const onAsk = vi.fn(
+      async (questionType: WitnessQuestionType): Promise<WitnessAskOutcome> => {
+        return okOutcome(questionType, makeEmilyTimeStatement());
+      },
+    );
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <WitnessPanel
+          witness={EMILY}
+          askedQuestions={["OBJECT"]}
+          statementCache={new Map()}
+          onAsk={onAsk}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="witness-question-OBJECT"]',
+    );
+    expect(button?.getAttribute("aria-pressed")).toBe("true");
+    act(() => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      for (let index = 0; index < 12; index += 1) await Promise.resolve();
+    });
+    expect(onAsk).toHaveBeenCalledWith("OBJECT");
+    expect(
+      container.querySelector('[data-testid="witness-statement-summary"]')?.textContent,
+    ).toContain("heavy impact");
   });
 });
