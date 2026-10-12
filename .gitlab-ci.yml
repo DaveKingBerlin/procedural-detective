@@ -46,8 +46,10 @@ variables:
   ENABLE_BRIDGE: "false"
   PYTHONUNBUFFERED: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  # The canonical REQUIREMENTS.md integrity pin (Phase 24 §20 / immutable spec).
-  REQUIREMENTS_SHA256: "b2e568c029b02de79a74c43bb0e2ecd4d44a7fbec65d7de191a890a6dec9970d"
+  # The canonical REQUIREMENTS.md integrity pin (Phase 24 §20 / immutable spec;
+  # Phase41A authorized the narrow 31.1.1A/31.10/rule-17/witness-deception
+  # change, so the NEW hash is the pinned value).
+  REQUIREMENTS_SHA256: "ba3dfec2ca08069bef21137286def9e6e9c45aaab80cdea424400c522a909678"
   # CI_COMPOSE_PROJECT is always per-job (set INSIDE each docker job; never
   # inherited as a fixed value so two jobs can never share a project).
 

@@ -47,7 +47,9 @@ from app.generation.schemas import (  # noqa: E402
     MAX_SINGLE_TEXT_FIELD_CHARS,
 )
 
-REQUIREMENTS_SHA256 = "b2e568c029b02de79a74c43bb0e2ecd4d44a7fbec65d7de191a890a6dec9970d"
+# Pinned to the Phase-41A canonical REQUIREMENTS hash (31.1.1A / 31.10 /
+# Rule 17), replacing the pre-Phase-41A value.
+REQUIREMENTS_SHA256 = "ba3dfec2ca08069bef21137286def9e6e9c45aaab80cdea424400c522a909678"
 REQUIREMENTS_PATH = Path(__file__).resolve().parents[2] / "REQUIREMENTS.md"
 
 
