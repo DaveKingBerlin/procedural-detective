@@ -821,6 +821,47 @@ describe("Phase 42 §6 — recoverTransportSelection (deterministic stale-select
     expect(recoverTransportSelection(selection, BOTH_UP)).toBeNull();
   });
 
+  it("P42-ADV-04 — a null transport RECOVERS in-session to the single available transport (server-only)", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: null,
+      ollamaModel: "",
+    };
+    const recovered = recoverTransportSelection(selection, SERVER_ONLY);
+    expect(recovered).not.toBeNull();
+    expect(recovered?.ollamaTransport).toBe("server");
+    // Every non-transport field is preserved (only the transport is re-picked).
+    expect(recovered?.generationProvider).toBe("ollama");
+    expect(recovered?.ollamaModel).toBe("");
+  });
+
+  it("P42-ADV-04 — a null transport RECOVERS in-session to the single available transport (bridge-only)", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: null,
+      ollamaModel: "",
+    };
+    expect(recoverTransportSelection(selection, BRIDGE_ONLY)?.ollamaTransport).toBe("bridge");
+  });
+
+  it("P42-ADV-04 — a null transport with BOTH transports available is NOT re-picked (explicit unselect preserved)", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: null,
+      ollamaModel: "",
+    };
+    expect(recoverTransportSelection(selection, BOTH_UP)).toBeNull();
+  });
+
+  it("P42-ADV-04 — a null transport with BOTH transports unavailable stays null (fail-closed preserved)", () => {
+    const selection: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: null,
+      ollamaModel: "",
+    };
+    expect(recoverTransportSelection(selection, BOTH_DOWN)).toBeNull();
+  });
+
   it("non-ollama selections are never rewritten by this helper", () => {
     expect(
       recoverTransportSelection(

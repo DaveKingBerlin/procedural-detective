@@ -341,6 +341,53 @@ describe("GenerationProviderSelector — Phase 26C1 the VISIBLE transport is the
     expect(markup).toContain("not connected"); // the availability line stays honest
   });
 
+  it("P42-ADV-03 — a STALE selection handed DIRECTLY with fresh caps never paints a radio that is both checked and disabled (first-paint invariant)", () => {
+    const caps: GenerationCapabilitiesResponse = {
+      modes: [],
+      defaultProvider: "ollama",
+      providers: [
+        {
+          id: "ollama",
+          label: "Ollama",
+          available: true,
+          transports: {
+            server: { available: true },
+            bridge: { available: false, reason: "not_connected" },
+          },
+        },
+      ],
+    };
+    // A parent re-render paints the freshly-refreshed DTO while its recovery
+    // effect has NOT run yet — this commit hands the OLD (stale) selection
+    // (bridge selected) with the NEW caps (bridge down). The FIRST paint must
+    // already account for availability: the recoverable Server radio is checked
+    // and NO radio can ever carry checked="" and disabled="" in the same frame.
+    const stale: GenerationProviderSelection = {
+      generationProvider: "ollama",
+      ollamaTransport: "bridge",
+      ollamaModel: "hermes3:8b",
+    };
+    const markup = render(caps, stale);
+    expect(markup).toContain(TRANSPORT_CHECKED_SERVER);
+    expect(markup).not.toContain(TRANSPORT_CHECKED_BRIDGE);
+    const transportRadios = markup.match(/<input[^>]*name="generation-ollama-transport"[^>]*>/g) ?? [];
+    expect(transportRadios.length).toBeGreaterThan(0);
+    for (const tag of transportRadios) {
+      expect(
+        tag.includes('checked=""') && tag.includes('disabled=""'),
+        `a radio must never be simultaneously checked and disabled: ${tag}`,
+      ).toBe(false);
+    }
+    // The bridge availability line stays honest (disabled + reason, unchecked).
+    const bridgeBlock = markup.match(/data-testid="generation-ollama-transport-bridge"[\s\S]*?<\/label>/)?.[0] ?? "";
+    expect(bridgeBlock).toContain('disabled=""');
+    expect(bridgeBlock).not.toContain('checked=""');
+    expect(markup).toContain("not connected");
+    // Steady-state behavior is intact: the effective (recovered) selection is
+    // what the oracle returns and what the route would persist.
+    expect(recoverTransportSelection(stale, caps)?.ollamaTransport).toBe("server");
+  });
+
   it("Phase 42 §6 — a stale SELECTED Server is recovered BEFORE rendering: the recovered Bridge is checked, Server stays disabled/not-configured (§8.13 revised)", () => {
     const caps: GenerationCapabilitiesResponse = {
       modes: [],

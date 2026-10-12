@@ -837,10 +837,15 @@ export function defaultOllamaTransport(
  * Returns a replacement selection (a NEW object with the transport replaced by
  * the {@link defaultOllamaTransport} natural fallback oracle) or null when the
  * selection is already valid (or has nothing to recover):
+ *   - a null selection (the route still loading / no selection resolved) -> null;
  *   - non-ollama selections -> null (this helper owns the transport only);
- *   - `ollamaTransport === null` -> null (the documented fail-closed
- *     no-usable-transport path is preserved — serializing omits the transport
- *     and the backend rejects INVALID_GENERATION_PROVIDER);
+ *   - `ollamaTransport === null` -> P42-ADV-04: the null-transport selection
+ *     resolves to null in the BOTH-unavailable fail-closed path, and it also
+ *     never re-picks while BOTH transports are available (an explicit
+ *     user unselect is preserved). ONLY when EXACTLY ONE transport becomes
+ *     available does it deterministically re-pick that transport in-session
+ *     (Phase 42 §6 — a reachable mode that the capability DTO now reports
+ *     available must not stay unselected until the user clicks);
  *   - the current transport is still available -> null;
  *   - otherwise -> `{...selection, ollamaTransport: defaultOllamaTransport(...)}`
  *     (the oracle may itself resolve to null when NO transport is usable —
@@ -848,17 +853,32 @@ export function defaultOllamaTransport(
  *
  * The route owns WHICH selections flow through this gate: selection
  * initialization (resolveProviderSelection), every capability refresh and
- * every user selection change (`onChange` / stageJourney in /new). This
- * deliberately REVISES the Phase 26C1 "preserve verbatim even when
- * unavailable" rule in favor of Phase 42 §6.
+ * every user selection change (`onChange` / stageJourney in /new); the
+ * GenerationProviderSelector applies the SAME oracle at render time so even a
+ * stale selection handed to it by a parent can never paint a checked+disabled
+ * radio (P42-ADV-03). This deliberately REVISES the Phase 26C1 "preserve
+ * verbatim even when unavailable" rule in favor of Phase 42 §6.
  */
 export function recoverTransportSelection(
-  selection: GenerationProviderSelection,
+  selection: GenerationProviderSelection | null,
   capabilities: GenerationCapabilitiesResponse | null,
 ): GenerationProviderSelection | null {
-  if (selection.generationProvider !== "ollama" || selection.ollamaTransport === null) return null;
+  if (selection === null || selection.generationProvider !== "ollama") return null;
   const ollama = buildProviderOffers(capabilities).find((offer) => offer.id === "ollama");
   if (ollama === undefined) return null; // no offer -> the provider-level DISCARD-IF-STALE rule owns it
+  if (selection.ollamaTransport === null) {
+    // P42-ADV-04 — a null transport (both-down fail-closed OR an explicit
+    // unselect) is re-picked ONLY when exactly one transport is available:
+    //   - exactly one available -> deterministic recovery to that transport;
+    //   - both available -> an explicit unselect is preserved (never re-picked);
+    //   - both unavailable -> the documented fail-closed null stays untouched.
+    const serverAvailable = ollama.transports.server.available === true;
+    const bridgeAvailable = ollama.transports.bridge.available === true;
+    if (serverAvailable !== bridgeAvailable) {
+      return { ...selection, ollamaTransport: serverAvailable ? "server" : "bridge" };
+    }
+    return null;
+  }
   if (isOllamaTransportAvailable(selection.ollamaTransport, ollama)) return null;
   const fallback = defaultOllamaTransport(ollama);
   if (fallback === selection.ollamaTransport) return null;
