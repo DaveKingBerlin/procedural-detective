@@ -3,21 +3,24 @@
 Backend regression + budget-alignment suite.
 
 Reproduces, deterministically (MockOllamaTransport / canned fixtures, NO real
-LLM, NO wall-clock sleeps), the exact live 12→13 failure:
+LLM, NO wall-clock sleeps), the live Hard-case repair pattern under the
+post-Phase-41A canonical algebra. The historical 12→13 ZeroHeadroom failure
+pinned the exact sequence:
 
     call 1   case_truth
     call 2   evidence
     call 3   activity_log
     call 4   activity_log
     call 5   activity_log_repair
-    call 6   activity_log
-    call 7   activity_log_repair
-    call 8   activity_log
-    call 9   activity_log_repair
-    call 10  activity_log
-    call 11  activity_log_repair
+    ...
     call 12  activity_log
     call 13  world_graph   <-- PRE-fix rejected; POST-fix permitted
+
+Post-Phase-41A the canonical algebra is the 5-suspect-plus-witness shape: the
+witness ``lisa_koenig`` now receives an impossible-opportunity exclusion too,
+so when_obs + 5 opportunity logs (4 suspects + the witness) + presence = 7
+time-bearing cctv facts (one bounded ACTIVITY_LOG round-trip each), and the
+live queue grows to 15 staged CORE calls.
 
 and pins the new DERIVED global CORE-budget model (Option A):
 
@@ -27,13 +30,14 @@ and pins the new DERIVED global CORE-budget model (Option A):
     total_passes            = 1 + MAX_REPAIR_PASSES + MAX_FULL_REGENERATIONS = 4
     default                 = 155 × 4 = 620
 
-The 6 live activity logs correspond to 5 eligible suspects; the PARSED-CASE
-legal maximum is MAX_CHARACTERS + 1 = 9 (all 8 persons eligible) — the spec's
-"6 logs" text was the live-observed count, not the source-derived bound — and
-the RAW-MODEL-EVIDENCE fallback (case-stage parse failure) is bounded by
-MAX_EVIDENCE_ITEMS = 50 facts, the binding path (adversarial F1a). The
-derivation also covers every controller repair/regeneration pass (F1b), and
-``Settings`` rejects any override below the derived legal maximum (F3).
+The 7 live activity logs correspond to the 5-suspect-plus-witness algebra
+(4 SUSPECT_ELIGIBLE suspects + the Phase41A witness exclusion + presence); the
+PARSED-CASE legal maximum stays ``MAX_CHARACTERS + 1 = 9`` (a safe upper bound
+over the 8-person cap) and the RAW-MODEL-EVIDENCE fallback (case-stage parse
+failure) is bounded by MAX_EVIDENCE_ITEMS = 50 facts, the binding path
+(adversarial F1a). The derivation also covers every controller
+repair/regeneration pass (F1b), and ``Settings`` rejects any override below the
+derived legal maximum (F3).
 """
 
 from __future__ import annotations
