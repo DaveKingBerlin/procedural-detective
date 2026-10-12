@@ -127,16 +127,13 @@ def _log_posts(*anchors):
 
 def _wm_posts(deceptive: bool):
     # witness murderer (seed 11 -> SELF_PROTECTION liar; seed 7 -> truthful):
-    # other targets = marcus/paul/sophie (3 opp) + presence. A deceptive
-    # witness-murderer additionally carries the scene contradiction
-    # ``d_ev_contradict_<wid>`` (kind ``view_record`` IS ACTIVITY_LOG-rendered)
-    # whose canonical time is the presence time (t-20), so the DECEPTIVE pass
-    # needs SIX activity-log posts.
-    anchors = (
-        (-10, -120, -120, -120, -20, -20)
-        if deceptive
-        else (-10, -120, -120, -120, -20)
-    )
+    # other targets = marcus/paul/sophie (3 opp) + when_obs + presence = 5
+    # time-bearing cctv facts. FIX-1 (ADV-41A-02): the deception contradiction
+    # IS the ordinary scene-presence record (``d_ev_presence``, already the
+    # murderer's presence log), so the deceptive case carries EXACTLY the same
+    # activity-log layout as the truthful one (no special/marked record).
+    del deceptive  # the neutral evidence algebra is identical either way
+    anchors = (-10, -120, -120, -120, -20)
     return [
         _j(_witness_murderer_people()),
         _j(_evidence()),
@@ -147,15 +144,15 @@ def _wm_posts(deceptive: bool):
 
 
 def _innocent_liar_posts():
-    # paul murderer + two witnesses; seed-1 liar = lisa -> her NON-scene
-    # contradiction record (kind view_record, canonical t-120) adds ONE more
-    # activity-log post: when, opp_marcus, opp_sophie, opp_erika, presence,
-    # contradiction (6 calls).
+    # paul murderer + two witnesses; seed-1 liar = lisa -> her ORDINARY
+    # distant opportunity record (neutral ``d_ev_opp_lisakoenig``, kind cctv,
+    # canonical t-120) is the discoverable contradiction: when, opp_marcus,
+    # opp_sophie, opp_erika, opp_lisa, presence (6 calls).
     return [
         _j(_two_witness_people()),
         _j(_evidence()),
-        # evidence order: when(-10), opp_erika/contradict_lisa/opp_marcus/
-        # opp_sophie (four -120), presence(-20), then contradiction(-120).
+        # evidence order: when(-10), opp_erika/opp_lisa/opp_marcus/opp_sophie
+        # (four -120), presence(-20).
         *_log_posts(-10, -120, -120, -120, -120, -20),
         _j(_world()),
         ICEPICK_SPEC,
@@ -205,9 +202,10 @@ def test_generated_witness_murderer_is_valid_and_publishable():
     record, transport = _run_wm(True, 11, max_llm_calls_per_generation=12)
     assert record.state is GenerationState.PUBLISHED
     assert record.budget.repair_passes == 0
-    # deceptive witness murderer: 10 calls (the contradiction record is
-    # ACTIVITY_LOG-rendered) — a single bounded pass, no repairs.
-    assert transport.call_count == 10, "single bounded pass, no extra calls"
+    # FIX-1 (ADV-41A-02): the deception contradiction is an ordinary observation
+    # (no marked ``view_record`` record), so a deceptive witness murderer has
+    # the SAME bounded single-pass layout as a truthful one — 9 calls.
+    assert transport.call_count == 9, "single bounded pass, no extra calls"
 
     public, evidence, truth, draft = _assembled(record)
     # the hidden murderer is the public WITNESS (not a crafted fixture case).
@@ -372,7 +370,8 @@ def test_generated_guilty_deceptive_witness_has_discoverable_contradiction():
     assert deceptive[0].witness_id == _WITNESS
     assert deceptive[0].deception_reason == "SELF_PROTECTION"
 
-    # the lie is discoverably contradicted (responder record + camera placement).
+    # the lie is discoverably contradicted (an ordinary observation + camera
+    # placement — no marked contradiction record).
     from app.generation.case_quality import (
         DECEPTIVE_CLAIM_UNCONTRADICTED,
         validate_case_quality,
@@ -716,6 +715,148 @@ def test_no_truth_or_deception_leak_in_public_sections():
 
 
 # --------------------------------------------------------------------------- #
+# FIX-1 (ADV-41A-02) — no pre-reveal deception meta-leak in published evidence
+# --------------------------------------------------------------------------- #
+
+
+def test_deceptive_witness_public_evidence_is_indistinguishable_from_truthful():
+    """FIX-1 (ADV-41A-02): the deceptive witness's contradiction is an ORDINARY
+    observation, so the published evidence of a deceptive witness-murderer is
+    structurally IDENTICAL to a truthful witness-murderer's (same ids, kinds and
+    titles) and nothing in the public DTO marks deception/truthfulness."""
+    deceptive = _assembled(_run_wm(True, 11, max_llm_calls_per_generation=12)[0])
+    truthful = _assembled(_run_wm(False, 7, max_llm_calls_per_generation=12)[0])
+    _dpub, d_ev, d_truth, _ddraft = deceptive
+    _tpub, t_ev, t_truth, _tdraft = truthful
+
+    from app.services.publication import _to_plain
+
+    # The deceptive stamp only exists in the hidden truth, never in the evidence.
+    assert any(t.truthfulness == "DECEPTIVE" for t in d_truth.witness_truthfulness)
+    assert not any(t.truthfulness == "DECEPTIVE" for t in t_truth.witness_truthfulness)
+
+    # Identical public evidence shape: no special/renamed/marked record.
+    assert sorted(str(e.id) for e in d_ev) == sorted(str(e.id) for e in t_ev)
+    assert {str(e.id): str(e.kind) for e in d_ev} == {
+        str(e.id): str(e.kind) for e in t_ev
+    }
+    assert {str(e.id): str((e.presentation or {}).get("title")) for e in d_ev} == {
+        str(e.id): str((e.presentation or {}).get("title")) for e in t_ev
+    }
+    # No deception marker namespace / wording anywhere in the evidence.
+    evidence_text = json.dumps(
+        [
+            {
+                "id": str(e.id),
+                "kind": str(e.kind),
+                "presentation": _to_plain(dict(e.presentation or {})),
+            }
+            for e in d_ev
+        ],
+        sort_keys=True,
+    )
+    for marker in (
+        "d_ev_contradict",
+        "view_record",
+        "contradicting",
+        "SELF_PROTECTION",
+        "PROTECT_OTHER",
+        "HIDE_UNRELATED_SECRET",
+        "truthfulness",
+        "deception_reason",
+    ):
+        assert marker not in evidence_text, marker
+
+
+def test_deception_marker_never_leaks_into_public_case_dto():
+    """FIX-1 (ADV-41A-02): the public-case DTO mapper
+    (``public_case_dict_from_payload``) exposes no field/string that could tell
+    a deceptive witness from a truthful one."""
+    from app.services.publication import (
+        _to_plain,
+        public_case_dict_from_payload,
+    )
+
+    record, _ = _run_wm(True, 11, max_llm_calls_per_generation=12)
+    payload = _driver_payload(record)
+    text = json.dumps(_to_plain(public_case_dict_from_payload(payload)), sort_keys=True)
+    for marker in (
+        "d_ev_contradict",
+        "view_record",
+        "contradicting",
+        "SELF_PROTECTION",
+        "PROTECT_OTHER",
+        "HIDE_UNRELATED_SECRET",
+        "truthfulness",
+        "deception_reason",
+    ):
+        assert marker not in text, marker
+
+
+# --------------------------------------------------------------------------- #
+# FIX-2 (ADV-41A-01) — a truthful witness never contradicts its own evidence
+# --------------------------------------------------------------------------- #
+
+
+def test_truthful_witness_statement_matches_its_opportunity_evidence():
+    """FIX-2 (ADV-41A-01): a generated case with a TRUTHFUL non-murderer witness
+    answers consistently with its published opportunity/observation evidence (no
+    unintentional contradiction); the case still validates and a DECEPTIVE
+    witness still intentionally contradicts."""
+    from app.domain.eligibility import derive_universes
+    from app.domain.solver import solve_case
+    from app.generation.case_quality import validate_case_quality
+
+    # seed=11 suspect-murderer case: lisa_koenig is a TRUTHFUL non-murderer
+    # witness (no innocent-deception branch at this seed).
+    record, _ = _run(
+        _run_posts_for_suspect(), seed=11, max_llm_calls_per_generation=12
+    )
+    assert record.state is GenerationState.PUBLISHED
+    public, evidence, truth, draft = _assembled(record)
+    assert not any(t.truthfulness == "DECEPTIVE" for t in truth.witness_truthfulness)
+
+    statement_fact = next(
+        e for e in evidence if str(e.id) == "d_ev_witness_lisakoenig"
+    )
+    opportunity = next(e for e in evidence if str(e.id) == "d_ev_opp_lisakoenig")
+    distant_id = next(
+        getattr(p, "location_id", None)
+        for p in opportunity.propositions
+        if getattr(p, "location_id", None)
+    )
+    distant_name = next(
+        loc.name for loc in public.locations if loc.location_id == distant_id
+    )
+    statement_text = str(statement_fact.presentation["statement"])
+    # The witness truthfully states the SAME location their observation places
+    # them at, and never asserts the scene (the contradiction).
+    assert distant_name in statement_text
+    assert public.scene.name not in statement_text
+
+    proof = solve_case(public, evidence)
+    assert proof.who.unique is True
+    assert proof.who.winner == _CRIME_MURDERER_SUSPECT
+    codes = validate_case_quality(
+        public, truth, evidence, derive_universes(public), draft
+    )
+    assert codes == (), codes
+
+    # A DECEPTIVE witness still intentionally contradicts its (ordinary) record.
+    d_record, _ = _run_wm(True, 11, max_llm_calls_per_generation=12)
+    d_public, d_evidence, d_truth, d_draft = _assembled(d_record)
+    assert any(t.truthfulness == "DECEPTIVE" for t in d_truth.witness_truthfulness)
+    d_statement = next(
+        e for e in d_evidence if str(e.id) == "d_ev_witness_lisakoenig"
+    )
+    assert "left the" in str(d_statement.presentation["statement"])
+    d_codes = validate_case_quality(
+        d_public, d_truth, d_evidence, derive_universes(d_public), d_draft
+    )
+    assert d_codes == (), d_codes
+
+
+# --------------------------------------------------------------------------- #
 # §64 — ordering stability (final targets never murderer-first)
 # --------------------------------------------------------------------------- #
 
@@ -879,16 +1020,17 @@ def _two_witness_case_objects():
 
 def test_witness_murderer_generation_is_bounded_single_pass():
     """The witness murderer is chosen by explicit bounded logic — a single
-    bounded pass (9 or 10 provider calls depending on the deception branch),
-    zero repairs, zero regenerations, no role-roll retries."""
+    bounded pass (9 provider calls for both the deceptive and the truthful
+    branch — FIX-1 neutralised the extra contradiction record), zero repairs,
+    zero regenerations, no role-roll retries."""
     records = []
     for posts, seed, prompt in ((_wm_posts(True), 11, _WM_PROMPT), (_wm_posts(False), 7, _WM_PROMPT)):
         record, transport = _run(posts, prompt=prompt, seed=seed, max_llm_calls_per_generation=12)
         assert record.state is GenerationState.PUBLISHED
         assert record.budget.repair_passes == 0
-        # bounded single pass: 10 provider calls when the witness-murderer lies
-        # (the contradiction record is ACTIVITY_LOG-rendered), 9 when truthful.
-        expected = 10 if seed == 11 else 9
+        # bounded single pass: 9 provider calls either way — the deceptive
+        # contradiction is an ordinary observation, never a marked extra fact.
+        expected = 9
         assert transport.call_count == expected, "no repair-loop amplification"
         records.append(record)
     assert records[0].solver_proof.who.winner == _WITNESS

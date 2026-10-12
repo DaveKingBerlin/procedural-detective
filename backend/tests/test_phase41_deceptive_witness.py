@@ -446,10 +446,12 @@ def test_fix3b_deceptive_claim_with_undiscoverable_contradiction_rejected():
 
 
 def test_fix3c_driver_injects_camera_placement_for_contradiction():
-    """The DRIVER's app-owned placement injection binds every generated
-    ``d_ev_contradict_*`` record to an INSPECTABLE camera placement (the
-    discoverability fix at the generation layer) — deterministic, and the
-    placement passes the world-graph validation."""
+    """The DRIVER's app-owned placement injection binds every witness-
+    referencing mechanical observation (the ordinary ``d_ev_opp_*`` records and
+    a witness murderer's ``d_ev_presence``) to an INSPECTABLE camera placement
+    (the discoverability fix at the generation layer) — deterministic, with no
+    leak-marked ``d_ev_contradict_*`` record, and the placement passes the
+    world-graph validation."""
     from app.domain.resolution import ResolutionType
     from app.generation.schemas import (
         CrimeSpec,
@@ -511,7 +513,10 @@ def test_fix3c_driver_injects_camera_placement_for_contradiction():
     spec, _rules, _notes = _evidence_gap_facts(_Attempt(), crime, public, None)
     assert spec is not None
     ids = {f.id for f in spec.evidence}
-    assert "d_ev_contradict_emilyreed" in ids
+    # FIX-1: the contradiction is the ORDINARY scene-presence observation; no
+    # leak-marked ``d_ev_contradict_*`` / ``view_record`` record is generated.
+    assert "d_ev_presence" in ids
+    assert not any(i.startswith("d_ev_contradict_") for i in ids)
 
     # The injection produces exactly one camera placement bound to the record.
     from app.environments.manifests import load_environment
@@ -522,7 +527,7 @@ def test_fix3c_driver_injects_camera_placement_for_contradiction():
     )
     assert len(objects) == 1 and len(placements) == 1
     placement = placements[0]
-    assert placement.evidence_id == "d_ev_contradict_emilyreed"
+    assert placement.evidence_id == "d_ev_presence"
     assert placement.interaction == "inspect"
     assert placement.asset_id == "CAMERA_HALL_01"
     assert objects[0].object_id == placement.object_id
@@ -550,9 +555,9 @@ def test_fix3c_driver_injects_camera_placement_for_contradiction():
 
 def test_fix3d_driver_assemble_keeps_contradiction_discoverable():
     """Full ``_assemble`` integration: the driver's assembled draft carries the
-    camera placement bound to the contradiction record and every world-graph
-    validation stays clean, so the generated guilty deceptive witness's
-    contradiction is genuinely discoverable through the world path."""
+    camera placement bound to the ordinary contradiction record and every
+    world-graph validation stays clean, so the generated guilty deceptive
+    witness's contradiction is genuinely discoverable through the world path."""
     from app.domain.witness_truth import WitnessStatementTruth
     from app.generation.provider import GenerationStage
     from app.generation.constraints import LockedConstraints
@@ -632,11 +637,10 @@ def test_fix3d_driver_assemble_keeps_contradiction_discoverable():
     contradiction_placements = [
         p
         for p in draft.world_graph.placements
-        if str(getattr(p, "evidence_id", "") or "").startswith("d_ev_contradict_")
+        if str(getattr(p, "evidence_id", "") or "") == "d_ev_presence"
     ]
     assert len(contradiction_placements) == 1
     placement = contradiction_placements[0]
-    assert placement.evidence_id == "d_ev_contradict_lisakoenig"
     assert placement.interaction == "inspect"
     assert placement.asset_id == "CAMERA_HALL_01"
     # The camera object is INSPECTABLE-only — never a weapon/suspect candidate.
