@@ -52,7 +52,7 @@ _CRIME_CANONICAL = "2026-09-11T23:42:00+02:00"
 
 
 def _pass1_posts():
-    """The exact 8 posts of one unharmed driver pass (case, evidence, 4 logs,
+    """The exact 9 posts of one unharmed driver pass (case, evidence, 5 logs,
     world, ASSET_SPEC)."""
 
     return [
@@ -155,7 +155,7 @@ def test_easy_victim_eligible_case_publishes_with_zero_repairs_and_no_victim_evi
 
     assert record.state is GenerationState.PUBLISHED
     assert record.budget.repair_passes == 0, "the projection fixed it before validation"
-    assert transport.call_count == 8, "no CASE_PEOPLE provider repair call"
+    assert transport.call_count == 9, "no CASE_PEOPLE provider repair call"
     case_prompts = [c for c in transport.post_calls if "case_people_v1" in c]
     assert len(case_prompts) == 1, "the case stage must NOT be re-run"
 
@@ -222,7 +222,7 @@ def test_candidate_only_repair_makes_zero_case_world_and_log_calls():
     attempt = _direct_attempt("GA-p40-repair-0001")
 
     driver.run_into(attempt)
-    assert transport.call_count == 8  # clean baseline
+    assert transport.call_count == 9  # clean baseline
 
     aid = str(attempt.attempt_id)
     assert aid in driver._case_outputs
@@ -231,7 +231,7 @@ def test_candidate_only_repair_makes_zero_case_world_and_log_calls():
 
     driver.run_into(attempt, repair_plan=_candidate_only_plan())
 
-    new_calls = transport.post_calls[8:]
+    new_calls = transport.post_calls[9:]
     assert len(new_calls) == 1, f"only the evidence rerun expected, got {new_calls}"
     assert "evidence_v1" in new_calls[0]
     # §40 — the headline guarantee
@@ -269,7 +269,7 @@ def test_candidate_only_plan_without_evidence_flag_still_reruns_evidence():
     attempt = _direct_attempt("GA-p40-defence-0001")
 
     driver.run_into(attempt)
-    assert transport.call_count == 8
+    assert transport.call_count == 9
     aid = str(attempt.attempt_id)
     crime, public = driver._case_outputs[aid]
     driver._case_outputs[aid] = (crime, _poisoned_public(public))
@@ -286,7 +286,7 @@ def test_candidate_only_plan_without_evidence_flag_still_reruns_evidence():
     )
     driver.run_into(attempt, repair_plan=forgetful_plan)
 
-    new_calls = transport.post_calls[8:]
+    new_calls = transport.post_calls[9:]
     assert len(new_calls) == 1, new_calls
     assert "evidence_v1" in new_calls[0], "evidence was force-rerun (§16)"
     assert not any("case_people_v1" in p for p in new_calls)

@@ -420,7 +420,13 @@ def test_def028_golden_unchanged():
     proof = solve_case(golden_public(), golden_evidence())
     assert proof.who.winner == "thomas_reed"
     assert proof.who.unique is True
-    assert {e.candidate_id for e in proof.who.excluded} == {"anna_karlsson", "michael_carter"}
+    # Phase41A — the WHO universe is the FINAL HOMICIDE TARGET universe, so the
+    # public witness (emily_reed) is a candidate and is evidence-excluded too.
+    assert {e.candidate_id for e in proof.who.excluded} == {
+        "anna_karlsson",
+        "emily_reed",
+        "michael_carter",
+    }
 
 
 # ===========================================================================

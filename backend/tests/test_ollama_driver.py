@@ -144,7 +144,10 @@ def _known_world():
 # The driver generates ONE structured log per ACTIVITY_LOG-rendered
 # time-bearing fact, in evidence order:
 #   d_ev_when_obs            observed_at = crime_time - 10s
-#   d_ev_opp_<suspect> x2    observed_at = crime_time - 120s
+#   d_ev_opp_<target> x3     (marcus/sophie suspects + lisa witness —
+#                             Phase41A: EVERY non-murderer FINAL HOMICIDE TARGET
+#                             gets an impossible-opportunity exclusion)
+#                              observed_at = crime_time - 120s
 #   d_ev_presence            observed_at = crime_time - 20s
 # --------------------------------------------------------------------------- #
 
@@ -211,6 +214,7 @@ def _alog_posts(crime_canonical):
         iso(-10),    # d_ev_when_obs (scene observation)
         iso(-120),   # d_ev_opp_marcus_fischer
         iso(-120),   # d_ev_opp_sophie_hoffmann
+        iso(-120),   # d_ev_opp_lisakoenig (Phase41A witness opportunity)
         iso(-20),    # d_ev_presence
     )
     return [_j(_alog(anchor)) for anchor in anchors]
@@ -219,10 +223,12 @@ def _alog_posts(crime_canonical):
 def _driver_posts(cp_json, evidence_json, world_json, crime_canonical, *, known=False):
     """The full ordered driver transport post queue (Phase 19J layout).
 
-    Order of provider calls: case_truth, evidence, activity_log x4 (the four
-    time-bearing cctv facts of the deterministic evidence algebra), world_graph,
-    and — when the weapon is an unknown object — the ASSET_SPEC response (added
-    by the caller via ``_staged``/explicit posts).
+    Order of provider calls: case_truth, evidence, activity_log x5 (the five
+    time-bearing cctv facts of the deterministic evidence algebra — WHEN scene
+    observation, three OTHER-TARGET opportunity exclusions incl. the witness,
+    murderer presence), world_graph, and — when the weapon is an unknown object
+    — the ASSET_SPEC response (added by the caller via ``_staged``/explicit
+    posts).
     """
     posts = [cp_json, evidence_json, *_alog_posts(crime_canonical), world_json]
     return posts
@@ -393,13 +399,13 @@ def test_18a_malformed_evidence_uses_local_projection_without_remote_retry(
                 "2026-09-11T23:42:00+02:00",
             )
             + [ICEPICK_SPEC],
-            max_llm_calls_per_generation=8,
+            max_llm_calls_per_generation=9,
         )
 
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 8
-    assert record.budget.calls == 8
-    assert "world_requirements_v1" in transport.prompt_of_call(6)
+    assert transport.call_count == 9
+    assert record.budget.calls == 9
+    assert "world_requirements_v1" in transport.prompt_of_call(7)
     assert record.deferred_structural == ()
     assert record.last_validation.valid is True
     assert record.last_validation.validation.all_true is True
@@ -466,10 +472,11 @@ def test_18b_valid_evidence_keeps_existing_ollama_path_without_local_projection(
         record, transport = _run(_staged(), max_llm_calls_per_generation=12)
 
     assert record.state is GenerationState.PUBLISHED
-    # 4 staged calls (case/evidence/world/asset) + 4 deterministic activity-log
-    # calls for the time-bearing cctv facts (Phase 19J driver-internal stage).
-    assert transport.call_count == 8
-    assert record.budget.calls == 8
+    # 4 staged calls (case/evidence/world/asset) + 5 deterministic activity-log
+    # calls for the time-bearing cctv facts (Phase 19J driver-internal stage;
+    # Phase41A adds the witness opportunity exclusion).
+    assert transport.call_count == 9
+    assert record.budget.calls == 9
     assert record.deferred_structural == ()
     assert not any(
         getattr(event, "pd_event", None) == "evidence.local_projection.used"
@@ -574,8 +581,8 @@ def test_18c_invalid_deterministic_projection_stays_fail_closed(monkeypatch, cap
 def test_19_world_requirements_stage():
     record, transport = _run(_staged())
     assert record.state is GenerationState.PUBLISHED
-    # the world stage runs after the four Phase 19J activity-log calls.
-    assert "world_requirements_v1" in transport.prompt_of_call(6)
+    # the world stage runs after the five Phase 19J activity-log calls.
+    assert "world_requirements_v1" in transport.prompt_of_call(7)
     # the office environment was selected via the LLM world-requirements.
     assert record.draft.scene is not None
     assert record.draft.scene.environment_id == "office"
@@ -683,8 +690,8 @@ def test_24_known_asset_does_not_call_asset_spec_provider():
 def test_25_unknown_asset_calls_provider():
     record, transport = _run(_staged())
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 8
-    assert "asset_spec_v1" in transport.prompt_of_call(7)
+    assert transport.call_count == 9
+    assert "asset_spec_v1" in transport.prompt_of_call(8)
     # the proc.* object appears in the published world.
     assert any(
         p.asset_id.startswith("proc.")
@@ -818,7 +825,8 @@ def test_33_degenerate_same_origin_geometry_is_repaired():
         json.dumps(repaired),     # ASSET_SPEC_REPAIR — repaired candidate
     ])
     assert record.state is GenerationState.PUBLISHED
-    assert transport.call_count == 9
+    # 9 base posts (case, evidence, 5 logs, world, asset) + 1 ASSET_SPEC_REPAIR.
+    assert transport.call_count == 10
     # the repair prompt restated the geometry rules.
     assert any(
         "Geometry-quality instructions" in transport.prompt_of_call(i)
@@ -868,9 +876,9 @@ def test_35_published_proc_object_immutable():
 def test_36_provider_call_uses_existing_budget():
     record, _t = _run(_staged(), max_llm_calls_per_generation=12)
     assert record.state is GenerationState.PUBLISHED
-    # 8 staged calls consumed from budget.calls: case/evidence/world/asset +
-    # the four Phase 19J activity-log calls (bounded by the same CORE budget).
-    assert record.budget.calls == 8
+    # 9 staged calls consumed from budget.calls: case/evidence/world/asset +
+    # the five Phase 19J activity-log calls (bounded by the same CORE budget).
+    assert record.budget.calls == 9
 
 
 def test_37_admission_happens_before_any_call():

@@ -71,6 +71,9 @@ def test_candidate_universes_value_equality():
         suspect_ids=["thomas_reed", "anna_karlsson", "michael_carter"],
         motive_ids=["robbery_gone_wrong", "cover_up_embezzlement", "revenge_for_affair"],
         weapon_ids=["scissors", "kitchen_knife", "letter_opener"],
+        # Phase41A — the truth-independent FINAL HOMICIDE TARGET universe
+        # (public suspects AND witnesses, victim + family excluded).
+        homicide_target_ids=["anna_karlsson", "emily_reed", "michael_carter", "thomas_reed"],
     ) == first
 
 
