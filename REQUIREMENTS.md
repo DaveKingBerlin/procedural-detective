@@ -1548,6 +1548,38 @@ SuspectUniverse
 all published person IDs with SUSPECT_ELIGIBLE
 ```
 
+### 31.1.1A Final Homicide Target Universe
+
+A person belongs to `FinalHomicideTargetUniverse` exactly when the published
+public model marks that person with one of the public roles:
+
+```text
+suspect OR witness
+```
+
+with any public role `victim` person excluded:
+
+```text
+FinalHomicideTargetUniverse
+=
+all published person IDs with public role "suspect"
+∪
+all published person IDs with public role "witness"
+−
+all published person IDs with public role "victim"
+```
+
+`FinalHomicideTargetUniverse` SHALL be deterministic, sorted, deduplicated and
+derived from public roles/eligibility only — never from `CaseTruth`
+(`CaseTruth.crime.murdererId` is not an input). It is the universe of possible
+murderers for homicide deduction (31.10) and the universe from which the hidden
+homicide murderer SHALL be selected.
+
+`SuspectUniverse` (31.1.1, `SUSPECT_ELIGIBLE`) remains the INVESTIGATIVE
+universe — investigative suspect display, suspect-specific opportunity evidence
+and suspect-focused gameplay affordances stay suspect-based. A public `witness`
+is a final homicide target WITHOUT receiving `SUSPECT_ELIGIBLE`.
+
 ### 31.1.2 Motive Eligibility
 
 A motive belongs to `MotiveUniverse` exactly when the public/published case model marks the
@@ -1895,17 +1927,30 @@ An `unknown` alternative remains viable and blocks uniqueness.
 
 ## 31.10 Murderer Deduction
 
+For homicide, the deduction universe is `FinalHomicideTargetUniverse`
+(31.1.1A): every public `suspect` AND `witness` is a deduction candidate.
+
 PASS:
 
 ```text
-exactly one suspect remains viable
+exactly one final homicide target remains viable
 AND
-every alternative suspect is evidence-backed excluded
+every alternative final homicide target is evidence-backed excluded
 AND
 survivor == CaseTruth.crime.murdererId
 ```
 
 `CaseTruth` is used only for final comparison.
+
+For homicide, the murderer SHALL be selected from the final homicide target
+universe and SHALL NOT be restricted exclusively to the investigative suspect
+universe (`SuspectUniverse`, 31.1.1). A person with public role `witness` MAY
+be the murderer while retaining role `witness` and without receiving
+`SUSPECT_ELIGIBLE`.
+
+Witness claims MAY be deceptive. A deceptive witness MAY be guilty or innocent.
+Every materially deceptive claim SHALL have a discoverable contradiction path
+and SHALL NOT be an unverifiable solver premise.
 
 ## 31.11 Motive Deduction
 
@@ -3924,7 +3969,7 @@ RAD must follow these rules:
 14. Generated NPC knowledge must remain separated from canonical truth.
 15. Any contradiction must either be intentional or fail validation.
 16. A case is not considered solvable merely because an LLM assigns it a high score.
-17. A valid case must have exactly one remaining suspect after deterministic deduction.
+17. A valid case must have exactly one remaining final homicide target after deterministic deduction.
 18. Critical evidence required by the solution proof must be discoverable in normal gameplay.
 19. `PublicCase`, `PlayerKnowledge`, and `CaseTruth` must be separate models and API contracts.
 20. Development tooling must never kill processes based on PID alone.
