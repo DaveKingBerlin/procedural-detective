@@ -1,0 +1,41 @@
+﻿=== ATTACK 1: replay exhaustion semantics ===
+downstream observed: [('http.request', b'abc', False), ('http.disconnect', None, None), ('http.disconnect', None, None), ('http.disconnect', None, None), ('http.disconnect', None, None), ('http.disconnect', None, None)]
+transport.receive_calls: 6 (1 script + 5 forwarded disconnects)
+app_invoked: 1 sent: ['http.response.start', 'http.response.body']
+post-replay all exactly http.disconnect: True
+no synthesized http.request after replay: True
+
+=== ATTACK 2: disconnect timing ===
+2a first-message disconnect -> observed: ['http.disconnect', 'http.disconnect', 'http.disconnect'] transport_calls: 3
+2b mid-body disconnect -> observed: [('http.request', b'ab', True), ('http.disconnect', None, None), ('http.disconnect', None, None), ('http.disconnect', None, None)] transport_calls: 4
+2c oversize+mid-drain disconnect -> app_invoked: 0 status: 413 transport_calls: 2
+2c2 send-after-disconnect RAISED: RuntimeError client disconnected (simulated send failure) send calls: ['http.response.start']
+2d multiple disconnects -> observed: ['http.request', 'http.disconnect', 'http.disconnect', 'http.disconnect']
+
+=== ATTACK 3: oversized/chunked invariants ===
+3a declared CL over -> app_invoked: 0 receive_calls: 0 status: 413
+3b chunked cross mid-stream -> app_invoked: 0 status: 413 transport_calls: 3
+3c terminal over-bound -> app_invoked: 0 status: 413 transport_calls (expect 1): 1
+3d exactly at bound -> app_invoked: 1
+3e bound+1 terminal -> app_invoked: 1 status: 413
+3f declared CL == bound -> app_invoked: 2
+3g declared CL=10 body=1124 -> app saw bytes: 1124 (middleware trusts declared CL; server framing is the guard)
+
+=== ATTACK 4: body integrity ===
+chunks in : [b'{"a":', b'1', b',"b":[', b'2,3', b']}']
+chunks out: [b'{"a":', b'1', b',"b":[', b'2,3', b']}']
+byte-exact & ordered: True no dup/loss: True
+
+=== ATTACK 5: non-http scope ===
+ws: downstream receive is ORIGINAL transport receive: True msg: websocket.connect
+
+=== ATTACK 6: resource / DoS ===
+6a block-on-transport -> not done while blocked: True hb ticks: 6067 after disconnect: http.disconnect
+6b hostile infinite-terminal transport -> downstream iterations: 50000 transport calls: 50000 elapsed_s: 0.048
+6c pre-read aborted by hostile cap: cap reached messages consumed: 300001
+6c app_invoked: 0 consulted messages: 300001 (empty non-terminal frames -> unbounded buffering; see note)
+
+=== ATTACK 7: original bug class (hot loop) ===
+FIXED  -> heartbeat ticks: 3 listen calls: 2 saw real disconnect: True
+PRE-FIX-> heartbeat ticks: 2 listen calls: 200000 saw real disconnect: False
+

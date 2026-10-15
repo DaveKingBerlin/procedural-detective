@@ -1,0 +1,21 @@
+﻿Adv43-Fix1 dependency / root-cause evidence
+===========================================
+Generated: 2026-10-15T21:32:51.4209807+02:00
+
+# Installed versions
+Name: starlette Version: 1.6.0 Name: fastapi Version: 0.141.1
+
+# backend/pyproject.toml dependency lines
+"fastapi>=0.115.0,<1.0.0", "uvicorn[standard]>=0.30.0,<1.0.0",
+
+# starlette.responses: who calls wait receive()?
+responses.py:244: message = await receive()
+
+# FileResponse.__call__ (lines 341-366) — sends file chunks only, NO disconnect listener
+      async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:           scope_type = scope["type"]           send_header_only = scope_type == "http" and scope["method"].upper() == "HEAD"           send_pathsend = scope_type == "http" and "http.response.pathsend" in scope.get("extensions", {})           if scope_type == "websocket":               send = self._wrap_websocket_denial_send(send)              if self.stat_result is None:               try:                   stat_result = await anyio.to_thread.run_sync(os.stat, self.path)                   self.set_stat_headers(stat_result)               except FileNotFoundError:                   raise RuntimeError(f"File at path {self.path} does not exist.")               else:                   mode = stat_result.st_mode                   if not stat.S_ISREG(mode):                       raise RuntimeError(f"File at path {self.path} is not a file.")           else:               stat_result = self.stat_result              headers = Headers(scope=scope)           http_range = headers.get("range")           http_if_range = headers.get("if-range")              if http_range is None or (http_if_range is not None and not self._should_use_range(http_if_range)):               await self._handle_simple(send, send_header_only, send_pathsend)
+
+# StreamingResponse.__call__ listener wiring (lines 273-280)
+              async with create_collapsing_task_group() as task_group:                      async def wrap(func: Callable[[], Awaitable[None]]) -> None:                       await func()                       task_group.cancel_scope.cancel()                      task_group.start_soon(wrap, partial(self.stream_response, send))                   await wrap(partial(self.listen_for_disconnect, receive))
+
+# uvicorn: send() after disconnect is a silent no-op (so 2c2's raise is NOT real); receive() yields while response incomplete
+httptools_impl.py:467: if self.disconnected:

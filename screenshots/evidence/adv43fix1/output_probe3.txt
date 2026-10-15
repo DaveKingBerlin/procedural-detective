@@ -1,0 +1,14 @@
+﻿--- fixed FileResponse ---
+    START fixed FileResponse
+    COMPLETED fixed FileResponse recv_calls=1 body_bytes=4096 started=True
+    exit=0
+--- old FileResponse ---
+    START pre-fix FileResponse
+    COMPLETED pre-fix FileResponse recv_calls=1 body_bytes=4096 started=True
+    exit=0
+--- fixed StreamingResponse ---
+    START fixed StreamingResponse
+    COMPLETED fixed StreamingResponse recv_calls=2 body_bytes=81920 started=True
+    exit=0
+--- old StreamingResponse ---
+    TIMEOUT after 8s -> event loop starved (no response, hot loop)
