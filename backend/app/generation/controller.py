@@ -516,6 +516,22 @@ class GenerationController:
                 if stage is None:
                     self._set_state(attempt, GenerationState.VALIDATING)
                     continue
+                if (
+                    self._driver is None
+                    and stage is GenerationStage.WORLD_GRAPH
+                    and not attempt._evidence_completed
+                ):
+                    # Phase43A (P43A-FR-07/09/10) — the generic path runs the
+                    # deterministic evidence completion on the trusted parsed
+                    # canonical state BEFORE the WORLD_GRAPH stage is generated,
+                    # so the world graph is generated against the completed
+                    # evidence. Firing here (rather than immediately after the
+                    # EVIDENCE provider call) also covers a PENDING EVIDENCE
+                    # result. Bounded to a single invocation per attempt; never
+                    # consumes repair/regeneration budget.
+                    pipeline.complete_generic_evidence_if_underconstrained(
+                        attempt
+                    )
                 if not self._invoke_provider(attempt, stage):
                     return  # pending (paused) or terminal
                 continue
@@ -1220,6 +1236,7 @@ class GenerationController:
         attempt.stage_outputs = {}
         attempt.stage_done = set()
         attempt.deferred_structural = ()
+        attempt.deferred_by_stage = {}
         attempt.draft = None
         attempt._phase3_cache = None
         attempt.solver_proof = None
@@ -1229,6 +1246,9 @@ class GenerationController:
         # constraints (and thus the canonical locked ids) are preserved.
         attempt._repair_pre_ids = None
         attempt._repair_authorized_sections = None
+        # Phase43A — a regenerated attempt gets a FRESH deterministic evidence
+        # completion (the stage outputs were discarded).
+        attempt._evidence_completed = False
         reset_cache = getattr(self._driver, "reset_attempt_cache", None)
         if callable(reset_cache):
             try:

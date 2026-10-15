@@ -25,7 +25,7 @@ COMPLETE validation suite again, never incremental trust).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 from app.domain.eligibility import derive_universes
@@ -44,6 +44,7 @@ from app.domain.solver import solve_case
 from app.domain.truth import CaseTruth, Crime, CrimeTime
 from app.generation import (
     case_quality,
+    evidence_algebra,
     parser,
     prompt as prompt_mod,
     prompts,
@@ -123,6 +124,15 @@ class AttemptRecord:
     stage_done: set[GenerationStage] = field(default_factory=set)
     # Structural issues deferred by the strict parser (stage parse failures).
     deferred_structural: tuple[str, ...] = ()
+    # Phase43A (P43A-FR-08) — the SAME deferred parser issues attributed to the
+    # stage that produced them. ``deferred_structural`` stays the flat union
+    # (unchanged validation/classification authority); this per-stage map lets
+    # the deterministic evidence completion treat an EVIDENCE-stage parse
+    # failure as algebra-owned WITHOUT masking a CASE_TRUTH / PUBLIC_WORLD /
+    # WORLD_GRAPH / REPAIR structural/safety/universe/locked/quality defect.
+    deferred_by_stage: dict[GenerationStage, tuple[str, ...]] = field(
+        default_factory=dict
+    )
     # The assembled full draft (rebuilt from stage outputs, or replaced by a
     # successful REPAIR full-draft parse).
     draft: GeneratedDraft | None = None
@@ -155,6 +165,10 @@ class AttemptRecord:
     # attempt-local, never serialized, never emitted; cleared on regeneration.
     _repair_pre_ids: dict[str, tuple[str, ...]] | None = None
     _repair_authorized_sections: frozenset[str] | None = None
+    # Phase43A — the generic-path deterministic evidence completion runs AT MOST
+    # ONCE per attempt (never a loop). Set when the EVIDENCE stage completes;
+    # cleared on regeneration so a fresh attempt gets a fresh completion.
+    _evidence_completed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1039,6 +1053,17 @@ def _authoritative_public_world_block(attempt: AttemptRecord) -> str:
         # validators remain authoritative.
         + "\n\n"
         + prompts.CASE_QUALITY_RULES
+        # Phase43A — the explicit world-breadth/cardinality contract the Ollama
+        # ``_CASE_FIELD_RULES`` template already teaches (victim + murderer +
+        # witness + >= 2 red-herring suspects; locked motive + >= 2 red-herring
+        # MOTIVE_CANDIDATE motives; locked scene + >= 2 other locations;
+        # mandatory travel rules from every non-scene location to the scene,
+        # >= 2 of them >= 1200s). Without it the live Easy PUBLIC_WORLD stage
+        # under-provisioned the world and produced an empty FINAL HOMICIDE
+        # TARGET universe (``FINAL_TARGET_UNIVERSE_EMPTY``). Guidance only; the
+        # validators remain authoritative.
+        + "\n\n"
+        + prompts.PUBLIC_WORLD_BREADTH_RULES
     )
 
 
@@ -1145,6 +1170,22 @@ def _authoritative_world_graph_block(attempt: AttemptRecord) -> str:
     lines.append("- currentObjectIds: " + (", ".join(object_ids) or "(none)"))
     lines.append("- currentLocationIds: " + (", ".join(location_ids) or "(none)"))
     lines.append("- currentEvidenceIds: " + (", ".join(evidence_ids) or "(none)"))
+    # Phase43A — explicit placement discipline. The live Easy WORLD_GRAPH
+    # emitted many placements with duplicate objectIds (a safety defect that
+    # blocks the world). Guidance only; the safety/structural validators remain
+    # authoritative.
+    lines.append(
+        "PLACEMENT DISCIPLINE (authoritative — placements are validated after "
+        "the pass):\n"
+        "- place ONLY the objects the case declares (the currentObjectIds "
+        "above) — never invent a new object or asset;\n"
+        "- each objectId appears AT MOST ONCE across ALL placements — never "
+        "emit two placements for the same objectId;\n"
+        "- keep placements MINIMAL: the single crime weapon plus ONLY the "
+        "objects an evidence item links to;\n"
+        "- NEVER duplicate an objectId — a duplicate placement is a safety "
+        "defect and blocks the world."
+    )
     return "\n".join(lines)
 
 
@@ -1261,6 +1302,13 @@ def _authoritative_repair_block(attempt: AttemptRecord) -> str:
     # resolve-every-id rule), so a full-draft repair can restore the exact
     # shapes the validators require.
     parts.append(prompts.CASE_QUALITY_RULES)
+    # Phase43A — the world-breadth/cardinality contract (victim + murderer +
+    # witness + >= 2 red-herring suspects; locked motive + >= 2 red-herring
+    # MOTIVE_CANDIDATE motives; locked scene + >= 2 other locations; mandatory
+    # travel rules, >= 2 of them >= 1200s), so a full-draft repair can restore
+    # a valid FINAL HOMICIDE TARGET universe after an under-provisioned
+    # PUBLIC_WORLD pass. Guidance only; the validators remain authoritative.
+    parts.append(prompts.PUBLIC_WORLD_BREADTH_RULES)
     return "\n\n".join(parts)
 
 
@@ -1325,6 +1373,34 @@ def build_request(
     )
 
 
+def _record_deferred_issues(
+    attempt: AttemptRecord, stage: GenerationStage, issues: tuple[str, ...]
+) -> None:
+    """Append parser issues to the flat union AND the per-stage map (P43A)."""
+    if not issues:
+        return
+    attempt.deferred_structural = tuple(
+        sorted(set(attempt.deferred_structural) | set(issues))
+    )
+    prior = set(attempt.deferred_by_stage.get(stage, ()))
+    attempt.deferred_by_stage[stage] = tuple(sorted(prior | set(issues)))
+
+
+def _clear_deferred_stage(attempt: AttemptRecord, stage: GenerationStage) -> None:
+    """Clear ONE stage's deferred issues (from the per-stage map AND the union).
+
+    Used by the deterministic evidence completion once the EVIDENCE algebra has
+    successfully supplied the evidence: the (now-cleared) parse failure is
+    algebra-owned, so it must stop feeding the structural bucket. No OTHER
+    stage's issues are touched (P43A-FR-08).
+    """
+    owned = set(attempt.deferred_by_stage.pop(stage, ()))
+    if not owned:
+        return
+    remaining = set(attempt.deferred_structural) - owned
+    attempt.deferred_structural = tuple(sorted(remaining))
+
+
 def apply_stage_output(attempt: AttemptRecord, stage: GenerationStage, content: str) -> None:
     """Apply one GENERATING stage's provider output (parse -> accumulate).
 
@@ -1336,10 +1412,13 @@ def apply_stage_output(attempt: AttemptRecord, stage: GenerationStage, content: 
         return
     spec = parser.parse_stage(stage, content, non_throwing=True)
     if spec is None:
-        attempt.deferred_structural = tuple(
-            sorted(set(attempt.deferred_structural) | set(parser.collect_issues(stage, content)))
+        _record_deferred_issues(
+            attempt, stage, tuple(parser.collect_issues(stage, content))
         )
     else:
+        # A successful parse clears any stale issue for THIS stage only (a
+        # re-parsed stage owns its own defects).
+        _clear_deferred_stage(attempt, stage)
         attempt.stage_outputs[stage] = spec
         attempt.draft = None
         attempt._phase3_cache = None
@@ -1419,21 +1498,22 @@ def apply_repair(attempt: AttemptRecord, content: str) -> tuple[str, ...]:
     """
     issues = parser.collect_full_draft_issues(content)
     if issues:
-        attempt.deferred_structural = tuple(
-            sorted(set(attempt.deferred_structural) | set(issues))
+        _record_deferred_issues(
+            attempt, GenerationStage.REPAIR, tuple(sorted(set(issues)))
         )
         return tuple(sorted(set(issues)))
     draft = parser.parse_full_draft(content, non_throwing=True)
     churn = _repair_id_churn_issues(attempt, draft)
     if churn:
-        attempt.deferred_structural = tuple(
-            sorted(set(attempt.deferred_structural) | set(churn))
+        _record_deferred_issues(
+            attempt, GenerationStage.REPAIR, tuple(sorted(set(churn)))
         )
         return tuple(sorted(set(churn)))
     attempt.draft = draft
     attempt.stage_outputs = {}
     attempt.stage_done = set()
     attempt.deferred_structural = ()
+    attempt.deferred_by_stage = {}
     attempt._phase3_cache = None
     return ()
 
@@ -1644,6 +1724,227 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
     return report
 
 
+# ---------------------------------------------------------------------------
+# Phase 43A — generic-path deterministic evidence completion (P43A-FR-07/09/10)
+# ---------------------------------------------------------------------------
+#
+# The Frontier/generic controller pipeline (no stage driver) must close an
+# evidence-only solver ambiguity deterministically BEFORE the WORLD_GRAPH stage
+# (so the world graph is generated against the completed evidence), instead of
+# burning the bounded repair/regeneration budget on an evidence-underconstrained
+# case (DEF-071). The completion is provider-neutral (``evidence_algebra``) and
+# can NEVER mask a model-owned structural/safety/quality defect — see
+# ``_evidence_completion_preconditions_met``.
+
+# The case-quality codes the deterministic algebra itself OWNS (a complete
+# canonical evidence set supplies a usable witness statement for every public
+# witness). Every OTHER quality code is model-owned and keeps the existing
+# repair/regeneration owner, so completion never masks a non-evidence defect.
+_EVIDENCE_OWNED_QUALITY_CODES: frozenset[str] = frozenset(
+    {
+        case_quality.WITNESS_STATEMENT_MISSING,
+        case_quality.WITNESS_STATEMENT_EMPTY,
+    }
+)
+
+
+def _evidence_completion_preconditions_met(
+    attempt: AttemptRecord, report: ValidationReport
+) -> bool:
+    """Whether a completion is SAFE: only an evidence-only defect remains.
+
+    Unknown-id / broken-reference (structural), safety, locked-constraint,
+    world-graph and universe defects — and every non-evidence quality defect
+    (role truth leak / invalid candidate membership / deceptive-claim) — block
+    completion so they keep routing through their existing owner.
+
+    Phase43A (P43A-FR-08): a deferred parser failure attributed to the EVIDENCE
+    stage is OWNED by the deterministic algebra (a complete canonical evidence
+    set is what supplies the missing evidence), so it does NOT block. Every
+    OTHER stage's deferred structural issue — and every non-deferred structural
+    issue (unknown references, assembly failure, world resolution) — still
+    blocks, so a CASE_TRUTH / PUBLIC_WORLD / WORLD_GRAPH / REPAIR defect is
+    never masked.
+    """
+    evidence_owned = set(
+        attempt.deferred_by_stage.get(GenerationStage.EVIDENCE, ())
+    )
+    non_evidence_structural = set(report.structural_issues) - evidence_owned
+    if (
+        report.locked_violations
+        or non_evidence_structural
+        or report.safety_issues
+        or report.world_issues
+        or report.universe_issues
+    ):
+        return False
+    for code in report.quality_issues:
+        if code not in _EVIDENCE_OWNED_QUALITY_CODES:
+            return False
+    return True
+
+
+def _apply_completed_evidence(attempt: AttemptRecord, completion: Any) -> None:
+    """Store a completed EvidenceSetSpec (+ any extra travel rules) on the attempt."""
+    attempt.stage_outputs[GenerationStage.EVIDENCE] = completion.evidence
+    extra_rules = tuple(completion.extra_travel_rules or ())
+    if extra_rules:
+        public_world = attempt.stage_outputs.get(GenerationStage.PUBLIC_WORLD)
+        if public_world is not None:
+            existing = tuple(getattr(public_world, "travel_rules", ()) or ())
+            # Replace same-endpoint rules (a deterministic override) and append
+            # the genuinely new ones; the endpoint set of the result is what
+            # changes, so compare the canonical pair sets.
+            override_endpoints = {
+                (rule.from_location_id, rule.to_location_id) for rule in extra_rules
+            }
+            merged = [
+                rule
+                for rule in existing
+                if (rule.from_location_id, rule.to_location_id) not in override_endpoints
+            ]
+            merged.extend(extra_rules)
+            before_pairs = {
+                (
+                    getattr(rule, "from_location_id", None),
+                    getattr(rule, "to_location_id", None),
+                    getattr(rule, "travel_time_seconds", None),
+                )
+                for rule in existing
+            }
+            after_pairs = {
+                (
+                    getattr(rule, "from_location_id", None),
+                    getattr(rule, "to_location_id", None),
+                    getattr(rule, "travel_time_seconds", None),
+                )
+                for rule in merged
+            }
+            if before_pairs != after_pairs:
+                attempt.stage_outputs[GenerationStage.PUBLIC_WORLD] = replace(
+                    public_world, travel_rules=tuple(merged)
+                )
+    # Force a rebuild from the (now completed) stage outputs.
+    attempt.draft = None
+    attempt._phase3_cache = None
+
+
+def complete_generic_evidence_if_underconstrained(attempt: AttemptRecord) -> bool:
+    """Phase 43A — deterministic evidence completion for the generic path.
+
+    Runs AT MOST ONCE per attempt (``attempt._evidence_completed``) on the
+    trusted canonical state after the EVIDENCE stage parsed and BEFORE the
+    WORLD_GRAPH stage. Returns True iff the evidence was completed.
+
+    Completion is attempted only when the FULL canonical validation of the
+    current partial draft reports NO locked/structural/safety/world/universe
+    issue and NO non-evidence quality issue, AND
+    :func:`evidence_algebra.analyze_evidence_gaps` independently classifies the
+    state as specifically ``EVIDENCE_UNDERCONSTRAINED``. Canonical validation +
+    solver are rerun afterwards and remain the SOLE acceptance authority — a
+    deterministic fact receives no privileged status. Non-evidence defects keep
+    routing through the existing repair/regeneration path.
+    """
+    if getattr(attempt, "_evidence_completed", False):
+        return False
+    attempt._evidence_completed = True
+    if attempt.budget is not None and attempt.budget.deadline_passed():
+        return False
+
+    emit_event(
+        "evidence.completion.started",
+        caseId=attempt.case_id,
+        generationAttemptId=attempt.attempt_id,
+        providerCallCount=(
+            attempt.budget.calls if attempt.budget is not None else None
+        ),
+        repairCount=(
+            attempt.budget.repair_passes if attempt.budget is not None else None
+        ),
+        regenerationCount=(
+            attempt.budget.regenerations if attempt.budget is not None else None
+        ),
+    )
+
+    def _skip(reason: str, *, analysis: Any = None) -> bool:
+        fields: dict[str, Any] = {
+            "caseId": attempt.case_id,
+            "generationAttemptId": attempt.attempt_id,
+            "reasonCode": reason,
+        }
+        if analysis is not None:
+            fields.update(
+                {
+                    "factsAddedCount": 0,
+                    "dimensionsBefore": tuple(analysis.ambiguous_dimensions),
+                    "dimensionsAfter": tuple(analysis.ambiguous_dimensions),
+                    "solverOutcomeBefore": analysis.solver_outcome,
+                    "solverOutcomeAfter": analysis.solver_outcome,
+                    "completionIdempotent": True,
+                    "completionOutcome": analysis.classification,
+                }
+            )
+        emit_event("evidence.completion.skipped", **fields)
+        return False
+
+    try:
+        public, evidence, truth, _draft = assemble(attempt)
+    except (TypeError, ValueError):
+        return _skip("STRUCTURED_OUTPUT_INVALID")
+
+    report = validate_draft(attempt)
+    if not _evidence_completion_preconditions_met(attempt, report):
+        return _skip("PRECONDITIONS_NOT_MET")
+
+    analysis = evidence_algebra.analyze_evidence_gaps(public, truth, evidence)
+    if not analysis.closable:
+        return _skip(analysis.classification, analysis=analysis)
+
+    current_spec = attempt.stage_outputs.get(GenerationStage.EVIDENCE)
+    completion = evidence_algebra.complete_evidence_if_ambiguous(
+        public,
+        truth.crime,
+        current_spec,
+        witness_truthfulness=tuple(
+            getattr(attempt, "_witness_truthfulness", ()) or ()
+        ),
+    )
+    if not completion.changed:
+        return _skip("NO_CHANGE", analysis=analysis)
+
+    _apply_completed_evidence(attempt, completion)
+    # P43A-FR-08 — the EVIDENCE-stage parse failure (if any) is now algebra-owned:
+    # the deterministic algebra supplied the evidence, so its deferred issues are
+    # cleared. No other stage's issues are touched. Canonical validation + solver
+    # rerun below remain the SOLE acceptance authority (P43A-FR-10).
+    _clear_deferred_stage(attempt, GenerationStage.EVIDENCE)
+    after_report = validate_draft(attempt)
+
+    emit_event(
+        "evidence.completion.completed",
+        caseId=attempt.case_id,
+        generationAttemptId=attempt.attempt_id,
+        factsAddedCount=int(completion.facts_added),
+        dimensionsBefore=tuple(completion.dimensions_before),
+        dimensionsAfter=tuple(completion.dimensions_after),
+        solverOutcomeBefore=completion.solver_outcome_before,
+        solverOutcomeAfter=completion.solver_outcome_after,
+        completionIdempotent=bool(completion.idempotent),
+        completionOutcome=analysis.classification,
+        validationOutcome=after_report.outcome.value,
+        providerCallCount=(
+            attempt.budget.calls if attempt.budget is not None else None
+        ),
+        repairCount=(
+            attempt.budget.repair_passes if attempt.budget is not None else None
+        ),
+        regenerationCount=(
+            attempt.budget.regenerations if attempt.budget is not None else None
+        ),
+    )
+    return True
+
+
 def time_proof_checks_passed(validation: Any) -> bool:
     """§31.8/31.7 time-proof summary: single connected, in scoring, canonical inside.
 
@@ -1667,6 +1968,7 @@ __all__ = [
     "apply_repair",
     "apply_stage_output",
     "build_request",
+    "complete_generic_evidence_if_underconstrained",
     "current_declaration_ids",
     "current_draft",
     "normalize_prompt",

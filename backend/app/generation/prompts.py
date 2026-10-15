@@ -1446,6 +1446,48 @@ CASE_QUALITY_RULES = (
 
 
 # --------------------------------------------------------------------------- #
+# Phase43A — provider-neutral PUBLIC WORLD BREADTH RULES.
+# --------------------------------------------------------------------------- #
+# The generic Frontier PUBLIC_WORLD stage must provision the SAME world
+# cardinality the Ollama ``_CASE_FIELD_RULES`` template already teaches: the
+# victim + murderer + witness AND at least TWO red-herring suspects, the locked
+# motive plus at least TWO red-herring MOTIVE_CANDIDATE motives, the locked
+# scene plus at least TWO other distinct locations, and MANDATORY travel rules
+# from EVERY non-scene location TO the scene (at least two >= 1200s). Without
+# this explicit breadth contract the live Easy case under-provisioned the
+# public world and produced an empty FINAL HOMICIDE TARGET universe
+# (``FINAL_TARGET_UNIVERSE_EMPTY``). It is a SEPARATE constant on purpose: the
+# Ollama ``_CASE_FIELD_RULES`` template bytes are pinned by tests and stay
+# byte-identical. Guidance only — every validator stays the sole acceptance
+# authority.
+PUBLIC_WORLD_BREADTH_RULES = (
+    "PUBLIC WORLD BREADTH RULES (deterministic, validated after every pass):\n"
+    "- persons: include the victim, the murderer and the witness (the "
+    "murderer may be a public suspect OR a public witness; the public role "
+    "vocabulary never changes) and at least TWO RED-HERRING suspects (role "
+    "'suspect' with the SUSPECT_ELIGIBLE affordance) — a case with a single "
+    "suspect is not a valid mystery.\n"
+    "- the FINAL HOMICIDE TARGET universe is every public person with role "
+    "'suspect' OR role 'witness' (the victim excluded): it MUST NOT be empty, "
+    "so ALWAYS emit at least two public suspects/witnesses an investigator "
+    "could accuse.\n"
+    "- motives: include the LOCKED motive plus at least TWO additional "
+    "MOTIVE_CANDIDATE red-herring motives with distinct plausible labels — "
+    "the solver must be able to EXCLUDE every alternative motive, so a "
+    "one-motive case is not a valid mystery.\n"
+    "- locations: include the locked location/scene plus at least TWO OTHER "
+    "distinct locations (a lab, a lobby, a parking lot, a lodge, a store...) — "
+    "the other suspects need somewhere ELSE to be during the crime.\n"
+    "- travelRules: MANDATORY — for EVERY non-scene location, provide the "
+    "travel time FROM that location TO the scene (fromLocationId = the other "
+    "location, toLocationId = the scene location, travelTimeSeconds = a "
+    "realistic 900..2700, i.e. 15-45 minutes). At least two non-scene "
+    "locations MUST have travelTimeSeconds >= 1200. A location without a "
+    "travel rule to the scene cannot be used for an alibi/opportunity check."
+)
+
+
+# --------------------------------------------------------------------------- #
 # shared template fragments
 # --------------------------------------------------------------------------- #
 
@@ -3593,6 +3635,7 @@ __all__ = [
     "ASSET_SPEC_REPAIR_PROMPT_v1",
     "CASE_PEOPLE_PROMPT_v1",
     "CASE_QUALITY_RULES",
+    "PUBLIC_WORLD_BREADTH_RULES",
     "PHASE41A_QUALITY_RULES",
     "CONTRACT_KEYS",
     "EVIDENCE_PROMPT_v1",

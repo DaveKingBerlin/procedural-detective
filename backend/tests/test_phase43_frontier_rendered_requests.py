@@ -904,3 +904,94 @@ def test_repair_added_fabricated_declaration_id_is_rejected():
     # Rejected: the pre-existing draft is kept unchanged.
     assert attempt.draft is draft
     assert all(o.object_id != "fabricated_object_zzz" for o in attempt.draft.objects)
+
+
+# --------------------------------------------------------------------------- #
+# Phase43A — generic PUBLIC_WORLD breadth + WORLD_GRAPH placement discipline
+# --------------------------------------------------------------------------- #
+
+
+def test_public_world_breadth_rules_constant_has_the_explicit_contract():
+    """The provider-neutral constant teaches the exact world cardinality the
+    Ollama ``_CASE_FIELD_RULES`` already carries (and which the live Easy
+    PUBLIC_WORLD pass under-provisioned)."""
+    block = prompts.PUBLIC_WORLD_BREADTH_RULES
+    assert "PUBLIC WORLD BREADTH RULES" in block
+    assert "at least TWO RED-HERRING suspects" in block
+    assert "SUSPECT_ELIGIBLE" in block
+    assert "witness" in block
+    assert "at least TWO additional" in block  # red-herring motives
+    assert "MOTIVE_CANDIDATE" in block
+    assert "at least TWO OTHER" in block  # other locations
+    assert "travelRules: MANDATORY" in block
+    assert "travelTimeSeconds >= 1200" in block
+    assert "FINAL HOMICIDE TARGET" in block
+
+
+def test_rendered_public_world_context_requires_world_breadth_rules():
+    """The rendered generic public_world context (the ACTUAL model-visible
+    request) carries the breadth rules — not just the constant."""
+    attempt = _attempt()
+    attempt.stage_outputs[GenerationStage.CASE_TRUTH] = _parse_stage(
+        GenerationStage.CASE_TRUTH, json.dumps(_crime_doc())
+    )
+    request = pipeline.build_request(attempt, GenerationStage.PUBLIC_WORLD)
+    context = request.prompt_context
+    assert prompts.PUBLIC_WORLD_BREADTH_RULES in context
+    assert "PUBLIC WORLD BREADTH RULES" in context
+    assert "at least TWO RED-HERRING suspects" in context
+    assert "at least TWO additional" in context
+    assert "at least TWO OTHER" in context
+    assert "travelRules: MANDATORY" in context
+    assert "travelTimeSeconds >= 1200" in context
+
+
+def test_public_world_context_rendering_is_deterministic():
+    """Rendering the same attempt twice yields byte-identical context (the
+    breadth rules add no time/randomness)."""
+    attempt = _attempt()
+    attempt.stage_outputs[GenerationStage.CASE_TRUTH] = _parse_stage(
+        GenerationStage.CASE_TRUTH, json.dumps(_crime_doc())
+    )
+    first = pipeline._authoritative_public_world_block(attempt)
+    second = pipeline._authoritative_public_world_block(attempt)
+    assert first == second
+    assert prompts.PUBLIC_WORLD_BREADTH_RULES in first
+
+
+def test_repair_context_carries_world_breadth_rules():
+    """A full-draft REPAIR must be able to restore an under-provisioned world,
+    so the repair context carries the SAME breadth rules."""
+    attempt = _attempt()
+    attempt.draft = parser_mod.parse_full_draft(GOLDEN_FULL_DRAFT)
+    request = pipeline.build_request(attempt, GenerationStage.REPAIR)
+    assert prompts.PUBLIC_WORLD_BREADTH_RULES in request.prompt_context
+
+
+def test_rendered_world_graph_context_requires_placement_discipline():
+    """The live Easy WORLD_GRAPH emitted duplicate objectId placements. The
+    rendered generic world_graph context MUST state the placement discipline."""
+    attempt = _attempt_with_prior_stages()
+    attempt.stage_outputs[GenerationStage.EVIDENCE] = _parse_stage(
+        GenerationStage.EVIDENCE, GOLDEN_STAGE_PAYLOADS[GenerationStage.EVIDENCE]
+    )
+    request = pipeline.build_request(attempt, GenerationStage.WORLD_GRAPH)
+    context = request.prompt_context
+    block = pipeline._authoritative_world_graph_block(attempt)
+    for text in (context, block):
+        assert "PLACEMENT DISCIPLINE" in text
+        assert "AT MOST ONCE" in text
+        assert "MINIMAL" in text
+        assert "duplicate" in text
+        assert "ONLY the objects the case declares" in text
+
+
+def test_world_graph_placement_discipline_is_deterministic():
+    attempt = _attempt_with_prior_stages()
+    attempt.stage_outputs[GenerationStage.EVIDENCE] = _parse_stage(
+        GenerationStage.EVIDENCE, GOLDEN_STAGE_PAYLOADS[GenerationStage.EVIDENCE]
+    )
+    first = pipeline._authoritative_world_graph_block(attempt)
+    second = pipeline._authoritative_world_graph_block(attempt)
+    assert first == second
+    assert "PLACEMENT DISCIPLINE" in first

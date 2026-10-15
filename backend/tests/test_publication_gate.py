@@ -314,8 +314,26 @@ def test_22_locked_constraint_violation_blocks_publication():
     assert record.last_validation.locked_violations != ()
 
 
+def _public_without_motive_candidates() -> str:
+    """A structurally valid public world whose MOTIVE_CANDIDATE universe is
+    EMPTY (a non-evidence universe defect that forces RECOVERABLE_REGENERATE
+    and that the Phase43A deterministic completion must NOT touch)."""
+    doc = json.loads(_G[GenerationStage.PUBLIC_WORLD])
+    for motive in doc["motives"]:
+        motive["affordances"] = [
+            a for a in motive.get("affordances", []) if a != "MOTIVE_CANDIDATE"
+        ]
+    return _dump(doc)
+
+
 def test_23_ambiguous_solver_result_blocks_publication():
-    """A suspect left unknown-viable -> RECOVERABLE_REGENERATE -> never published."""
+    """A suspect left unknown-viable -> raw classification is REGENERATE.
+
+    Phase43A: an EVIDENCE-ONLY ambiguity is now completed deterministically by
+    the generic path (see ``test_phase43a_evidence_algebra``), so the
+    regeneration-exhaustion gate below is exercised with a non-evidence
+    universe defect the completion must NOT touch.
+    """
     docs = _golden_docs()
     docs[GenerationStage.EVIDENCE] = _evidence_without("cctv_michael_office_01")
     probe = _probe(docs)
@@ -323,11 +341,11 @@ def test_23_ambiguous_solver_result_blocks_publication():
     assert probe.last_validation.solver_result is not None
     assert probe.last_validation.solver_result.who.unique is False
 
-    ambiguous = _evidence_without("cctv_michael_office_01")
+    degenerate = _public_without_motive_candidates()
     script = {
         GenerationStage.CASE_TRUTH: [_G[GenerationStage.CASE_TRUTH]] * 2,
-        GenerationStage.PUBLIC_WORLD: [_G[GenerationStage.PUBLIC_WORLD]] * 2,
-        GenerationStage.EVIDENCE: [ambiguous, ambiguous],
+        GenerationStage.PUBLIC_WORLD: [degenerate, degenerate],
+        GenerationStage.EVIDENCE: [_G[GenerationStage.EVIDENCE]] * 2,
         GenerationStage.WORLD_GRAPH: [_G[GenerationStage.WORLD_GRAPH]] * 2,
     }
     record = _run(script, max_full_regenerations=1)
