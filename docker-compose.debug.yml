@@ -1,0 +1,6 @@
+services:
+  procedural-detective:
+    environment:
+      ENVIRONMENT: development
+      PD_DEV_TRACE: "true"
+      PD_GENERATION_DEBUG_LOGS: "true"
