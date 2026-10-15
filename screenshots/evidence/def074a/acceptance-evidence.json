@@ -1,0 +1,281 @@
+{
+  "startedAt": "2026-10-15T19:36:06.620Z",
+  "base": "https://enshrouded-server",
+  "backendTreeCommit": null,
+  "steps": {
+    "preflightHealth": {
+      "status": 200,
+      "ms": 47
+    },
+    "session": {
+      "status": 201
+    },
+    "case": {
+      "status": 201,
+      "caseId": "CASE-e-knwpOxBWB0",
+      "caseStatus": "PUBLISHED"
+    },
+    "playthrough": {
+      "status": 201,
+      "playthroughId": "PT-r8q-ySXJODr_zjVWEz7t4A"
+    },
+    "investigation": {
+      "status": 200,
+      "ms": 36
+    },
+    "interaction": {
+      "status": 200,
+      "ms": 31,
+      "objectId": "apartment_door",
+      "body": {
+        "objectId": "apartment_door",
+        "interaction": "",
+        "evidenceId": null,
+        "discovery": null,
+        "result": "interacted",
+        "inspection": {
+          "relevant": false,
+          "label": "Apartment Door"
+        }
+      }
+    },
+    "witness": {
+      "status": 200,
+      "ms": 35,
+      "witnessId": "emily_reed",
+      "body": {
+        "witnessId": "emily_reed",
+        "displayName": "Emily Reed",
+        "questionType": "OBSERVATION",
+        "statement": {
+          "summary": "Neighbour Emily Reed's account of the evening.",
+          "observations": [
+            {
+              "time": null,
+              "text": "I heard shouting from the apartment around 22:10 and saw Thomas leave the kitchen around 22:20."
+            }
+          ]
+        },
+        "discovery": {
+          "newlyDiscovered": true,
+          "record": {
+            "evidenceId": "witness_statement_emily_01",
+            "kind": "witness_statement",
+            "title": "Emily Reed's statement",
+            "description": "Neighbour Emily Reed's account of the evening.",
+            "openedAt": "2026-10-15T19:36:06.943205+00:00",
+            "readByPlayer": true,
+            "content": {
+              "renderType": "BODY_OBSERVATION",
+              "summary": "Neighbour Emily Reed's account of the evening.",
+              "speakerName": "Emily Reed",
+              "statement": "I heard shouting from the apartment around 22:10 and saw Thomas leave the kitchen around 22:20.",
+              "witnessId": "emily_reed",
+              "questionType": "OBSERVATION"
+            }
+          }
+        }
+      }
+    }
+  },
+  "assets": [
+    {
+      "url": "https://enshrouded-server/assets/index-CTrv3xzc.css",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/index-cUFJOrU8.js",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/index-cUFJOrU8.js",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/index-CTrv3xzc.css",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/helperFunctions-Bi6LNNyi.js",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/default.vertex-BpVnaSoi.js",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/logDepthDeclaration-CqR8j26e.js",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/vertexColorMixing-DhYZP0xR.js",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/fogFragment-CoLneQlG.js",
+      "status": 200
+    },
+    {
+      "url": "https://enshrouded-server/assets/default.fragment-MwzE-JbW.js",
+      "status": 200
+    }
+  ],
+  "assetFailures": [],
+  "healthSamples": [
+    {
+      "status": 200,
+      "ms": 9
+    },
+    {
+      "status": 200,
+      "ms": 6
+    },
+    {
+      "status": 200,
+      "ms": 31
+    },
+    {
+      "status": 200,
+      "ms": 21
+    },
+    {
+      "status": 200,
+      "ms": 7
+    },
+    {
+      "status": 200,
+      "ms": 28
+    },
+    {
+      "status": 200,
+      "ms": 8
+    },
+    {
+      "status": 200,
+      "ms": 5
+    },
+    {
+      "status": 200,
+      "ms": 30
+    },
+    {
+      "status": 200,
+      "ms": 16
+    },
+    {
+      "status": 200,
+      "ms": 29
+    },
+    {
+      "status": 200,
+      "ms": 13
+    },
+    {
+      "status": 200,
+      "ms": 9
+    },
+    {
+      "status": 200,
+      "ms": 44
+    },
+    {
+      "status": 200,
+      "ms": 13
+    },
+    {
+      "status": 200,
+      "ms": 28
+    },
+    {
+      "status": 200,
+      "ms": 28
+    },
+    {
+      "status": 200,
+      "ms": 12
+    },
+    {
+      "status": 200,
+      "ms": 27
+    },
+    {
+      "status": 200,
+      "ms": 139
+    },
+    {
+      "status": 200,
+      "ms": 43
+    }
+  ],
+  "consoleErrors": [],
+  "requestFailures": [],
+  "assertions": [
+    {
+      "label": "preflight /health is 200",
+      "ok": true
+    },
+    {
+      "label": "anonymous session 201",
+      "ok": true
+    },
+    {
+      "label": "create case 201",
+      "ok": true
+    },
+    {
+      "label": "fake provider publishes (status=PUBLISHED)",
+      "ok": true
+    },
+    {
+      "label": "create playthrough 201",
+      "ok": true
+    },
+    {
+      "label": "GET investigation 200 (latency=36ms)",
+      "ok": true
+    },
+    {
+      "label": "POST object interaction {\"interaction\":\"\"} 200 (latency=31ms)",
+      "ok": true
+    },
+    {
+      "label": "witness interview 200 (latency=35ms)",
+      "ok": true
+    },
+    {
+      "label": "SPA requested static assets (unique=8)",
+      "ok": true
+    },
+    {
+      "label": "all static assets HTTP 200 (nonOk=0)",
+      "ok": true
+    },
+    {
+      "label": "no failed SPA requests (failed=0)",
+      "ok": true
+    },
+    {
+      "label": "concurrent /health probe ran (samples=21)",
+      "ok": true
+    },
+    {
+      "label": "all concurrent /health samples 200 (bad=0)",
+      "ok": true
+    }
+  ],
+  "assetSummary": {
+    "totalResponses": 10,
+    "unique": 8,
+    "nonOk": []
+  },
+  "healthSummary": {
+    "samples": 21,
+    "ok": 21,
+    "bad": 0,
+    "minMs": 5,
+    "medianMs": 21,
+    "maxMs": 139
+  },
+  "finishedAt": "2026-10-15T19:36:10.937Z",
+  "result": "PASS"
+}

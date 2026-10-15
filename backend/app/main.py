@@ -203,9 +203,9 @@ class RequestBodySizeMiddleware:
             if not message.get("more_body", False):
                 break
         async def replayed_receive():
-            return messages.popleft() if messages else {
-                "type": "http.request", "body": b"", "more_body": False
-            }
+            if messages:
+                return messages.popleft()
+            return await receive()
 
         await self.app(scope, replayed_receive, send)
 

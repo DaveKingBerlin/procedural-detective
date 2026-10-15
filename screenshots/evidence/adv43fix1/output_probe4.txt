@@ -1,0 +1,7 @@
+﻿{"timestamp":"2026-10-15T19:32:39.114459+00:00","level":"WARNING","logger":"dotenv.main","event":"unstructured_log"}
+GET / -> 200 bytes: 33 elapsed_ms: 61.2
+GET /assets/app-abc123.js -> 200 bytes: 21000 byte_exact: True elapsed_ms: 76.6
+GET /assets/missing.js -> 404 elapsed_ms: 6.5
+GET /api/v1/health -> 200 elapsed_ms: 0.0
+POST /api/v1/sessions/anonymous -> 500 elapsed_ms: 16.0
+50x asset GET -> elapsed_ms: 197.0

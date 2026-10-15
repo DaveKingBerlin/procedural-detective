@@ -1,0 +1,5 @@
+﻿=== probe2: real Starlette responses through the FIXED middleware ===
+FileResponse -> status: 200 body_bytes: 9000 expected: 9000 byte_exact: True
+  heartbeat ticks: 3309 transport receive calls: 1 elapsed_s: 0.0802
+StreamingResponse -> body_bytes: 8000 expected 8000: True heartbeat ticks: 3 recv calls: 2 elapsed_s: 0.0021
+Plain Response -> body: b'hello' heartbeat ticks: 0 recv calls: 1 elapsed_s: 0.0000
