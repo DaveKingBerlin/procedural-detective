@@ -537,6 +537,17 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
                     "name": "display name",
                     "role": "victim|suspect|witness|family|other",
                     "affordances": ["SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER", "INSPECTABLE"],
+                    # Phase43B (P43B-FR-07 / AC-07) — a legitimate OPTIONAL
+                    # canonical field the strict parser accepts
+                    # (``_PERSON_KEYS``): an OPEN player-facing presentation
+                    # mapping. It MUST be represented in the contract before
+                    # the transport object can be closed with
+                    # ``additionalProperties:false`` (its hint contains "null"
+                    # so the derived node stays OPTIONAL and open).
+                    "presentedData": (
+                        "real JSON object of player-facing presented data, or "
+                        "null when absent (never a JSON-encoded string)"
+                    ),
                 }
             ],
             "motives": [
@@ -550,7 +561,15 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
                     "travelTimeSeconds": "non-negative int",
                 }
             ],
-            "scene": {"locationId": "location id", "name": "scene name"},
+            "scene": {
+                "locationId": "location id",
+                "name": "scene name",
+                # Phase43B (P43B-FR-07 / AC-07) — a legitimate OPTIONAL
+                # canonical field the strict parser accepts (``_SCENE_KEYS``):
+                # the Phase 11 additive player-safe kit identity. Its hint
+                # contains "null" so the derived node stays OPTIONAL.
+                "environmentId": "environment kit id string, or null when absent",
+            },
         }
     return contract
 

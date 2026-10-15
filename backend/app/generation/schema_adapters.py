@@ -54,6 +54,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
+from app.assets.depthguard import MAX_STRUCT_NESTING
 from app.generation.frontier_registry import (
     STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
 )
@@ -222,11 +223,217 @@ def adapt_schema_for_transport(
     return result
 
 
+# --------------------------------------------------------------------------- #
+# Phase43B (P43B-FR-07/08, AC-06/08) — parser-aligned TRANSPORT closure.
+#
+# The canonical MODELED objects derived from ``prompts._stage_contract`` are
+# rendered as ``{"type": "object", "properties": {...}}`` WITHOUT an
+# ``additionalProperties`` marker, i.e. open by JSON-Schema default. The strict
+# canonical parser, however, REJECTS unknown keys (``_check_keys``). This
+# projection closes every modeled object with ``additionalProperties: false``
+# so a native structured-output provider can no longer be forced into emitting
+# the DEF-072 ``public_world`` extra fields (``description``/``name``/
+# ``locationId``) that the parser must later reject.
+#
+# It is a TRANSPORT-ONLY deep copy: the canonical schema, its fingerprint, the
+# parser and every validator are untouched. Intentionally OPEN/type-dependent
+# nodes are preserved:
+#
+# - any node that already declares ``additionalProperties`` (e.g. the evidence
+#   proposition ``structured`` open object, and the ``presentedData`` open
+#   mapping) is left unchanged;
+# - the evidence ``presentation`` object is keyed as an OPEN/type-dependent
+#   node (its typed public fields and its arbitrary ``rows``/``events`` maps
+#   depend on the evidence ``kind``), so it is NOT closed here;
+# - nodes without a non-empty ``properties`` map are not closed.
+# --------------------------------------------------------------------------- #
+
+# Object nodes whose parent key marks them as intentionally OPEN/type-dependent:
+# never closed by the transport closure projection (P43B-FR-08).
+_TRANSPORT_OPEN_OBJECT_KEYS: frozenset[str] = frozenset({"presentation"})
+
+
+def _close_modeled_node(value: Any, field_key: str | None, depth: int) -> Any:
+    """Bounded (depth-capped) deep copy that closes modeled objects.
+
+    Never mutates the input; a container deeper than ``MAX_STRUCT_NESTING``
+    is copied unchanged (bounded recursion).
+    """
+    if depth > MAX_STRUCT_NESTING:
+        return _deep_copy(value)
+    if isinstance(value, dict):
+        closed = {
+            key: _close_modeled_node(item, key, depth + 1)
+            for key, item in value.items()
+        }
+        declared_type = closed.get("type")
+        is_object = declared_type == "object" or (
+            isinstance(declared_type, list) and "object" in declared_type
+        )
+        properties = closed.get("properties")
+        if (
+            is_object
+            and isinstance(properties, Mapping)
+            and properties
+            and "additionalProperties" not in closed
+            and field_key not in _TRANSPORT_OPEN_OBJECT_KEYS
+        ):
+            closed["additionalProperties"] = False
+        return closed
+    if isinstance(value, list):
+        return [
+            _close_modeled_node(item, field_key, depth + 1) for item in value
+        ]
+    return value
+
+
+def close_transport_modeled_objects(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the Phase43B parser-aligned TRANSPORT closure projection.
+
+    A deep-copied schema where every modeled object (a node with
+    ``type == "object"`` and a non-empty ``properties`` map that does NOT
+    already declare ``additionalProperties``) gains
+    ``"additionalProperties": false``. Intentionally open/type-dependent nodes
+    (see the module notes) are preserved. Never mutates the input; a malformed
+    input degrades to an unchanged deep copy.
+    """
+    if not isinstance(schema, Mapping):
+        return {}
+    result = _close_modeled_node(schema, None, 1)
+    if not isinstance(result, dict):
+        return _deep_copy(schema)
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Phase43B (P43B-FR-05, AC-04) — strict-schema compatibility check.
+#
+# ``json_schema.strict=true`` may be sent ONLY when the effective provider
+# capability declares native strict JSON Schema support AND the rendered
+# transport schema is a PROVEN strict-compatible combination: it uses only the
+# supported keyword surface AND every modeled object is closed
+# (``additionalProperties: false``) with EVERY property listed in ``required``
+# (the OpenAI strict-mode requirement — optional keys are not supported).
+# A schema with any optional/dangling property therefore stays in the explicit
+# hint-only mode. This is deterministic and structural (never a heuristic).
+# --------------------------------------------------------------------------- #
+
+# The closed keyword surface the strict dialect is allowed to see. This is
+# exactly the subset the transport schemas emit and the local validator
+# enforces (plus the inert ``title``/``default`` annotations).
+_STRICT_SUPPORTED_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "items",
+        "enum",
+        "minItems",
+        "maxItems",
+        "pattern",
+        "format",
+        "maxLength",
+        "description",
+        "title",
+        "default",
+    }
+)
+
+
+def _strict_unsupported_keyword_found(node: Any, depth: int) -> bool:
+    """Schema-aware walk: only ``properties``/``items``/``additionalProperties``
+    values are sub-schemas (property NAMES are not schema keywords)."""
+    if depth > MAX_STRUCT_NESTING:
+        return True
+    if not isinstance(node, Mapping):
+        return False
+    if any(key not in _STRICT_SUPPORTED_KEYWORDS for key in node):
+        return True
+    properties = node.get("properties")
+    if isinstance(properties, Mapping):
+        for subschema in properties.values():
+            if _strict_unsupported_keyword_found(subschema, depth + 1):
+                return True
+    items = node.get("items")
+    if isinstance(items, Mapping):
+        if _strict_unsupported_keyword_found(items, depth + 1):
+            return True
+    additional = node.get("additionalProperties")
+    if isinstance(additional, Mapping):
+        if _strict_unsupported_keyword_found(additional, depth + 1):
+            return True
+    return False
+
+
+def _strict_open_object_found(node: Any, depth: int) -> bool:
+    """``True`` when any object node is NOT OpenAI-strict compatible.
+
+    OpenAI strict JSON Schema requires EVERY object to declare
+    ``additionalProperties: false``. An object that is NOT closed — including a
+    genuinely OPEN no-``properties`` object (``additionalProperties: true``,
+    absent, or a sub-schema mapping) — is therefore NOT strict-compatible
+    (ADV-43B-03). A closed object must additionally list EVERY property in
+    ``required`` (optional keys are unsupported; nullable values use a nullable
+    type with the key required). A schema with any optional property is NOT a
+    proven strict-capable combination and must stay in hint-only mode.
+    """
+    if depth > MAX_STRUCT_NESTING:
+        return True
+    if not isinstance(node, Mapping):
+        return False
+    declared = node.get("type")
+    is_object = declared == "object" or (
+        isinstance(declared, list) and "object" in declared
+    )
+    properties = node.get("properties")
+    if is_object:
+        # Every object node MUST be closed, whether or not it declares a
+        # property map: an open no-property object is not strict-compatible.
+        if node.get("additionalProperties") is not False:
+            return True
+        if isinstance(properties, Mapping) and properties:
+            required = node.get("required")
+            if not isinstance(required, list) or set(required) != set(properties):
+                return True
+    if isinstance(properties, Mapping):
+        for subschema in properties.values():
+            if _strict_open_object_found(subschema, depth + 1):
+                return True
+    items = node.get("items")
+    if isinstance(items, Mapping):
+        if _strict_open_object_found(items, depth + 1):
+            return True
+    additional = node.get("additionalProperties")
+    if isinstance(additional, Mapping):
+        if _strict_open_object_found(additional, depth + 1):
+            return True
+    return False
+
+
+def openai_strict_schema_is_compatible(schema: Mapping[str, Any]) -> bool:
+    """``True`` iff the schema is a proven strict-compatible combination.
+
+    Deterministic, bounded (depth-capped) and purely structural: it must use
+    only the supported keyword surface AND every modeled object must be
+    closed (``additionalProperties: false``) with EVERY property required.
+    A non-mapping schema, or any schema with an optional/dangling property, is
+    incompatible (fail-closed → the adapter keeps the explicit hint-only mode).
+    """
+    if not isinstance(schema, Mapping):
+        return False
+    if _strict_unsupported_keyword_found(schema, 1):
+        return False
+    return not _strict_open_object_found(schema, 1)
+
+
 __all__ = [
     "CLOSED_SCHEMA_ADAPTER_IDS",
     "COHERE_TRANSPORT_STRIP_KEYS",
     "OPEN_OBJECT_SYNTHETIC_PROPERTY",
     "SCHEMA_ADAPTER_ID_COHERE_OPENAI_JSON_SCHEMA",
     "adapt_schema_for_transport",
+    "close_transport_modeled_objects",
+    "openai_strict_schema_is_compatible",
     "schema_adapter_id_for_frontier_call",
 ]

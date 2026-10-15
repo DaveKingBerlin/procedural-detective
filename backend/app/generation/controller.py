@@ -110,6 +110,17 @@ _BOUND_EPSILON = 1e-9
 _STAGE_TIMING_EVENT_ITEM_CAP = 32
 
 
+# Phase43B — the closed ``providerCapabilityMode`` tokens reported on the
+# bounded structured-output provenance events. NEVER free text.
+PROVIDER_CAPABILITY_MODE_NATIVE_STRICT = "native_strict"
+PROVIDER_CAPABILITY_MODE_NATIVE_HINT = "native_hint"
+
+
+def _as_optional_bool(value: Any) -> bool | None:
+    """Coerce a provenance attribute to ``bool``/``None`` (never a truthy value)."""
+    return value if isinstance(value, bool) else None
+
+
 @dataclass(frozen=True)
 class GenerationHandle:
     """Immutable handle returned by ``start_generation`` (snapshot at return)."""
@@ -373,8 +384,45 @@ class GenerationController:
             return
         attempt.pending_id = None
         attempt.pending_stage = None
-        self._apply_provider_result(attempt, stage, result)
+        trusted = self._apply_provider_result(attempt, stage, result)
+        if (
+            not trusted
+            and stage is not GenerationStage.REPAIR
+            and attempt.state is GenerationState.GENERATING
+        ):
+            # Phase43B (FR-14/15) — a deferred (pending) non-REPAIR stage that
+            # did NOT become trusted must route through the existing bounded
+            # VALIDATING recovery classification instead of being re-picked by
+            # ``_next_stage`` in a tight cycle. Phase43B (P43A-FR-07) — BUT an
+            # untrusted EVIDENCE stage is first offered to the Phase43A
+            # deterministic completion (zero provider/repair/regeneration
+            # budget); only if the completion refuses do we route to recovery.
+            if not self._offer_generic_evidence_completion(attempt, stage):
+                self._set_state(attempt, GenerationState.VALIDATING)
         self._advance(attempt)
+
+    def _offer_generic_evidence_completion(
+        self, attempt: AttemptRecord, stage: GenerationStage
+    ) -> bool:
+        """Phase43B — offer an untrusted EVIDENCE stage to the Phase43A algebra.
+
+        Generic (driver-less) path only. Returns True iff the deterministic
+        evidence completion supplied canonical evidence (installing it as the
+        trusted EVIDENCE stage state and marking EVIDENCE trusted), so the
+        controller can continue to WORLD_GRAPH instead of routing the malformed
+        EVIDENCE stage to the bounded recovery. Consumes ZERO provider calls,
+        repair passes and regenerations, and is bounded to a single invocation
+        per attempt by the completion's ``_evidence_completed`` guard. A refusal
+        (non-evidence defect, or the algebra cannot close the gap) returns False
+        unchanged.
+        """
+        if self._driver is not None:
+            return False  # driver owns its own deterministic completion
+        if stage is not GenerationStage.EVIDENCE:
+            return False
+        if attempt.state is not GenerationState.GENERATING:
+            return False
+        return pipeline.complete_generic_evidence_if_underconstrained(attempt)
 
     def publish(self, attempt_id: str, *, hold_ok: bool = False) -> PublishResult:
         """CAS publication gate (§32.4/§F).
@@ -534,6 +582,31 @@ class GenerationController:
                     )
                 if not self._invoke_provider(attempt, stage):
                     return  # pending (paused) or terminal
+                if (
+                    stage not in attempt.stage_done
+                    and attempt.state is GenerationState.GENERATING
+                ):
+                    # Phase43B (FR-14/15, AC-13/14) — the provider call returned
+                    # content but the stage did NOT become trusted (canonical
+                    # parse failure, or a semantically empty PUBLIC_WORLD
+                    # breadth failure). Do NOT advance to the next stage with
+                    # incomplete trusted state (which would contaminate
+                    # evidence/world_graph generation) and do NOT let
+                    # ``_next_stage`` re-pick the failed stage in a tight cycle.
+                    #
+                    # Phase43B (P43A-FR-07) — an untrusted EVIDENCE stage is
+                    # first offered to the Phase43A deterministic evidence
+                    # completion (zero provider/repair/regeneration budget). If
+                    # it supplies the canonical evidence, EVIDENCE becomes
+                    # trusted and generation continues to WORLD_GRAPH; otherwise
+                    # the failed stage routes through the existing bounded
+                    # VALIDATING recovery classification (RECOVERABLE_REPAIR /
+                    # RECOVERABLE_REGENERATE / TERMINAL_FAILURE), which consumes
+                    # the EXISTING budgets.
+                    if self._offer_generic_evidence_completion(attempt, stage):
+                        continue
+                    self._set_state(attempt, GenerationState.VALIDATING)
+                    continue
                 continue
 
             if state is GenerationState.VALIDATING:
@@ -1074,17 +1147,23 @@ class GenerationController:
             )
             self._fail(attempt, _PROVIDER_FAILURE_REASON, code=code)
             return False
-        # Phase30-fix DEF-B — truthful structured-output telemetry. The
-        # provider records what it ACTUALLY sent for this call
-        # (``last_structured_output`` — the native mode name when a real
-        # ``response_format`` was attached, else None); ``structuredOutput`` /
-        # ``structuredOutputRequested`` are true exactly then. Providers that
-        # ignore the schema carrier (Fake/Live) keep ``False``, and a fallback
-        # call never pretends structured output was used.
+        # Phase30-fix DEF-B / Phase43B DEF-073 — truthful structured-output
+        # telemetry with a REQUEST vs SUCCESS split. ``structuredOutputRequested``
+        # is the REQUEST signal: the provider records what it ACTUALLY attached
+        # to this call (``last_structured_output`` — the native mode name when a
+        # real ``response_format`` was attached, else None), so it is true
+        # exactly when a native structured request was SENT. ``structuredOutput``
+        # is the SUCCESS signal: native structured output was sent AND the
+        # returned content validated against the exact transport schema. A
+        # call that sent ``response_format`` but whose content failed local
+        # validation therefore reports requested=true / structuredOutput=false
+        # (ADV-43B-06). Providers that ignore the schema carrier (Fake/Live)
+        # keep both ``False``, and a fallback call never pretends structured
+        # output was used.
         # Phase30-fix DEF-023 — ``schemaId`` is a structured-output diagnostic:
         # it is reported ONLY when native structured output was actually
-        # requested/used (the mode came back non-None), so a fallback call
-        # never over-claims a schema id that no schema reached the wire for.
+        # requested (the mode came back non-None), so a fallback call never
+        # over-claims a schema id that no schema reached the wire for.
         structured_output_mode = getattr(self._provider, "last_structured_output", None)
         native_structured = structured_output_mode is not None
         # Phase31A — safe per-call schema diagnostics (Track A). Reported only
@@ -1098,6 +1177,45 @@ class GenerationController:
         response_format_type = getattr(
             self._provider, "last_response_format_type", None
         )
+        # Phase43B (P43B-FR-13, AC-12) + DEF-073 (ADV-43B-06) — transport
+        # success is NOT structured success, and the REQUEST signal is kept
+        # distinct from the SUCCESS signal. ``provider.call.complete`` keeps
+        # meaning transport success; ``structuredOutput`` becomes true ONLY when
+        # native structured output was actually sent AND the returned content
+        # was locally validated as True against the EXACT effective transport
+        # schema (never when validation was False/None); ``structuredOutputRequested``
+        # stays "a native ``response_format`` was attached to this request".
+        transport_schema_valid = getattr(
+            self._provider, "last_transport_schema_valid", None
+        )
+        if not isinstance(transport_schema_valid, bool):
+            transport_schema_valid = None
+        content_extracted = _as_optional_bool(
+            getattr(self._provider, "last_content_extracted", None)
+        )
+        json_decoded = _as_optional_bool(
+            getattr(self._provider, "last_json_decoded", None)
+        )
+        strict_requested = getattr(self._provider, "last_strict_requested", None)
+        if not isinstance(strict_requested, bool):
+            strict_requested = None
+        require_parameters_requested = getattr(
+            self._provider, "last_require_parameters_requested", None
+        )
+        if not isinstance(require_parameters_requested, bool):
+            require_parameters_requested = None
+        structured_output_success = bool(
+            native_structured and transport_schema_valid is True
+        )
+        # A closed capability-mode token: whether native structured output was
+        # sent with strict enforcement requested, sent hint-only, or not sent
+        # at all.
+        if not native_structured:
+            provider_capability_mode = None
+        elif strict_requested:
+            provider_capability_mode = PROVIDER_CAPABILITY_MODE_NATIVE_STRICT
+        else:
+            provider_capability_mode = PROVIDER_CAPABILITY_MODE_NATIVE_HINT
         emit_event(
             "provider.call.complete",
             caseId=attempt.case_id,
@@ -1108,7 +1226,7 @@ class GenerationController:
             success=True,
             elapsedMs=int((time.perf_counter() - _t0) * 1000),
             responseBytes=len(result.content.encode("utf-8")),
-            structuredOutput=native_structured,
+            structuredOutput=structured_output_success,
             structuredOutputRequested=native_structured,
             structuredOutputMode=structured_output_mode,
             schemaId=(request.schema_id if native_structured else None),
@@ -1117,6 +1235,13 @@ class GenerationController:
                 request_schema_byte_length if native_structured else None
             ),
             responseFormatType=(response_format_type if native_structured else None),
+            # Phase43B — bounded transport-vs-structured provenance.
+            transportSchemaValid=transport_schema_valid,
+            contentExtracted=content_extracted,
+            jsonDecoded=json_decoded,
+            strictRequested=strict_requested,
+            requireParametersRequested=require_parameters_requested,
+            providerCapabilityMode=provider_capability_mode,
             # Phase43 (P43-FR-12) — bounded, non-secret contract diagnostics.
             requestPromptBytes=len(request.prompt_context.encode("utf-8")),
             selectedEnvironmentKit=request.selected_environment_kit,
@@ -1138,13 +1263,57 @@ class GenerationController:
             repairCount=attempt.budget.repair_passes,
             regenerationCount=attempt.budget.regenerations,
         )
+        # Phase43B — bounded structured-output acceptance/rejection events
+        # (no raw content, no schema contents, no secrets).
+        if native_structured:
+            if structured_output_success:
+                emit_event(
+                    "provider.structured_output.validated",
+                    caseId=attempt.case_id,
+                    generationAttemptId=attempt.attempt_id,
+                    stage=stage.value,
+                    provider=self._provider_name,
+                    model=self._provider_model,
+                    transportSchemaValid=True,
+                    jsonDecoded=json_decoded,
+                    contentExtracted=content_extracted,
+                    strictRequested=strict_requested,
+                    requireParametersRequested=require_parameters_requested,
+                    providerCapabilityMode=provider_capability_mode,
+                    schemaId=request.schema_id,
+                    schemaFingerprint=schema_fingerprint,
+                )
+            else:
+                emit_event(
+                    "provider.structured_output.rejected",
+                    caseId=attempt.case_id,
+                    generationAttemptId=attempt.attempt_id,
+                    stage=stage.value,
+                    provider=self._provider_name,
+                    model=self._provider_model,
+                    transportSchemaValid=transport_schema_valid,
+                    jsonDecoded=json_decoded,
+                    contentExtracted=content_extracted,
+                    strictRequested=strict_requested,
+                    requireParametersRequested=require_parameters_requested,
+                    providerCapabilityMode=provider_capability_mode,
+                    schemaId=request.schema_id,
+                    schemaFingerprint=schema_fingerprint,
+                )
         self._apply_provider_result(attempt, stage, result)
         return True
 
     def _apply_provider_result(
         self, attempt: AttemptRecord, stage: GenerationStage, result: ProviderResult
-    ) -> None:
-        """Apply a completed provider result for its recorded stage."""
+    ) -> bool:
+        """Apply a completed provider result for its recorded stage.
+
+        Phase43B (FR-14, AC-13) — returns whether the stage became TRUSTED.
+        Trust is established by ``pipeline.apply_stage_output`` ONLY when the
+        canonical parser accepts the content (and, for PUBLIC_WORLD, the
+        stage-local semantic breadth gate passes); a provider-level failure
+        returns ``False`` (the attempt is failed terminally).
+        """
         if result.timed_out or result.error is not None or result.content is None:
             code = (
                 GenerationFailureCode.PROVIDER_TIMEOUT
@@ -1152,12 +1321,8 @@ class GenerationController:
                 else infer_failure_code(result.error)
             )
             self._fail(attempt, _PROVIDER_FAILURE_REASON, code=code)
-            return
-        content = result.content
-        if stage is GenerationStage.REPAIR:
-            pipeline.apply_repair(attempt, content)
-        else:
-            pipeline.apply_stage_output(attempt, stage, content)
+            return False
+        return pipeline.apply_stage_output(attempt, stage, result.content)
 
     # -- helpers ---------------------------------------------------------------
 

@@ -97,13 +97,16 @@ _SAFE_FIELDS = frozenset(
         # the closed server-owned registry). NEVER the API key, the registry
         # endpoint, Authorization header or any previous-user selection.
         "frontierProvider",
-        # Phase30-fix — safe structured-output diagnostic fields. Booleans and
-        # a closed non-secret mode token only: ``structuredOutputRequested`` /
-        # ``structuredOutput`` tell whether native structured mode was actually
-        # requested/used, ``structuredOutputMode`` is the adapter/protocol
-        # capability token ("openai_json_schema" or None) and ``schemaId`` (the
-        # existing bridge field) is the stable non-secret schema name token.
-        # NEVER the schema object itself, its internals, prompts or bodies.
+        # Phase30-fix / Phase43B DEF-073 — safe structured-output diagnostic
+        # fields. Booleans and a closed non-secret mode token only:
+        # ``structuredOutputRequested`` is the REQUEST signal ("a native
+        # ``response_format`` was attached to this request"), ``structuredOutput``
+        # is the SUCCESS signal (native structured output was sent AND the
+        # returned content validated against the exact transport schema),
+        # ``structuredOutputMode`` is the adapter/protocol capability token
+        # ("openai_json_schema" or None) and ``schemaId`` (the existing bridge
+        # field) is the stable non-secret schema name token. NEVER the schema
+        # object itself, its internals, prompts or bodies.
         "structuredOutputRequested",
         "structuredOutputMode",
         # Phase31A — safe schema/upstream diagnostics (Track A). Field values
@@ -128,6 +131,29 @@ _SAFE_FIELDS = frozenset(
         "codesUnchanged",
         "validatorCodesBefore",
         "validatorCodesAfter",
+        # Phase43B — bounded transport-vs-structured-output provenance. Booleans
+        # (or None) and a closed capability-mode token ONLY: ``transportSchemaValid``
+        # / ``contentExtracted`` / ``jsonDecoded`` / ``strictRequested`` /
+        # ``requireParametersRequested`` tell whether the returned content was
+        # decoded and validated against the EXACT sent transport schema, and
+        # ``providerCapabilityMode`` is a closed mode token. NEVER the schema
+        # contents, the returned content, prompts or upstream bodies.
+        "transportSchemaValid",
+        "contentExtracted",
+        "jsonDecoded",
+        "strictRequested",
+        "requireParametersRequested",
+        "providerCapabilityMode",
+        # Phase43B — bounded STAGE-BOUNDARY acceptance telemetry
+        # (``generation.stage.accepted`` / ``generation.stage.rejected``).
+        # ``stageAccepted`` is whether the stage became trusted (canonical parse
+        # AND, for PUBLIC_WORLD, the semantic breadth gate); ``canonicalParseValid``
+        # is the canonical-parser half and ``semanticBreadthValid`` the
+        # stage-local semantic half (None when not applicable). Booleans only —
+        # NEVER content, prompts, schema contents or hidden truth.
+        "stageAccepted",
+        "canonicalParseValid",
+        "semanticBreadthValid",
         # Phase38 — closed timeout-source observability (§23/§25): a closed
         # vocabulary token for the timeout layer that fired and a boolean
         # deadline-clip marker (deciding "the generation deadline was the

@@ -114,7 +114,10 @@ def _enum_agnostic(node):
         return {
             key: _enum_agnostic(value)
             for key, value in node.items()
-            if key != "enum"
+            # Phase43B (P43B-FR-07) only ADDS the transport-only
+            # ``additionalProperties`` closure marker (separately asserted in
+            # ``test_phase43b_structured_output``); normalize it away here too.
+            if key not in ("enum", "additionalProperties")
         }
     if isinstance(node, list):
         return [_enum_agnostic(item) for item in node]

@@ -200,9 +200,16 @@ def _name_of(post_body: dict) -> str | None:
 def _enum_agnostic(node):
     """Structural view of a schema with every additive Phase43 reference
     ``enum`` removed. The pre-Phase-43 tests assert the STAGE STRUCTURE is
-    unchanged; Phase43 (P43-FR-04) only ADDS request-local reference enums."""
+    unchanged; Phase43 (P43-FR-04) only ADDS request-local reference enums and
+    Phase43B (P43B-FR-07) only ADDS the transport-only ``additionalProperties``
+    closure marker (separately asserted in ``test_phase43b_structured_output``),
+    so both additive markers are normalized away here."""
     if isinstance(node, dict):
-        return {k: _enum_agnostic(v) for k, v in node.items() if k != "enum"}
+        return {
+            k: _enum_agnostic(v)
+            for k, v in node.items()
+            if k not in ("enum", "additionalProperties")
+        }
     if isinstance(node, list):
         return [_enum_agnostic(item) for item in node]
     return node
@@ -700,13 +707,19 @@ def test_repair_uses_intended_schema_and_parses_through_structured_path(database
     """§15-11 + §9 — a malformed stage triggers the repair path; the REPAIR
     call carries the intended full-draft schema contract, the structured
     repair response is parsed through the normal pipeline and the attempt
-    publishes (repair count stays exactly 1)."""
+    publishes (repair count stays exactly 1).
+
+    Phase43B (FR-14/15, P43A-FR-07): a malformed EVIDENCE stage is now owned by
+    the deterministic evidence completion (it supplies the canonical evidence),
+    so the malformed stage that exercises the normal bounded REPAIR owner here
+    is WORLD_GRAPH. All four GENERATING stage schemas are still exercised and the
+    single repair publishes."""
     wire = _Wire(
         golden=[
             _G[GenerationStage.CASE_TRUTH],
-            "malformed",  # public_world -> forces RECOVERABLE_REPAIR
+            _G[GenerationStage.PUBLIC_WORLD],
             _G[GenerationStage.EVIDENCE],
-            _G[GenerationStage.WORLD_GRAPH],
+            "malformed",  # world_graph -> forces RECOVERABLE_REPAIR
             GOLDEN_FULL_DRAFT,  # the one bounded repair
         ]
     )
@@ -743,16 +756,17 @@ def test_repair_uses_intended_schema_and_parses_through_structured_path(database
 
 
 def test_repair_remains_bounded_third_repair_rejected(database_url):
-    """§9 — with every stage AND every repair malformed the pipeline burns the
-    four stage calls + exactly TWO repair calls and then rejects the third
-    repair with the EXISTING budget (REPAIR_BUDGET_EXHAUSTED): the structured
-    repair path introduces no unlimited Frontier repair mode."""
+    """§9 — with every stage AND every repair malformed the pipeline burns ONE
+    stage call + exactly TWO repair calls and then rejects the third repair
+    with the EXISTING budget (REPAIR_BUDGET_EXHAUSTED): the structured repair
+    path introduces no unlimited Frontier repair mode.
+
+    Phase43B (FR-14/15): the first malformed stage no longer marks
+    ``stage_done`` (so it is not advanced past), but the bounded repair budget
+    is unchanged — two repairs, then REPAIR_BUDGET_EXHAUSTED."""
     wire = _Wire(
         golden=[
-            "malformed",
-            "malformed",
-            "malformed",
-            "malformed",
+            "malformed",  # case_truth (first stage)
             "malformed",  # repair #1
             "malformed",  # repair #2
         ]
@@ -771,20 +785,21 @@ def test_repair_remains_bounded_third_repair_rejected(database_url):
                 assert res.status_code == 201, res.text
                 assert res.json()["status"] == "FAILED"
                 assert res.json()["failureCode"] == "REPAIR_BUDGET_EXHAUSTED"
-                # 4 stages + 2 repairs = 6 bounded provider calls (the exact
-                # production pattern: providerCallCount=6, repairCount=2).
-                assert len(wire.posts) == 6, wire.posts
-                for index in (4, 5):
+                # 1 stage call + 2 repairs = 3 bounded provider calls (the exact
+                # production pattern: providerCallCount=3, repairCount=2).
+                assert len(wire.posts) == 3, wire.posts
+                for index in (1, 2):
                     _url, body, _headers = wire.posts[index]
                     assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
                         prompts.json_schema_for_stage_output("repair")
                     ), f"repair call #{index}"
-                # every stage call still carries that stage's PARSER-SHAPED
-                # canonical output schema (DEF-019)
-                for index, stage in enumerate(_REGISTRY_STAGES):
-                    assert _enum_agnostic(_schema_of(wire.posts[index][1])) == _enum_agnostic(
-                        prompts.json_schema_for_stage_output(stage.value)
-                    ), stage
+                # the first (failed) stage call still carries that stage's
+                # PARSER-SHAPED canonical output schema (DEF-019)
+                assert _enum_agnostic(_schema_of(wire.posts[0][1])) == _enum_agnostic(
+                    prompts.json_schema_for_stage_output(
+                        _REGISTRY_STAGES[0].value
+                    )
+                )
         finally:
             _dispose(application)
     finally:

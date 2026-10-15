@@ -329,7 +329,14 @@ def test_09_deadline_exceeded_on_resume_fails():
 
 
 def test_10_model_call_budget_exhausted_fails():
-    """Endless repairable stream -> exactly max_llm_calls calls -> FAILED."""
+    """Endless repairable stream -> exactly max_llm_calls calls -> FAILED.
+
+    Phase43B (FR-14/15, P43A-FR-07): the malformed EVIDENCE stage is now
+    completed by the deterministic algebra (zero provider budget), so the stream
+    is case_truth -> public_world -> evidence -> world_graph(fail) -> repair ->
+    repair -> ... The budget is still exhausted at exactly ``max_llm_calls``
+    calls.
+    """
     clock = ManualClock()
     ids = IdSource()
     admission = _make_admission(clock, ids, max_concurrent_generations=1)
@@ -339,7 +346,9 @@ def test_10_model_call_budget_exhausted_fails():
         GenerationStage.PUBLIC_WORLD: ["pending"],
         GenerationStage.EVIDENCE: ["pending"],
         GenerationStage.WORLD_GRAPH: ["pending"],
-        GenerationStage.REPAIR: ["pending"] * 4,
+        # Phase43B (P43A-FR-07): EVIDENCE is completed deterministically, so the
+        # malformed stage that enters the bounded REPAIR owner is WORLD_GRAPH.
+        GenerationStage.REPAIR: ["pending"] * 5,
     }
     fake = FakeProvider(script)
     controller = _make_controller(
@@ -357,7 +366,9 @@ def test_10_model_call_budget_exhausted_fails():
         _G[GenerationStage.CASE_TRUTH],
         _G[GenerationStage.PUBLIC_WORLD],
         "<not-json>",
-        _G[GenerationStage.WORLD_GRAPH],
+        # The remaining calls are the failing WORLD_GRAPH stage plus the bounded
+        # repair passes (EVIDENCE was completed deterministically, no budget).
+        "<not-json>",
         "<not-json>",
         "<not-json>",
         "<not-json>",
@@ -392,7 +403,12 @@ def test_11_regeneration_budget_exhausted_fails():
     Phase43A: an EVIDENCE-ONLY ambiguity is now completed deterministically by
     the generic path (see ``test_phase43a_evidence_algebra``), so the
     regeneration-exhaustion path is exercised with a defect the deterministic
-    completion must NOT touch (an empty motive universe)."""
+    completion must NOT touch (an empty motive universe).
+
+    Phase43B (FR-15/18): the semantically empty PUBLIC_WORLD now fails at the
+    public_world owner boundary, so EVIDENCE/WORLD_GRAPH are NEVER generated
+    from it — the executed sequence is case_truth -> public_world ->
+    validation/regeneration (four calls total: two per regeneration pass)."""
     clock = ManualClock()
     ids = IdSource()
     admission = _make_admission(clock, ids)
@@ -414,7 +430,9 @@ def test_11_regeneration_budget_exhausted_fails():
     assert "regeneration budget" in record.reason
     assert record.budget.regenerations == 1
     assert record.published is None
-    assert len(fake.calls) == 8
+    # Phase43B: EVIDENCE/WORLD_GRAPH are never invoked from the invalid public
+    # world (previously 8 calls including evidence + world_graph).
+    assert len(fake.calls) == 4
 
 
 def test_26_golden_published_full_assertion_list():

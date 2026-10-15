@@ -44,7 +44,11 @@ def _enum_agnostic(node):
     """Structural view of a schema with every additive Phase43 reference
     ``enum`` removed (the artifact assertions check stage/schema structure)."""
     if isinstance(node, dict):
-        return {k: _enum_agnostic(v) for k, v in node.items() if k != "enum"}
+        return {
+            k: _enum_agnostic(v)
+            for k, v in node.items()
+            if k not in ("enum", "additionalProperties")
+        }
     if isinstance(node, list):
         return [_enum_agnostic(item) for item in node]
     return node

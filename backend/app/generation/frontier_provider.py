@@ -136,7 +136,11 @@ from app.assets.depthguard import (
 from app.generation.clock import Clock, RealClock
 from app.generation.failure_codes import GenerationFailureCode
 from app.generation.frontier_registry import (
+    OPENROUTER_PROVIDER_ID,
     STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+    FrontierProviderCapabilities,
+    frontier_provider_capabilities,
+    model_supports_native_strict_json_schema,
 )
 from app.generation.prompts import canonical_schema_bytes, schema_fingerprint
 from app.generation.provider import (
@@ -146,8 +150,11 @@ from app.generation.provider import (
 )
 from app.generation.schema_adapters import (
     adapt_schema_for_transport,
+    close_transport_modeled_objects,
+    openai_strict_schema_is_compatible,
     schema_adapter_id_for_frontier_call,
 )
+from app.generation.transport_schema import validate_transport_schema
 
 # Bounded 2xx response cap (PD-SEC-09 parity with the live/ollama adapters).
 MAX_FRONTIER_RESPONSE_BYTES = 256 * 1024  # 256 KiB
@@ -504,6 +511,7 @@ class FrontierProvider:
         sink: Any = None,  # CompletionSink | None (interface compatibility)
         clock: Clock | None = None,
         structured_output_mode: str | None = None,
+        provider_id: str | None = None,
     ) -> None:
         self._endpoint_url = str(endpoint_url)
         self._api_key = str(api_key)
@@ -526,6 +534,16 @@ class FrontierProvider:
         self._structured_output_mode = (
             str(structured_output_mode) if structured_output_mode is not None else None
         )
+        # Phase43B (P43B-FR-01/02) — the SERVER-OWNED logical provider id
+        # (wired by ``selection._frontier()`` from the trusted registry). It
+        # selects the EFFECTIVE capability projection used for the strict /
+        # OpenRouter parameter-gating decisions. Default ``None`` keeps every
+        # existing direct construction valid and resolves to the all-``False``
+        # fail-closed capabilities.
+        self._provider_id = str(provider_id) if provider_id is not None else None
+        self._capabilities: FrontierProviderCapabilities = (
+            frontier_provider_capabilities(self._provider_id)
+        )
         # Truthful per-call telemetry: the structured-output mechanism that was
         # actually requested for the LAST call (``"openai_json_schema"`` when a
         # native ``response_format`` was attached, else ``None``). The
@@ -540,6 +558,18 @@ class FrontierProvider:
         self.last_schema_id: str | None = None
         self.last_request_schema_byte_length: int | None = None
         self.last_response_format_type: str | None = None
+        # Phase43B — truthful per-call transport/structured-output provenance.
+        # ``last_transport_schema_valid`` is ``None`` when no native schema was
+        # sent (prompt-embedded fallback), ``True``/``False`` when the returned
+        # content was validated against the EXACT effective transport schema.
+        self.last_transport_schema_valid: bool | None = None
+        self.last_content_extracted: bool = False
+        self.last_json_decoded: bool = False
+        self.last_strict_requested: bool | None = None
+        self.last_require_parameters_requested: bool | None = None
+        # The effective native mode token ("openai_json_schema") when native
+        # structured output was sent, else None.
+        self.last_structured_output_mode: str | None = None
 
     # -- Provider protocol ---------------------------------------------------
 
@@ -578,6 +608,11 @@ class FrontierProvider:
             == STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA
             and isinstance(request.json_schema, dict)
         )
+        # The EXACT effective transport schema that reaches the wire (and that
+        # the returned content is validated against) — the documented seam.
+        transport_schema: dict[str, Any] | None = None
+        strict_requested = False
+        require_parameters_requested = False
         if native_structured:
             # Phase31A (Track A) — server-owned protocol adaptation at the
             # TRANSPORT boundary only. ``schema_adapter_id_for_frontier_call``
@@ -592,19 +627,76 @@ class FrontierProvider:
             adapter_id = schema_adapter_id_for_frontier_call(
                 self._model, self._structured_output_mode
             )
+            # Phase43B (P43B-FR-07/08) — the parser-aligned TRANSPORT closure.
+            # Applied ONLY for dialects that support closed-object semantics
+            # (i.e. when no provider-specific schema adapter applies). The
+            # Cohere-family adapter keeps its behaviorally-unchanged transport
+            # (P43B-FR-19 / AC-16): closure is NOT forced onto Cohere. A deep
+            # copy is always produced, so ``request.json_schema`` is untouched.
+            projected_schema = request.json_schema
+            if adapter_id is None:
+                projected_schema = close_transport_modeled_objects(
+                    request.json_schema
+                )
             transport_schema = adapt_schema_for_transport(
-                request.json_schema, adapter=adapter_id
+                projected_schema, adapter=adapter_id
             )
+            # Phase43B (P43B-FR-05, AC-04/05) — conditional ``strict:true``.
+            # Set ONLY when the effective provider capability declares PROVEN
+            # native strict support AND the exact (provider, model) pair is on
+            # the closed server-owned strict-capable allowlist (P43B-FR-02 /
+            # ADV-43B-01: a provider-wide boolean is NOT proof of per-model
+            # strict enforcement) AND the exact rendered transport schema uses
+            # only the target dialect's supported keyword surface. Otherwise the
+            # ``strict`` key is omitted and the explicit hint-only mode is kept
+            # (still validated locally below). Never globally enabled; the model
+            # is the trusted per-attempt value, never a browser field.
+            strict_requested = bool(
+                self._capabilities.supports_native_strict_json_schema
+                and model_supports_native_strict_json_schema(
+                    self._provider_id, self._model
+                )
+                and adapter_id is None
+                and openai_strict_schema_is_compatible(transport_schema)
+            )
+            json_schema_block: dict[str, Any] = {
+                "name": request.schema_id or f"generation_{request.stage.value}",
+                "schema": transport_schema,
+            }
+            if strict_requested:
+                json_schema_block["strict"] = True
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": {
-                    "name": request.schema_id or f"generation_{request.stage.value}",
-                    "schema": transport_schema,
-                },
+                "json_schema": json_schema_block,
             }
+            # Phase43B (P43B-FR-04, AC-02/03) — OpenRouter-only parameter-gated
+            # routing. The OpenRouter-specific ``provider`` object is added
+            # ONLY when the effective capability declares OpenRouter parameter
+            # gating AND the server-owned provider id is EXACTLY OpenRouter;
+            # it can never be sent to any other provider.
+            require_parameters_requested = bool(
+                self._capabilities.supports_openrouter_parameter_gating
+                and self._provider_id == OPENROUTER_PROVIDER_ID
+            )
+            if require_parameters_requested:
+                body["provider"] = {"require_parameters": True}
         self.last_structured_output = (
             _FRONTIER_RESPONSE_FORMAT_JSON_SCHEMA if native_structured else None
         )
+        # Phase43B — truthful per-call provenance. Reset for THIS call so a
+        # previous call on a reused instance can never leak stale state.
+        self.last_strict_requested = (
+            strict_requested if native_structured else None
+        )
+        self.last_require_parameters_requested = (
+            require_parameters_requested if native_structured else None
+        )
+        self.last_structured_output_mode = (
+            _FRONTIER_RESPONSE_FORMAT_JSON_SCHEMA if native_structured else None
+        )
+        self.last_transport_schema_valid = None
+        self.last_content_extracted = False
+        self.last_json_decoded = False
         # Phase31A — safe per-call schema diagnostics. Derived ONLY from the
         # LOCAL trusted request carrier (never contents are stored): a stable
         # fingerprint + canonical byte length when the request carried a
@@ -717,9 +809,39 @@ class FrontierProvider:
                 # path flows through the SAME extraction — a repair response
                 # that arrives as an envelope becomes the bare full draft.
                 extracted = extract_openai_chat_completions_content(text)
-                box["result"] = ProviderResult(
-                    content=text if extracted is None else extracted
+                content = text if extracted is None else extracted
+                # Phase43B (P43B-FR-11/12/13) — EXACT local transport-schema
+                # validation. The returned content is JSON-decoded with the
+                # bounded decoder and validated against the EXACT effective
+                # transport schema that was placed in ``response_format`` (the
+                # closed/adapted projection). The content is STILL returned so
+                # the canonical parser/controller remains the stage authority;
+                # the provenance flags let the controller distinguish transport
+                # success from application-level structured-output success.
+                self.last_content_extracted = bool(
+                    content and content.strip()
                 )
+                decoded_instance: Any = None
+                decoded = False
+                if self.last_content_extracted:
+                    try:
+                        decoded_instance = bounded_json_loads(content)
+                        _reject_non_finite_anywhere(decoded_instance)
+                        decoded = True
+                    except (BoundedJsonError, TypeError, ValueError):
+                        decoded = False
+                self.last_json_decoded = decoded
+                if transport_schema is not None:
+                    if not decoded:
+                        # A JSON decode failure is NEVER a schema success.
+                        self.last_transport_schema_valid = False
+                    else:
+                        self.last_transport_schema_valid = (
+                            not validate_transport_schema(
+                                decoded_instance, transport_schema
+                            )
+                        )
+                box["result"] = ProviderResult(content=content)
             except Exception as exc:  # noqa: BLE001 - absolute safety net
                 # DEF-018: NO exception may escape the supervised worker with
                 # the box incomplete; every conceivable failure lands as a

@@ -126,7 +126,11 @@ def _enum_agnostic(node):
     ``enum`` removed (the affordance-enum contract is unaffected by Phase43
     request-local reference enums)."""
     if isinstance(node, dict):
-        return {k: _enum_agnostic(v) for k, v in node.items() if k != "enum"}
+        return {
+            k: _enum_agnostic(v)
+            for k, v in node.items()
+            if k not in ("enum", "additionalProperties")
+        }
     if isinstance(node, list):
         return [_enum_agnostic(item) for item in node]
     return node

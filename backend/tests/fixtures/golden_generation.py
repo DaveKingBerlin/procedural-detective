@@ -117,8 +117,12 @@ def _proposition_to_json(prop: TypedProposition) -> dict[str, Any]:
         if value is not None:
             out[key] = value
     out["uncertaintySeconds"] = prop.uncertainty_seconds
-    if prop.structured:
-        out["structured"] = dict(prop.structured)
+    # Phase43B — the transport schema teaches ``structured`` as a (possibly
+    # empty) JSON object for EVERY proposition ("every OTHER proposition type
+    # keeps an empty object"), so the golden output is schema-conformant and
+    # still parses identically (the strict parser treats an empty object as
+    # "no extra typed fields").
+    out["structured"] = dict(prop.structured)
     return out
 
 
@@ -149,6 +153,11 @@ def _crime_to_json(crime: Crime) -> dict[str, Any]:
             "canonical": crime.crime_time.canonical,
             "accusationToleranceSeconds": crime.crime_time.accusation_tolerance_seconds,
         },
+        # Phase43B — the crime transport schema teaches the REQUIRED closed
+        # resolution token (Phase43 P43-FR-05). The golden truth.A crime is a
+        # HOMICIDE (murderer named), so the golden output now carries the
+        # schema-required token; the strict parser remains byte-equivalent.
+        "resolutionType": crime.resolution_type or "HOMICIDE",
     }
 
 
