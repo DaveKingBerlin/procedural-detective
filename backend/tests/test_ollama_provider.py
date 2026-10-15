@@ -562,10 +562,12 @@ def test_09_repair_call_uses_same_ollama_provider_interface():
 def test_10_stale_ollama_completion_cannot_publish():
     transport = MockOllamaTransport(
         posts=[
-            _G[GenerationStage.CASE_TRUTH],
-            _G[GenerationStage.PUBLIC_WORLD],
-            "<not-json>",  # EVIDENCE malformed
-            _G[GenerationStage.WORLD_GRAPH],
+            "<not-json>",  # CASE_TRUTH malformed
+            # Phase43B (P43A-FR-07): a malformed EVIDENCE stage is now completed
+            # deterministically by the generic path, so the malformed stage that
+            # exercises the bounded repair owner here is CASE_TRUTH (the first
+            # stage), which never advances. It routes through two bounded repairs
+            # then exhausts the repair budget.
             "<not-json>",  # REPAIR 1
             "<not-json>",  # REPAIR 2 -> repair budget exhausted -> FAILED
         ]
@@ -584,7 +586,8 @@ def test_10_stale_ollama_completion_cannot_publish():
     assert record.reason == "repair budget exhausted"
     assert record.published is None
     calls_before = transport.call_count
-    assert calls_before == 6
+    # Phase43B: malformed case_truth + 2 bounded repairs.
+    assert calls_before == 3
 
     # A stale/late completion routed through the controller's race machinery
     # (the ONLY deferred path) is discarded with zero mutation (§32.4).

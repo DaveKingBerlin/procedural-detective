@@ -201,7 +201,11 @@ def _enum_agnostic(node):
     ``enum`` removed (the pre-Phase-43 tests assert stage structure; Phase43
     P43-FR-04 only ADDS request-local reference enums)."""
     if isinstance(node, dict):
-        return {k: _enum_agnostic(v) for k, v in node.items() if k != "enum"}
+        return {
+            k: _enum_agnostic(v)
+            for k, v in node.items()
+            if k not in ("enum", "additionalProperties")
+        }
     if isinstance(node, list):
         return [_enum_agnostic(item) for item in node]
     return node
@@ -367,16 +371,18 @@ def test_repair_effectiveness_severity_ordering_is_documented():
 
 
 def test_repair_failure_sets_and_outcomes_recorded(database_url):
-    """The exact Phase 31 DeepSeek pattern: all four stages succeed, then two
-    bounded repairs never converge (REPAIR_BUDGET_EXHAUSTED). Every validation
-    pass and every repair delta is recorded with CLOSED validator codes and
-    the deterministic effectiveness label."""
+    """The exact Phase 31 DeepSeek pattern: bounded repairs never converge
+    (REPAIR_BUDGET_EXHAUSTED). Every validation pass and every repair delta is
+    recorded with CLOSED validator codes and the deterministic effectiveness
+    label.
+
+    Phase43B (FR-14/15): the FIRST malformed stage no longer marks
+    ``stage_done`` and no longer advances to the downstream stages; the pipeline
+    burns one stage call + exactly two repair calls (providerCallCount=3) while
+    the validator-code/repair-outcome evidence is unchanged."""
     wire = _Wire(
         golden=[
             "malformed",  # case_truth  -> deferred structural issues
-            "malformed",  # public_world
-            "malformed",  # evidence
-            "malformed",  # world_graph
             "malformed",  # repair #1
             "malformed",  # repair #2
         ]
@@ -400,7 +406,9 @@ def test_repair_failure_sets_and_outcomes_recorded(database_url):
                 assert res.status_code == 201, res.text
                 assert res.json()["status"] == "FAILED"
                 assert res.json()["failureCode"] == "REPAIR_BUDGET_EXHAUSTED"
-                assert len(wire.posts) == 6, wire.posts  # 4 stages + 2 repairs
+                # Phase43B: 1 stage call + 2 repairs (the invalid first stage
+                # stops downstream generation).
+                assert len(wire.posts) == 3, wire.posts
 
                 events = _json_events(log_buffer.getvalue())
                 failed_passes = [
@@ -416,7 +424,9 @@ def test_repair_failure_sets_and_outcomes_recorded(database_url):
                     assert pass_event["failureCodeSetFingerprint"] == (
                         failure_set_fingerprint(codes)
                     )
-                    assert pass_event["providerCallCount"] == 4 + int(
+                    # Phase43B: the first stage call (1) + one repair call per
+                    # repair pass.
+                    assert pass_event["providerCallCount"] == 1 + int(
                         pass_event["repairCount"]
                     )
                 assert failed_passes[0]["validatorCodes"] == [
@@ -425,7 +435,7 @@ def test_repair_failure_sets_and_outcomes_recorded(database_url):
 
                 # §25.11/.12 — the REPAIR wire carries REPAIR_v1 + the
                 # parser-shaped repair schema + structured output true.
-                for index in (4, 5):
+                for index in (1, 2):
                     _url, body, _h = wire.posts[index]
                     assert _name_of(body) == "REPAIR_v1"
                     assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
@@ -438,7 +448,16 @@ def test_repair_failure_sets_and_outcomes_recorded(database_url):
                 ]
                 assert len(repair_completes) == 2
                 for event in repair_completes:
-                    assert event["structuredOutput"] is True
+                    # Phase43B (P43B-FR-13 / AC-12) — ``structuredOutput`` now
+                    # means "native structured output was sent AND the returned
+                    # content validated against the exact transport schema".
+                    # This scenario's repairs return the non-JSON "malformed"
+                    # body, so the call is transport-successful (HTTP 2xx,
+                    # content extracted) but NOT structured-output success; the
+                    # native mode was still requested and is recorded truthfully.
+                    assert event["structuredOutput"] is False
+                    assert event["structuredOutputMode"] == "openai_json_schema"
+                    assert event["transportSchemaValid"] is False
                     assert event["schemaId"] == "REPAIR_v1"
 
                 outcomes = [
@@ -470,10 +489,13 @@ def test_third_repair_rejected_budget_and_deadline_unchanged(database_url):
     """§25.15/.16/.18/.19 — the repair budget still caps at exactly TWO
     repairs (no third repair), the provider-call budget remains the unchanged
     production ceiling and the attempt is killed by the REPAIR budget while a
-    LARGE generation deadline remains (the exact Phase 31
-    providerCallCount=6 / repairCount=2 / large-deadline-remaining pattern)."""
+    LARGE generation deadline remains.
+
+    Phase43B (FR-14/15): the first malformed stage no longer advances, so the
+    bounded pattern is providerCallCount=3 / repairCount=2 (one stage call + two
+    repairs) instead of the pre-43B four-stage pattern."""
     wire = _Wire(
-        golden=["malformed"] * 6
+        golden=["malformed"] * 3
     )
     wire.install()
     log_buffer = io.StringIO()
@@ -493,7 +515,8 @@ def test_third_repair_rejected_budget_and_deadline_unchanged(database_url):
                 )
                 assert res.json()["status"] == "FAILED"
                 assert res.json()["failureCode"] == "REPAIR_BUDGET_EXHAUSTED"
-                assert len(wire.posts) == 6, "exactly 4 stages + 2 repairs"
+                # Phase43B: 1 stage call + 2 repairs.
+                assert len(wire.posts) == 3, "exactly 1 stage + 2 repairs"
 
                 events = _json_events(log_buffer.getvalue())
                 failed = next(e for e in events if e.get("event") == "generation.failed")
@@ -501,7 +524,7 @@ def test_third_repair_rejected_budget_and_deadline_unchanged(database_url):
                 # §25.15 — bounded repair count (unchanged).
                 assert failed["repairCount"] == 2
                 # §25.18 — provider-call budget unchanged (production ceilings).
-                assert failed["providerCallCount"] == 6
+                assert failed["providerCallCount"] == 3
                 assert failed["configuredGlobalProviderCallBudget"] is not None
                 assert failed["configuredCoreProviderCallBudget"] is not None
                 assert failed["providerCallBudget"] == (
@@ -964,14 +987,14 @@ def test_malformed_envelope_passes_through_and_strict_parser_deterministic(
     """A malformed envelope (no usable content string) passes the body through
     UNCHANGED so the strict parser still reports its deterministic issue —
     the attempt exhausts the bounded repair budget with the canonical code,
-    exactly as before, and never crashes."""
+    exactly as before, and never crashes.
+
+    Phase43B (FR-14/15): the first malformed stage stops downstream generation,
+    so the bounded pattern is 1 stage call + 2 repairs (3 posts)."""
     no_content_envelope = json.dumps({"choices": [], "id": "chatcmpl-x", "usage": {}})
     wire = _Wire(
         golden=[
             no_content_envelope,  # case_truth (not an envelope -> pass-through
-            no_content_envelope,  # public_world
-            no_content_envelope,  # evidence
-            no_content_envelope,  # world_graph
             no_content_envelope,  # repair #1
             no_content_envelope,  # repair #2
         ]
@@ -994,7 +1017,7 @@ def test_malformed_envelope_passes_through_and_strict_parser_deterministic(
                 assert res.status_code == 201, res.text
                 assert res.json()["status"] == "FAILED"
                 assert res.json()["failureCode"] == "REPAIR_BUDGET_EXHAUSTED"
-                assert len(wire.posts) == 6
+                assert len(wire.posts) == 3
         finally:
             _dispose(application)
     finally:
@@ -1006,16 +1029,21 @@ def test_repair_envelope_wrapped_full_draft_publishes(database_url):
     that arrives as an OpenAI-compatible ENVELOPE wrapping the golden FULL
     DRAFT becomes the bare full draft and the attempt PUBLISHES after exactly
     ONE repair. The repair wire still carries REPAIR_v1 + structuredOutput
-    true (unchanged)."""
+    true (unchanged).
+
+    Phase43B (FR-14/15, P43A-FR-07): a malformed EVIDENCE stage is now completed
+    deterministically by the generic path, so the malformed stage that routes to
+    the bounded REPAIR owner here is WORLD_GRAPH. The four stage calls run and
+    the one envelope repair publishes."""
     from fixtures.golden_generation import GOLDEN_FULL_DRAFT
 
     wire = _Wire(
         golden=[
-            _G[GenerationStage.CASE_TRUTH],   # valid stage
-            "malformed",                     # public_world -> RECOVERABLE_REPAIR
-            _G[GenerationStage.EVIDENCE],
-            _G[GenerationStage.WORLD_GRAPH],
-            _envelope(GOLDEN_FULL_DRAFT),    # repair #1 arrives as an envelope
+            _G[GenerationStage.CASE_TRUTH],    # valid stage
+            _G[GenerationStage.PUBLIC_WORLD],  # valid stage
+            _G[GenerationStage.EVIDENCE],      # valid stage
+            "malformed",                       # world_graph -> RECOVERABLE_REPAIR
+            _envelope(GOLDEN_FULL_DRAFT),      # repair #1 arrives as an envelope
         ]
     )
     wire.install()
@@ -1036,7 +1064,8 @@ def test_repair_envelope_wrapped_full_draft_publishes(database_url):
                 )
                 assert res.status_code == 201, res.text
                 assert res.json()["status"] == "PUBLISHED"
-                assert len(wire.posts) == 5, wire.posts  # 4 stages + 1 repair
+                # Phase43B: 4 stages + 1 repair.
+                assert len(wire.posts) == 5, wire.posts
                 # The repair wire is unchanged: REPAIR_v1 + structured output.
                 _url, repair_body, _h = wire.posts[4]
                 assert _name_of(repair_body) == "REPAIR_v1"
@@ -1050,7 +1079,19 @@ def test_repair_envelope_wrapped_full_draft_publishes(database_url):
                     and e.get("stage") == "repair"
                 ]
                 assert len(repair_completes) == 1
-                assert repair_completes[0]["structuredOutput"] is True
+                # Phase43B (P43B-FR-13 / AC-12) — the envelope was extracted
+                # and the repair used the native structured mode; whether the
+                # returned full draft validated against the EXACT (narrowed)
+                # repair transport schema is reported separately. A repair that
+                # ADDS declarations (here the golden full draft) legitimately
+                # does not satisfy the request-local reference enums, so
+                # ``structuredOutput`` (validated success) is reported
+                # truthfully as False while the canonical parser accepts the
+                # repair and the attempt publishes.
+                repair_complete = repair_completes[0]
+                assert repair_complete["structuredOutputMode"] == "openai_json_schema"
+                assert repair_complete["contentExtracted"] is True
+                assert repair_complete["jsonDecoded"] is True
                 outcomes = [
                     e for e in events if e.get("event") == "generation.repair.outcome"
                 ]

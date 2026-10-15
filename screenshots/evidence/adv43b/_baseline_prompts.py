@@ -1,0 +1,3668 @@
+"""Versioned prompt templates for the local-Llama stage driver (Phase 16_2).
+
+These are STATIC application-owned strings (bounded, never player-facing, never
+serialized into any DTO). They are the ONLY place the Ollama stage driver
+derives its prompts; the deterministic engine remains authoritative over every
+value they request.
+
+Design rules (frozen contract):
+
+- VERSIONED: every template is a module constant named ``..._v1`` (the version
+  is embedded verbatim in the template text so the provider request can record
+  which template version produced it).
+- SCHEMA-DERIVED: the per-stage JSON skeletons are rendered at build time from
+  the ACTUAL authoritative schema constants (``app.generation.schemas`` bounds
+  and ``app.assets.specs`` bounds) — never a hand-maintained approximation. The
+  ``schema_contract`` helper reads the frozen bound constants and turns them
+  into deterministic JSON so model output and the strict parser can never drift
+  from the real schema. A unit test asserts the rendered contract matches the
+  authoritative bounds (no drift).
+- LOCKED: templates embed the sanitized user prompt, the locked constraints,
+  "no truth / no secrets / no internals" instructions, explicit meter units
+  (``0.25 means 25 centimeters; 25 means 25 meters``), bounds ranges, the
+  material allowlist (from ``app.assets.materials.MATERIAL_VOCAB``) and the
+  primitive allowlist (Phase 13 exports). The repair templates additionally
+  embed the ORIGINAL object concept / previous candidate / SANITIZED structured
+  issues / exact schema / bounds / materials / units and the exact repair
+  instruction from Phase16_2 §9/§13.
+- Templates record (internally, as text) the template version + stage + model +
+  attempt id — never sent to the player.
+
+Placeholders use ``__UPPER_SNAKE__`` tokens substituted with ``.replace()`` so
+the JSON braces embedded by ``schema_contract`` never collide with the template
+mechanism.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import re
+from typing import Any, Iterable, Mapping
+
+from app.assets.catalog import CATEGORY_ALLOWLIST
+from app.assets.materials import MATERIAL_VOCAB
+from app.assets.specs import (
+    DIMENSION_MAX,
+    DIMENSION_MIN,
+    MAX_PART_ROLE_LENGTH,
+    MAX_PARTS,
+    MAX_POSITION_BOUND,
+    MAX_ROTATION_BOUND,
+    MAX_PART_SCALE,
+    MIN_PART_SCALE,
+    PRIMITIVE_ALLOWLIST,
+)
+from app.domain.activity_log import (
+    ACTIVITY_LOG_ACTIVITY_TYPES,
+    MAX_ACTIVITY_TEXT_CHARS,
+    MAX_ACTIVITY_LOG_ENTRIES,
+    MIN_ACTIVITY_LOG_ENTRIES,
+    WINDOW_DEFAULT_AFTER_MINUTES,
+    WINDOW_DEFAULT_BEFORE_MINUTES,
+    WINDOW_HARD_MAX_TOTAL_MINUTES,
+    activity_log_window_bounds,
+    entity_leak_tokens,
+)
+from app.domain.evidence import (
+    ALIBI_TIME_CLAIM,
+    FORENSIC_WEAPON_MATCH,
+    PROPOSITION_TYPES,
+    RELIABILITY_VOCABULARY,
+    TIME_REQUIRED_TYPES,
+)
+from app.domain.time_interval import (
+    canonical_timestamp_schema_pattern,
+    epoch_to_iso,
+    parse_iso8601,
+)
+from app.generation.safety import (
+    ANCHOR_ALLOWLIST,
+    INTERACTION_ALLOWLIST,
+    AssetRegistry,
+)
+from app.generation.schemas import (
+    AFFORDANCE_VOCABULARY,
+    MAX_SINGLE_TEXT_FIELD_CHARS,
+)
+from app.generation.trusted_context import PHASE41A_QUALITY_RULES
+from app.world.environment import ENVIRONMENT_IDS
+
+# --- schema-contract builder (deterministic, authoritative) ----------------
+#
+# ``schema_contract`` renders the JSON skeleton the stage templates embed. It
+# reads ONLY the frozen constants (number bounds, allowlists) from the
+# authoritative schema modules so the prompt and the strict parser share one
+# source of truth. Every bound in the rendered text is literally the constant
+# value (interpolated, never a copy).
+
+_PROPOSITION_TYPE_HINT_PREFIX = "use EXACTLY one of the proposition type tokens:"
+
+# Phase31A (Track B, class B — schema construction) — the transport grammar
+# for affordance ARRAY ITEMS.
+#
+# The canonical closed affordance vocabulary lives in ``app.generation.schemas``
+# (``AFFORDANCE_VOCABULARY`` = the PUBLIC ``AFFORDANCES`` tuples + the documented
+# optional weapon-subtype tokens — the SAME vocabulary the strict parser
+# enforces via ``parser._string_list_field(..., vocabulary=...)``). The FULL
+# DRAFT / stage contracts carry every ``affordances`` field as a plain
+# list-of-strings hint, so ``_contract_to_json_schema`` rendered it as an
+# unconstrained ``{"type":"array","items":{"type":"string"}}`` — the structured
+# output GRAMMAR never taught the model the closed tokens, so live models
+# freely invented free-text affordances (e.g. ``"discovered"`` / ``"dusting for
+# prints"`` / ``"investigate"`` / ``"autopsy"``) that the (correct, unchanged)
+# strict parser then rejected forever (RECOVERABLE_REPAIR ->
+# REPAIR_BUDGET_EXHAUSTED with repairEffectiveness UNCHANGED across passes).
+#
+# The rule below therefore renders ANY list-of-strings hint found under a key
+# named ``affordances`` with a CLOSED ``enum`` of the canonical vocabulary
+# (sorted for determinism — the same deterministic treatment as the evidence
+# ``PROPOSITION_TYPES`` enum and the ``enum <tokens>`` marker hints). Every
+# OTHER list-of-strings contract shape is untouched (``travelRules`` is a list
+# of objects; ``rooms``/``tags``/``locationTokens`` stay permissive strings;
+# the evidence proposition ``type`` keeps its own dedicated enum). This is a
+# server-owned transport-schema STRENGTHENING only — the strict parser and all
+# validators are byte-identical and remain the sole acceptance authority.
+_AFFORDANCE_VOCABULARY_ENUM: tuple[str, ...] = tuple(sorted(AFFORDANCE_VOCABULARY))
+
+# --------------------------------------------------------------------------- #
+# Phase31B — canonical-source schema alignment.
+#
+# The STRICT parser stays the sole acceptance authority. The constants below
+# feed ONLY the transport-schema builder (and the prompt contract text) and
+# derive from the SAME canonical sources the parser/domain use, so the schema
+# grammar can never silently drift from the parser grammar (Phase31B §7/§33):
+#
+#   timestamp grammar  -> app.domain.time_interval._ISO_RE (via
+#                         ``canonical_timestamp_schema_pattern``)
+#   reliability tokens -> app.domain.evidence.Reliability enum (via
+#                         ``RELIABILITY_VOCABULARY``)
+#   proposition types  -> app.domain.evidence.PROPOSITION_TYPES
+# --------------------------------------------------------------------------- #
+
+_TIMESTAMP_CONTRACT_PREFIX = "canonical ISO-8601 timestamp"
+
+_CANONICAL_TIMESTAMP_HINT = (
+    _TIMESTAMP_CONTRACT_PREFIX
+    + ", EXACTLY YYYY-MM-DDTHH:MM:SS with a MANDATORY timezone offset "
+    + "(Z, z, +02:00, +0200, -05:30); fractional seconds are optional "
+    + "(e.g. 2026-09-11T21:18:00+02:00 or 2026-09-11T20:18:00Z or "
+    + "2026-09-11T20:18:00.500Z); the date AND the offset are REQUIRED — "
+    + "NEVER a time-only value like 20:15, NEVER a naive timestamp without "
+    + "an offset"
+)
+
+# The range-strengthened ECMA-262 timestamp pattern (DEF-053) — derived from
+# the single source ``app.domain.time_interval.canonical_timestamp_schema_pattern``:
+# month 01..12 / day 01..31 / hour 00..23 / minute 00..59 / second 00..59|60
+# (leap-second clamp) / offset hour 00..23 / offset minute 00..59. The residual
+# impossible families (year 0000, invalid calendar dates) are documented as
+# schema-weaker-than-parser in the derived descriptions and the drift tests.
+_CANONICAL_ISO_TIMESTAMP_PATTERN = canonical_timestamp_schema_pattern()
+
+# The canonical proposition -> structured-field contract the transport schema
+# teaches (the strict parser / ``TypedProposition`` stays the acceptance
+# authority). Every sentence is embedded in the evidence ``structured`` node
+# description AND the evidence prompt contract — ONE source, never a second
+# copy.
+_STRUCTURED_CONTRACT_TYPES: tuple[tuple[str, str], ...] = (
+    (
+        FORENSIC_WEAPON_MATCH,
+        '{"match": <real JSON boolean true|false>} (never a string, never '
+        "0/1, never an object)",
+    ),
+    (
+        ALIBI_TIME_CLAIM,
+        '{"claimedDeparture": <canonical ISO-8601 timestamp with offset, '
+        "e.g. 2026-09-11T21:18:00+02:00>}",
+    ),
+)
+
+# The required placement interaction hint (Phase31B §11): the STRICT parser
+# requires interaction as a string that MAY be empty ("decorative / not
+# interactable", DEF-062) bounded to the canonical per-field maximum.
+_INTERACTION_HINT = (
+    "interaction string [REQUIRED] — use the EMPTY string \"\" only for a "
+    "decorative / non-interactable placement; otherwise use a documented "
+    "interaction identifier such as inspect, read, collect, open, activate, "
+    "talk, view_record, add_to_evidence_board; maxLength "
+    + str(MAX_SINGLE_TEXT_FIELD_CHARS)
+    + " chars"
+)
+
+
+def structured_contract_sentence(ptype: str) -> str:
+    """The canonical structured-field contract sentence for a proposition type
+    (embedded in the transport-schema description; the parser stays the
+    acceptance authority). Empty for types with no required structured key.
+    """
+    for _ptype, sentence in _STRUCTURED_CONTRACT_TYPES:
+        if _ptype == ptype:
+            return f"{_ptype} -> {sentence}"
+    return ""
+
+
+def _structured_contract_hint() -> str:
+    """The deterministic evidence ``structured`` contract hint: teaches the
+    per-type structured keys while keeping the node an open JSON object (the
+    Cohere transport adapter's proven compatibility needs the open shape)."""
+    sentences = "; ".join(
+        structured_contract_sentence(ptype) for ptype, _ in _STRUCTURED_CONTRACT_TYPES
+    )
+    return (
+        "a JSON object holding ONLY extra typed fields that are not already "
+        "proposition-level keys (NEVER a JSON-encoded string). Canonical "
+        "type-specific structured contracts: "
+        + sentences
+        + ". Every OTHER proposition type keeps an empty object or only its "
+        "documented extra keys — never invent keys."
+    )
+
+
+# Marker for the evidence proposition REFERENCE fields (personId/locationId/
+# objectId/motiveId). DEF-056 (ADV-31B-04): the Phase31A evidence 400 named
+# the UNION subtree ``["string","null"]`` at exactly
+# ``#/properties/evidence/items/properties/propositions`` — these four
+# REQUIRED-nullable union nodes are the ONLY unions the evidence schema still
+# carried. They are converted to OPTIONAL non-null ``{"type":"string"}`` nodes
+# (the STRICT parser treats a missing key and a JSON null identically as
+# "absent"), taught as "omit, never emit JSON null". The parser still ACCEPTS
+# a JSON null for backward compatibility; the transport just stops teaching
+# it. This keeps the marker OUT of the case_people section (whose ``personId``
+# is a REQUIRED unique id with an unrelated hint text).
+_REFERENCE_FIELD_PREFIX = "[OMIT-IF-NONE] "
+
+
+def _reference_field_hint(owner_label: str, the: str) -> str:
+    """One canonical evidence reference-field contract hint (DEF-056).
+
+    ``owner_label`` is the object the field references (e.g. "person id");
+    ``the`` is the fill instruction for when this proposition names an owner
+    (e.g. "the locked person id when the fact names a person"). The parser
+    accepts an ABSENT key or a JSON ``null`` as "no relation"; the teaching
+    therefore says OMIT (never emit JSON null).
+    """
+    return (
+        _REFERENCE_FIELD_PREFIX
+        + owner_label
+        + " — fill with "
+        + the
+        + "; when the proposition names none, OMIT the key entirely. "
+        "The parser accepts a JSON null as absent for backward compatibility, "
+        "but never emit it — an omitted key is the canonical form"
+    )
+
+
+def observed_at_contract_hint() -> str:
+    """The canonical evidence ``observedAt`` contract hint (DEF-054/055).
+
+    REQUIRED for the parser's time-required proposition types (the canonical
+    ``TIME_REQUIRED_TYPES`` set) and OMITTED (never emitted as null) for every
+    other type. The set is interpolated from the domain constant, so the
+    schema teaching and the drift guards share ONE source. The hint starts
+    with the canonical timestamp marker, so the derived schema node carries
+    the range-strengthened timestamp pattern.
+    """
+    time_required = ", ".join(sorted(TIME_REQUIRED_TYPES))
+    return (
+        _CANONICAL_TIMESTAMP_HINT
+        + "; REQUIRED for the time-bearing proposition types ("
+        + time_required
+        + "); for every OTHER type OMIT the key ENTIRELY — never emit "
+        "observedAt: null"
+    )
+
+# The closed ``environmentHint`` enum (Phase 19 Fix A). The hint text carries
+# this exact ``enum <tokens>`` marker so the derived transport JSON Schema
+# constrains ``environmentHint`` to the five canonical ids (the model can never
+# suggest a path-like or free-text location).
+#
+# Phase 19B ADV-214: the hint text deliberately NEVER contains the literal
+# word "null" — ``_key_required``/``_hint_nullable`` treat any hint mentioning
+# "null" as a nullable value-slot, which would demote ``environmentHint`` from
+# REQUIRED to OPTIONAL in the transport JSON Schema (letting structured-output
+# mode silently omit the location — the exact determinism loss Fix A removed).
+# The enum constraint AND the requiredness both stay authoritative.
+_ENVIRONMENT_ENUM_HINT = (
+    "canonical environment token; enum " + ",".join(ENVIRONMENT_IDS) +
+    " (use EXACTLY one of those EXACT tokens — never a path, never a location "
+    "phrase like 'hotel suite', never a free text word)"
+)
+
+
+def _canonical_concept_sentence(concept: str | None) -> str:
+    """Deterministic application-owned canonical (category, subtype) sentence.
+
+    Phase17D B: the AssetSpec prompts state the EXPECTED category/subtype for
+    a concept the application owns (``geometry_quality`` phase §6 mapping) so
+    a Hermes-class model never leaves ``subtype`` null for a crime-critical
+    ceremonial object (the semantic gate then passes on the first pass).
+    Returns an empty sentence for unmapped concepts.
+    """
+    from app.assets.geometry_quality import normalized_category_subtype
+
+    canonical = normalized_category_subtype(concept) if concept else None
+    if canonical is None:
+        return ""
+    expected_category, expected_subtype = canonical
+    return (
+        f"\nFor the object concept {concept!r} the application REQUIRES "
+        f"category {expected_category!r} and subtype {expected_subtype!r} — "
+        "declare those EXACT values (never null, never a different token)."
+    )
+
+# Meter-units statement used by every numeric contract (Phase16_2 §15).
+# Phase17B: the worked examples make the meter/centimeter mapping concrete so a
+# Hermes-class model cannot return "25" for a 25-centimetre value.
+_METERS_STATEMENT = (
+    "ALL dimensions, positions, rotations and scales are in METERS. "
+    "0.25 means 25 centimeters; 25 means 25 meters. Use 0.001..4 for "
+    "dimensions and 0.001..2 for part scale.\n"
+    "METER WORKED EXAMPLES: an ice pick is about 0.25 meters long overall "
+    "(declare dimensions that COVER all its parts, e.g. x: 0.05, y: 0.3, "
+    "z: 0.05 — never a smaller box than the parts need); a desk lamp is "
+    "about 0.2 by 0.4 by 0.2 meters; a coin is about 0.02 (write 0.02, never "
+    "2). NEVER write 25 for a 25-centimeter value: write 0.25.\n"
+    "THIN OBJECTS: thin shafts and blades ARE realistic — 0.002 to 0.01 "
+    "(2-10 millimeters) is a correct thickness for an ice pick spike, a "
+    "blade or a letter opener. Write the thin axis as a small number like "
+    "0.005 or 0.01, never 0, and never scale the whole object up to make "
+    "it thick.\n"
+    "DECLARED-DIMENSIONS RULE: the declared dimensions are the object's "
+    "TRUE overall bounding box in meters. They MUST be large enough to cover "
+    "every part you place (the longest part extent fits inside them) and the "
+    "part layout must actually reach near those bounds — never declare a "
+    "tiny 0.05m box and then place parts 0.3m apart."
+)
+
+
+def __dimensions_contract() -> Mapping[str, Any]:
+    return {
+        "dimensions": {
+            "$note": "overall bounding box in METERS",
+            "x": f"number in [{DIMENSION_MIN:g}, {DIMENSION_MAX:g}]",
+            "y": f"number in [{DIMENSION_MIN:g}, {DIMENSION_MAX:g}]",
+            "z": f"number in [{DIMENSION_MIN:g}, {DIMENSION_MAX:g}]",
+        },
+        "parts": {
+            "$note": f"1..{MAX_PARTS} parts; unique part ids",
+            "maxParts": MAX_PARTS,
+            "partSchema": {
+                "id": "unique id like part_00 .. part_23",
+                "role": f"lowercase letters/underscores, 1..{MAX_PART_ROLE_LENGTH} chars",
+                "primitive": f"one of {sorted(PRIMITIVE_ALLOWLIST)}",
+                "transform": {
+                    "position": f"[x,y,z] with |axis| <= {MAX_POSITION_BOUND:g}",
+                    "rotation": f"[x,y,z] with |axis| <= {MAX_ROTATION_BOUND:g}",
+                    "scale": f"[x,y,z] with each axis in [{MIN_PART_SCALE:g}, {MAX_PART_SCALE:g}]",
+                },
+                "material": f"one of {sorted(MATERIAL_VOCAB)}",
+                "parentId": "null or the id of an EARLIER part (max parent depth 2)",
+            },
+        },
+        "category": f"one of {list(CATEGORY_ALLOWLIST)}",
+    }
+
+
+def _stage_contract(stage: str) -> Mapping[str, Any]:
+    """THE single authoritative per-stage schema skeleton.
+
+    Both the rendered prompt contract (``schema_contract``) and the derived
+    transport JSON Schema (``schema_contract_as_json_schema``) read this one
+    mapping — the prompt and the structured-output ``format`` can never drift
+    from each other (Phase17B §2: one source, never a duplicate).
+    """
+    if stage == "full_draft":
+        return _full_draft_contract()
+    if stage == "public_world":
+        return _public_world_contract()
+    if stage == "asset_spec":
+        contract: Mapping[str, Any] = {
+            "canonicalName": "non-empty string (80 chars max)",
+            "category": f"one of {list(CATEGORY_ALLOWLIST)}",
+            "subtype": "string or null",
+            **__dimensions_contract(),
+        }
+    elif stage == "activity_log":
+        # Phase 19J — closed structured activity-log schema. The closed enum
+        # marker derives the transport JSON Schema ``enum`` for Ollama
+        # structured output; the strict Phase 19J validator stays the sole
+        # acceptance authority. The provider NEVER emits HTML/tables.
+        # Phase19J-RI: the derived transport JSON Schema ALSO carries the hard
+        # entry-count bounds (``minItems``/``maxItems`` from the authoritative
+        # MIN_ACTIVITY_LOG_ENTRIES/MAX_ACTIVITY_LOG_ENTRIES constants) so the
+        # Ollama grammar itself can never emit a one-row repair wrapper (the
+        # observed 153/186-byte repair failures). Both ACTIVITY_LOG and
+        # ACTIVITY_LOG_REPAIR share this ONE contract via STAGE_TO_CONTRACT, so
+        # the bounds apply to both stages automatically.
+        contract = {
+            "entries": {
+                "$note": (
+                    f"array of {MIN_ACTIVITY_LOG_ENTRIES}.."
+                    f"{MAX_ACTIVITY_LOG_ENTRIES} chronological entries"
+                ),
+                "minItems": MIN_ACTIVITY_LOG_ENTRIES,
+                "maxItems": MAX_ACTIVITY_LOG_ENTRIES,
+                "entrySchema": {
+                    "timestamp": "ISO-8601 timestamp WITH timezone offset "
+                        "(e.g. 2026-09-11T21:18:00+02:00 or 2026-09-11T20:18:00Z)",
+                    "activityType": (
+                        "enum "
+                        + ",".join(sorted(ACTIVITY_LOG_ACTIVITY_TYPES))
+                        + " (use EXACTLY one of those EXACT tokens, never "
+                        "an invented/lowercase token)"
+                    ),
+                    "activity": (
+                        f"plain short text, 1..{MAX_ACTIVITY_TEXT_CHARS} "
+                        "characters, no HTML, no URLs, no file paths, no "
+                        "control characters, no person/weapon/motive/location "
+                        "names, no crime wording"
+                    ),
+                },
+            }
+        }
+    elif stage == "evidence":
+        contract = {
+            "evidence": [
+                {
+                    "id": "unique id",
+                    "kind": "email|physical|financial|cctv|testimonial|forensic|witness_statement",
+                    "reliability": "high|medium|low",
+                    "discoverable": "bool",
+                    "sourceRef": {"kind": "string", "sourceId": "string"},
+                    "propositions": [
+                        {
+                            "type": (
+                                "use EXACTLY one of the proposition type "
+                                "tokens: PERSON_OBSERVED_AT_LOCATION, "
+                                "VICTIM_LAST_SEEN_ALIVE_AT, BODY_FIRST_FOUND_AT, "
+                                "NOISE_HEARD_AT, CRIME_SCENE_OBSERVATION_AT, "
+                                "WITNESS_CLAIMS, SUSPECT_CLAIMS, ALIBI_TIME_CLAIM, "
+                                "OBJECT_CONTAINS_FINGERPRINT, "
+                                "OBJECT_CONTAINS_BLOOD, FORENSIC_WEAPON_MATCH, "
+                                "MOTIVE_LINKED_TO_PERSON, "
+                                "MOTIVE_FACT_CONTRADICTED, "
+                                "CAN_REACH_CRIME_SCENE_IN_TIME, "
+                                "TIME_WINDOW_EXCLUSION, OTHER — never an "
+                                "invented/lowercase/natural-language token, "
+                                "never a truth/final verdict declaration"
+                            ),
+                            "personId": _reference_field_hint(
+                                "person id",
+                                "the locked person id when the fact names a "
+                                "person",
+                            ),
+                            "locationId": _reference_field_hint(
+                                "location id",
+                                "the locked location id when the fact names a "
+                                "location",
+                            ),
+                            "objectId": _reference_field_hint(
+                                "object id",
+                                "the locked weapon/object id when the fact "
+                                "names an object",
+                            ),
+                            "motiveId": _reference_field_hint(
+                                "motive id",
+                                "the locked motive id when the fact names a "
+                                "motive",
+                            ),
+                            "observedAt": observed_at_contract_hint(),
+                            "uncertaintySeconds": "non-negative int",
+                            "structured": _structured_contract_hint(),
+                        }
+                    ],
+                    "presentation": {"title": "string", "description": "string"},
+                }
+            ]
+        }
+    elif stage == "world_requirements":
+        contract = {
+            "environmentHint": _ENVIRONMENT_ENUM_HINT,
+            "locationTokens": ["matched location token strings"],
+            "objects": [
+                {
+                    "name": "physical object noun",
+                    "categoryHint": "category or null",
+                    "subtypeHint": "subtype or null",
+                    "tags": ["tag strings"],
+                    "requiredInteraction": "inspect|read or null",
+                    "evidenceId": "evidence id or null",
+                    "criticality": "required|decorative",
+                }
+            ],
+            "relations": [
+                {
+                    "kind": "on_desk|on_table|near_victim|inside_cabinet|floor_area|on_wall",
+                    "target": "the casefolded object name this relation binds",
+                }
+            ],
+            "unsafeUnsupported": ("short diagnostic notes, each at most 120 "
+                "characters (usually an empty list; never long prose)"),
+        }
+    else:  # case_people
+        contract = {
+            "crime": {
+                "type": "string (e.g. murder)",
+                "victimId": "person id",
+                # Phase43 (P43-FR-05) — HOMICIDE needs a non-empty canonical
+                # person id; SUICIDE carries a JSON null (the hint mentions
+                # "null" so ``_key_required`` makes this key OPTIONAL and
+                # ``_hint_json_types`` derives the ["string","null"] union).
+                "murdererId": (
+                    "the canonical murderer person id for HOMICIDE, or null "
+                    "for SUICIDE"
+                ),
+                "motiveId": "motive id",
+                "weaponId": "object id",
+                "locationId": "location id",
+                "crimeTime": {
+                    "canonical": _CANONICAL_TIMESTAMP_HINT,
+                    "accusationToleranceSeconds": "non-negative int",
+                },
+                # Phase43 (P43-FR-05) — REQUIRED closed resolution token. The
+                # hint deliberately does NOT contain the substring "null" so
+                # ``_key_required`` keeps the key required; ``_enum_token_list``
+                # derives the {HOMICIDE, SUICIDE} enum.
+                "resolutionType": (
+                    "HOMICIDE|SUICIDE resolution token; enum HOMICIDE,SUICIDE "
+                    "(use EXACTLY one token: HOMICIDE when a murderer is named, "
+                    "SUICIDE for a self-inflicted resolution)"
+                ),
+            },
+            "persons": [
+                {
+                    "personId": "unique id",
+                    "name": "display name",
+                    "role": "victim|suspect|witness|family|other",
+                    "affordances": ["SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER", "INSPECTABLE"],
+                }
+            ],
+            "motives": [
+                {"motiveId": "unique id", "label": "motive phrase", "affordances": ["MOTIVE_CANDIDATE"]}
+            ],
+            "locations": [{"locationId": "unique id", "name": "location name"}],
+            "travelRules": [
+                {
+                    "fromLocationId": "location id",
+                    "toLocationId": "location id",
+                    "travelTimeSeconds": "non-negative int",
+                }
+            ],
+            "scene": {"locationId": "location id", "name": "scene name"},
+        }
+    return contract
+
+
+def _full_draft_contract() -> Mapping[str, Any]:
+    """The authoritative FULL-DRAFT REPAIR contract (Phase17D C §2).
+
+    Derived from the SAME section contracts the stage templates embed (the
+    ``crime`` / ``persons`` / ``motives`` / ``locations`` / ``travelRules`` /
+    ``scene`` sections of case_people, the ``evidence`` section of the
+    evidence contract) plus the application-owned public-object and
+    world-graph sections — one source of truth with the strict full-draft
+    parser (``app.generation.parser`` ``_FULL_DRAFT_TOP``: crime, persons,
+    motives, objects, locations, travelRules, scene, evidence, worldGraph).
+
+    REPAIR has NO partial-patch semantics: the response must be the COMPLETE
+    repaired draft, so every top-level key is required in the contract and
+    in the transport JSON Schema.
+    """
+    case = _stage_contract("case_people")
+    evidence = _stage_contract("evidence")
+    return {
+        "crime": case["crime"],
+        "persons": case["persons"],
+        "motives": case["motives"],
+        "objects": [
+            {
+                "objectId": "unique object id",
+                "assetId": "asset id or object id",
+                "affordances": ["INSPECTABLE", "POTENTIAL_WEAPON", "POTENTIAL_SHARP_WEAPON"],
+                "subtype": "subtype or null",
+            }
+        ],
+        "locations": case["locations"],
+        "travelRules": case["travelRules"],
+        "scene": case["scene"],
+        "evidence": evidence["evidence"],
+        "worldGraph": {
+            "locations": [
+                {
+                    "locationId": "location id",
+                    "template": "kit template token",
+                    "rooms": ["room tokens"],
+                }
+            ],
+            "placements": [
+                {
+                    "objectId": "object id",
+                    "assetId": "asset id",
+                    "locationId": "location id",
+                    "anchor": "anchor token",
+                    "interaction": _INTERACTION_HINT,
+                    "evidenceId": "evidence id or null",
+                }
+            ],
+        },
+    }
+
+
+def _public_world_contract() -> Mapping[str, Any]:
+    """The authoritative PUBLIC_WORLD stage contract (Phase30-fix DEF-B).
+
+    ``public_world`` is a REAL controller generation stage (``STAGE_ORDER``)
+    that previously had NO canonical schema — Frontier/Ollama could never send
+    native structured output for it. This contract matches the strict parser's
+    ``_PUBLIC_WORLD_TOP`` EXACTLY (persons, motives, objects, locations,
+    travelRules, scene) — the player-visible projections of the ``case_people``
+    sections plus the ``objects`` section of the full-draft contract — so the
+    derived transport JSON Schema and the deterministic parser share one
+    source of truth.
+    """
+    case = _stage_contract("case_people")
+    full_draft = _full_draft_contract()
+    return {
+        "persons": case["persons"],
+        "motives": case["motives"],
+        "objects": full_draft["objects"],
+        "locations": case["locations"],
+        "travelRules": case["travelRules"],
+        "scene": case["scene"],
+    }
+
+
+def _activity_log_prompt_contract() -> Mapping[str, Any]:
+    """The PROMPT-FACING activity-log contract: the unambiguous ARRAY shape.
+
+    Phase19J-RI (ADV-A): the TRANSPORT JSON Schema (``schema_contract_as_json_schema``)
+    intentionally carries the enriched directive object (``minItems=15`` /
+    ``maxItems=20`` / ``entrySchema``) so the Ollama grammar itself bounds the
+    entry count — but embedding THAT object verbatim in the prompt as the
+    "EXACT schema" made a literal-copying model emit ``entries`` as an OBJECT
+    instead of the ARRAY the transport schema and the worked example show.
+    The prompt therefore renders the plain, unambiguous array illustration
+    (a list containing one entry object, exactly like the pre-Phase19J-RI
+    contract) derived from the SAME authoritative directive contract's
+    ``entrySchema`` strings — one source, never a duplicate.
+    """
+    directive = _stage_contract("activity_log")["entries"]
+    entry_schema = directive["entrySchema"]
+    return {
+        "entries": [
+            {
+                "timestamp": entry_schema["timestamp"],
+                "activityType": entry_schema["activityType"],
+                "activity": entry_schema["activity"],
+            }
+        ],
+    }
+
+
+def schema_contract(stage: str) -> str:
+    """Deterministic JSON text of the per-stage schema skeleton (authoritative).
+
+    ``stage`` is one of ``case_people`` / ``public_world`` / ``evidence`` /
+    ``world_requirements`` / ``asset_spec`` / ``full_draft``. The returned text
+    carries the exact numeric bounds from the authoritative schema constants. A
+    unit test asserts the rendered values equal the constants (schema-drift
+    guard). Rendered from the single ``_stage_contract`` source (Phase17B: the
+    transport JSON Schema and the prompt share this mapping — no duplicate).
+
+    Phase19J-RI (ADV-A): for ``activity_log`` (the ONLY stage whose contract
+    carries a directive object) the rendered PROMPT text shows the unambiguous
+    ARRAY illustration (``"entries": [{...}]``) instead of the directive keys
+    (``minItems``/``maxItems``/``entrySchema``) — the directive keys remain
+    authoritative ONLY in the derived transport JSON Schema, so the prompt can
+    never teach a literal-copying model an object-shaped ``entries``.
+    """
+    if stage == "activity_log":
+        rendered = _activity_log_prompt_contract()
+    else:
+        rendered = _stage_contract(stage)
+    return json.dumps(
+        rendered, sort_keys=True, ensure_ascii=False, indent=2
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Phase17B — transport-level structured output (authoritative JSON Schema)
+# --------------------------------------------------------------------------- #
+#
+# ``schema_contract_as_json_schema`` deterministically converts the SAME
+# ``_stage_contract`` mapping into a JSON Schema object for the Ollama
+# ``/api/chat`` ``format`` field. The conversion is structural and permissive
+# (matching keys + nesting + primitive types; no hand-maintained duplicate);
+# the strict parsers remain the ONLY authority that accepts/rejects a response.
+#
+# Documented stage mapping (smoke alias -> GenerationStage.value ->
+# prompt-template version -> schema contract):
+#   case_truth      -> CASE_TRUTH      -> case_people_v1        -> case_people
+#   public_world    -> PUBLIC_WORLD    -> (stage driver joins the public
+#                                          world sections into the case_people
+#                                          account; the non-driver pipeline
+#                                          stage)                     -> public_world
+#   evidence        -> EVIDENCE        -> evidence_v1           -> evidence
+#   world_requirements -> WORLD_GRAPH  -> world_requirements_v1 -> world_requirements
+#   asset_spec      -> ASSET_SPEC      -> asset_spec_v1         -> asset_spec
+#   asset_spec_repair -> ASSET_SPEC_REPAIR -> asset_spec_repair_v1 -> asset_spec
+#   activity_log    -> ACTIVITY_LOG    -> activity_log_v1       -> activity_log
+#   activity_log_repair -> ACTIVITY_LOG_REPAIR -> activity_log_repair_v1 -> activity_log
+#   repair          -> REPAIR          -> repair_v1             -> full_draft
+STAGE_TO_PROMPT_VERSION: Mapping[str, str] = {
+    "case_truth": "case_people_v1",
+    "evidence": "evidence_v1",
+    "world_graph": "world_requirements_v1",
+    "asset_spec": "asset_spec_v1",
+    "asset_spec_repair": "asset_spec_repair_v1",
+    "activity_log": "activity_log_v1",
+    "activity_log_repair": "activity_log_repair_v1",
+    "repair": "repair_v1",
+}
+STAGE_TO_CONTRACT: Mapping[str, str] = {
+    "case_truth": "case_people",
+    # Phase30-fix DEF-B: PUBLIC_WORLD is a real controller generation stage and
+    # now carries its OWN canonical contract (persons/motives/objects/
+    # locations/travelRules/scene — the strict parser's ``_PUBLIC_WORLD_TOP``).
+    "public_world": "public_world",
+    "evidence": "evidence",
+    "world_graph": "world_requirements",
+    "asset_spec": "asset_spec",
+    "asset_spec_repair": "asset_spec",
+    "activity_log": "activity_log",
+    "activity_log_repair": "activity_log",
+    "repair": "full_draft",
+}
+# The authoritative schema-contract vocabulary (a closed set; the stale-version
+# guard test asserts its members are exactly the ones shipped).
+CONTRACT_KEYS: frozenset[str] = frozenset(
+    {
+        "case_people",
+        "public_world",
+        "evidence",
+        "world_requirements",
+        "asset_spec",
+        "activity_log",
+        "full_draft",
+    }
+)
+
+# Phase30-fix DEF-B — stable server-owned schema ids for the generation
+# contract vocabulary (the wire ``name`` of a native structured-output
+# ``response_format``). The shared tokens mirror the bridge protocol ids where
+# both copies exist; ``PUBLIC_WORLD_v1`` is the new closed-token entry for the
+# previously-unmapped controller stage. Safe, non-secret, bounded.
+STAGE_TO_GENERATION_SCHEMA_ID: Mapping[str, str] = {
+    "case_truth": "CASE_PEOPLE_v1",
+    "public_world": "PUBLIC_WORLD_v1",
+    "evidence": "EVIDENCE_v1",
+    "world_graph": "WORLD_REQUIREMENTS_v1",
+    "asset_spec": "ASSET_SPEC_v1",
+    "asset_spec_repair": "ASSET_SPEC_REPAIR_v1",
+    "activity_log": "ACTIVITY_LOG_v1",
+    "activity_log_repair": "ACTIVITY_LOG_REPAIR_v1",
+    "repair": "REPAIR_v1",
+}
+
+
+def schema_id_for_generation_stage(stage_value: str) -> str | None:
+    """The stable server-owned schema id for a ``GenerationStage.value``.
+
+    ``None`` for unknown/unmapped values (the caller then simply omits the
+    native structured-output request — fail-closed, never a guessed id).
+    """
+    return STAGE_TO_GENERATION_SCHEMA_ID.get(stage_value)
+
+
+def _hint_nullable(hint: str) -> bool:
+    return "null" in hint.casefold()
+
+
+def _enum_token_list(hint: str) -> list[str]:
+    """Deterministic closed-enum token list of a contract hint.
+
+    A hint carrying the marker ``enum token1,token2,...`` (e.g. the Phase 19
+    ``environmentHint`` vocabulary) contributes exactly those tokens to the
+    derived transport JSON Schema ``{"type": "string", "enum": [...]}``. The
+    token list is everything after ``enum`` up to the first ``(`` (prose
+    parentheticals are cut); tokens are split on commas/whitespace and
+    deduplicated while preserving order. No other hint text matches the
+    marker, so no unrelated schema changes.
+    """
+    lowered = hint.casefold()
+    marker = "enum "
+    index = lowered.find(marker)
+    if index < 0:
+        return []
+    rest = hint[index + len(marker):]
+    paren = rest.find("(")
+    if paren != -1:
+        rest = rest[:paren]
+    tokens: list[str] = []
+    for token in rest.replace(",", " ").split():
+        token = token.strip()
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _key_required(value: Any) -> bool:
+    """Requiredness rule for the derived JSON Schema: containers and scalars are
+    always required; a string hint is optional only when it mentions ``null``
+    WITHOUT the explicit ``[REQUIRED]`` key marker (a field can therefore be a
+    required KEY with a nullable type — the Ollama grammar then forces the key
+    to be present). Never applied to a container's repr (which may
+    coincidentally mention ``null`` inside a nested hint)."""
+    if isinstance(value, (Mapping, list, tuple, bool, int, float)):
+        return True
+    text = str(value)
+    if "[REQUIRED]" in text:
+        return True
+    return not _hint_nullable(text)
+
+
+def _hint_json_types(hint: str) -> tuple[str, ...]:
+    """Deterministic primitive-type tuple derived from a contract hint string.
+
+    Scalar types only — array/object structure comes from the contract shape.
+    Used to build the permissive transport JSON Schema (the strict parsers stay
+    the sole acceptance authority).
+    """
+    text = hint.casefold()
+    # A declared nested JSON object (e.g. evidence ``structured`` — Phase17D A):
+    # the transport schema must declare an OBJECT so Ollama's grammar forces a
+    # real nested object and never a JSON-encoded string. The marker is the
+    # explicit "JSON object" phrasing (never matches "physical object noun").
+    # Checked BEFORE the boolean marker because the Phase31B structured
+    # teaching text legitimately mentions "real JSON boolean" inside an object
+    # hint.
+    if "json object" in text:
+        return ("object",)
+    if "bool" in text:
+        return ("boolean",)
+    # Phase31B fix: the integer branch must not fire for the word
+    # "interaction" — ``text.startswith("int")`` AND a bare ``" int"`` check
+    # both match "... interaction ..." / "interaction string…", which
+    # mis-typed ``placements[].interaction`` as integer (the documented
+    # world-graph failure class). ``\bint\b`` matches the lone "non-negative
+    # int" / "… int" token and NEVER a longer identifier like "integer" or
+    # "interaction".
+    if "integer" in text or bool(re.search(r"\bint\b", text)):
+        return ("integer",)
+    if "number" in text:
+        return ("number",)
+    if _hint_nullable(hint):
+        return ("string", "null")
+    return ("string",)
+
+
+def _contract_to_json_schema(
+    node: Any, *, _field_key: str | None = None
+) -> dict[str, Any]:
+    """Deterministic structural JSON Schema derived from the authoritative
+    ``_stage_contract`` mapping (never a hand-maintained duplicate).
+
+    Rules (documented, deterministic):
+    - ``$note`` keys carry a JSON-Schema ``description`` (never a property);
+    - a dict carrying ``partSchema`` is an ARRAY whose items are the schema of
+      ``partSchema`` and whose ``maxItems`` is the embedded ``maxParts`` integer;
+    - a dict carrying ``entrySchema`` (Phase19J-RI) is an ARRAY whose items are
+      the schema of ``entrySchema`` and whose ``minItems``/``maxItems`` are the
+      embedded optional integers (the activity-log contract's hard 15..20 entry
+      bound — the Ollama grammar can therefore never emit a one-row repair
+      wrapper); absent markers simply leave the JSON-Schema bounds unset;
+    - a list of one dict is an array whose items are that dict's schema; a list
+      of strings is an array of strings — EXCEPT a list of strings under a key
+      named ``affordances``, which derives the CLOSED canonical affordance enum
+      (``_AFFORDANCE_VOCABULARY_ENUM``, Phase31A Track B class B: the grammar
+      now teaches the documented tokens instead of letting the model invent
+      free-text affordances the strict parser must reject);
+    - a hint containing ``[x,y,z]`` declares the documented vector object with
+      exactly x/y/z numeric properties;
+    - a hint mentioning ``null`` marks the property optional (not required);
+    - otherwise the primitive type is derived from the hint text.
+    """
+    if isinstance(node, Mapping):
+        container = dict(node)
+        note = container.pop("$note", None)
+        array_schema_key = (
+            "partSchema" if "partSchema" in container
+            else "entrySchema" if "entrySchema" in container
+            else None
+        )
+        if array_schema_key is not None:
+            min_items = container.pop("minItems", None)
+            max_items = container.pop("maxParts" if array_schema_key == "partSchema" else "maxItems", None)
+            schema: dict[str, Any] = {
+                "type": "array",
+                "items": _contract_to_json_schema(container.pop(array_schema_key)),
+            }
+            if isinstance(min_items, int) and not isinstance(min_items, bool):
+                schema["minItems"] = int(min_items)
+            if isinstance(max_items, int) and not isinstance(max_items, bool):
+                schema["maxItems"] = int(max_items)
+            if note is not None:
+                schema["description"] = str(note)
+            return schema
+        props = {
+            key: _contract_to_json_schema(value, _field_key=key)
+            for key, value in container.items()
+            if key != "maxParts"
+        }
+        required = sorted(
+            key
+            for key, value in container.items()
+            if key != "maxParts" and _key_required(value)
+        )
+        schema = {"type": "object", "properties": props}
+        if required:
+            schema["required"] = required
+        if note is not None:
+            schema["description"] = str(note)
+        return schema
+    if isinstance(node, (list, tuple)):
+        if not node:
+            return {"type": "array"}
+        if all(isinstance(item, str) for item in node):
+            if _field_key == "affordances":
+                # Phase31A Track B (class B): the canonical closed affordance
+                # vocabulary becomes the ARRAY-ITEMS enum (sorted for
+                # determinism). Everything else about the array shape is
+                # unchanged — items stay strings, the strict parser + all
+                # validators stay byte-identical and remain the sole
+                # acceptance authority.
+                return {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": list(_AFFORDANCE_VOCABULARY_ENUM),
+                    },
+                }
+            return {"type": "array", "items": {"type": "string"}}
+        return {"type": "array", "items": _contract_to_json_schema(node[0])}
+    if isinstance(node, bool):
+        return {"type": "boolean"}
+    if isinstance(node, (int, float)):
+        return {"type": "number"}
+    hint = str(node)
+    if hint.startswith(_PROPOSITION_TYPE_HINT_PREFIX):
+        # The strict evidence parser owns this vocabulary. Give Ollama's JSON
+        # Schema grammar that exact enum instead of merely accepting a string.
+        return {"type": "string", "enum": sorted(PROPOSITION_TYPES)}
+    if hint.startswith(_TIMESTAMP_CONTRACT_PREFIX):
+        # Phase31B (§8/§9): the canonical ISO-8601-with-offset grammar, derived
+        # from the SAME regex the strict parser uses (single source). ``format:
+        # date-time`` is the standardized annotation; ``pattern`` is the
+        # deterministic ECMA-262 token grammar (offsets/Z/fraction). A
+        # provider whose JSON-Schema dialect rejects/ignores either keyword
+        # receives a stripped transport copy via ``schema_adapters`` (Cohere);
+        # the STRICT parser stays the sole acceptance authority.
+        return {
+            "type": "string",
+            "format": "date-time",
+            "pattern": _CANONICAL_ISO_TIMESTAMP_PATTERN,
+            "description": hint,
+        }
+    enum_tokens = _enum_token_list(hint)
+    if enum_tokens:
+        # Phase 19 Fix A: a contract hint carrying the ``enum a,b,c`` marker
+        # derives a CLOSED string enum in the transport JSON Schema (the
+        # ``environmentHint`` vocabulary is the canonical five ids). Sorted
+        # like every other derived enum (the evidence proposition vocabulary)
+        # so the grammar is deterministic. The strict parsers stay the sole
+        # acceptance authority.
+        return {"type": "string", "enum": sorted(set(enum_tokens))}
+    if "[x,y,z]" in hint:
+        return {
+            "type": "object",
+            "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "z": {"type": "number"},
+            },
+            "required": ["x", "y", "z"],
+        }
+    if hint.startswith(_REFERENCE_FIELD_PREFIX):
+        # DEF-056 (ADV-31B-04): the four evidence reference fields are OPTIONAL
+        # non-null strings. The STRICT parser treats a missing key and a JSON
+        # null identically as "absent", so the canonical transport never
+        # derived a union here (the previous ``["string","null"]`` nodes were
+        # the ONLY unions in the evidence propositions subtree — the exact
+        # subtree the Phase31A Cohere evidence 400 named). The hint still
+        # mentions "null" only to teach "never emit JSON null"; the TYPE is
+        # forced to a plain string so no union node can ever be derived.
+        return {"type": "string", "description": hint}
+    types = _hint_json_types(hint)
+    if types == ("object",):
+        # A declared nested JSON object (Phase17D A): permissive open object —
+        # the grammar admits any keys/values, so the strict parser stays the
+        # sole acceptance authority (a closed property set would force the
+        # model to invent contradictory shapes). Phase31B adds the canonical
+        # proposition->structured teaching description; the node stays an OPEN
+        # object so the Cohere transport adapter (Phase31A) keeps accepting
+        # it unchanged.
+        return {
+            "type": "object",
+            "additionalProperties": True,
+            "description": hint,
+        }
+    schema_node: dict[str, Any] = {
+        "type": list(types) if len(types) > 1 else types[0]
+    }
+    if _field_key == "interaction":
+        # Phase31B (§11): the STRICT parser treats placements[].interaction as
+        # REQUIRED, string, empty-allowed and bounded to the canonical
+        # per-field maximum; the transport schema encodes exactly that (the
+        # hint carries the [REQUIRED] key marker -> the required list).
+        schema_node["maxLength"] = MAX_SINGLE_TEXT_FIELD_CHARS
+        schema_node["description"] = hint
+    if _field_key == "reliability":
+        # Phase31B (§10): the closed reliability vocabulary must derive from
+        # the SAME canonical constant the strict parser enforces
+        # (``app.domain.evidence.RELIABILITY_VOCABULARY``) — never a
+        # hand-maintained second copy. Live failure values HIGH/DEFINITIVE
+        # can no longer pass the transport grammar.
+        schema_node["enum"] = sorted(RELIABILITY_VOCABULARY)
+        schema_node["description"] = (
+            "reliability is ONE exact lowercase token from the canonical "
+            "vocabulary ("
+            + ", ".join(sorted(RELIABILITY_VOCABULARY))
+            + ") — NEVER an uppercase token (HIGH), NEVER a synonym "
+            "(DEFINITIVE)"
+        )
+    return schema_node
+
+
+def schema_contract_as_json_schema(stage: str) -> dict[str, Any]:
+    """The authoritative transport JSON Schema (Ollama ``format`` object).
+
+    Derived from the SAME ``_stage_contract(stage)`` mapping the prompt embeds
+    — one source, never a duplicate (Phase17B §2).
+    """
+    return _contract_to_json_schema(_stage_contract(stage))
+
+
+def json_schema_for_generation_stage(stage_value: str) -> dict[str, Any] | None:
+    """The authoritative JSON Schema for a ``GenerationStage.value``, or None
+    when the stage has no schema contract. Every generation stage the Ollama
+    provider serves has one — including ``repair`` (the full-draft REPAIR
+    contract, Phase17D C §2 — structured transport demands the COMPLETE draft,
+    never a partial patch) and ``public_world`` (Phase30-fix: the strict
+    ``_PUBLIC_WORLD_TOP`` contract). Unknown/unmapped values return None
+    (fail-closed: the provider keeps ``format: "json"`` / the prompt-embedded
+    fallback)."""
+    contract_stage = STAGE_TO_CONTRACT.get(stage_value)
+    if contract_stage is None:
+        return None
+    return schema_contract_as_json_schema(contract_stage)
+
+
+# --------------------------------------------------------------------------- #
+# DEF-019 — the FRONTIER response_format schemas (parser-shaped stage OUTPUT)
+# --------------------------------------------------------------------------- #
+#
+# ``json_schema_for_generation_stage`` is the OLLAMA/transport contract: it
+# describes the PROMPT-facing document of each stage, e.g. ``case_people`` for
+# the ``case_truth`` stage. Those contracts were designed for Ollama's grammar
+# path, where the strict parsers stay the sole acceptance authority and extra
+# top-level keys are tolerated at runtime. When the SAME contract is pushed
+# through a strict native structured-output provider (Frontier
+# ``response_format`` with ``required`` keys), the provider is FORCED to emit a
+# document whose top-level keys the strict controller parser REJECTS
+# (``_CASE_TRUTH_TOP = {crime}`` vs the case_people contract's
+# [crime, persons, motives, locations, travelRules, scene]) — recreating the
+# DEF-B repair->REPAIR_BUDGET_EXHAUSTED loop.
+#
+# ``json_schema_for_stage_output`` therefore returns the PARSER-SHAPED
+# stage-OUTPUT JSON Schema for the controller-pipeline stages: the document a
+# strict provider is asked to emit is EXACTLY the document
+# ``parser.parse_stage``/``collect_full_draft_issues`` accepts. The overrides
+# are derived from the SAME trusted contract sources (never browser-supplied):
+#
+#   case_truth   -> {"crime": <the trusted case_people crime section>}
+#   world_graph  -> {"worldGraph": <the trusted full-draft worldGraph section>}
+#   evidence / public_world / repair -> unchanged (already parser-aligned)
+#
+# ``json_schema_for_generation_stage`` and every other existing consumer stay
+# byte-identical (Direct/Bridge/Ollama/Fake behavior unregressed); only the
+# Frontier native-structured-output boundary consumes this mapping
+# (``pipeline.build_request`` -> ``GenerateRequest.json_schema``).
+
+
+def _stage_output_contract(stage_value: str) -> Mapping[str, Any] | None:
+    """The authoritative output-document contract for a ``GenerationStage.value``.
+
+    ``case_truth`` wraps the trusted ``case_people`` ``crime`` section in the
+    strict parser's ``{crime}`` top level; ``world_graph`` wraps the trusted
+    ``full_draft`` ``worldGraph`` section in the strict parser's
+    ``{worldGraph}`` top level. Every other mapped stage keeps its existing
+    generation-stage contract verbatim. ``None`` for unknown/unmapped values
+    (fail-closed)."""
+    if stage_value == "case_truth":
+        case = _stage_contract("case_people")
+        return {"crime": case["crime"]}
+    if stage_value == "world_graph":
+        return {"worldGraph": _full_draft_contract()["worldGraph"]}
+    contract_stage = STAGE_TO_CONTRACT.get(stage_value)
+    if contract_stage is None:
+        return None
+    return _stage_contract(contract_stage)
+
+
+def json_schema_for_stage_output(
+    stage_value: str, *, reference_universe: Mapping[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """The parser-shaped JSON Schema the Frontier adapter sends as native
+    structured output for a controller-pipeline stage (DEF-019).
+
+    The returned schema describes a document the strict controller parser
+    accepts for that stage (``case_truth`` -> ``{crime}``, ``world_graph`` ->
+    ``{worldGraph}``, ``evidence`` / ``public_world`` / ``repair`` unchanged),
+    derived from the SAME trusted contract sources as the Ollama transport
+    schemas. ``None`` for unknown/unmapped values (fail-closed).
+
+    Phase43 (P43-FR-04): when ``reference_universe`` is supplied, ONLY the
+    reference fields (never declaration-defining ids) are narrowed to the
+    request-local closed enums — see ``narrow_stage_output_schema``. The
+    NO-ARGUMENT call is byte-identical to before (many tests assert this); the
+    new behavior is opt-in and used only by ``pipeline.build_request``.
+    """
+    if reference_universe is not None:
+        return narrow_stage_output_schema(
+            stage_value, reference_universe=reference_universe
+        )
+    contract = _stage_output_contract(stage_value)
+    if contract is None:
+        return None
+    return _contract_to_json_schema(contract)
+
+
+# --------------------------------------------------------------------------- #
+# Phase43 (P43-FR-04) — request-local reference enums.
+# --------------------------------------------------------------------------- #
+#
+# The valid reference universe is ALREADY known once a prior stage has been
+# validated into trusted canonical state. Where that is true, the transport
+# schema constrains the reference fields with closed enums so a strict
+# structured-output provider cannot emit a reference outside the current
+# universe BEFORE canonical validation. This NEVER weakens the strict parser:
+# ``narrow_stage_output_schema`` returns a FRESH deep copy and only ADDS
+# ``enum`` constraints to reference fields; the parser/validators stay the sole
+# acceptance authority.
+#
+# Only REFERENCE fields are narrowed — never declaration-defining ids (a
+# ``persons[].personId`` that DECLARES a person stays a free string so
+# red-herrings can be created). The closed universe keys are documented here:
+#
+#   personIds, locationIds, motiveIds, objectIds, evidenceIds, assetIds,
+#   anchors, roles, affordances
+_REFERENCE_UNIVERSE_KEYS: tuple[str, ...] = (
+    "personIds",
+    "locationIds",
+    "motiveIds",
+    "objectIds",
+    "evidenceIds",
+    "assetIds",
+    "anchors",
+    "roles",
+    "affordances",
+)
+
+
+def _reference_id_tuple(reference_universe: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    """Deterministic sorted unique non-empty string tuple for one universe key."""
+    if not isinstance(reference_universe, Mapping):
+        return ()
+    value = reference_universe.get(key)
+    if value is None or isinstance(value, (str, bytes)):
+        return ()
+    seen: set[str] = set()
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return ()
+    for item in iterator:
+        if isinstance(item, str) and item:
+            seen.add(item)
+    return tuple(sorted(seen))
+
+
+def _set_reference_enum(node: Any, values: tuple[str, ...], *, nullable: bool) -> None:
+    """Add a closed ``enum`` to one reference schema node (in place, fresh copy).
+
+    The node's declared ``type`` is preserved; ``nullable`` appends a JSON
+    ``null`` branch so a ``["string","null"]`` union keeps its null validity
+    (e.g. ``murdererId`` for SUICIDE, ``evidenceId`` for a decorative pick).
+    Every list is already sorted, so the enum is deterministic.
+    """
+    if not isinstance(node, dict) or not values:
+        return
+    enum: list[Any] = list(values)
+    if nullable:
+        enum.append(None)
+    node["enum"] = enum
+
+
+def _schema_props(node: Any) -> dict[str, Any]:
+    if isinstance(node, Mapping):
+        props = node.get("properties")
+        if isinstance(props, Mapping):
+            return props  # type: ignore[return-value]
+    return {}
+
+
+def _narrow_case_truth(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    # DEF-062 (ADV-43-01): each crime reference is constrained ONLY when THAT
+    # specific role is LOCKED. The case_truth stage CREATES the crime; an
+    # unlocked victim/murderer/motive/weapon/location has no canonical id yet
+    # (the person declarations come later from public_world), so its reference
+    # must stay a free string — otherwise a fresh murderer becomes unrepresentable
+    # or a victim==murderer shape is forced. The role-scoped locked-* universe
+    # keys are populated only from the locked constraints.
+    crime = _schema_props(props.get("crime"))
+    _set_reference_enum(crime.get("victimId"), _reference_id_tuple(universe, "lockedVictimIds"), nullable=False)
+    _set_reference_enum(crime.get("murdererId"), _reference_id_tuple(universe, "lockedMurdererIds"), nullable=True)
+    _set_reference_enum(crime.get("motiveId"), _reference_id_tuple(universe, "lockedMotiveIds"), nullable=False)
+    _set_reference_enum(crime.get("weaponId"), _reference_id_tuple(universe, "lockedWeaponIds"), nullable=False)
+    _set_reference_enum(crime.get("locationId"), _reference_id_tuple(universe, "lockedLocationIds"), nullable=False)
+
+
+def _narrow_evidence(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    evidence = props.get("evidence")
+    items = _schema_props(_array_items(evidence))
+    propositions = _schema_props(_array_items(items.get("propositions")))
+    _set_reference_enum(propositions.get("personId"), _reference_id_tuple(universe, "personIds"), nullable=False)
+    _set_reference_enum(propositions.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+    _set_reference_enum(propositions.get("objectId"), _reference_id_tuple(universe, "objectIds"), nullable=False)
+    _set_reference_enum(propositions.get("motiveId"), _reference_id_tuple(universe, "motiveIds"), nullable=False)
+
+
+def _narrow_world_graph(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    world_graph = _schema_props(props.get("worldGraph"))
+    placements = _schema_props(_array_items(world_graph.get("placements")))
+    _set_reference_enum(placements.get("objectId"), _reference_id_tuple(universe, "objectIds"), nullable=False)
+    _set_reference_enum(placements.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+    _set_reference_enum(placements.get("evidenceId"), _reference_id_tuple(universe, "evidenceIds"), nullable=True)
+    _set_reference_enum(placements.get("assetId"), _reference_id_tuple(universe, "assetIds"), nullable=False)
+    _set_reference_enum(placements.get("anchor"), _reference_id_tuple(universe, "anchors"), nullable=False)
+    locations = _schema_props(_array_items(world_graph.get("locations")))
+    _set_reference_enum(locations.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+
+
+def _narrow_public_world(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    # Only the SCENE location is a reference to an already-existing (crime)
+    # location; declared persons/motives/objects/locations and the travel rules
+    # between those declarations stay free so red-herrings can be created.
+    scene = _schema_props(props.get("scene"))
+    _set_reference_enum(scene.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+
+
+def _narrow_repair(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    # The draft's crime.* ids reference the (locked/current) entities; the
+    # DECLARATION arrays stay free (a repair may add/keep red-herring people).
+    crime = _schema_props(props.get("crime"))
+    _set_reference_enum(crime.get("victimId"), _reference_id_tuple(universe, "personIds"), nullable=False)
+    _set_reference_enum(crime.get("murdererId"), _reference_id_tuple(universe, "personIds"), nullable=True)
+    _set_reference_enum(crime.get("motiveId"), _reference_id_tuple(universe, "motiveIds"), nullable=False)
+    _set_reference_enum(crime.get("weaponId"), _reference_id_tuple(universe, "objectIds"), nullable=False)
+    _set_reference_enum(crime.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+    # DEF-064 (ADV-43-02): the KNOWN world-graph / evidence reference universes
+    # are already computed for repair (``trusted_reference_universe``), so the
+    # same reference enums the world_graph / evidence stages use also constrain
+    # the full-draft repair references. Declaration-defining arrays
+    # (persons[].personId, objects[].objectId, evidence[].id, top-level
+    # locations[].locationId) stay free.
+    _narrow_world_graph(props, universe)
+    _narrow_evidence(props, universe)
+
+
+def _array_items(node: Any) -> Any:
+    if isinstance(node, Mapping):
+        items = node.get("items")
+        if isinstance(items, Mapping):
+            return items
+    return {}
+
+
+_NARROWERS: Mapping[str, Any] = {
+    "case_truth": _narrow_case_truth,
+    "evidence": _narrow_evidence,
+    "world_graph": _narrow_world_graph,
+    "public_world": _narrow_public_world,
+    "repair": _narrow_repair,
+}
+
+
+def narrow_stage_output_schema(
+    stage_value: str, *, reference_universe: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """A deep-copied, path-aware narrowing of the parser-shaped stage schema.
+
+    Returns a FRESH schema (the source contract is never mutated) with closed
+    ``enum`` constraints added ONLY to explicit REFERENCE fields at known stage
+    paths. The source is never modified, and the strict parser/validators are
+    untouched. When ``stage_value`` is unknown the base ``None`` is returned.
+    """
+    schema = json_schema_for_stage_output(stage_value)
+    if schema is None or not isinstance(reference_universe, Mapping):
+        return schema
+    narrowed = copy.deepcopy(schema)
+    narrower = _NARROWERS.get(stage_value)
+    if narrower is None:
+        return narrowed
+    try:
+        narrower(_schema_props(narrowed), reference_universe)
+    except Exception:  # noqa: BLE001 - narrowing is additive best-effort
+        return schema
+    return narrowed
+
+
+# --------------------------------------------------------------------------- #
+# Phase31A — stable schema fingerprinting (SAFE diagnostics only)
+# --------------------------------------------------------------------------- #
+#
+# ``schema_fingerprint`` hashes a LOCAL trusted schema into a stable 64-char
+# SHA-256 hex, so observability can record WHICH schema a stage used (and its
+# canonical byte size) without ever logging schema contents. The sources are
+# ONLY this module's server-owned ``_stage_contract`` constants (derived via
+# the public ``json_schema_for_stage_output`` / ``json_schema_for_generation_stage``
+# helpers) — a provider/browser value can never reach these functions. The
+# canonical serialization sorts every mapping key recursively, so the output
+# never depends on insertion order.
+
+_CANONICAL_JSON_SEPARATORS = (",", ":")
+
+
+def _canonical_sort(value: Any) -> Any:
+    """Recursively sort mapping keys so the canonical form is a pure function
+    of the object graph (never of insertion order). Lists keep their order
+    (array positions are semantically meaningful in a JSON Schema)."""
+    if isinstance(value, Mapping):
+        return {
+            key: _canonical_sort(value[key])
+            for key in sorted(value, key=lambda item: str(item))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_sort(item) for item in value]
+    return value
+
+
+def canonical_schema_bytes(schema: Mapping) -> bytes:
+    """Deterministic canonical UTF-8 serialization of a trusted schema mapping.
+
+    Keys are recursively sorted, separators are the stable minimal comma/colon
+    pair and non-ASCII is escaped (``ensure_ascii=True``), so the returned
+    bytes are a pure function of the schema object graph. Used by
+    ``schema_fingerprint`` and ``schema_byte_length_for_stage_output`` only —
+    never sent anywhere or logged.
+    """
+    if not isinstance(schema, Mapping):
+        raise TypeError("schema must be a mapping")
+    return json.dumps(
+        _canonical_sort(schema),
+        sort_keys=True,
+        separators=_CANONICAL_JSON_SEPARATORS,
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+
+def schema_fingerprint(schema: Mapping) -> str:
+    """Stable SHA-256 hex (64 lowercase hex chars) of a trusted schema.
+
+    Additive Phase31A diagnostics helper: hashes the CANONICAL serialization
+    (sorted keys, stable separators) so identical schemas always produce the
+    identical fingerprint regardless of how the mapping was constructed.
+    """
+    return hashlib.sha256(canonical_schema_bytes(schema)).hexdigest()
+
+
+def schema_fingerprint_for_generation_stage(stage_value: str) -> str | None:
+    """Fingerprint of the trusted OLLAMA/transport contract for a
+    ``GenerationStage.value`` (``json_schema_for_generation_stage``), or None
+    for unmapped values. Local-trusted-schema-only."""
+    schema = json_schema_for_generation_stage(stage_value)
+    if schema is None:
+        return None
+    return schema_fingerprint(schema)
+
+
+def schema_fingerprint_for_stage_output(stage_value: str) -> str | None:
+    """Fingerprint of the trusted PARSER-SHAPED stage-OUTPUT schema
+    (``json_schema_for_stage_output`` — the exact schema the Frontier adapter
+    sends as native structured output), or None for unmapped values.
+    Local-trusted-schema-only: never a provider/browser value."""
+    schema = json_schema_for_stage_output(stage_value)
+    if schema is None:
+        return None
+    return schema_fingerprint(schema)
+
+
+def schema_byte_length_for_stage_output(stage_value: str) -> int | None:
+    """Canonical byte length (``len(canonical_schema_bytes...``) of the trusted
+    stage-OUTPUT schema for a ``GenerationStage.value``, or None for unmapped
+    values. A safe size/probe diagnostic: the number is logged, the schema
+    contents never are."""
+    schema = json_schema_for_stage_output(stage_value)
+    if schema is None:
+        return None
+    return len(canonical_schema_bytes(schema))
+
+
+# --------------------------------------------------------------------------- #
+# Phase35 — compact CASE QUALITY RULES (provider-neutral, Ollama-friendly).
+# --------------------------------------------------------------------------- #
+# The deterministic Phase35 quality contract (phase35-Fix-GCQ.md §21) rendered
+# for every persons/evidence-bearing stage. It is SHORT on purpose (local
+# Ollama models must not be crowded out) and provider-neutral (the same block
+# travels to Ollama and Frontier). It mirrors exactly the deterministic rules
+# in ``app.generation.case_quality`` — guidance only; the deterministic
+# validator stays the sole acceptance authority. Never a full golden savegame.
+CASE_QUALITY_RULES = (
+    "CASE QUALITY RULES (deterministic, validated after every pass):\n"
+    "- The victim must never appear in suspect candidates (give the victim "
+    "ONLY the VISIBLE_CHARACTER affordance, never SUSPECT_ELIGIBLE).\n"
+    "- Witnesses must never appear in suspect candidates (witnesses keep ONLY "
+    "the VISIBLE_CHARACTER affordance, never SUSPECT_ELIGIBLE).\n"
+    "- The true murderer must remain publicly an ordinary suspect or witness "
+    "before reveal: public person role is ONE exact token of "
+    "victim|suspect|witness|family|other — NEVER 'murderer', NEVER a truth "
+    "label.\n"
+    "- The murderer must be one of the final homicide targets: a public person "
+    "with role 'suspect' OR role 'witness'. A suspect murderer carries "
+    "SUSPECT_ELIGIBLE exactly like every other suspect; a witness murderer "
+    "keeps role 'witness' WITHOUT SUSPECT_ELIGIBLE.\n"
+    "- Every playable witness must have usable statement content: for each "
+    "role 'witness' person provide at least one evidence item of kind "
+    "witness_statement (with a non-empty statement, a speakerName that matches "
+    "the witness name, and a WITNESS_CLAIMS proposition referencing that "
+    "witness personId).\n"
+    "- Every referenced person/evidence/weapon/motive/object/location ID must "
+    "resolve to a declared value.\n"
+    "- Do not expose THE TRUTH in public role labels or public descriptions.\n"
+    "- Produce only fields allowed by the requested schema."
+)
+
+
+# --------------------------------------------------------------------------- #
+# Phase43A — provider-neutral PUBLIC WORLD BREADTH RULES.
+# --------------------------------------------------------------------------- #
+# The generic Frontier PUBLIC_WORLD stage must provision the SAME world
+# cardinality the Ollama ``_CASE_FIELD_RULES`` template already teaches: the
+# victim + murderer + witness AND at least TWO red-herring suspects, the locked
+# motive plus at least TWO red-herring MOTIVE_CANDIDATE motives, the locked
+# scene plus at least TWO other distinct locations, and MANDATORY travel rules
+# from EVERY non-scene location TO the scene (at least two >= 1200s). Without
+# this explicit breadth contract the live Easy case under-provisioned the
+# public world and produced an empty FINAL HOMICIDE TARGET universe
+# (``FINAL_TARGET_UNIVERSE_EMPTY``). It is a SEPARATE constant on purpose: the
+# Ollama ``_CASE_FIELD_RULES`` template bytes are pinned by tests and stay
+# byte-identical. Guidance only — every validator stays the sole acceptance
+# authority.
+PUBLIC_WORLD_BREADTH_RULES = (
+    "PUBLIC WORLD BREADTH RULES (deterministic, validated after every pass):\n"
+    "- persons: include the victim, the murderer and the witness (the "
+    "murderer may be a public suspect OR a public witness; the public role "
+    "vocabulary never changes) and at least TWO RED-HERRING suspects (role "
+    "'suspect' with the SUSPECT_ELIGIBLE affordance) — a case with a single "
+    "suspect is not a valid mystery.\n"
+    "- the FINAL HOMICIDE TARGET universe is every public person with role "
+    "'suspect' OR role 'witness' (the victim excluded): it MUST NOT be empty, "
+    "so ALWAYS emit at least two public suspects/witnesses an investigator "
+    "could accuse.\n"
+    "- motives: include the LOCKED motive plus at least TWO additional "
+    "MOTIVE_CANDIDATE red-herring motives with distinct plausible labels — "
+    "the solver must be able to EXCLUDE every alternative motive, so a "
+    "one-motive case is not a valid mystery.\n"
+    "- locations: include the locked location/scene plus at least TWO OTHER "
+    "distinct locations (a lab, a lobby, a parking lot, a lodge, a store...) — "
+    "the other suspects need somewhere ELSE to be during the crime.\n"
+    "- travelRules: MANDATORY — for EVERY non-scene location, provide the "
+    "travel time FROM that location TO the scene (fromLocationId = the other "
+    "location, toLocationId = the scene location, travelTimeSeconds = a "
+    "realistic 900..2700, i.e. 15-45 minutes). At least two non-scene "
+    "locations MUST have travelTimeSeconds >= 1200. A location without a "
+    "travel rule to the scene cannot be used for an alibi/opportunity check."
+)
+
+
+# --------------------------------------------------------------------------- #
+# shared template fragments
+# --------------------------------------------------------------------------- #
+
+_NO_INTERNALS = (
+    "NEVER output hidden truth, solver proof, secrets, credentials, database "
+    "internals, the murderer/weapon 'answer', or any clue that this is a "
+    "generated puzzle. You PROPOSE structured facts only."
+)
+
+
+# --------------------------------------------------------------------------- #
+# Phase33 RAD-2 — authoritative generation scope (model-facing vocabulary)
+# --------------------------------------------------------------------------- #
+#
+# Phase33 RAD-1 evidence: the real-content failures were overwhelmingly
+# "Missing trusted context" — the model never receives the *allowed* value
+# vocabularies (asset registry + catalog ids, kit-scoped anchor ids,
+# interaction ids) and in the locked-witness case receives only ambiguous
+# guidance ("include the witness" without binding it to the locked Witness
+# value). The blocks below render the AUTHORITATIVE allowed scalar
+# vocabularies from the application-owned registries (``AssetRegistry.ASSET_IDS``,
+# the Asset Oracle catalog ``app.assets.catalog`` ``by_id`` keys, the
+# environment-kit manifests ``app.environments.manifests``, ``ANCHOR_ALLOWLIST``
+# and ``INTERACTION_ALLOWLIST``) into the model-facing stage/repair contexts.
+#
+# DEF-058 / DEF-060: ``safety.validate_asset_reference`` accepts the UNION of
+# the legacy registry AND the Oracle catalog (the Phase 10+ asset authority),
+# but the composition gate (``app.environments.placer.validate_placement``)
+# accepts ONLY catalog-backed ids. The effective guaranteed-valid asset scope
+# is therefore the catalog ``by_id`` keys (registry AND catalog), with the
+# catalog-less legacy ids listed separately as NOT composition-usable — the
+# block never again advertises an id the composition gate would reject.
+#
+# DEF-059: anchors are KIT/ENVIRONMENT-SCOPED — a placement is valid only when
+# its anchor exists in the case's OWN kit. The per-kit anchor vocabularies are
+# DERIVED from the environment manifests (never hardcoded per kit), so the kit
+# set can grow without this block going stale.
+#
+# They are GUIDANCE ONLY: every validator stays the sole acceptance authority
+# and rejects out-of-scope values exactly as before (byte-identical rejection
+# semantics).
+
+
+def _composition_asset_ids() -> tuple[str, ...]:
+    """Sorted catalog-backed asset ids — the composition-usable vocabulary.
+
+    The Asset Oracle catalog (``app.assets.catalog`` — the Phase 10+ asset
+    authority) owns the ids the composition gate accepts as real placeable
+    assets (``app.environments.placer.validate_placement`` checks
+    ``asset_id in catalog.by_id`` first). ``safety.validate_asset_reference``
+    accepts the UNION of ``AssetRegistry.ASSET_IDS`` and the catalog ``by_id``
+    keys; only the catalog-backed ids are composition-valid, so the
+    model-facing scope advertises exactly these as guaranteed-valid ids.
+    """
+    from app.assets.catalog import load_catalog_from_repo
+
+    return tuple(sorted(load_catalog_from_repo().by_id))
+
+
+def _registry_only_asset_ids() -> tuple[str, ...]:
+    """Sorted registry ids that are NOT catalog-backed (composition-unsafe).
+
+    These pass ``safety.validate_asset_reference`` (registered for the
+    reference validator) but the composition gate
+    (``app.environments.placer.validate_placement``) rejects them
+    ('asset ... is not in the asset catalog') — they are never advertised as
+    guaranteed-valid, only named so the model knows to avoid them.
+    """
+    catalog_backed = frozenset(_composition_asset_ids())
+    return tuple(
+        sorted(
+            asset_id
+            for asset_id in AssetRegistry.ASSET_IDS
+            if asset_id not in catalog_backed
+        )
+    )
+
+
+def _kit_anchor_table() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Deterministic per-kit anchor vocabulary (environment-manifest derived).
+
+    A placement is composition-valid only when its anchor exists in the
+    case's OWN kit (``app.environments.placer.validate_placement`` rejects a
+    cross-kit anchor: 'unknown anchor ... in kit ...'). This helper renders
+    the per-kit anchor vocabularies from the environment manifests —
+    intersected with the semantic ``ANCHOR_ALLOWLIST`` the world-graph
+    validator accepts — instead of a flat global list that hides the kit
+    scoping. Returns an empty tuple when the manifests cannot be loaded
+    (fail-soft: ``generation_scope_block`` then falls back to the global
+    allowlist plus explicit kit-scope language). Deterministic: kits are
+    sorted by environment id and anchors are sorted within each kit.
+    """
+    try:
+        from app.environments.manifests import load_all_environments
+
+        kits = load_all_environments()
+    except Exception:  # noqa: BLE001 - manifest unavailability must not break
+        # prompt import; the block still renders the global allowlist.
+        return ()
+    allowed = frozenset(ANCHOR_ALLOWLIST)
+    return tuple(
+        (
+            kit.environment_id,
+            tuple(
+                sorted(a.anchor_id for a in kit.anchors if a.anchor_id in allowed)
+            ),
+        )
+        for kit in sorted(kits, key=lambda kit: kit.environment_id)
+    )
+
+
+_NO_KIT_ARGUMENT: Any = object()
+"""Sentinel default for ``generation_scope_block`` (P43-FR-10 / DEF-063).
+
+The NO-ARGUMENT call must stay byte-identical (Ollama templates and many tests
+rely on it). Passing ANY value (including ``None``/``""`` for an unresolved kit)
+opts into the kit-scoped rendering: only the SELECTED kit's anchors are offered
+and other kits' anchors are never presented as options."""
+
+
+def _kit_scoped_anchor_block(
+    environment_id: Any, kit_table: tuple[tuple[str, tuple[str, ...]], ...]
+) -> str:
+    """The anchor guidance for ONE selected environment kit (DEF-063).
+
+    Only the selected kit's manifest-derived anchors are listed; anchors that
+    belong exclusively to any OTHER kit are NEVER offered. When the kit is
+    unresolved (``None``/``""``/unknown id) no kit anchors are offered at all —
+    the model is told a kit must be selected rather than handed the multi-kit
+    vocabulary to infer from.
+    """
+    selected = (
+        environment_id
+        if isinstance(environment_id, str) and environment_id.strip()
+        else None
+    )
+    if selected is None:
+        return (
+            "- SELECTED ENVIRONMENT KIT: (must be selected — no location/"
+            "environment could be resolved). Anchors are KIT/ENVIRONMENT-SCOPED; "
+            "NO kit anchors are offered here and anchors from multiple kits MUST "
+            "NOT be assumed or mixed. Select exactly one kit first.\n"
+        )
+    anchors = dict(kit_table).get(selected) if kit_table else None
+    if anchors is None:
+        return (
+            f"- SELECTED ENVIRONMENT KIT: {selected!r} — anchors are KIT/"
+            "ENVIRONMENT-SCOPED; only this kit's anchors are valid, but no anchor "
+            "vocabulary could be derived for it. Anchors from any OTHER kit are "
+            "NOT valid for this case and MUST NOT be used.\n"
+        )
+    return (
+        f"- SELECTED ENVIRONMENT KIT: {selected!r} — worldGraph.placements[]"
+        ".anchor MUST be an anchor of THIS kit (anchors are KIT/ENVIRONMENT-"
+        "SCOPED; a cross-kit anchor from a DIFFERENT kit fails composition: "
+        "'unknown anchor ... in kit ...'). The selected kit's anchor vocabulary "
+        "is:\n"
+        f"      kit {selected!r}: {', '.join(anchors)}\n"
+        "- Anchors belonging to any OTHER kit are NOT valid for this case and "
+        "MUST NOT be used.\n"
+    )
+
+
+def generation_scope_block(environment_id: Any = _NO_KIT_ARGUMENT) -> str:
+    """Deterministic, authoritative asset/anchor/interaction scope block.
+
+    Rendered from the frozen registries AND the Asset Oracle catalog
+    (``app.assets.catalog``) AND the environment-kit manifests
+    (``app.environments.manifests``); never an invented id. Same function
+    -> same bytes. Consumed by the REPAIR / PUBLIC_WORLD / WORLD_GRAPH prompt
+    contexts (``pipeline._stage_context``) and the REPAIR / WORLD_REQUIREMENTS
+    prompt templates.
+
+    The advertised ASSET scope is composition-valid: an id is guaranteed only
+    when it is catalog-backed (``_composition_asset_ids``); the catalog-less
+    legacy ``AssetRegistry`` ids are listed separately as NOT composition-
+    usable (``_registry_only_asset_ids``). The ANCHOR scope is
+    kit/environment-scoped: the per-kit anchor vocabularies are derived from
+    the environment manifests (``_kit_anchor_table``), because a placement is
+    valid only when its anchor exists in the case's OWN kit.
+
+    Phase43 (P43-FR-10 / DEF-063): when ``environment_id`` is supplied (the
+    resolved SELECTED kit — ``None``/``""`` when unresolved) only that kit's
+    anchors are offered and every other kit's anchors are withheld, so the
+    model is never handed the full multi-kit anchor table. The NO-ARGUMENT
+    call keeps the original multi-kit vocabulary byte-identically.
+    """
+    guaranteed = _composition_asset_ids()
+    registry_only = _registry_only_asset_ids()
+    kit_table = _kit_anchor_table()
+    kit_scoped = environment_id is not _NO_KIT_ARGUMENT
+    if kit_scoped:
+        anchor_block = _kit_scoped_anchor_block(environment_id, kit_table)
+    elif kit_table:
+        anchor_block = (
+            "- worldGraph.placements[].anchor MUST be an anchor of the CASE'S "
+            "OWN environment kit — anchors are KIT/ENVIRONMENT-SCOPED, and a "
+            "placement is valid ONLY when the anchor exists in that kit (a "
+            "cross-kit anchor from a DIFFERENT kit fails composition: 'unknown "
+            "anchor ... in kit ...'). The per-kit anchor vocabularies (derived "
+            "from the app environment manifests; the global allowed union is "
+            "the sum of these kit vocabularies) are:\n"
+            + "\n".join(
+                f"      kit {kit_id!r}: {', '.join(anchor_ids)}"
+                for kit_id, anchor_ids in kit_table
+            )
+            + "\n"
+        )
+    else:
+        anchor_block = (
+            "- worldGraph.placements[].anchor MUST be one of the semantic "
+            "anchor ids: "
+            + ", ".join(sorted(ANCHOR_ALLOWLIST))
+            + ".\n"
+            "- anchors are KIT/ENVIRONMENT-SCOPED: a placement is valid ONLY "
+            "when the anchor exists in the case's own environment kit — a "
+            "cross-kit anchor fails composition ('unknown anchor ... in kit "
+            "...'). NEVER invent a coordinate, a room or an anchor token "
+            "(rejected: 'anchor ... is not in ANCHOR_ALLOWLIST').\n"
+        )
+    registry_only_block = (
+        f"- Legacy registry-only ids that ARE registered for the reference "
+        f"validator but are NOT in the asset catalog and are therefore "
+        f"REJECTED at composition ('asset ... is not in the asset catalog'), "
+        f"NEVER use them for objects or worldGraph.placements: "
+        f"{', '.join(registry_only)}.\n"
+        if registry_only
+        else ""
+    )
+    return (
+        "AUTHORIZED GENERATION SCOPE (authoritative - keep every generated "
+        "reference inside this scope):\n"
+        "- assetId (objects and worldGraph.placements) MUST be a REGISTERED "
+        "asset id. Always reuse one of these guaranteed-valid, "
+        "composition-usable ids: "
+        + ", ".join(guaranteed)
+        + ".\n"
+        "- NEVER invent an asset id (e.g. 'PROP_SNEAKERS_01', 'prop_knife', "
+        "'knife'); an unregistered id is rejected with 'is not in the "
+        "AssetRegistry'.\n"
+        + registry_only_block
+        + anchor_block
+        + "- worldGraph.placements[].interaction MUST be \"\" (decorative, not "
+        "interactable) or one of: "
+        + ", ".join(sorted(INTERACTION_ALLOWLIST))
+        + ".\n"
+        "The validators remain the sole acceptance authority: a value outside "
+        "this scope is rejected, never coerced."
+    )
+
+
+_IDENTITY_MATCH_CONTRACT = (
+    "matching is case-insensitive and keeps ONLY ASCII letters and digits "
+    "(spaces, underscores, punctuation AND non-ASCII/accented letters are "
+    "removed, so 'Rita Vale' == 'rita_vale' == 'RITA VALE'; an accented "
+    "spelling like 'Émily Reed' normalizes to 'milyreed', so write witness "
+    "names with plain ASCII letters only)"
+)
+
+
+def locked_witness_contract_line() -> str:
+    """Bound a locked ``Witness:`` constraint to a realizeable person.
+
+    The persons rule already says 'include the witness' but never ties the
+    generated witness to the LOCKED value (Phase33 RAD-1 row: Ambiguous
+    guidance). This sentence states the EXACT ``LockedConstraints`` match
+    semantics (``constraints.normalize_identity``: Unicode casefold + keep
+    ONLY ASCII letters/digits — case, spaces, underscores, punctuation AND
+    non-ASCII letters are all dropped) without relaxing the lock and without
+    exposing case truth. The locked value itself never appears here: the
+    CASE_TRUTH / CASE_PEOPLE template renders the locked constraint sheet
+    separately (its ``__LOCKED__`` slot), while the REPAIR template
+    intentionally has NO ``__LOCKED__`` slot — a locked-witness violation is
+    TERMINAL (never repairable), so REPAIR never runs for it and the locked
+    value reaches the model only through the sanitized validator issue text.
+    """
+    return (
+        "LOCKED WITNESS CONTRACT - when the locked constraints include "
+        "'witness', persons MUST include EXACTLY that witness person: a person "
+        "with role 'witness' whose personId or name matches the locked witness "
+        "value, where " + _IDENTITY_MATCH_CONTRACT + ". A missing or renamed "
+        "witness is a TERMINAL validation failure and cannot be repaired."
+    )
+
+
+# Stable pre-rendered fragments (deterministic; rendered once at import).
+_AUTHORIZED_SCOPE_TEXT = generation_scope_block()
+_LOCKED_WITNESS_CONTRACT_TEXT = locked_witness_contract_line()
+_SCOPE_AND_WITNESS_TEXT = _AUTHORIZED_SCOPE_TEXT + "\n\n" + _LOCKED_WITNESS_CONTRACT_TEXT
+
+
+def _asset_spec_rules() -> str:
+    return (
+        "AssetSpec rules (MUST follow all of them):\n"
+        "- Return ONLY a single JSON document (no markdown fences, no prose).\n"
+        "- Top-level keys are EXACTLY: canonicalName, category, subtype, "
+        "dimensions, parts. Do not invent, rename or drop any key (never "
+        "snake_case variants, never extra keys).\n"
+        "- Part keys are EXACTLY: id, role, primitive, transform, material, "
+        "sourceColor, parentId.\n"
+        "- transform keys are EXACTLY: position, rotation, scale; every vector "
+        "is an object with EXACT keys x, y, z.\n"
+        "- category is ONE exact token from the schema list (e.g. decor, "
+        "evidence, utility, character, furniture, electronics, structural).\n"
+        "- primitive is ONE exact token from the schema list (box, cylinder, "
+        "plane, sphere).\n"
+        "- material is ONE exact token from the schema material list (e.g. "
+        "ceramic, fabric, leather, metal.brass, metal.steel, plastic, "
+        "wood.dark, wood.light). Never invent a material word.\n"
+        f"- At most {MAX_PARTS} parts (1 part minimum).\n"
+        f"- Use ONLY the primitives: {sorted(PRIMITIVE_ALLOWLIST)}.\n"
+        f"- Use ONLY the materials: {sorted(MATERIAL_VOCAB)}.\n"
+        "- All part ids unique (part_00..part_23).\n"
+        "- Bounded finite dimensions/position/rotation/scale (see schema).\n"
+        "- Maximum parent depth 2 (a parent must be an EARLIER part).\n"
+        "- NO URLs, paths, HTML, scripts, shaders, event handlers, or "
+        "executable code.\n"
+        "- Prefer simple, recognizable silhouettes; use as few parts as "
+        "necessary (a single sphere is not a usable pick or knife).\n"
+        "- Do NOT place all parts at the same position (a same-origin pile has "
+        "no recognizable silhouette and is rejected).\n"
+        "- Near-zero or collapsed geometry is disallowed: hand-held or "
+        "evidence objects need at least TWO well-separated parts (positions "
+        "differing by more than 0.05m on one axis); never declare a single "
+        "tiny part or a 0.05m clump as the whole object.\n"
+        "- STUDY THIS VALID MINIMAL thin-object example (copy its STRUCTURE and "
+        "layout — declared dims COVER the parts, thin blade, parts "
+        "separated by more than 0.05m; invent your own values):\n"
+        '{"canonicalName":"Ceremonial Ice Pick","category":"decor",'
+        '"subtype":"ceremonial_ice_pick",'
+        '"dimensions":{"x":0.04,"y":0.32,"z":0.04},\n'
+        ' "parts":[{"id":"part_00","role":"handle","primitive":"cylinder",'
+        '"transform":{"position":{"x":0.0,"y":0.0,"z":0.0},'
+        '"rotation":{"x":0.0,"y":0.0,"z":0.0},'
+        '"scale":{"x":0.04,"y":0.18,"z":0.04}},"material":"wood.dark"},\n'
+        '  {"id":"part_01","role":"blade","primitive":"box",'
+        '"transform":{"position":{"x":0.0,"y":0.2,"z":0.0},'
+        '"rotation":{"x":0.0,"y":0.0,"z":0.0},'
+        '"scale":{"x":0.02,"y":0.1,"z":0.005}},"material":"metal.brass"}'
+        "]\n}"
+    )
+
+
+def _phase17_repair_instruction() -> str:
+    """Phase 17 — deterministic geometry-quality repair instruction.
+
+    The LLM proposes the object; Procedural Detective verifies its geometry. The
+    repair candidate is NEVER trusted incrementally: after this repair the full
+    Phase 13 schema/security validation AND the Phase 17 geometry-quality
+    validation run again before any compilation/publishing.
+    """
+    return (
+        "Geometry-quality instructions (Phase 17):\n"
+        "- Dimensions and positions are in METERS: 0.25 means 25 centimeters, "
+        "25 means 25 meters.\n"
+        "- Make the declared dimensions the TRUE overall bounding box: they "
+        "must be large enough to cover every part you place (if a part pokes "
+        "past the declared box, either move the part inside OR enlarge the "
+        "declared dimensions so they cover it — fix both together until they "
+        "agree).\n"
+        "- Keep every part inside the declared object envelope (declared "
+        "dimensions are the object's overall bounds in metres).\n"
+        "- Use a recognizable silhouette: at least TWO well-separated parts "
+        "(positions differing by more than 0.05m along one axis) for hand-held "
+        "or evidence objects. A single sphere is not a usable ice pick or "
+        "knife.\n"
+        "- Do not place all parts at the same origin (no overlapping "
+        "same-position pile).\n"
+        "- Use valid identifiers and roles: part ids like part_00..part_23 and "
+        "roles matching ^[a-z0-9_]+$ (no dashes, spaces or uppercase).\n"
+        "- Use only allowed materials and primitives (listed in the schema "
+        "above).\n"
+        "- Keep the object at a visible, plausible scale; use as few parts as "
+        "necessary.\n"
+        "- Use the EXACT schema key names above (canonicalName, category, "
+        "subtype, dimensions, parts and the part keys) — never rename, drop or "
+        "invent keys.\n"
+    )
+
+
+# --- Phase17B field ring-fencing fragments (messages/instructions only; the
+# --- schema contracts and strict parsers are untouched).
+
+_CASE_FIELD_RULES = (
+    "\n\nFIELD RULES (strict):\n"
+    "- Return ONLY the JSON object for the case_people stage - no extra text, "
+    "no markdown fences.\n"
+    "- The document keys are EXACTLY: crime, persons, motives, locations, "
+    "travelRules, scene.\n"
+    "- crime uses EXACTLY: type, victimId, murdererId, motiveId, weaponId, "
+    "locationId, crimeTime, resolutionType (camelCase - never snake_case "
+    "variants like crime_time, never renamed or dropped keys).\n"
+    "- resolutionType is EXACTLY one token from HOMICIDE, SUICIDE: a HOMICIDE "
+    "names a NON-EMPTY murdererId (a canonical person id, never a display "
+    "name), while a SUICIDE sets murdererId to the JSON null value and names "
+    "no murderer.\n"
+    "- crimeTime uses EXACTLY: canonical (ISO-8601 timestamp) and "
+    "accusationToleranceSeconds (a plain non-negative integer).\n"
+    "- person role is one exact token from: victim, suspect, witness, family, "
+    "other.\n"
+    "- affordances use ONLY the exact tokens SUSPECT_ELIGIBLE, MOTIVE_CANDIDATE, "
+    "POTENTIAL_WEAPON, VISIBLE_CHARACTER, INSPECTABLE, POTENTIAL_SHARP_WEAPON, "
+    "POTENTIAL_BLUNT_WEAPON, POTENTIAL_POISON.\n"
+    "- every motive affordances array contains exactly the token MOTIVE_CANDIDATE.\n"
+    "- travelTimeSeconds is a plain non-negative integer.\n"
+    "- persons: include the victim, the murderer and the witness (the "
+    "murderer may be a public suspect OR a public witness; the public role "
+    "vocabulary never changes) and at least TWO RED-HERRING suspects (role "
+    "'suspect' with the SUSPECT_ELIGIBLE affordance) — a case with a single "
+    "suspect is not a valid mystery.\n"
+    "- LOCKED WITNESS CONTRACT: when the locked constraints include 'witness', "
+    "the SAME person MUST appear in persons with role 'witness' AND a personId "
+    "or name that matches the locked witness value, where " + _IDENTITY_MATCH_CONTRACT + "; "
+    "a missing or renamed witness is a TERMINAL failure that "
+    "cannot be repaired.\n"
+    "- motives: include the LOCKED motive plus at least TWO additional "
+    "MOTIVE_CANDIDATE red-herring motives with distinct plausible labels — "
+    "the solver must be able to EXCLUDE every alternative motive, so a "
+    "one-motive case is not a valid mystery.\n"
+    "- locations: include the locked location/scene plus at least TWO OTHER "
+    "distinct locations (a lab, a lobby, a parking lot, a lodge, a store...) — "
+    "the other suspects need somewhere ELSE to be during the crime.\n"
+    "- travelRules: MANDATORY — for EVERY non-scene location, provide the "
+    "travel time FROM that location TO the scene (fromLocationId = the other "
+    "location, toLocationId = the scene location, travelTimeSeconds = a "
+    "realistic 900..2700, i.e. 15-45 minutes). At least two non-scene "
+    "locations MUST have travelTimeSeconds >= 1200. A location without a "
+    "travel rule to the scene cannot be used for an alibi/opportunity check.\n"
+    "- Use EXACTLY the id tokens from the locked identity sheet for the locked "
+    "people, the locked motive, the locked weapon and the locked time (never "
+    "invent alternative ids for them); invent fresh ids ONLY for the "
+    "red-herring people/motives/locations you create.\n"
+    "- Do not invent keys, values, ids or enums; stay inside the schema.\n"
+)
+
+
+_EVIDENCE_TIME_REQUIRED_SENTENCE = (
+    "- These proposition types REQUIRE an observedAt timestamp (never null, "
+    "never omitted): "
+    + ", ".join(sorted(TIME_REQUIRED_TYPES))
+    + ". Every OTHER type keeps observedAt ABSENT — never emitted as null "
+    "(an omitted key, never a JSON null)."
+)
+
+
+_EVIDENCE_FIELD_RULES = (
+    "\n\nFIELD RULES (strict):\n"
+    "- The document has EXACTLY one top-level key: evidence (an array of "
+    "items) - never rename or wrap it.\n"
+    "- Each evidence item uses EXACTLY: id, kind, reliability, discoverable, "
+    "sourceRef, propositions, presentation.\n"
+    "- kind is one exact token from: email, physical, financial, cctv, "
+    "testimonial, forensic, witness_statement.\n"
+    "- reliability is one exact token from: high, medium, low; discoverable "
+    "is a real boolean (true or false).\n"
+    "- sourceRef uses EXACTLY kind and sourceId; presentation uses EXACTLY "
+    "title and description (plus the documented typed public fields).\n"
+    "- proposition type is one of the exact proposition type tokens listed in "
+    "the schema - never an invented token, never a verdict or final-truth "
+    "declaration, never a lowercase/natural-language label.\n"
+    + _EVIDENCE_TIME_REQUIRED_SENTENCE
+    + "\n"
+    "For a time-requiring type, observedAt MUST be the proposition's OWN "
+    "observedAt field (a sibling of type) — never inside structured, never "
+    "renamed.\n"
+    "- WORKED EXAMPLE — a timestamped proposition is EXACTLY:\n"
+    "    {\"type\": \"NOISE_HEARD_AT\", \"observedAt\": "
+    "\"2026-09-19T22:00:00+02:00\", \"uncertaintySeconds\": 60, \"locationId\": "
+    "\"loc001\"}\n"
+    "  observedAt sits at the PROPOSITION level. The DATE and +02:00 offset in "
+    "this example are placeholders — in your REAL output use the SAME date and "
+    "+02:00 offset as the DEDUCTION SEED / locked crime time (never a "
+    "different date, never a 'Z' UTC timestamp: the solver compares ticks, and "
+    "a timestamp on another date would break the case). Do NOT copy it "
+    "into structured, and DO NOT put personId/locationId/objectId timestamps "
+    "inside structured either.\n"
+    "into structured, and DO NOT put personId/locationId/objectId timestamps "
+    "inside structured either.\n"
+    "- structured holds ONLY extra typed fields that are not already "
+    "proposition-level keys (e.g. FORENSIC_WEAPON_MATCH -> {\"match\": true}; "
+    "ALIBI_TIME_CLAIM -> {\"claimedDeparture\": \"...\"}). Never repeat "
+    "observedAt/personId/locationId/objectId inside structured.\n"
+    "- propositions[].structured MUST be a nested JSON OBJECT (never a "
+    "JSON-encoded string, never quoted/escaped JSON).\n"
+    "- FILL THE RELATIONAL FIELDS (they are how the solver connects the "
+    "facts — NEVER null when the fact names a person, location or object):\n"
+    "    VICTIM_LAST_SEEN_ALIVE_AT / BODY_FIRST_FOUND_AT / "
+    "CRIME_SCENE_OBSERVATION_AT -> locationId = the locked location_id, "
+    "personId = the victim/murderer id where named;\n"
+    "    PERSON_OBSERVED_AT_LOCATION -> personId + locationId (both filled);\n"
+    "    ALIBI_TIME_CLAIM -> personId (the claimant's id) + the "
+    "structured.claimedDeparture;\n"
+    "    OBJECT_CONTAINS_FINGERPRINT -> objectId (the weapon) + personId "
+    "(the person);\n"
+    "    FORENSIC_WEAPON_MATCH -> objectId (the weapon examined);\n"
+    "    MOTIVE_LINKED_TO_PERSON -> personId + motiveId.\n"
+    "- ALIBI_TIME_CLAIM propositions REQUIRE structured.claimedDeparture (a "
+    "non-empty ISO-8601 departure timestamp string).\n"
+    "- FORENSIC_WEAPON_MATCH propositions REQUIRE structured.match (a real "
+    "JSON boolean true or false, never a string).\n"
+    "- observedAt is ISO-8601; uncertaintySeconds is a plain non-negative "
+    "integer.\n"
+    "- SPREAD the facts over SEVERAL evidence items (one coherent cluster per "
+    "item, e.g. one CCTV item, one forensic item, one witness item) — NEVER "
+    "merge the whole case into a single evidence item, and NEVER emit an "
+    "evidence item with an empty propositions array.\n"
+    "- Use the EXACT ids from the APPROVED PUBLIC MATERIAL / DEDUCTION SEED — "
+    "never invent ids for locked people/objects or for persons/locations/"
+    "motives listed there.\n"
+    "- Do not invent keys, ids or enums; never assert the solution.\n"
+)
+
+
+_WORLD_FIELD_RULES = (
+    "\n\nFIELD RULES (strict):\n"
+    "- The document uses EXACTLY: environmentHint, locationTokens, objects, "
+    "relations, unsafeUnsupported.\n"
+    "- environmentHint is ONE EXACT canonical token from this closed vocabulary: "
+    "apartment, office, hotel_suite, warehouse, mansion. NEVER write a "
+    "location phrase ('hotel suite', 'the office'), NEVER a path ('hotel/"
+    "suite'), NEVER a synonym or free text — pick the exact canonical token "
+    "for the prompt's location (hotel suite -> hotel_suite, company office -> "
+    "office). If the prompt names no supported location, still output one "
+    "canonical token from the vocabulary (the closest match).\n"
+    "- objects entries use EXACTLY: name, categoryHint, subtypeHint, tags, "
+    "requiredInteraction, evidenceId, criticality.\n"
+    "- MAPPING OF THE PROMPT LINES: Victim/Murderer/Witness are PERSONS, the "
+    "Motive is a motive, the Time is the crime timestamp, the Location is the "
+    "ENVIRONMENT (choose it via environmentHint) — none of these become an "
+    "object entry. ONLY the Weapon becomes an object entry.\n"
+    "- objects: list ONLY the single crime weapon. Do NOT add extra props, "
+    "documents, folders, furniture, desks, chairs or other items — the scene "
+    "already contains its standard props; an extra invented object can "
+    "unavoidably block the world.\n"
+    "- NEVER list the environment/location token or any abstract concept as "
+    "an object: 'office', 'desk', 'room', 'research data', 'motive', a "
+    "person's name, an activity — none of these is an object entry.\n"
+    "- criticality: the weapon is exactly required; there are no other "
+    "objects, so nothing else is required or decorative.\n"
+    "- evidenceId and requiredInteraction ALWAYS travel together: when an "
+    "evidenceId is set for an object, its requiredInteraction MUST be "
+    "'inspect' in the SAME object entry — never one without the other.\n"
+    "- relations: bind ONLY the weapon with EXACTLY ONE relation — the "
+    "natural surface it rests on, e.g. {\"kind\": \"on_desk\", \"target\": "
+    "\"<weapon name>\"} or {\"kind\": \"on_table\", \"target\": \"<weapon "
+    "name>\"}. Every relation target is an OBJECT name from your objects "
+    "list — never a person.\n"
+    "- relations kind is one exact token from: on_desk, on_table, "
+    "near_victim, inside_cabinet, floor_area, on_wall.\n"
+    "- SEMANTIC ANCHORS: the placer binds every placement to a REGISTERED "
+    "anchor id; valid anchor ids are: "
+    + ", ".join(sorted(ANCHOR_ALLOWLIST))
+    + ". NEVER invent an anchor, a coordinate or a room name — "
+    "cross-object/invented anchors are rejected ('anchor ... is not in "
+    "ANCHOR_ALLOWLIST').\n"
+    "- unsafeUnsupported is an ARRAY of short diagnostic notes; every entry "
+    "must be at most 120 characters, and the array should normally be [] "
+    "(one or two short words at most, never long sentences or prose).\n"
+    "- Do not invent keys, tokens, ids or coordinates; output declarative "
+    "intent only.\n"
+)
+
+
+def _repair_instruction() -> str:
+    return (
+        "Correct the AssetSpec. Do not redesign the object unless required. "
+        "Fix the listed validation violations. Return the complete corrected "
+        "AssetSpec as JSON only."
+    )
+
+
+# --- the six versioned templates -------------------------------------------
+
+CASE_PEOPLE_PROMPT_v1 = (
+    "You are generating the CASE and PEOPLE stage of a detective case for "
+    "GENERATION_PROVIDER=ollama (prompt template version case_people_v1).\n"
+    "Return ONLY the JSON object for this stage with this EXACT schema:\n"
+    + schema_contract("case_people")
+    + _CASE_FIELD_RULES
+    + "\n\n" + CASE_QUALITY_RULES
+    + "\n\n" + PHASE41A_QUALITY_RULES
+    + "\n\nSanitized user prompt:\n__PROMPT__\n\n"
+    "LOCKED user constraints (MUST be respected EXACTLY - never change a "
+    "locked value):\n__LOCKED__\n\n"
+    + "__ID_SHEET__\n"
+    + _NO_INTERNALS
+    + "\nNote: the crime TIME and the crime identity come from the locked "
+    "constraints plus generated filler. Never declare a final verdict."
+)
+
+
+# The evidence contract's DEDUCTION CONTRACT (teaching the three-state algebra
+# the deterministic solver uses; NEVER a solver answer/reveal — the locked
+# fields in the DEDUCTION SEED are the only truth seeds and the model emits
+# FACTS, never conclusions).
+_EVIDENCE_DEDUCTION_CONTRACT = (
+    "\nDEDUCTION CONTRACT — your facts ARE the case a deterministic solver "
+    "proves. The solver works purely from your structured facts and EXCLUDES a "
+    "candidate ONLY when the right fact type is present; a missing fact "
+    "leaves that candidate viable and the whole case cannot be published. You "
+    "must therefore emit EVERY fact listed here — never skip one:\n"
+    "1. WHEN — bound the crime window: VICTIM_LAST_SEEN_ALIVE_AT at the scene "
+    "(about 2 minutes before the crime time), BODY_FIRST_FOUND_AT at the "
+    "scene (about 1.5 minutes after the crime time), and "
+    "CRIME_SCENE_OBSERVATION_AT at the scene around the crime time with "
+    "uncertaintySeconds ~90.\n"
+    "2. IMPOSSIBLE-OPPORTUNITY — one PERSON_OBSERVED_AT_LOCATION for EVERY "
+    "other suspect, each at a DIFFERENT location that has an approved "
+    "travelRule TO the scene of at least 1200 seconds, observed about 2 "
+    "minutes before the crime time (uncertaintySeconds ~30). With that travel "
+    "time the suspect physically cannot reach the scene before the crime "
+    "window ends, so the solver ELIMINATES them. NEVER use type OTHER for "
+    "these.\n"
+    "3. PRESENCE — PERSON_OBSERVED_AT_LOCATION for the locked person AT the "
+    "scene, around the crime time (uncertaintySeconds ~60) — that is the "
+    "feasible scene presence that keeps the locked person the only viable "
+    "suspect.\n"
+    "4. ALIBI — ALIBI_TIME_CLAIM by the locked person with "
+    "structured.claimedDeparture about 32 minutes before the crime time "
+    "(contradicted by their scene presence — an alibi can NEVER be the only "
+    "reason, it just weakens credibility).\n"
+    "5. MOTIVE — MOTIVE_LINKED_TO_PERSON (locked person -> locked motive) and "
+    "MOTIVE_FACT_CONTRADICTED for EVERY other motive.\n"
+    "6. WEAPON — FORENSIC_WEAPON_MATCH with structured.match false for EVERY "
+    "other sharp weapon (normally kitchen_knife, letter_opener, scissors) and "
+    "true for the locked weapon, plus OBJECT_CONTAINS_FINGERPRINT on the "
+    "locked weapon for the locked person.\n"
+    "The DEDUCTION SEED below lists the EXACT ids and timestamps to use (same "
+    "date and +02:00 offset as the locked crime time). Emit the facts as "
+    "OBSERVATIONS/FORENSIC RESULTS — never conclusions, never the words "
+    "'guilty'/'committed'/'the murderer is', never any hidden answer."
+)
+
+
+EVIDENCE_PROMPT_v1 = (
+    "You are generating the EVIDENCE stage of a detective case for "
+    "GENERATION_PROVIDER=ollama (prompt template version evidence_v1).\n"
+    "Return ONLY the JSON object for this stage with this EXACT schema:\n"
+    + schema_contract("evidence")
+    + _EVIDENCE_FIELD_RULES
+    + "\n\n" + CASE_QUALITY_RULES
+    + "\n\n" + PHASE41A_QUALITY_RULES
+    + _EVIDENCE_DEDUCTION_CONTRACT
+    + "\n\nSanitized user prompt:\n__PROMPT__\n\n"
+    "LOCKED user constraints:\n__LOCKED__\n\n"
+    + "__APPROVED_PEOPLE__\n"
+    + "__ID_SHEET__\n"
+    + "__DEDUCTION_SEED__\n"
+    + "__DEDUCTION_FEEDBACK__\n"
+    + _NO_INTERNALS
+)
+
+
+WORLD_REQUIREMENTS_PROMPT_v1 = (
+    "You are generating the WORLD_REQUIREMENTS stage of a detective case for "
+    "GENERATION_PROVIDER=ollama (prompt template version world_requirements_v1).\n"
+    "Return ONLY the JSON object for this stage with this EXACT schema:\n"
+    + schema_contract("world_requirements")
+    + _WORLD_FIELD_RULES
+    + "\n\nSanitized user prompt:\n__PROMPT__\n\n"
+    "LOCKED user constraints:\n__LOCKED__\n\n"
+    + "__ID_SHEET__\n"
+    + "__WEAPON_EVIDENCE_ID__\n"
+    "Produce declarative world intent ONLY: environmentHint, locationTokens, "
+    "bounded objects, and bounded placement relations. NEVER output coordinates, "
+    "raw transforms, JavaScript, Babylon code, shaders, event handlers, URLs or "
+    "paths. The deterministic placer decides final placement.\n"
+    + _AUTHORIZED_SCOPE_TEXT
+    + "\n"
+    + _NO_INTERNALS
+)
+
+
+ASSET_SPEC_PROMPT_v1 = (
+    "You are generating a declarative procedural AssetSpec for the object "
+    "'__OBJECT_CONCEPT__' for GENERATION_PROVIDER=ollama (prompt template "
+    "version asset_spec_v1).\n"
+    + _METERS_STATEMENT
+    + "\n\nThe object this AssetSpec must represent (original concept): __OBJECT_CONCEPT__"
+    + "\nCategory hint: __CATEGORY_HINT__"
+    + "__CANONICAL_CONCEPT__"
+    + "\n\nReturn ONLY a single JSON document with this EXACT schema:\n"
+    + schema_contract("asset_spec")
+    + "\n\n"
+    + _asset_spec_rules()
+)
+
+
+ASSET_SPEC_REPAIR_PROMPT_v1 = (
+    "You are REPAIRING a declarative procedural AssetSpec for the object "
+    "'__OBJECT_CONCEPT__' for GENERATION_PROVIDER=ollama (prompt template "
+    "version asset_spec_repair_v1).\n"
+    + _METERS_STATEMENT
+    + "__CANONICAL_CONCEPT__"
+    + "\n\nCorrect the AssetSpec. Do not redesign the object unless required. "
+    "Fix the listed validation violations. Return the complete corrected "
+    "AssetSpec as JSON only.\n\n"
+    "Original object concept: __OBJECT_CONCEPT__\n"
+    "Previous (invalid) candidate AssetSpec:\n__PREVIOUS_CANDIDATE__\n\n"
+    "SANITIZED validation issues to fix:\n__ISSUES__\n\n"
+    "The exact schema and bounds:\n"
+    + schema_contract("asset_spec")
+    + "\n\n" + _asset_spec_rules()
+    + "\n" + _phase17_repair_instruction()
+    + "\nReturn the corrected AssetSpec with the EXACT schema keys above - "
+    "never rename, drop or invent keys (no snake_case variants, no extra "
+    "fields).\n"
+    "Do not loosen or reinterpret the constraints. The repaired AssetSpec "
+    "is re-validated with the FULL Phase 13 schema/security validator AND the "
+    "Phase 17 geometry-quality validator before it can be compiled."
+)
+
+
+# --- repair/draft template (full-draft correction used by driver REPAIR) ---
+
+REPAIR_PROMPT_v1 = (
+    "You are repairing the generated draft of a detective case for "
+    "GENERATION_PROVIDER=ollama (prompt template version repair_v1).\n"
+    "Correct the draft to fix the SANITIZED validation issues WITHOUT changing "
+    "any LOCKED user constraint.\n"
+    "Return the COMPLETE repaired draft, including every required top-level "
+    "key.\n"
+    "The repaired draft MUST contain EVERY one of these required top-level "
+    "keys — never a partial or patched draft: crime, persons, motives, "
+    "objects, locations, travelRules, scene, evidence, worldGraph.\n"
+    "Return ONLY a single COMPLETE JSON document matching the EXACT draft "
+    "schema below. Use EXACTLY the section key names in the schema — never "
+    "rename, drop or invent keys, sections or enums.\n"
+    + schema_contract("full_draft")
+    + "\n\n__PREVIOUS_DRAFT__\n\n"
+    "SANITIZED validation issues to fix:\n__ISSUES__\n\n"
+    + "\n\n" + CASE_QUALITY_RULES
+    + "\n\n" + PHASE41A_QUALITY_RULES
+    + _SCOPE_AND_WITNESS_TEXT
+    + "\n\n"
+    + _NO_INTERNALS
+)
+
+
+# --- Phase 19J activity-log templates (server owns the canonical fact) ------
+#
+# Phase19J-RI (DEF-104): the prompt gives the stateless model the concrete
+# ISO-8601 temporal window endpoints (computed with the EXACT same
+# ``activity_log_window_bounds`` clamp the strict validator applies) and a
+# machine-readable canonical-anchor example row filled with the locked value —
+# so an 8B-class model never has to compute the relative ±N-minute window
+# itself and never invents a second canonical instant.
+
+# The canonical-anchor worked example (template-fill only: the actual
+# ``__CANONICAL_TIME__`` value lands verbatim in this ONE example row; the
+# activityType token stays a closed-enum token and the activity text is the
+# existing neutral fixture phrase already used throughout the tree).
+#
+# Phase37 (DEF-091): the example activity phrase is ALSO template-filled via
+# ``__CANONICAL_EXAMPLE_PHRASE__``. The builder substitutes a COLLISION-CHECKED
+# phrase whenever the default "Local user activity detected" collides with a
+# hidden forbidden token for this case (e.g. ``person_names=("Local",)``), so
+# a model copying the canonical-anchor example can never re-trigger
+# ``ACTIVITY_LOG_ENTITY_LEAK``. Default runs (no collision) render the exact
+# pre-Phase37 sentence byte-for-byte.
+_CANONICAL_ROW_ANCHOR_SENTENCE = (
+    "The locked canonical time MUST appear VERBATIM in exactly one entry: "
+    '{"timestamp": "__CANONICAL_TIME__", "activityType": '
+    '"LOCAL_ACTIVITY", "activity": "__CANONICAL_EXAMPLE_PHRASE__"}.'
+)
+
+# DEF-104 follow-up #2 — COMPLETE worked example + simultaneous-constraint rule.
+# The observed hermes3:8b failure class was a simultaneous-constraint
+# compliance gap: the model satisfies (window) XOR (canonical-once) XOR
+# (schema), never all three at once. The fix gives the stateless model a
+# COMPLETE 15-row scaffold (generated at build time from the SAME
+# ``activity_log_window_bounds`` math the strict validator applies) plus an
+# explicit "satisfy ALL of these at once" rule and a shape-scaffold
+# qualification ("this is a shape, not the answer").
+#
+# DEF-104 follow-up #3 — THE TIMESTAMP GRID: the model still DROPPED the
+# locked canonical instant even with window endpoints + anchor row + full
+# scaffold + simultaneous rule. The final semantic lever hands the model the
+# app-owned DETERMINISTIC grid of EXACT timestamps (computed with the SAME
+# validated-window math) and makes the canonical-once property a pure
+# VERBATIM COPY task: the canonical instant IS one grid member (middle slot);
+# the model only writes the surrounding neutral text. The scaffold is aligned
+# to the SAME grid (its 15 rows are the grid's first 15 timestamps) so the two
+# signals agree byte-for-byte. The grid is NOT truth — it is a deterministic
+# sampling around the locked canonical fact (which stays separately injected).
+
+# App-owned neutral computer-log text pool for the scaffold example rows ONLY.
+# These are the phase-19J fixture vocabulary strings (a subset of the safe
+# neutral phrases the deterministic driver fixtures and the FakeProvider
+# golden path use): every phrase is harmless, bounded (<=120 chars) and
+# mismatch-free under ``activity_text_unsafe_tokens`` / ``truth_leak_tokens``
+# / ``entity_leak_tokens`` with no person/weapon/motive/location needles.
+# NOTE: the pool deliberately omits the fixture phrase "System resumed from
+# sleep" so the repair prompt can never echo the exact rejected-log content
+# the driver-repair regression asserts stays out (test_phase19j §11).
+ACTIVITY_LOG_NEUTRAL_TEXT_POOL: tuple[str, ...] = (
+    "User session login recorded",
+    "Mail client synchronized",
+    "Browser tab opened",
+    "Research document accessed",
+    "File explorer opened",
+    "Text editor application opened",
+    "Cloud synchronization completed",
+    "Background synchronization started",
+    "Network activity detected",
+    "Document autosaved",
+    "User session unlocked",
+    "Local file written",
+    "Keyboard activity detected",
+    "File copied to local workspace",
+    "Local user activity detected",
+    "Browser activity detected",
+    "System entered idle state",
+)
+
+# Phase19J-RI (ADV-D) — the SMALL reserved fallback pool used ONLY when a
+# canonical forbidden person/weapon/motive/location token collides with a
+# primary pool phrase or the canonical-anchor text ("Local user activity
+# detected"). Each phrase is harmless (bounded <= 120 chars, passes
+# ``activity_text_unsafe_tokens`` / ``truth_leak_tokens`` with no needles) and
+# deliberately avoids the ordinary computer-log vocabulary a hostile canonical
+# name could target (user/mail/local/workspace/server/network/...). The
+# substitution is deterministic (first non-colliding phrase in this fixed
+# order) and bounded; a pathological hostile set covering EVERY fallback
+# phrase too stays a documented LOW residual (the validator's own lexical
+# limits already carry the same bounded guarantee).
+ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL: tuple[str, ...] = (
+    "System clock synchronization heartbeat",
+    "Peripheral input device reconnected",
+    "Display framebuffer refresh scheduled",
+    "Network daemon handshake completed",
+    "Storage controller cache flushed",
+    "Process scheduler tick recorded",
+)
+
+# The scaffold (DEF-104 follow-up #2/#3) is the first
+# ``MIN_ACTIVITY_LOG_ENTRIES`` (15) timestamps of the app-owned TIMESTAMP GRID
+# (``activity_log_timestamp_grid``) — never a hand-computed row list.
+# Strictly increasing +3 minutes between the grid rows (deterministic
+# generator; the validator itself only requires strict increase, but the
+# grid shows the realistic cadence).
+# Pre-Phase19J-RI fixed +3-minute cadence (still the PREFERRED step for the
+# default/clamped-120 windows so the QA-closed path is byte-identical).
+_ACTIVITY_LOG_EXAMPLE_STEP_SECONDS = 3 * 60
+_ACTIVITY_LOG_EXAMPLE_CANONICAL_TYPE = "LOCAL_ACTIVITY"
+_ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT = "Local user activity detected"
+
+# Phase19J-RI (ADV-C) — the deterministic ADAPTIVE cadence chain for the
+# timestamp grid. The preferred 3-minute step is tried first (default
+# 60/60 and every clamped-120 case emit EXACTLY the pre-fix grid), then a
+# bounded geometric fine-grain chain down to the minimal 1-second step. The
+# FIRST step for which a grid of ``count`` members (largest count in
+# [MIN..ACTIVITY_LOG_GRID_COUNT]) fits inside the ACTUAL clamped window with
+# the canonical slot in the 15-row scaffold wins — so a sub-42-minute window
+# like 30/0 or 0/30 now yields a self-validating 15-row grid instead of a
+# self-contradictory count < MIN prompt. Every step is a whole number of
+# seconds >= 1 (bounded; deterministic; no fractional timestamps).
+_ACTIVITY_LOG_STEP_CANDIDATES: tuple[int, ...] = (3 * 60, 2 * 60, 60, 30, 15, 10, 5, 2, 1)
+
+# DEF-104 follow-up #3 — THE TIMESTAMP GRID (app-owned, deterministic). The
+# grid is NOT truth: it is a deterministic, app-owned sampling of the ACTUAL
+# validated window around the locked canonical fact (that fact is already
+# injected separately). The model's ONLY job with the grid is to copy these
+# timestamps VERBATIM into the rows and write the surrounding neutral text —
+# it never computes, reorders or redefines a time.
+#
+# Count: 18, derived from the authoritative entry bounds (inside
+# [MIN_ACTIVITY_LOG_ENTRIES .. MAX_ACTIVITY_LOG_ENTRIES] = [15..20]) and large
+# enough that a 15-row worked-example scaffold (the first
+# MIN_ACTIVITY_LOG_ENTRIES grid members) plus the remaining grid members prove
+# the canonical-once property on a copy, at the SMALLEST token cost that still
+# saturates the row-count contract.
+ACTIVITY_LOG_GRID_COUNT = 18
+
+# The explicit simultaneous-constraint rule (DEF-104 follow-up #2 step 2).
+# Shared fragment: the template prefixes "The generated" (initial) or "The
+# repaired" (repair) so both prompts carry the SAME "(a)..(e) ALL at once"
+# sentence with the SAME concrete window endpoints (``__WINDOW_START_ISO__ ..
+# __WINDOW_END_ISO__`` are replaced by the builder with the exact rendered
+# endpoints — identical to the sentence in the window bullet below).
+_ACTIVITY_LOG_SIMULTANEOUS_COMMON = (
+    " log MUST satisfy ALL of these at once:\n"
+    f"(a) {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries;\n"
+    "(b) every timestamp strictly increasing and inside the deterministic "
+    "window;\n"
+    "(c) the locked canonical time appears verbatim exactly once;\n"
+    "(d) every activityType is one of the closed tokens;\n"
+    "(e) every activity is harmless neutral text.\n"
+    "Fixing one rule must NEVER break another."
+)
+
+# DEF-104 follow-up #2 step 3 — the worked example is a SHAPE SCAFFOLD, not
+# the answer: the model must keep the shape and invent its own content.
+_ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD = (
+    "The complete worked example below shows the required shape/format only — "
+    "replace the row content with your own plausible harmless rows."
+)
+
+# DEF-104 follow-up #2 step 4 — repair-stage recheck line (the repair must
+# re-verify EVERY simultaneous rule and never trade one for another).
+_ACTIVITY_LOG_REPAIR_RECHECK_LINE = (
+    "When fixing the findings, re-verify ALL the simultaneous rules above — "
+    "never trade one rule for another."
+)
+
+# DEF-104 follow-up #3 — the machine-readable TIMESTAMP GRID block injected
+# into BOTH templates (requirement 2). ``__TIMESTAMP_GRID__`` is filled by the
+# builder with the compact comma-separated ISO list (never JSON, to minimize
+# tokens) generated by ``activity_log_timestamp_grid`` — the SAME deterministic
+# ``activity_log_window_bounds`` math the strict validator applies. The
+# canonical-once property becomes a pure COPY task: the locked instant is ONE
+# member of the grid (at the middle slot whenever the window allows), so a
+# model that "copies the grid" necessarily satisfies the validator's
+# canonical-once rule.
+_ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK = (
+    "- The EXACT timestamps for the entries are GIVEN below (server-owned; "
+    "deterministic):\n"
+    "  TIMESTAMP_GRID: __TIMESTAMP_GRID__\n"
+    "- Copy EACH timestamp VERBATIM into exactly one row's 'timestamp' "
+    "field, in the exact order shown; the row whose timestamp equals the "
+    "locked canonical time MUST be the ordinary neutral row. Never invent, "
+    "reformat, reorder, or omit any given timestamp. Never add a timestamp "
+    "outside the grid.\n"
+)
+
+# DEF-104 follow-up #3 requirement 4 — the repair stage's grid restatement:
+# the canonical missing finding is resolved by including the grid's canonical
+# row unchanged (the model never has to decide WHERE the canonical lands).
+_ACTIVITY_LOG_REPAIR_GRID_LINE = (
+    "When repairing, copy the GIVEN timestamp grid verbatim — the canonical "
+    "missing finding is resolved by including the grid's canonical row "
+    "unchanged."
+)
+
+# Phase26-Fix-B (H1/H2/H3/H4/H5) — the single canonical MACHINE-VERIFIABLE
+# contract directive shared VERBATIM by the normal and repair templates. It is
+# built ONLY from the authoritative domain constants (MIN/MAX entries, the
+# closed activityType set) so the prompt text, the transport JSON Schema and
+# the strict validator can NEVER drift. It makes the count bound, the closed
+# vocabulary and the canonical-time rule explicit top-of-log instructions that
+# survive even on transport paths that do not carry a JSON Schema (the Bridge
+# job frame carries only ``schemaId`` + prompt; the local Ollama receives
+# ``format: "json"`` free-form, so the prompt is the ONLY structural channel).
+_ACTIVITY_LOG_HARD_CONTRACT = (
+    "MACHINE-VERIFIABLE CONTRACT (deterministically re-validated server-side "
+    "against EVERY line below; ANY violation is REJECTED):\n"
+    f"- The \"entries\" array MUST contain between {MIN_ACTIVITY_LOG_ENTRIES} "
+    f"and {MAX_ACTIVITY_LOG_ENTRIES} objects — never fewer, never more.\n"
+    "- Every \"activityType\" MUST be exactly one of the closed tokens:\n"
+    "    " + ", ".join(sorted(ACTIVITY_LOG_ACTIVITY_TYPES)) + "\n"
+    "- The locked canonical evidence time MUST appear verbatim in exactly ONE "
+    "entry.\n"
+    "- Every \"timestamp\" MUST lie inside the deterministic window, strictly "
+    "increasing and unique.\n"
+    "- Do not exceed the entry limit, invent activityType tokens, omit the "
+    "canonical time, or break chronology.\n"
+)
+
+# Phase 37 §10 — the positive ACTIVITY TEXT RULES block for the INITIAL
+# activity-log prompt. Feeds the model a POSITIVE closed output contract on
+# top of the hidden negative vocabulary the validator enforces: the model may
+# only use the supplied safe neutral phrases, so it never needs to know the
+# secret values it must avoid.
+_ACTIVITY_LOG_ACTIVITY_TEXT_RULES = (
+    "\nACTIVITY TEXT RULES:\n"
+    "- Use ONLY the supplied neutral activity phrases for every \"activity\" "
+    "value.\n"
+    "- Do not introduce names, locations, weapons, motives, organizations, or "
+    "other proper entities.\n"
+    "- Do not invent synonyms or additional named entities.\n"
+    "- Keep each activity short and generic.\n"
+)
+
+# Phase 37 §11 — the DEDICATED entity-leak repair directive. ``ENTITY_LEAK``
+# repairs must NOT fall through the generic "other" directive: they regenerate
+# the COMPLETE log using ONLY the supplied safe neutral vocabulary (see
+# ``_activity_log_repair_directive_lines`` below).
+_ACTIVITY_LOG_ENTITY_LEAK_DIRECTIVE = (
+    "- ACTIVITY_LOG_ENTITY_LEAK: regenerate the COMPLETE activity log using "
+    "ONLY the supplied safe neutral vocabulary; do NOT invent activity phrases "
+    "or introduce named people, places, weapons, motives, organizations.\n"
+)
+
+# The non-leak directive bullets shared by every repair prompt (count /
+# activityType / canonical-time fixes). ``other`` is appended ONLY when the
+# findings carry no entity leak (Phase 37 §11: a leak repair never falls
+# through the generic path).
+_ACTIVITY_LOG_REPAIR_COMMON_DIRECTIVES = (
+    "- count: make it EXACTLY "
+    f"{MIN_ACTIVITY_LOG_ENTRIES}..{MAX_ACTIVITY_LOG_ENTRIES} rows; remove "
+    "ONLY filler rows; keep canonical row/types/order.\n"
+    "- invalid activityType: replace ONLY with a closed token from the EXACT "
+    "schema.\n"
+    "- canonical time missing: MUST include the locked canonical time verbatim "
+    "exactly once.\n"
+)
+
+_ACTIVITY_LOG_REPAIR_OTHER_DIRECTIVE = (
+    "- other: preserve ALL simultaneous rules; never trade one for another.\n"
+)
+
+
+def _activity_log_repair_directive_lines(findings: Iterable[str]) -> str:
+    """Deterministic per-finding directive lines for the repair prompt.
+
+    Phase26-Fix-B kept the count/type/canonical bullets; Phase 37 adds the
+    DEDICATED ``ACTIVITY_LOG_ENTITY_LEAK`` directive whenever the findings
+    carry ``ENTITY_LEAK_DETECTED`` and silently KEEPS the generic "other" line
+    OUT of that path (§11: the leak repair never falls through the generic
+    directive, which would leave the model with no positive safe output
+    contract).
+    """
+    present = set(findings or ())
+    lines = [_ACTIVITY_LOG_REPAIR_COMMON_DIRECTIVES]
+    if "ENTITY_LEAK_DETECTED" in present:
+        lines.append(_ACTIVITY_LOG_ENTITY_LEAK_DIRECTIVE)
+    else:
+        lines.append(_ACTIVITY_LOG_REPAIR_OTHER_DIRECTIVE)
+    return "".join(lines)
+
+
+# Phase 37 — the shared SAFE NEUTRAL ACTIVITY VOCABULARY block used by BOTH
+# activity-log prompts. The vocabulary itself is computed by the deterministic
+# ``activity_log_safe_neutral_vocabulary`` builder (same inputs => same
+# output), so the initial AND the repair prompt always receive the SAME
+# collision-checked safe phrases for the case (§7/§16/§18/§20/§25).
+_ACTIVITY_LOG_SAFE_VOCABULARY_BLOCK = (
+    "SAFE NEUTRAL ACTIVITY VOCABULARY (use ONLY these for every activity): "
+    "__SAFE_VOCABULARY__\n\n"
+)
+
+# Phase26-Fix-B (H5/H4) — the repair stage's EXACT validator-failure-code and
+# parse-failure-class directive block. §6 requires repairs to receive the exact
+# failure code + relevant contract; the driver passes the typed primary code
+# (ACTIVITY_LOG_ENTRY_COUNT_INVALID / ACTIVITY_LOG_SCHEMA_INVALID /
+# ACTIVITY_LOG_CANONICAL_TIME_MISSING) and the parse-failure class
+# (e.g. ``entry_activity_type_invalid``). The per-code directives make the fix
+# contractual: count errors preserve canonical time / enum / order; type errors
+# replace ONLY with the closed enum; canonical-time errors MUST include the
+# locked time. COMPACT on purpose: the repair prompt already restates the full
+# machine-verifiable contract via the same schema/grid/worked-example blocks
+# the initial prompt embeds. PROMPT-LENGTH PROOF (DEF-013): the pre-existing
+# Phase19J-RI prompt-length guard (``test_ri26``, <= 7000 chars) is a locked
+# regression THAT IS ACTUALLY TRUE AT THE WORST CASE: ``test_ri26`` builds the
+# full co-occurring multi-finding repair prompt (every ``repair_findings``
+# token incl. ``ENTRY_COUNT_TOO_HIGH (need 15..20, have 27)``) with the
+# longest validator code + parse-failure class and asserts <= 7000 built
+# chars (measured ~6950 after the DEF-013 compaction below), so the §2.1
+# count-error path and every reachable combination stay inside the
+# context-pressure budget without trimming a single contracted directive.
+_ACTIVITY_LOG_REPAIR_DIRECTIVE_BLOCK = (
+    "\nVALIDATOR FAILURE CODE: __VALIDATOR_CODE__\n"
+    "PARSE FAILURE CLASS: __PARSE_FAILURE_CLASS__\n"
+    # Phase37 (DEF-090): compact prose so the deterministic total-prompt length
+    # guard (``ACTIVITY_LOG_PROMPT_MAX_CHARS``) holds for EVERY supported
+    # forbidden-token set even when the safe-vocabulary block is long. The
+    # instructions below are unchanged; only the frame sentence is shorter.
+    "Apply these directives:\n"
+    "__REPAIR_DIRECTIVES__"
+)
+
+
+def activity_log_timestamp_grid(
+    canonical_time: str,
+    *,
+    before_minutes: int = WINDOW_DEFAULT_BEFORE_MINUTES,
+    after_minutes: int = WINDOW_DEFAULT_AFTER_MINUTES,
+) -> tuple[str, ...]:
+    """The app-owned DETERMINISTIC timestamp grid (DEF-104 follow-up #3).
+
+    Returns strictly-increasing ISO-8601 timestamps computed with the SAME
+    ``activity_log_window_bounds`` math (and the same
+    ``parse_iso8601``/``epoch_to_iso`` helpers) the strict validator
+    applies. Guarantees (the tests assert every one):
+
+    - the locked canonical time appears EXACTLY once, VERBATIM (the original
+      string, never a re-render), at the slot CLOSEST to the grid middle
+      (``count // 2``) that the window geometry allows, with the slot ALWAYS
+      < ``MIN_ACTIVITY_LOG_ENTRIES`` so the 15-row worked-example scaffold
+      contains it;
+    - every member lies INSIDE the actual validated window ``[window_min ..
+      window_max]`` (the validator's own inclusive acceptance bound; for the
+      centered default the members are STRICTLY interior);
+    - the count is ``ACTIVITY_LOG_GRID_COUNT`` whenever the window can hold 18
+      members at +3 minutes; otherwise the count is the largest whole-second
+      cadence fit in ``[MIN_ACTIVITY_LOG_ENTRIES .. ACTIVITY_LOG_GRID_COUNT]``
+      (Phase19J-RI ADV-C ADAPTIVE GRID) — a sub-42-minute window such as 30/0
+      or 0/30 deterministically yields a 15-row grid at a finer cadence (e.g.
+      +2 minutes) instead of a self-contradictory count < MIN prompt.
+
+    Phase19J-RI (ADV-C) CANONICAL DEFAULT PRESERVED: the default 60/60 and
+    every clamped-120 case (90/90, 5/130, 0/120, 120/0, 15/130) emit EXACTLY
+    the pre-fix grid — count 18 at +3 minutes, canonical slot 9 (or slot 1 /
+    slot 0 / slot 14 for the clamped geometry) — so the QA-closed real path
+    never regresses.
+
+    Fallback (documented): only a window whose total clamped span is below
+    ``MIN_ACTIVITY_LOG_ENTRIES - 1`` (14) seconds cannot geometrically hold 15
+    distinct strictly-increasing integer-second ticks (the reachable 0/0
+    integer-minute config). The grid then deterministically emits the 1-second
+    rows the window's larger side fits. The driver NEVER builds a prompt for
+    such a window: the ``activity_log_window_satisfiable`` operator guard
+    fails fast BEFORE any provider call.
+
+    Raises ``ValueError`` on an unparseable canonical time (a server contract
+    error — identical to the validator's determinism: never silently rewrite a
+    locked instant).
+    """
+    tick, offset = parse_iso8601(canonical_time)
+    window_min, window_max = activity_log_window_bounds(
+        tick, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    span_seconds = window_max - window_min
+    if span_seconds < MIN_ACTIVITY_LOG_ENTRIES - 1:
+        # Fail-closed degenerate span (reachable only as the integer-minute
+        # 0/0 configuration): emit the densest bounded grid the window CAN
+        # hold at the minimal 1-second step, canonical once on the larger
+        # side. Never reached from the driver (the operator guard fails fast
+        # BEFORE a prompt is built for an unsatisfiable window).
+        step = 1
+        rows_before = (tick - window_min) // step if (tick - window_min) >= (window_max - tick) else 0
+        rows_after = (window_max - tick) // step if (window_max - tick) > (tick - window_min) else 0
+        grid = [canonical_time]
+        if rows_before:
+            grid = [
+                epoch_to_iso(tick - (rows_before - i) * step, offset)
+                for i in range(rows_before)
+            ] + grid
+        if rows_after:
+            grid = grid + [
+                epoch_to_iso(tick + k * step, offset)
+                for k in range(1, rows_after + 1)
+            ]
+        return tuple(grid)
+
+    # Adaptive cadence search (deterministic, bounded): the FIRST step for
+    # which a largest-first count in [MIN..GRID_COUNT] is feasible wins. The
+    # count loop prefers the largest feasible count (closest to the desired
+    # ACTIVITY_LOG_GRID_COUNT) at the CURRENT preferred step, so the default
+    # and clamped-120 windows resolve at +3 minutes BEFORE any finer step is
+    # ever considered.
+    for step in _ACTIVITY_LOG_STEP_CANDIDATES:
+        before_fit = (tick - window_min) // step
+        after_fit = (window_max - tick) // step
+        for count in range(ACTIVITY_LOG_GRID_COUNT, MIN_ACTIVITY_LOG_ENTRIES - 1, -1):
+            mid = count // 2
+            k_min = max(0, (count - 1) - after_fit)
+            k_max = min(
+                before_fit,
+                count - 1,
+                MIN_ACTIVITY_LOG_ENTRIES - 1,
+            )
+            if k_min > k_max:
+                continue
+            canon_index = min(max(mid, k_min), k_max)
+            return tuple(
+                canonical_time if i == canon_index else epoch_to_iso(tick + (i - canon_index) * step, offset)
+                for i in range(count)
+            )
+    # Defensive: unreachable (a span >= MIN - 1 seconds always admits a
+    # 15-row grid at the 1-second step). Deterministically fall back to the
+    # helper's canonical row alone rather than raise mid-prompt.
+    return (canonical_time,)
+
+
+def _neutral_text_collides(
+    text: str,
+    *,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> bool:
+    """Phase19J-RI (ADV-D): does ONE neutral scaffold phrase collide with the
+    injected canonical forbidden-name set under the REAL entity-leak filter?
+
+    Uses the strict validator's OWN ``entity_leak_tokens`` (never weakened):
+    a scaffold row the MODEL would be told to copy must not be a row the
+    VALIDATOR would reject. The canonical names themselves never appear in the
+    rendered prompt — they are used ONLY for this deterministic collision
+    check (ADV-256 keeps the identity sheet out of the prompt text).
+    """
+    if not any(
+        (person_names, weapon_names, motive_names, location_ids, location_names)
+    ):
+        return False
+    return bool(
+        entity_leak_tokens(
+            text,
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+    )
+
+
+def _shortest_safe_fallback_text(
+    *,
+    person_names: Iterable[str],
+    weapon_names: Iterable[str],
+    motive_names: Iterable[str],
+    location_ids: Iterable[str],
+    location_names: Iterable[str],
+) -> str:
+    """Deterministic SHORTEST non-colliding fallback phrase (ADV-D + Phase37
+    DEF-090).
+
+    ADV-D: a colliding scaffold row is substituted with a guaranteed-safe,
+    non-colliding phrase from the bounded reserved
+    ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` (every member passes the strict
+    validator with no needles; the canonical forbidden names NEVER enter the
+    rendered text).
+
+    Phase37 DEF-090 length bound: the SHORTEST collision-free fallback phrase
+    is selected (deterministic tie-break = canonical pool order), bounding the
+    worked-example scaffold's substituted-row length so the rendered prompt
+    stays inside the pinned ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` guard for EVERY
+    supported forbidden-token set (hostile-but-§15-supported common-word sets
+    included).
+
+    Returns the pool's first phrase when every fallback phrase collides (a
+    pathological hostile set beyond the bounded pool — documented LOW residual,
+    same bound the validator's own lexical limits carry)."""
+    pool = ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL
+    safe = [
+        phrase
+        for phrase in pool
+        if not _neutral_text_collides(
+            phrase,
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+    ]
+    if not safe:
+        return pool[0]
+    # ``min`` returns the FIRST minimal-length member in fixed pool order ⇒
+    # deterministic for identical inputs.
+    return min(safe, key=len)
+
+
+# Phase 37 — closed collision-safe neutral output vocabulary for activity
+# text. The server filters the canonical neutral pools through the EXACT
+# existing entity-leak collider (``_neutral_text_collides`` →
+# ``entity_leak_tokens`` — never weakened, never re-implemented) with the
+# case's hidden forbidden tokens and supplies ONLY the collision-safe phrases
+# to BOTH the initial and the repair prompt. The provider never learns the
+# hidden forbidden values or the rejection reasons (time-only identity
+# isolation preserved — Phase37 §6/§19/§40 principle), and an ENTITY_LEAK
+# repair is guided by a positive proven-safe output set instead of
+# "regenerate and hope".
+ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE = 12
+
+# Phase19J-RI (DEF-013) / Phase37 (DEF-090): the AUTHORITATIVE built-prompt
+# length guard pinned by ``test_ri26`` — both activity-log prompts (the
+# worst-case initial AND the worst-case multi-finding repair) stay <= this many
+# rendered characters so the whole prompt fits the ``OLLAMA_NUM_CTX=4096``
+# context-pressure budget. The builders enforce this BY CONSTRUCTION: the
+# safe-vocabulary block is deterministically bounded to whatever budget remains
+# after the fixed prose + the worked-example scaffold, and the scaffold's
+# collision substitution picks the SHORTEST collision-free fallback phrase — so
+# a hostile-but-supported forbidden-token set can never overflow the guard
+# (the 15-row shape + timestamp-grid contract is untouched).
+ACTIVITY_LOG_PROMPT_MAX_CHARS = 7000
+
+# Closed match-category tokens for the optional bounded diagnostics
+# (Phase37 §13/§27) — never hidden values, never raw activity strings.
+ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN = "PERSON_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN = "LOCATION_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN = "WEAPON_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN = "MOTIVE_TOKEN"
+ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM = "STATIC_FORBIDDEN_TERM"
+
+
+def activity_log_safe_neutral_vocabulary(
+    *,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Deterministic collision-checked neutral activity vocabulary (Phase 37).
+
+    Filters the canonical ``ACTIVITY_LOG_NEUTRAL_TEXT_POOL`` through the exact
+    existing entity-leak collider (``_neutral_text_collides`` →
+    ``entity_leak_tokens``) using the case's hidden forbidden tokens and
+    returns ONLY phrases proven safe for THIS case. Pure and deterministic:
+    same inputs ⇒ same output, zero provider calls / randomness / network.
+
+    Minimum-size behavior (Phase37 §17):
+    - the filtered PRIMARY pool is used when it is sufficient
+      (≥ ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` phrases);
+    - otherwise the collision-checked reserved
+      ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` is appended, so `the supplied
+      vocabulary stays large enough for the model to fill 15..20 rows.
+    - EVERY returned phrase passes the SAME canonical collision checker.
+
+    Fail-closed (Phase37 §16/§17): a pathological forbidden set that leaves
+    fewer than ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` collision-free
+    phrases across BOTH pools raises ``ValueError`` deterministically rather
+    than ever supplying a phrase the strict validator would reject (same
+    documented bounded LOW residual the ADV-D scaffold fallback carries).
+
+    The hidden forbidden values never appear in the output.
+    """
+    forbidden = dict(
+        person_names=tuple(person_names or ()),
+        weapon_names=tuple(weapon_names or ()),
+        motive_names=tuple(motive_names or ()),
+        location_ids=tuple(location_ids or ()),
+        location_names=tuple(location_names or ()),
+    )
+    primary = tuple(
+        phrase
+        for phrase in ACTIVITY_LOG_NEUTRAL_TEXT_POOL
+        if not _neutral_text_collides(phrase, **forbidden)
+    )
+    if len(primary) >= ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE:
+        return primary
+    combined = primary + tuple(
+        phrase
+        for phrase in ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL
+        if not _neutral_text_collides(phrase, **forbidden)
+    )
+    if len(combined) < ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE:
+        raise ValueError(
+            "activity-log safe neutral vocabulary exhausted for this case "
+            f"(only {len(combined)} collision-free phrases remain; minimum is "
+            f"{ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE})"
+        )
+    return combined
+
+
+def _collision_checked_canonical_example_phrase(
+    safe_vocabulary: Iterable[str],
+    *,
+    person_names: Iterable[str],
+    weapon_names: Iterable[str],
+    motive_names: Iterable[str],
+    location_ids: Iterable[str],
+    location_names: Iterable[str],
+) -> str:
+    """Phase37 DEF-091: the canonical-row anchor/example phrase for BOTH
+    prompts, collision-checked against the case's hidden forbidden tokens.
+
+    The default canonical phrase (``_ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT`` —
+    "Local user activity detected") is rendered whenever it passes the SAME
+    canonical collider (``_neutral_text_collides`` → ``entity_leak_tokens``,
+    never weakened). When it collides (e.g. ``person_names=("Local",)``), the
+    FIRST deterministic member of the supplied collision-checked safe
+    vocabulary is substituted — a phrase the strict validator accepts — so a
+    model copying the prose anchor can never re-trigger
+    ``ACTIVITY_LOG_ENTITY_LEAK``. Same inputs ⇒ same phrase in the INITIAL and
+    REPAIR prompts.
+
+    Fail-closed: an EMPTY ``safe_vocabulary`` (Phase37 DEF-092) yields the
+    empty string rather than a raw-pool phrase; the caller's typed fail-closed
+    guard (or the builders' own internal derivation) is the only authority.
+    """
+    if not _neutral_text_collides(
+        _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    ):
+        return _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT
+    phrases = tuple(safe_vocabulary or ())
+    if phrases:
+        return phrases[0]
+    return ""
+
+
+def _rendered_safe_vocabulary(
+    safe_vocabulary: Iterable[str],
+    *,
+    max_chars: int | None = None,
+) -> str:
+    """Deterministic render of the ``__SAFE_VOCABULARY__`` fill value.
+
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` renders
+    the EMPTY block — NEVER the raw unfiltered
+    ``ACTIVITY_LOG_NEUTRAL_TEXT_POOL`` (colliding phrases included). Only the
+    caller's typed fail-closed guard / the builders' derivation may supply
+    vocabulary; the render path never silently disables the collision filter.
+
+    Phase37 DEF-090 (length bound): when ``max_chars`` is given, render the
+    LARGEST deterministic prefix of the supplied (collision-checked) phrases
+    that fits inside ``max_chars``. The builders compute ``max_chars`` from the
+    actual remaining budget after the fixed prose + worked-example scaffold, so
+    the total rendered prompt can NEVER exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for any supported forbidden-token set.
+    The floor (≥ ``ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE`` phrases) is
+    documented and holds for every supported set: the scaffold's SHORTEST-safe
+    substitution plus the compact directive prose leave the budget wide enough.
+    When the initial and repair prompts have different remaining budgets they
+    render different PREFIXES of the SAME supplied safe tuple (the repair's
+    block is a subset of the initial's) — every rendered phrase in either
+    prompt stays collision-checked, so the §7/§25 "same safe vocabulary"
+    contract is preserved at the supply level.
+    """
+    phrases = tuple(safe_vocabulary or ())
+    if not phrases:
+        return ""
+    if max_chars is None:
+        return ", ".join(phrases)
+    count = 0
+    length = 0
+    for phrase in phrases:
+        length += (2 if count else 0) + len(phrase)
+        if length > max_chars:
+            break
+        count += 1
+    if count == 0:
+        # Pathological guard (unreachable for supported sets): the fixed prose
+        # already filled the whole budget; render the first phrase alone so the
+        # block still names at least one collision-safe phrase.
+        return phrases[0]
+    return ", ".join(phrases[:count])
+
+
+def _activity_log_match_category(
+    matches: Iterable[str],
+    *,
+    person_names: Iterable[str],
+    weapon_names: Iterable[str],
+    motive_names: Iterable[str],
+    location_ids: Iterable[str],
+    location_names: Iterable[str],
+) -> str:
+    """Deterministic closed match-category for one row's leak findings.
+
+    Maps the raw ``entity_leak_tokens`` labels onto the bounded closed enum
+    (PERSON_TOKEN / LOCATION_TOKEN / WEAPON_TOKEN / MOTIVE_TOKEN /
+    STATIC_FORBIDDEN_TERM). Never returns hidden values or raw text.
+    """
+    tokens = tuple(matches or ())
+    if "<person-name-token>" in tokens:
+        return ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN
+    if any(t.startswith("weapon-token:") for t in tokens):
+        return ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN
+    if any(t.startswith("motive-token:") for t in tokens):
+        return ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN
+    known = set(person_names or ())
+    weapon_set = set(weapon_names or ())
+    motive_set = set(motive_names or ())
+    location_ids_set = set(location_ids or ())
+    location_names_set = set(location_names or ())
+    for raw in tokens:
+        if raw in known:
+            return ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN
+        if raw in weapon_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN
+        if raw in motive_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN
+        if raw in location_ids_set or raw in location_names_set:
+            return ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN
+        # Any other label (e.g. "knife", "stolen") is a STATIC forbidden
+        # content term from the deterministic ADV-255 (c) vocabulary.
+    return ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM
+
+
+def activity_log_entity_leak_diagnostics(
+    entries,
+    *,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> dict[str, Any]:
+    """BOUNDED safe entity-leak diagnostics (Phase37 §13/§27).
+
+    Returns ONLY non-secret metadata for the FIRST colliding row:
+    ``rowIndex`` (0-based), ``matchCategory`` (closed enum) and
+    ``safeVocabularySize`` (the deterministic safe-vocabulary size for this
+    case). Never includes hidden entity values or raw activity strings;
+    production logging stays safe.
+    """
+    safe_vocab_size = 0
+    try:
+        safe_vocab = activity_log_safe_neutral_vocabulary(
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+        safe_vocab_size = len(safe_vocab)
+    except ValueError:  # pragma: no cover - pathological defensive path
+        # Phase37 DEF-093: the no-match + exhausted-vocabulary path keeps the
+        # CLOSED set ``{rowIndex, matchCategory, safeVocabularySize}`` with
+        # ``safeVocabularySize: 0``. No prose ``error`` key is ever emitted —
+        # observability stays aligned to §13/§27 and no hidden values leak.
+        safe_vocab_size = 0
+    for index, entry in enumerate(entries):
+        matches = entity_leak_tokens(
+            getattr(entry, "activity", None) or "",
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+        category: str | None = None
+        if matches:
+            category = _activity_log_match_category(
+                matches,
+                person_names=person_names,
+                weapon_names=weapon_names,
+                motive_names=motive_names,
+                location_ids=location_ids,
+                location_names=location_names,
+            )
+        if category is not None:
+            return {
+                "rowIndex": index,
+                "matchCategory": category,
+                "safeVocabularySize": safe_vocab_size,
+            }
+    return {
+        "rowIndex": None,
+        "matchCategory": None,
+        "safeVocabularySize": safe_vocab_size,
+    }
+
+
+def _activity_log_worked_example_json(
+    canonical_time: str,
+    *,
+    before_minutes: int,
+    after_minutes: int,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+) -> str:
+    """Deterministic COMPLETE 15-row worked example log (DEF-104 follow-up #3).
+
+    The scaffold rows ARE the first ``MIN_ACTIVITY_LOG_ENTRIES`` timestamps of
+    the SAME ``activity_log_timestamp_grid`` that the prompt's
+    ``TIMESTAMP_GRID`` block injects — so the two signals agree byte-for-byte
+    and the scaffold proves that a model which verbatim-copies the grid passes
+    the strict validator. Guarantees (the tests assert every one of them):
+
+    - exactly ``MIN_ACTIVITY_LOG_ENTRIES`` (15) entries;
+    - every timestamp strictly increasing; every timestamp lies INSIDE the
+      deterministic window ``[window_min .. window_max]`` computed with the
+      validator's own ``activity_log_window_bounds`` math;
+    - the locked canonical time appears EXACTLY once, VERBATIM (the original
+      string, not a re-render), at an ordinary "Local user activity detected"
+      row;
+    - every activityType is one of the closed enum tokens and every activity
+      is one of the app-owned neutral pool strings.
+
+    Phase19J-RI (ADV-D — prompt-side mitigation, NO validator weakening): when
+    an injected canonical forbidden person/weapon/motive/location token
+    collides with a primary pool phrase or the canonical-anchor text, the
+    colliding scaffold row only is deterministically substituted with a
+    guaranteed-safe, non-colliding phrase from the small reserved
+    ``ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL`` — everything else stays identical,
+    so the built scaffold self-validates (entity_leak_tokens == zero codes)
+    even for hostile names like "Mail" / "User" / "Local" / "Workspace" or a
+    distinctive location like "ServerWorkspace". The canonical names NEVER
+    enter the rendered text (ADV-256).
+
+    Phase37 DEF-090 (total-prompt length bound): the substitution picks the
+    SHORTEST collision-free fallback phrase (``_shortest_safe_fallback_text``),
+    bounding the scaffold's length growth so the rendered prompt stays inside
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for every supported forbidden-token set.
+
+    Fail-closed degenerate windows (total span below ``MIN - 1`` seconds — the
+    reachable 0/0 configuration) cannot hold 15 distinct rows; the scaffold
+    then renders the rows the window CAN hold (those windows never reach a
+    prompt from the driver — the operator guard fails fast first).
+    """
+    grid = activity_log_timestamp_grid(
+        canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    rows = list(grid[:MIN_ACTIVITY_LOG_ENTRIES])
+    # Guaranteed present (the grid's canonical slot is always < MIN, so the
+    # scaffold's first 15 members contain it exactly once).
+    canon_index = rows.index(canonical_time)
+    tokens = tuple(sorted(ACTIVITY_LOG_ACTIVITY_TYPES))
+    pool = ACTIVITY_LOG_NEUTRAL_TEXT_POOL
+    forbidden = dict(
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
+    out: list[dict[str, str]] = []
+    position = 0  # deterministic cycle index for types/texts
+    for index, ts in enumerate(rows):
+        if index == canon_index:
+            text = _ACTIVITY_LOG_EXAMPLE_CANONICAL_TEXT
+            if _neutral_text_collides(text, **forbidden):
+                # Phase37 DEF-090: shortest collision-safe fallback bound.
+                text = _shortest_safe_fallback_text(**forbidden)
+            out.append(
+                {
+                    "timestamp": canonical_time,  # verbatim, exactly once
+                    "activityType": _ACTIVITY_LOG_EXAMPLE_CANONICAL_TYPE,
+                    "activity": text,
+                }
+            )
+        else:
+            text = pool[position % len(pool)]
+            if _neutral_text_collides(text, **forbidden):
+                text = _shortest_safe_fallback_text(**forbidden)
+            out.append(
+                {
+                    "timestamp": ts,
+                    "activityType": tokens[position % len(tokens)],
+                    "activity": text,
+                }
+            )
+            position += 1
+    return json.dumps(
+        {"entries": out}, ensure_ascii=False, separators=(",", ":")
+    )
+
+
+def _activity_log_window_context(
+    canonical_time: str,
+    *,
+    before_minutes: int,
+    after_minutes: int,
+) -> tuple[str, str, str, str]:
+    """Deterministic app-owned activity-log window context (DEF-104).
+
+    Computes the concrete ISO-8601 window endpoints with the SAME
+    ``activity_log_window_bounds`` math the strict validator applies and
+    renders both endpoints in the canonical instant's OWN timezone offset
+    (``epoch_to_iso`` — the exact helper the domain uses for ISO rendering),
+    so the prompt and the validator can never drift. Also returns the CLAMPED
+    relative minutes the actual window uses, so the relative sentence and the
+    concrete bounds always agree even when the 120-minute hard cap bites.
+
+    Returns ``(window_start_iso, window_end_iso, before_minutes_str,
+    after_minutes_str)``. Raises ``ValueError`` on an unparseable canonical
+    time (a server contract error — identical to the validator's
+    determinism: never silently rewrite a locked instant).
+    """
+    tick, offset = parse_iso8601(canonical_time)
+    window_min, window_max = activity_log_window_bounds(
+        tick, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    return (
+        epoch_to_iso(window_min, offset),
+        epoch_to_iso(window_max, offset),
+        str(max(0, (tick - window_min) // 60)),
+        str(max(0, (window_max - tick) // 60)),
+    )
+
+
+ACTIVITY_LOG_PROMPT_v1 = (
+    "You are generating a realistic computer activity log for a detective "
+    "game — GENERATION_PROVIDER=ollama (prompt template version "
+    "activity_log_v1).\n"
+    "The server OWNS the canonical evidence fact. The time below is LOCKED: "
+    "return it VERBATIM in exactly one entry; never change it, never add a "
+    "second occurrence, never call it the crime/murder/attack time.\n\n"
+    "Canonical evidence time: __CANONICAL_TIME__\n\n"
+    + _CANONICAL_ROW_ANCHOR_SENTENCE
+    + "\n\n" + _ACTIVITY_LOG_HARD_CONTRACT
+    + "\n\nThe generated" + _ACTIVITY_LOG_SIMULTANEOUS_COMMON
++ "\n\nRequirements:\n"
+    + f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
+    "chronological entries.\n"
+    + f"- Cover the window: from "
+    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes around the "
+    "canonical time.\n"
+    + f"- Every entry timestamp MUST lie inside the deterministic window "
+    "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__] (the whole log spans at "
+    f"most {WINDOW_HARD_MAX_TOTAL_MINUTES} minutes).\n"
+    + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
+    + "- Include the locked canonical time EXACTLY ONCE, in an ordinary row "
+    "(e.g. \"__CANONICAL_EXAMPLE_PHRASE__\"); never label it as crime/"
+    "evidence.\n"
+    "- All other entries: plausible harmless computer/system actions only.\n"
+    + _ACTIVITY_LOG_ACTIVITY_TEXT_RULES
+    + "\n" + _ACTIVITY_LOG_SAFE_VOCABULARY_BLOCK
+    + _ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD
+    + "\nComplete worked example:\n__WORKED_EXAMPLE__\n\n"
+    "Return ONLY a JSON document with this EXACT schema:\n"
+    + schema_contract("activity_log")
+    + "\nNote: 'entries' is a JSON ARRAY of "
+    + f"{MIN_ACTIVITY_LOG_ENTRIES}..{MAX_ACTIVITY_LOG_ENTRIES} "
+    + "objects.\n\n"
+    "No HTML, no markdown tables, no prose outside the JSON document."
+)
+
+
+ACTIVITY_LOG_REPAIR_PROMPT_v1 = (
+    "You are REPAIRING a computer activity log for a detective game — "
+    "GENERATION_PROVIDER=ollama (prompt template version activity_log_repair_v1).\n"
+    "The server OWNS the canonical evidence fact; the locked time below must "
+    "appear VERBATIM in exactly ONE of the "
+    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries; never "
+    "change or duplicate it, never call it crime time.\n\n"
+    "Canonical evidence time: __CANONICAL_TIME__\n\n"
+    + _CANONICAL_ROW_ANCHOR_SENTENCE
+    + "\n\nThe repaired" + _ACTIVITY_LOG_SIMULTANEOUS_COMMON
+    + "\n\nYour previous log failed validation: return a COMPLETE replacement "
+    "ActivityLogDocument with "
+    f"{MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} entries — never "
+    "a single surrounding entry; the locked canonical time is ONE of those "
+    "rows.\n\n"
+    "Fix the machine-readable findings below:\n"
+    "__FINDINGS__\n\n"
+    "Findings-to-fix mapping (deterministic): CANONICAL_TIME_MISSING -> "
+    "include the locked time verbatim once; TIMESTAMP_OUTSIDE_WINDOW "
+    "-> every row inside the window.\n"
+    + _ACTIVITY_LOG_REPAIR_GRID_LINE
+    + "\n"
+    + _ACTIVITY_LOG_REPAIR_RECHECK_LINE
+    + _ACTIVITY_LOG_REPAIR_DIRECTIVE_BLOCK
+    + "\n\nRequirements (reapplied after this repair):\n"
+    + f"- Exactly {MIN_ACTIVITY_LOG_ENTRIES} to {MAX_ACTIVITY_LOG_ENTRIES} "
+    "chronological entries.\n"
+    + f"- Cover the window: from "
+    "-__WINDOW_BEFORE__ minutes to +__WINDOW_AFTER__ minutes around the "
+    "canonical time.\n"
+    + f"- Every entry timestamp MUST lie inside the deterministic window "
+    "[__WINDOW_START_ISO__ .. __WINDOW_END_ISO__].\n"
+    + _ACTIVITY_LOG_TIMESTAMP_GRID_BLOCK
+    + "- Include the locked canonical time EXACTLY ONCE, in an ordinary row "
+    "(e.g. \"__CANONICAL_EXAMPLE_PHRASE__\"); never label it as crime/"
+    "evidence.\n"
+    + "\n" + _ACTIVITY_LOG_SAFE_VOCABULARY_BLOCK
+    + _ACTIVITY_LOG_EXAMPLE_IS_SCAFFOLD
+    + "\nComplete worked example:\n__WORKED_EXAMPLE__\n\n"
+    "Return ONLY a JSON document with this EXACT schema:\n"
+    + schema_contract("activity_log")
+    + "\nNote: 'entries' is a JSON ARRAY of "
+    + f"{MIN_ACTIVITY_LOG_ENTRIES}..{MAX_ACTIVITY_LOG_ENTRIES} "
+    + "objects.\n\n"
+    "No HTML, no markdown tables, no prose outside the JSON document."
+)
+
+
+# ---------------------------------------------------------------------------
+# internal prompt-building helpers (fill every placeholder; never leave a hole)
+# ---------------------------------------------------------------------------
+
+
+def _locked_contract_line(locked: Mapping[str, Any] | None) -> str:
+    if not locked:
+        return "(none)"
+    parts = []
+    for key, value in locked.items():
+        if value is not None:
+            parts.append(f"- {key}: {value}")
+    if not parts:
+        return "(none)"
+    return "\n".join(parts)
+
+
+def _fill(*, template: str, **tokens: str) -> str:
+    out = template
+    for key, value in tokens.items():
+        out = out.replace(f"__{key}__", value if value is not None else "")
+    return out
+
+
+def build_case_people_prompt(
+    prompt: str,
+    locked: Mapping[str, Any] | None,
+    *,
+    id_sheet: str = "",
+) -> str:
+    return _fill(
+        template=CASE_PEOPLE_PROMPT_v1,
+        PROMPT=prompt,
+        LOCKED=_locked_contract_line(locked),
+        ID_SHEET=id_sheet,
+    )
+
+
+def build_evidence_prompt(
+    prompt: str,
+    locked: Mapping[str, Any] | None,
+    *,
+    id_sheet: str = "",
+    approved_people: str = "",
+    deduction_seed: str = "",
+    deduction_feedback: str = "",
+) -> str:
+    return _fill(
+        template=EVIDENCE_PROMPT_v1,
+        PROMPT=prompt,
+        LOCKED=_locked_contract_line(locked),
+        ID_SHEET=id_sheet,
+        APPROVED_PEOPLE=approved_people,
+        DEDUCTION_SEED=deduction_seed,
+        DEDUCTION_FEEDBACK=deduction_feedback,
+    )
+
+
+def build_world_requirements_prompt(
+    prompt: str,
+    locked: Mapping[str, Any] | None,
+    *,
+    id_sheet: str = "",
+    weapon_evidence_id: str = "",
+) -> str:
+    sheet = id_sheet
+    if not sheet:
+        sheet = ""
+    evidence_line = ""
+    if weapon_evidence_id:
+        evidence_line = (
+            f"The weapon object carries sealed evidence id {weapon_evidence_id!r}. "
+            f"Set the weapon object's evidenceId to that EXACT id AND its "
+            f"requiredInteraction to 'inspect' — BOTH fields in the SAME "
+            "object entry, never one without the other (a placement with an "
+            "evidenceId but no interaction is rejected)."
+        )
+    return _fill(
+        template=WORLD_REQUIREMENTS_PROMPT_v1,
+        PROMPT=prompt,
+        LOCKED=_locked_contract_line(locked),
+        ID_SHEET=sheet,
+        WEAPON_EVIDENCE_ID=evidence_line,
+    )
+
+
+def build_asset_spec_prompt(
+    object_concept: str, category_hint: str | None = None
+) -> str:
+    return _fill(
+        template=ASSET_SPEC_PROMPT_v1,
+        OBJECT_CONCEPT=object_concept,
+        CATEGORY_HINT=category_hint or "none",
+        CANONICAL_CONCEPT=_canonical_concept_sentence(object_concept),
+    )
+
+
+def build_asset_spec_repair_prompt(
+    object_concept: str, previous_candidate: str, issues: tuple[str, ...]
+) -> str:
+    return _fill(
+        template=ASSET_SPEC_REPAIR_PROMPT_v1,
+        OBJECT_CONCEPT=object_concept,
+        PREVIOUS_CANDIDATE=previous_candidate,
+        ISSUES="\n".join(f"- {i}" for i in issues),
+        CANONICAL_CONCEPT=_canonical_concept_sentence(object_concept),
+    )
+
+
+def build_repair_prompt(previous_draft: str, issues: tuple[str, ...]) -> str:
+    return _fill(
+        template=REPAIR_PROMPT_v1,
+        PREVIOUS_DRAFT=previous_draft,
+        ISSUES="\n".join(f"- {i}" for i in issues),
+    )
+
+
+def build_activity_log_prompt(
+    canonical_time: str,
+    *,
+    before_minutes: int = WINDOW_DEFAULT_BEFORE_MINUTES,
+    after_minutes: int = WINDOW_DEFAULT_AFTER_MINUTES,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+    safe_vocabulary: Iterable[str] | None = None,
+) -> str:
+    """The Phase 19J activity-log prompt (locked canonical time + window).
+
+    ``canonical_time`` is the app-owned evidence time injected as the locked
+    constraint; the provider only ever receives this one temporal fact plus the
+    neutral generation rules — no CaseTruth, no person/weapon/motive names.
+
+    Phase19J-RI (DEF-104): the concrete deterministic window endpoints
+    (``[WINDOW_START_ISO .. WINDOW_END_ISO]``) and the CLAMPED relative
+    minutes are computed with the EXACT same ``activity_log_window_bounds``
+    math the strict validator applies, so the prompt and the validator share
+    one window and a stateless model never has to compute the relative
+    ±N-minute instant range itself. DEF-104 follow-up #2 also injects a
+    COMPLETE 15-row worked example (same canonical time, same window,
+    strictly increasing +3-minute rows, canonical verbatim once, closed-enum
+    types, neutral texts) as a shape scaffold — never the answer.
+    DEF-104 follow-up #3 additionally injects the app-owned TIMESTAMP GRID
+    (same deterministic math): the model must copy the GIVEN timestamps
+    verbatim into the rows, so the canonical-once property is a pure copy task.
+
+    Phase19J-RI (ADV-C): the grid and scaffold are ADAPTIVE to the actual
+    clamped window span, so every satisfiable window (including 30/0 or 0/30)
+    yields a self-validating scaffold; the operator guard fails fast before
+    this builder for an unsatisfiable window. ADV-D: the canonical forbidden
+    name/location sets are accepted ONLY for deterministic collision
+    substitution inside the scaffold (reserved fallback pool); they are NEVER
+    rendered into the prompt text (ADV-256 holds).
+
+    Phase 37: the SAME collision-safe neutral activity vocabulary is derived
+    by the deterministic ``activity_log_safe_neutral_vocabulary`` builder
+    (identical to the repair prompt's) and rendered as the positive closed
+    output contract (ACTIVITY TEXT RULES + SAFE NEUTRAL ACTIVITY VOCABULARY).
+    ``safe_vocabulary`` is the optional precomputed builder output (the driver
+    computes it once and passes the SAME tuple into BOTH stages — determinism
+    guarantees equality when omitted). The hidden forbidden values and
+    rejection reasons never reach the provider (§6/§7/§19/§25).
+
+    Phase37 DEF-090 (length): the SAFE VOCABULARY block is deterministically
+    bounded to the remaining budget after the fixed prose + worked-example
+    scaffold, so the rendered prompt can never exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for ANY supported forbidden-token set
+    (hostile-but-§15-supported common-word sets included); the 15-20 row shape
+    and the timestamp-grid contract survive untouched.
+    Phase37 DEF-091 (canonical example): the prose canonical-anchor example
+    phrase is collision-checked (``_collision_checked_canonical_example_phrase``)
+    and substituted when it collides with a hidden forbidden token.
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` is treated
+    as "not supplied" and re-derived internally — the render path NEVER falls
+    back to the raw unfiltered pool.
+    """
+    if not safe_vocabulary:
+        # Phase37 DEF-092: ``None`` OR any falsy iterable re-derives the
+        # collision-checked vocabulary internally (never the raw pool).
+        safe_vocabulary = activity_log_safe_neutral_vocabulary(
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+    forbidden = dict(
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
+    start_iso, end_iso, before_min, after_min = _activity_log_window_context(
+        canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    worked_example = _activity_log_worked_example_json(
+        canonical_time,
+        before_minutes=before_minutes,
+        after_minutes=after_minutes,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
+    grid_text = ", ".join(
+        activity_log_timestamp_grid(
+            canonical_time,
+            before_minutes=before_minutes,
+            after_minutes=after_minutes,
+        )
+    )
+    tokens = {
+        "CANONICAL_TIME": canonical_time,
+        "WINDOW_BEFORE": before_min,
+        "WINDOW_AFTER": after_min,
+        "WINDOW_START_ISO": start_iso,
+        "WINDOW_END_ISO": end_iso,
+        "TIMESTAMP_GRID": grid_text,
+        "WORKED_EXAMPLE": worked_example,
+        "CANONICAL_EXAMPLE_PHRASE": _collision_checked_canonical_example_phrase(
+            safe_vocabulary, **forbidden
+        ),
+        "SAFE_VOCABULARY": "",
+    }
+    # Phase37 DEF-090: the SAFE_VOCABULARY fill value is bounded to the exact
+    # remaining budget, so len(rendered) <= ACTIVITY_LOG_PROMPT_MAX_CHARS holds
+    # by construction for this case.
+    base = _fill(template=ACTIVITY_LOG_PROMPT_v1, **tokens)
+    rendered_sv = _rendered_safe_vocabulary(
+        safe_vocabulary,
+        max_chars=ACTIVITY_LOG_PROMPT_MAX_CHARS - len(base),
+    )
+    return _fill(
+        template=ACTIVITY_LOG_PROMPT_v1,
+        **{**tokens, "SAFE_VOCABULARY": rendered_sv},
+    )
+
+
+def build_activity_log_repair_prompt(
+    canonical_time: str,
+    findings: tuple[str, ...],
+    *,
+    before_minutes: int = WINDOW_DEFAULT_BEFORE_MINUTES,
+    after_minutes: int = WINDOW_DEFAULT_AFTER_MINUTES,
+    person_names: Iterable[str] = (),
+    weapon_names: Iterable[str] = (),
+    motive_names: Iterable[str] = (),
+    location_ids: Iterable[str] = (),
+    location_names: Iterable[str] = (),
+    validator_code: str | None = None,
+    parse_failure_class: str | None = None,
+    safe_vocabulary: Iterable[str] | None = None,
+) -> str:
+    """The Phase 19J repair prompt: machine-readable findings + locked time.
+
+    The findings are the ONLY feedback (never the rejected log, never
+    CaseTruth beyond the locked temporal constraint), so the repair can never
+    be steered by content or hidden truth (Phase19J §20). The deterministic
+    window is restated from the SAME app-owned configuration the initial
+    prompt uses (Phase19J-RI: the repair must blind the model to the complete
+    contract - count floor/ceiling, chronology, canonical-once, window).
+
+    Phase 26 Fix-B (H5/§6): the repair ALSO receives the EXACT validator
+    failure code (``validator_code`` — e.g. ``ACTIVITY_LOG_ENTRY_COUNT_INVALID``)
+    and the safe parse-failure class (``parse_failure_class`` — e.g.
+    ``entry_activity_type_invalid``) plus per-code fix directives, so a
+    bounded repair is contract-guided instead of generic.
+
+    Phase 37 (§11): ``ACTIVITY_LOG_ENTITY_LEAK``/``ENTITY_LEAK_DETECTED`` gets
+    a DEDICATED repair directive (regenerate the COMPLETE activity log using
+    ONLY the supplied safe neutral vocabulary) and NEVER falls through the
+    generic "other" directive. The SAME deterministic
+    ``activity_log_safe_neutral_vocabulary`` builder the initial prompt uses
+    supplies the collision-checked closed output vocabulary (``safe_vocabulary``
+    optional precomputed value — the driver computes it once and passes it into
+    BOTH stages). The rejected activity-log text is never passed back (§12).
+
+    Phase19J-RI (DEF-104): the exponential repair also receives the concrete
+    ISO-8601 window endpoints and the canonical-anchor example row, because a
+    stateless 8B model cannot reliably compute the relative ±N-minute window
+    itself; the mapping from the machine-readable findings tokens to the fix
+    (CANONICAL_TIME_MISSING / TIMESTAMP_OUTSIDE_WINDOW) is restated
+    explicitly. DEF-104 follow-up #2 additionally injects the SAME complete
+    15-row worked example shape scaffold (valid under the actual configured
+    window) and the repair recheck line ("never trade one rule for another").
+    DEF-104 follow-up #3 additionally restates the SAME app-owned TIMESTAMP
+    GRID: the canonical missing finding is resolved by copying the grid's
+    canonical row unchanged. ADV-C/ADV-D: same adaptive grid + deterministic
+    scaffold collision substitution as the initial prompt (operational guard
+    still fails fast before an unsatisfiable window ever reaches a builder).
+
+    Phase37 DEF-090 (length): the SAFE VOCABULARY block is deterministically
+    bounded to the remaining budget after the fixed prose + worked-example
+    scaffold, so the rendered prompt can never exceed
+    ``ACTIVITY_LOG_PROMPT_MAX_CHARS`` for ANY supported forbidden-token set;
+    the 15-20 row shape and the timestamp-grid contract survive untouched.
+    Phase37 DEF-091 (canonical example): the prose canonical-anchor example
+    phrase is collision-checked for THIS case and substituted when it collides
+    with a hidden forbidden token (never shown when it would re-trigger the
+    leak).
+    Phase37 DEF-092 (fail-closed): a falsy/empty ``safe_vocabulary`` is treated
+    as "not supplied" and re-derived internally — the render path NEVER falls
+    back to the raw unfiltered pool.
+    """
+    if not safe_vocabulary:
+        # Phase37 DEF-092: ``None`` OR any falsy iterable re-derives the
+        # collision-checked vocabulary internally (never the raw pool).
+        safe_vocabulary = activity_log_safe_neutral_vocabulary(
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+        )
+    forbidden = dict(
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
+    start_iso, end_iso, before_min, after_min = _activity_log_window_context(
+        canonical_time, before_minutes=before_minutes, after_minutes=after_minutes
+    )
+    worked_example = _activity_log_worked_example_json(
+        canonical_time,
+        before_minutes=before_minutes,
+        after_minutes=after_minutes,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    )
+    grid_text = ", ".join(
+        activity_log_timestamp_grid(
+            canonical_time,
+            before_minutes=before_minutes,
+            after_minutes=after_minutes,
+        )
+    )
+    findings_text = (
+        "\n".join(f"- {finding}" for finding in findings) or "- SCHEMA_INVALID"
+    )
+    tokens = {
+        "CANONICAL_TIME": canonical_time,
+        "FINDINGS": findings_text,
+        "WINDOW_BEFORE": before_min,
+        "WINDOW_AFTER": after_min,
+        "WINDOW_START_ISO": start_iso,
+        "WINDOW_END_ISO": end_iso,
+        "TIMESTAMP_GRID": grid_text,
+        "WORKED_EXAMPLE": worked_example,
+        "VALIDATOR_CODE": validator_code or "UNKNOWN",
+        "PARSE_FAILURE_CLASS": parse_failure_class or "none",
+        "REPAIR_DIRECTIVES": _activity_log_repair_directive_lines(findings),
+        "CANONICAL_EXAMPLE_PHRASE": _collision_checked_canonical_example_phrase(
+            safe_vocabulary, **forbidden
+        ),
+        "SAFE_VOCABULARY": "",
+    }
+    # Phase37 DEF-090: the SAFE_VOCABULARY fill value is bounded to the exact
+    # remaining budget, so len(rendered) <= ACTIVITY_LOG_PROMPT_MAX_CHARS holds
+    # by construction for this case.
+    base = _fill(template=ACTIVITY_LOG_REPAIR_PROMPT_v1, **tokens)
+    rendered_sv = _rendered_safe_vocabulary(
+        safe_vocabulary,
+        max_chars=ACTIVITY_LOG_PROMPT_MAX_CHARS - len(base),
+    )
+    return _fill(
+        template=ACTIVITY_LOG_REPAIR_PROMPT_v1,
+        **{**tokens, "SAFE_VOCABULARY": rendered_sv},
+    )
+
+
+__all__ = [
+    "ACTIVITY_LOG_GRID_COUNT",
+    "ACTIVITY_LOG_NEUTRAL_FALLBACK_POOL",
+    "ACTIVITY_LOG_NEUTRAL_TEXT_POOL",
+    "ACTIVITY_LOG_PROMPT_v1",
+    "ACTIVITY_LOG_REPAIR_PROMPT_v1",
+    "ACTIVITY_LOG_PROMPT_MAX_CHARS",
+    "ACTIVITY_LOG_SAFE_VOCABULARY_MIN_SIZE",
+    "ACTIVITY_LOG_MATCH_CATEGORY_PERSON_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_LOCATION_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_WEAPON_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_MOTIVE_TOKEN",
+    "ACTIVITY_LOG_MATCH_CATEGORY_STATIC_FORBIDDEN_TERM",
+    "ASSET_SPEC_PROMPT_v1",
+    "ASSET_SPEC_REPAIR_PROMPT_v1",
+    "CASE_PEOPLE_PROMPT_v1",
+    "CASE_QUALITY_RULES",
+    "PUBLIC_WORLD_BREADTH_RULES",
+    "PHASE41A_QUALITY_RULES",
+    "CONTRACT_KEYS",
+    "EVIDENCE_PROMPT_v1",
+    "REPAIR_PROMPT_v1",
+    "STAGE_TO_CONTRACT",
+    "STAGE_TO_PROMPT_VERSION",
+    "WORLD_REQUIREMENTS_PROMPT_v1",
+    "activity_log_timestamp_grid",
+    "activity_log_safe_neutral_vocabulary",
+    "activity_log_entity_leak_diagnostics",
+    "build_activity_log_prompt",
+    "build_activity_log_repair_prompt",
+    "build_asset_spec_prompt",
+    "build_asset_spec_repair_prompt",
+    "build_case_people_prompt",
+    "build_evidence_prompt",
+    "build_repair_prompt",
+    "build_world_requirements_prompt",
+    "canonical_schema_bytes",
+    "generation_scope_block",
+    "json_schema_for_generation_stage",
+    "json_schema_for_stage_output",
+    "locked_witness_contract_line",
+    "schema_byte_length_for_stage_output",
+    "schema_contract",
+    "schema_contract_as_json_schema",
+    "schema_fingerprint",
+    "schema_fingerprint_for_generation_stage",
+    "schema_fingerprint_for_stage_output",
+]

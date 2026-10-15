@@ -1401,28 +1401,175 @@ def _clear_deferred_stage(attempt: AttemptRecord, stage: GenerationStage) -> Non
     attempt.deferred_structural = tuple(sorted(remaining))
 
 
-def apply_stage_output(attempt: AttemptRecord, stage: GenerationStage, content: str) -> None:
+def public_world_semantic_breadth_issues(
+    attempt: AttemptRecord, public_world: Any
+) -> tuple[str, ...]:
+    """Phase43B (P43B-FR-17/18) — stage-local public-world semantic breadth gate.
+
+    ZERO provider calls. After the PUBLIC_WORLD canonical parse succeeds, the
+    assembled PARTIAL trusted state (the immutable CASE_TRUTH crime + this
+    candidate public world) is checked with the SAME truth-independent universe
+    derivation (``derive_universes``) and the SAME resolution rule the full
+    ``validate_draft`` universe bucket uses:
+
+    - a HOMICIDE requires a non-empty FINAL HOMICIDE TARGET universe AND
+      non-empty motive/weapon universes;
+    - a SUICIDE requires non-empty motive/weapon universes (the WHO/final-target
+      dimension is vacuous — REQUIREMENTS 31.1.1A / 31.10).
+
+    Returns the sorted, deterministic, content-safe issue strings (empty ==
+    valid). This is intentionally a SEMANTIC breadth check — it never inspects
+    the response byte length (P43B-FR-10), so a structurally valid but
+    semantically empty world is rejected by meaning, not by size.
+    """
+    crime = attempt.stage_outputs.get(GenerationStage.CASE_TRUTH)
+    if crime is None:
+        # No trusted crime yet: there is nothing to derive universes against.
+        return ()
+    draft = GeneratedDraft(
+        crime=crime,
+        persons=tuple(getattr(public_world, "persons", ()) or ()),
+        motives=tuple(getattr(public_world, "motives", ()) or ()),
+        objects=tuple(getattr(public_world, "objects", ()) or ()),
+        locations=tuple(getattr(public_world, "locations", ()) or ()),
+        travel_rules=tuple(getattr(public_world, "travel_rules", ()) or ()),
+        scene=getattr(public_world, "scene", None),
+        evidence=(),
+        world_graph=WorldGraphSpec(),
+    )
+    try:
+        public, _evidence, truth = _draft_to_phase3(
+            draft,
+            case_id=attempt.case_id,
+            title=_title_for_prompt(attempt.prompt),
+            witness_truthfulness=tuple(
+                getattr(attempt, "_witness_truthfulness", ()) or ()
+            ),
+        )
+    except (TypeError, ValueError):
+        # Shape validity is the strict parser's responsibility; never
+        # double-report it here (canonical parsing remains the shape authority).
+        return ()
+    from app.domain.resolution import ResolutionType
+
+    universes = derive_universes(public)
+    is_suicide = truth.crime.resolution_type is ResolutionType.SUICIDE
+    issues: list[str] = []
+    if not universes.homicide_target_ids and not is_suicide:
+        issues.append("final homicide target universe is empty")
+    if not universes.motive_ids:
+        issues.append("motive universe is empty")
+    if not universes.weapon_ids:
+        issues.append("weapon universe is empty")
+    return tuple(sorted(set(issues)))
+
+
+def _emit_stage_boundary(
+    attempt: AttemptRecord,
+    stage: GenerationStage,
+    *,
+    canonical_parse_valid: bool,
+    semantic_breadth_valid: bool | None,
+    accepted: bool,
+) -> None:
+    """Phase43B (FR-14/15, §15) — bounded stage-boundary acceptance telemetry.
+
+    Distinguishes transport success (``provider.call.complete`` /
+    ``provider.structured_output.*``) from STRUCTURED success: this event records
+    whether the canonical parser accepted the stage output and whether the
+    stage-local semantic gate (PUBLIC_WORLD breadth) accepted it. Only booleans,
+    the closed stage token and a bounded call counter are emitted — never raw
+    content, prompts, schema contents, hidden truth or secrets.
+    """
+    emit_event(
+        "generation.stage.accepted" if accepted else "generation.stage.rejected",
+        caseId=attempt.case_id,
+        generationAttemptId=attempt.attempt_id,
+        stage=stage.value,
+        stageAccepted=accepted,
+        canonicalParseValid=canonical_parse_valid,
+        semanticBreadthValid=semantic_breadth_valid,
+        providerCallCount=(
+            attempt.budget.calls if attempt.budget is not None else None
+        ),
+    )
+
+
+def apply_stage_output(
+    attempt: AttemptRecord, stage: GenerationStage, content: str
+) -> bool:
     """Apply one GENERATING stage's provider output (parse -> accumulate).
 
-    Parse issues are collected (never coerced) into the attempt's deferred
-    structural issues and feed the full validation later.
+    Phase43B (P43B-FR-14, AC-13): returns whether the stage became TRUSTED.
+    A stage is trusted only when its canonical parse succeeds AND, for
+    PUBLIC_WORLD, the stage-local semantic breadth gate passes. A stage that is
+    not trusted is NEVER added to ``attempt.stage_done`` (so it cannot be the
+    basis of downstream generation), while parse issues are still collected
+    (never coerced) into the attempt's deferred structural issues for the full
+    validation.
+
+    Parse failure leaves the stage output UNINSTALLED. A structurally valid
+    PUBLIC_WORLD that fails only the semantic breadth gate is installed as
+    staging material (it parsed) but is NOT marked trusted, so the deterministic
+    full validation re-derives the same universe/quality rejection under its
+    existing classification.
     """
     if stage is GenerationStage.REPAIR:
-        apply_repair(attempt, content)
-        return
+        issues = apply_repair(attempt, content)
+        trusted = not issues
+        _emit_stage_boundary(
+            attempt,
+            stage,
+            canonical_parse_valid=trusted,
+            semantic_breadth_valid=None,
+            accepted=trusted,
+        )
+        return trusted
     spec = parser.parse_stage(stage, content, non_throwing=True)
     if spec is None:
         _record_deferred_issues(
             attempt, stage, tuple(parser.collect_issues(stage, content))
         )
-    else:
-        # A successful parse clears any stale issue for THIS stage only (a
-        # re-parsed stage owns its own defects).
-        _clear_deferred_stage(attempt, stage)
-        attempt.stage_outputs[stage] = spec
-        attempt.draft = None
-        attempt._phase3_cache = None
+        _emit_stage_boundary(
+            attempt,
+            stage,
+            canonical_parse_valid=False,
+            semantic_breadth_valid=None,
+            accepted=False,
+        )
+        return False
+    semantic_issues: tuple[str, ...] = ()
+    if stage is GenerationStage.PUBLIC_WORLD:
+        semantic_issues = public_world_semantic_breadth_issues(attempt, spec)
+    # A successful parse clears any stale issue for THIS stage only (a re-parsed
+    # stage owns its own defects).
+    _clear_deferred_stage(attempt, stage)
+    attempt.stage_outputs[stage] = spec
+    attempt.draft = None
+    attempt._phase3_cache = None
+    if semantic_issues:
+        # Structurally valid but semantically empty breadth -> NOT trusted. The
+        # deterministic full validation re-derives the universe/quality issues
+        # from the installed staging spec and owns the recovery classification.
+        _emit_stage_boundary(
+            attempt,
+            stage,
+            canonical_parse_valid=True,
+            semantic_breadth_valid=False,
+            accepted=False,
+        )
+        return False
     attempt.stage_done.add(stage)
+    _emit_stage_boundary(
+        attempt,
+        stage,
+        canonical_parse_valid=True,
+        semantic_breadth_valid=(
+            True if stage is GenerationStage.PUBLIC_WORLD else None
+        ),
+        accepted=True,
+    )
+    return True
 
 
 def _repair_id_churn_issues(attempt: AttemptRecord, new_draft: GeneratedDraft) -> tuple[str, ...]:
@@ -1785,8 +1932,17 @@ def _evidence_completion_preconditions_met(
 
 
 def _apply_completed_evidence(attempt: AttemptRecord, completion: Any) -> None:
-    """Store a completed EvidenceSetSpec (+ any extra travel rules) on the attempt."""
+    """Store a completed EvidenceSetSpec (+ any extra travel rules) on the attempt.
+
+    Phase43B — installing the deterministic algebra's canonical evidence also
+    marks EVIDENCE trusted (``stage_done``). This is what lets the generic
+    controller continue straight to WORLD_GRAPH when the provider's EVIDENCE
+    stage was untrusted (parse failure / absent): the canonical evidence is the
+    trusted EVIDENCE stage state. On the existing WORLD_GRAPH-path completion the
+    marker is a no-op (EVIDENCE was already trusted to reach WORLD_GRAPH).
+    """
     attempt.stage_outputs[GenerationStage.EVIDENCE] = completion.evidence
+    attempt.stage_done.add(GenerationStage.EVIDENCE)
     extra_rules = tuple(completion.extra_travel_rules or ())
     if extra_rules:
         public_world = attempt.stage_outputs.get(GenerationStage.PUBLIC_WORLD)
@@ -1832,9 +1988,23 @@ def _apply_completed_evidence(attempt: AttemptRecord, completion: Any) -> None:
 def complete_generic_evidence_if_underconstrained(attempt: AttemptRecord) -> bool:
     """Phase 43A — deterministic evidence completion for the generic path.
 
-    Runs AT MOST ONCE per attempt (``attempt._evidence_completed``) on the
-    trusted canonical state after the EVIDENCE stage parsed and BEFORE the
-    WORLD_GRAPH stage. Returns True iff the evidence was completed.
+    Runs AT MOST ONCE per attempt (``attempt._evidence_completed``). The generic
+    controller offers it at two seams, both zero-provider-cost and guarded by the
+    same once-per-attempt flag:
+
+    * BEFORE the WORLD_GRAPH stage (the original Phase43A hook), on trusted
+      canonical state whose EVIDENCE stage parsed but is underconstrained; and
+    * Phase43B — when the provider's EVIDENCE stage did NOT become trusted (a
+      canonical parse failure / absent output). The malformed provider evidence
+      is discarded and, if the deterministic algebra can close the evidence gap
+      against the already-trusted CASE_TRUTH + PUBLIC_WORLD, the canonical
+      evidence is installed and EVIDENCE becomes trusted so generation proceeds
+      to WORLD_GRAPH.
+
+    Returns True iff the evidence was completed (installed as the trusted EVIDENCE
+    stage state). A refusal (any non-evidence defect, or the algebra cannot close
+    it) returns False and the controller falls through to the existing bounded
+    recovery.
 
     Completion is attempted only when the FULL canonical validation of the
     current partial draft reports NO locked/structural/safety/world/universe
@@ -1973,6 +2143,7 @@ __all__ = [
     "current_draft",
     "normalize_prompt",
     "provider_facing_draft",
+    "public_world_semantic_breadth_issues",
     "selected_environment_kit",
     "time_proof_checks_passed",
     "trusted_reference_universe",

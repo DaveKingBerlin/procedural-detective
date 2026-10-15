@@ -1232,9 +1232,18 @@ def enrich_result(
         result["serverReportedTotalElapsedMs"] = bounded_elapsed
 
     # Structured output: truthfully from actual call telemetry (never inferred
-    # from marketing metadata).
+    # from marketing metadata). DEF-073/ADV-43B-06 — ``structuredOutputUsed``
+    # records whether a structured request was SENT (the historical meaning),
+    # read from the request signal ``structuredOutputRequested``; older events
+    # that predate the request/success split fall back to the validated-success
+    # ``structuredOutput`` signal.
+    def _structured_request_sent(event: dict[str, Any]) -> bool:
+        if "structuredOutputRequested" in event:
+            return event.get("structuredOutputRequested") is True
+        return event.get("structuredOutput") is True
+
     used_structured = any(
-        e.get("event") == "provider.call.complete" and e.get("structuredOutput") is True
+        e.get("event") == "provider.call.complete" and _structured_request_sent(e)
         for e in attempt_events
     )
     result["structuredOutputUsed"] = True if used_structured else False

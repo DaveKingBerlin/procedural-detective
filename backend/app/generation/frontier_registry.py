@@ -198,6 +198,26 @@ class FrontierProviderDefinition:
     structured-output mode (Phase30-Fix §6 — ``None`` when the entry does not
     support native structured output). Never API keys, never per-user state,
     never mutable browser data.
+
+    Phase43B (P43B-FR-01/02/03) adds FOUR fail-closed capability booleans so
+    the effective structured-output contract is never over-claimed:
+
+    - ``accepts_response_format`` — the endpoint accepts the OpenAI-compatible
+      ``response_format`` parameter at all. This is the WEAKEST guarantee and
+      NEVER implies native strict enforcement (P43B-FR-03).
+    - ``supports_json_schema`` — the endpoint's ``response_format`` accepts the
+      ``type="json_schema"`` form with a JSON Schema document. Still guidance
+      for most endpoints; validation of returned content remains LOCAL.
+    - ``supports_native_strict_json_schema`` — the provider/model family is
+      PROVEN to enforce a native strict JSON Schema (the only member that may
+      legitimately receive ``json_schema.strict=true``; P43B-FR-05).
+    - ``supports_openrouter_parameter_gating`` — the endpoint is OpenRouter and
+      honours ``provider.require_parameters`` routing (P43B-FR-04). Only
+      OpenRouter may ever receive that field.
+
+    Every boolean defaults to ``False`` (fail-closed) and an entry that claims
+    a stronger capability must also claim every weaker one (validated at
+    import).
     """
 
     provider_id: str
@@ -206,6 +226,11 @@ class FrontierProviderDefinition:
     protocol: str = "openai_chat_completions"
     enabled: bool = True
     structured_output_mode: str | None = None
+    # Phase43B capability booleans — safe defaults, never implied by routing.
+    accepts_response_format: bool = False
+    supports_json_schema: bool = False
+    supports_native_strict_json_schema: bool = False
+    supports_openrouter_parameter_gating: bool = False
 
 
 # The committed catalog (order is display order). Appendix in the module
@@ -223,49 +248,181 @@ FRONTIER_PROVIDER_REGISTRY: tuple[FrontierProviderDefinition, ...] = (
         label="OpenAI",
         endpoint="https://api.openai.com/v1/chat/completions",
         structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+        accepts_response_format=True,
+        supports_json_schema=True,
+        # Phase43B — native strict is NOT claimed here: accepting a
+        # ``response_format`` is not proof of native strict enforcement
+        # (P43B-FR-03). Only OpenRouter is currently proven.
+        supports_native_strict_json_schema=False,
+        supports_openrouter_parameter_gating=False,
     ),
     FrontierProviderDefinition(
         provider_id="openrouter",
         label="OpenRouter",
         endpoint="https://openrouter.ai/api/v1/chat/completions",
         structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+        accepts_response_format=True,
+        supports_json_schema=True,
+        # Phase43B — OpenRouter is the ONE provider where both native strict
+        # JSON Schema and ``provider.require_parameters`` parameter-gated
+        # routing are PROVEN and therefore declared.
+        supports_native_strict_json_schema=True,
+        supports_openrouter_parameter_gating=True,
     ),
     FrontierProviderDefinition(
         provider_id="groq",
         label="Groq",
         endpoint="https://api.groq.com/openai/v1/chat/completions",
         structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+        accepts_response_format=True,
+        supports_json_schema=True,
+        supports_native_strict_json_schema=False,
+        supports_openrouter_parameter_gating=False,
     ),
     FrontierProviderDefinition(
         provider_id="together",
         label="Together AI",
         endpoint="https://api.together.ai/v1/chat/completions",
         structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+        accepts_response_format=True,
+        supports_json_schema=True,
+        supports_native_strict_json_schema=False,
+        supports_openrouter_parameter_gating=False,
     ),
     FrontierProviderDefinition(
         provider_id="mistral",
         label="Mistral AI",
         endpoint="https://api.mistral.ai/v1/chat/completions",
         structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+        accepts_response_format=True,
+        supports_json_schema=True,
+        supports_native_strict_json_schema=False,
+        supports_openrouter_parameter_gating=False,
     ),
     FrontierProviderDefinition(
         provider_id="fireworks",
         label="Fireworks AI",
         endpoint="https://api.fireworks.ai/inference/v1/chat/completions",
         structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+        accepts_response_format=True,
+        supports_json_schema=True,
+        supports_native_strict_json_schema=False,
+        supports_openrouter_parameter_gating=False,
     ),
     FrontierProviderDefinition(
         provider_id="deepinfra",
         label="DeepInfra",
         endpoint="https://api.deepinfra.com/v1/openai/chat/completions",
         structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+        accepts_response_format=True,
+        supports_json_schema=True,
+        supports_native_strict_json_schema=False,
+        supports_openrouter_parameter_gating=False,
     ),
     FrontierProviderDefinition(
         provider_id="xai",
         label="xAI",
         endpoint="https://api.x.ai/v1/chat/completions",
         structured_output_mode=STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA,
+        accepts_response_format=True,
+        supports_json_schema=True,
+        supports_native_strict_json_schema=False,
+        supports_openrouter_parameter_gating=False,
     ),
+)
+
+
+# The ONE provider id allowed to receive OpenRouter-specific request fields
+# (``provider.require_parameters``). Hard-coded so a hostile registry edit can
+# never leak the field to another endpoint.
+OPENROUTER_PROVIDER_ID = "openrouter"
+
+
+# --------------------------------------------------------------------------- #
+# Phase43B (P43B-FR-02, ADV-43B-01) — model-granular native-strict allowlist.
+#
+# Native strict JSON Schema support is a (provider, model) property, NOT a
+# provider-wide one. An aggregator such as OpenRouter exposes many upstream
+# models whose strict-JSON-Schema support differs, so the provider-level
+# ``supports_native_strict_json_schema`` boolean is necessary but NOT
+# sufficient to send ``json_schema.strict=true``. This is the CLOSED,
+# server-owned allowlist of ``(provider_id, model)`` pairs PROVEN to enforce a
+# native strict JSON Schema. The predicate is DEFAULT DENY: any pair not listed
+# here — including an unknown/absent provider id or model — is treated as NOT
+# strict-capable, so ``strict:true`` is never emitted. The browser can never
+# supply or extend this list (the model reaching the adapter is the validated
+# per-attempt BYOK model, wired alongside the trusted, server-owned provider
+# id).
+#
+# Model comparison is a stripped, casefolded exact match against the committed
+# entry; the provider id is an exact match. Entries are stored with an already
+# casefolded model token. Additions require independent proof for that exact
+# (provider, model) pairing — never a model-family prefix or a provider-wide
+# claim.
+STRICT_CAPABLE_MODELS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # OpenAI ``gpt-4o`` via OpenRouter: OpenAI native structured outputs
+        # enforce ``strict:true``, and ``provider.require_parameters`` keeps the
+        # request on a routing target that honours the parameter.
+        ("openrouter", "openai/gpt-4o"),
+    }
+)
+
+
+def model_supports_native_strict_json_schema(
+    provider_id: str | None, model: str | None
+) -> bool:
+    """Closed, server-owned ``(provider_id, model)`` native-strict predicate.
+
+    Returns ``True`` ONLY when the exact ``(provider_id, model)`` pair is a
+    member of ``STRICT_CAPABLE_MODELS``. DEFAULT DENY: a non-string/empty
+    provider id or model, or any pair not explicitly allowlisted, returns
+    ``False`` (never a guessed capability). The model is stripped and casefolded
+    for a stable match; the provider id is an exact match.
+
+    This is the ONLY helper the adapter consults for the model-granular strict
+    gate, so a browser value can never influence it.
+    """
+    if not isinstance(provider_id, str) or not provider_id:
+        return False
+    if not isinstance(model, str) or not model.strip():
+        return False
+    return (provider_id, model.strip().casefold()) in STRICT_CAPABLE_MODELS
+
+
+@dataclass(frozen=True)
+class FrontierProviderCapabilities:
+    """Phase43B — the EFFECTIVE structured-output capability of one provider.
+
+    A read-only projection of a registry entry's capability booleans plus the
+    declared ``structured_output_mode``. The provider adapter reads THIS (never
+    a browser value) to decide whether to send ``response_format``, whether it
+    may add ``json_schema.strict=true`` and whether it may add the
+    OpenRouter-only ``provider.require_parameters`` field.
+
+    Documented invariant (P43B-FR-03): ``accepts_response_format`` NEVER
+    implies ``supports_native_strict_json_schema``. The two are distinct here
+    and only the strict boolean may gate ``strict=true``.
+    """
+
+    provider_id: str
+    structured_output_mode: str | None
+    accepts_response_format: bool
+    supports_json_schema: bool
+    supports_native_strict_json_schema: bool
+    supports_openrouter_parameter_gating: bool
+
+
+# The all-``False`` fail-closed projection used when no provider id resolves
+# (or the adapter was constructed without one). No native structured output,
+# no strict, no OpenRouter gating.
+FAIL_CLOSED_CAPABILITIES = FrontierProviderCapabilities(
+    provider_id="",
+    structured_output_mode=None,
+    accepts_response_format=False,
+    supports_json_schema=False,
+    supports_native_strict_json_schema=False,
+    supports_openrouter_parameter_gating=False,
 )
 
 
@@ -387,6 +544,54 @@ def validate_structured_output_mode(provider_id: str, mode: str | None) -> None:
         )
 
 
+def validate_frontier_capabilities(definition: FrontierProviderDefinition) -> None:
+    """Phase43B (P43B-FR-01/02/03) — import-time validation of ONE entry's
+    capability booleans. Deterministic, hermetic (parse-only).
+
+    Fail-closed invariants (every weaker guarantee must be declared too):
+
+    - ``supports_json_schema`` REQUIRES ``accepts_response_format``;
+    - ``supports_native_strict_json_schema`` REQUIRES ``supports_json_schema``
+      (an endpoint can never claim native strict without accepting a JSON
+      Schema at all — the P43B-FR-03 no-trust-escalation rule);
+    - ``supports_openrouter_parameter_gating`` is ONLY legal on the OpenRouter
+      entry (a request field that must never reach another endpoint);
+    - a declared ``structured_output_mode`` REQUIRES
+      ``accepts_response_format`` (no mode without the parameter).
+    """
+    if definition.supports_json_schema and not definition.accepts_response_format:
+        raise ValueError(
+            f"registry provider {definition.provider_id!r} declares "
+            "supports_json_schema without accepts_response_format"
+        )
+    if (
+        definition.supports_native_strict_json_schema
+        and not definition.supports_json_schema
+    ):
+        raise ValueError(
+            f"registry provider {definition.provider_id!r} declares "
+            "supports_native_strict_json_schema without supports_json_schema "
+            "(response_format acceptance must never imply native strict support)"
+        )
+    if (
+        definition.supports_openrouter_parameter_gating
+        and definition.provider_id != OPENROUTER_PROVIDER_ID
+    ):
+        raise ValueError(
+            f"registry provider {definition.provider_id!r} declares "
+            "supports_openrouter_parameter_gating (only the OpenRouter entry "
+            "may ever receive OpenRouter-specific request fields)"
+        )
+    if (
+        definition.structured_output_mode is not None
+        and not definition.accepts_response_format
+    ):
+        raise ValueError(
+            f"registry provider {definition.provider_id!r} declares a "
+            "structured-output mode without accepts_response_format"
+        )
+
+
 def _validate_committed_registry() -> None:
     seen: set[str] = set()
     for definition in FRONTIER_PROVIDER_REGISTRY:
@@ -411,6 +616,9 @@ def _validate_committed_registry() -> None:
         validate_structured_output_mode(
             definition.provider_id, definition.structured_output_mode
         )
+        # Phase43B — the capability booleans must be internally consistent
+        # (fail-closed: no over-claiming).
+        validate_frontier_capabilities(definition)
 
 
 _validate_committed_registry()
@@ -442,6 +650,39 @@ def frontier_provider_definition(
     return None
 
 
+def frontier_provider_capabilities(
+    provider_id: str | None,
+) -> FrontierProviderCapabilities:
+    """Phase43B — the EFFECTIVE capabilities for a provider id.
+
+    Resolves the trusted registry entry and projects its capability booleans
+    (plus the declared ``structured_output_mode``) into a frozen
+    ``FrontierProviderCapabilities``. An unknown/absent/disabled provider id —
+    or a monkeypatched registry that no longer contains it — degrades to the
+    all-``False`` ``FAIL_CLOSED_CAPABILITIES`` (never a guessed capability).
+
+    This is the ONLY helper the adapter consults for the strict / parameter
+    gating decisions, so a browser value can never influence them.
+    """
+    if not isinstance(provider_id, str) or not provider_id:
+        return FAIL_CLOSED_CAPABILITIES
+    definition = frontier_provider_definition(provider_id)
+    if definition is None:
+        return FAIL_CLOSED_CAPABILITIES
+    return FrontierProviderCapabilities(
+        provider_id=definition.provider_id,
+        structured_output_mode=definition.structured_output_mode,
+        accepts_response_format=definition.accepts_response_format,
+        supports_json_schema=definition.supports_json_schema,
+        supports_native_strict_json_schema=(
+            definition.supports_native_strict_json_schema
+        ),
+        supports_openrouter_parameter_gating=(
+            definition.supports_openrouter_parameter_gating
+        ),
+    )
+
+
 def frontier_enabled_providers() -> tuple[FrontierProviderDefinition, ...]:
     """The ENABLED committed definitions, in registry order."""
     return tuple(
@@ -465,13 +706,20 @@ def frontier_catalog() -> tuple[tuple[str, str], ...]:
 
 
 __all__ = [
+    "FAIL_CLOSED_CAPABILITIES",
     "FRONTIER_PROVIDER_REGISTRY",
     "FRONTIER_STRUCTURED_OUTPUT_MODES",
+    "OPENROUTER_PROVIDER_ID",
+    "STRICT_CAPABLE_MODELS",
     "STRUCTURED_OUTPUT_MODE_OPENAI_JSON_SCHEMA",
+    "FrontierProviderCapabilities",
     "FrontierProviderDefinition",
     "frontier_catalog",
     "frontier_enabled_providers",
+    "frontier_provider_capabilities",
     "frontier_provider_definition",
+    "model_supports_native_strict_json_schema",
+    "validate_frontier_capabilities",
     "validate_frontier_registry_endpoint",
     "validate_structured_output_mode",
 ]

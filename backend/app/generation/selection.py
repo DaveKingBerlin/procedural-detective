@@ -548,6 +548,10 @@ def resolve(
                 # can never influence it (the FrontierBlock carries only
                 # provider/apiKey/model).
                 structured_output_mode=definition.structured_output_mode,
+                # Phase43B (P43B-FR-01/02): the SERVER-OWNED logical provider
+                # id selects the EFFECTIVE capability projection (native strict
+                # support + OpenRouter parameter gating). Never browser-supplied.
+                provider_id=definition.provider_id,
             )
 
         return ResolvedGeneration(
