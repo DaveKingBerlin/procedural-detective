@@ -466,7 +466,7 @@ def test_6_when_derivability_medium_driver_hotel_knife():
         _j(cp),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
         *_alog_posts('2026-09-11T21:18:00+02:00'),
-        _j(_world("kitchen knife")),
+        _j(_world("kitchen knife", "hotel_suite")),
     ]
     prompt = (
         "Victim: Dr. Anna Weiss\nMurderer: Paul Becker\nMotive: stolen research data\n"

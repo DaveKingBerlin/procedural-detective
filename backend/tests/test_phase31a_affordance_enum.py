@@ -121,6 +121,17 @@ EVIDENCE_FINGERPRINT_PREFIX = "a8e2040b69f49a7a"  # post-DEF-054..056 evidence
 EVIDENCE_CANONICAL_BYTE_LENGTH = 4179
 
 
+def _enum_agnostic(node):
+    """Structural view of a schema with every additive Phase43 reference
+    ``enum`` removed (the affordance-enum contract is unaffected by Phase43
+    request-local reference enums)."""
+    if isinstance(node, dict):
+        return {k: _enum_agnostic(v) for k, v in node.items() if k != "enum"}
+    if isinstance(node, list):
+        return [_enum_agnostic(item) for item in node]
+    return node
+
+
 def _walk(node):
     """Yield every (key, value) pair of a JSON-Schema object graph."""
     if isinstance(node, dict):
@@ -313,9 +324,11 @@ def test_non_affordance_list_of_strings_shapes_stay_plain():
     assert travel_rules["type"] == "array"
     assert travel_rules["items"]["type"] == "object"
     assert "enum" not in travel_rules["items"]
-    # Every ENUM anywhere in the case_truth transport is exactly the closed
-    # affordance vocabulary (the ONLY enum-bearing nodes are the persons/
-    # motives ``affordances`` arrays — no other enum marker exists here).
+    # Every ENUM anywhere in the case_truth transport is either the closed
+    # affordance vocabulary (the persons/motives ``affordances`` arrays) or the
+    # Phase43 sanctioned ``crime.resolutionType`` enum (P43-FR-05: HOMICIDE
+    # needs a murderer, SUICIDE carries a null murdererId) — a widened, not
+    # weakened, contract.
     all_enums = [
         value["enum"]
         for _key, value in _walk(ct)
@@ -323,7 +336,7 @@ def test_non_affordance_list_of_strings_shapes_stay_plain():
     ]
     assert all_enums
     for enum in all_enums:
-        assert enum == sorted(AFFORDANCE_VOCABULARY)
+        assert enum in (sorted(AFFORDANCE_VOCABULARY), ["HOMICIDE", "SUICIDE"])
 
 
 # --------------------------------------------------------------------------- #
@@ -368,8 +381,8 @@ def test_golden_fixtures_parse_and_publish_unchanged(database_url):
                     _url, body, _h = wire.posts[index]
                     rf = (body.get("response_format") or {}).get("json_schema")
                     assert rf is not None
-                    assert rf["schema"] == prompts.json_schema_for_stage_output(
-                        stage.value
+                    assert _enum_agnostic(rf["schema"]) == _enum_agnostic(
+                        prompts.json_schema_for_stage_output(stage.value)
                     ), stage
         finally:
             _dispose(application)

@@ -314,8 +314,12 @@ def test_02c_non_dict_json_envelope_is_sanitized_error():
 
 
 def test_03_malformed_json_follows_normal_failure_path():
+    # Phase43A: a malformed EVIDENCE stage is now owned by the deterministic
+    # evidence completion (it supplies the canonical evidence). The malformed
+    # stage used to exercise the normal repair path is therefore the
+    # WORLD_GRAPH stage, which still routes through the existing repair owner.
     transport = MockOllamaTransport(
-        posts=_golden_posts(malformed_stage=GenerationStage.EVIDENCE)
+        posts=_golden_posts(malformed_stage=GenerationStage.WORLD_GRAPH)
     )
     record = _run_generation(_provider(transport))
     assert record.state is GenerationState.PUBLISHED
@@ -334,8 +338,8 @@ def test_03b_fence_wrapped_malformed_json_still_normal_failure_path():
         posts=[
             _G[GenerationStage.CASE_TRUTH],
             _G[GenerationStage.PUBLIC_WORLD],
+            _G[GenerationStage.EVIDENCE],
             fenced_malformed,
-            _G[GenerationStage.WORLD_GRAPH],
             GOLDEN_FULL_DRAFT,
         ]
     )
@@ -531,9 +535,10 @@ def test_08_admission_happens_before_ollama_call():
 
 
 def test_09_repair_call_uses_same_ollama_provider_interface():
-    # a malformed EVIDENCE stage forces a REAL repair pass.
+    # a malformed WORLD_GRAPH stage forces a REAL repair pass (Phase43A: a
+    # malformed EVIDENCE stage is instead owned by the deterministic completion).
     transport = MockOllamaTransport(
-        posts=_golden_posts(malformed_stage=GenerationStage.EVIDENCE)
+        posts=_golden_posts(malformed_stage=GenerationStage.WORLD_GRAPH)
     )
     provider = _provider(transport)
     record = _run_generation(provider)

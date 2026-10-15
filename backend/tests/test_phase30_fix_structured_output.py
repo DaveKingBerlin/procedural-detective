@@ -197,6 +197,17 @@ def _name_of(post_body: dict) -> str | None:
     return inner.get("name")
 
 
+def _enum_agnostic(node):
+    """Structural view of a schema with every additive Phase43 reference
+    ``enum`` removed. The pre-Phase-43 tests assert the STAGE STRUCTURE is
+    unchanged; Phase43 (P43-FR-04) only ADDS request-local reference enums."""
+    if isinstance(node, dict):
+        return {k: _enum_agnostic(v) for k, v in node.items() if k != "enum"}
+    if isinstance(node, list):
+        return [_enum_agnostic(item) for item in node]
+    return node
+
+
 def _sqlite_path(database_url: str) -> Path:
     prefix = "sqlite:///"
     assert database_url.startswith(prefix)
@@ -237,7 +248,7 @@ def test_trusted_stage_schema_reaches_frontier_adapter(database_url):
                 for index, stage in enumerate(_REGISTRY_STAGES):
                     _url, body, _headers = wire.posts[index]
                     expected = prompts.json_schema_for_stage_output(stage.value)
-                    assert _schema_of(body) == expected, stage
+                    assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(expected), stage
                     assert (
                         _name_of(body)
                         == prompts.schema_id_for_generation_stage(stage.value)
@@ -431,8 +442,8 @@ def test_openrouter_wire_capture_native_structured_output(database_url):
                     assert url == OPENROUTER_ENDPOINT
                     # native structured output present with the PARSER-SHAPED
                     # stage-output schema (DEF-019)
-                    assert _schema_of(body) == prompts.json_schema_for_stage_output(
-                        stage.value
+                    assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                        prompts.json_schema_for_stage_output(stage.value)
                     ), stage
                     # the key exists ONLY in the Authorization header
                     assert headers["Authorization"] == "Bearer OR-WIRE-KEY-43"
@@ -714,13 +725,13 @@ def test_repair_uses_intended_schema_and_parses_through_structured_path(database
                 assert res.json()["status"] == "PUBLISHED"
                 assert len(wire.posts) == 5, wire.posts
                 for index, stage in enumerate(_REGISTRY_STAGES):
-                    assert _schema_of(wire.posts[index][1]) == prompts.json_schema_for_stage_output(
-                        stage.value
+                    assert _enum_agnostic(_schema_of(wire.posts[index][1])) == _enum_agnostic(
+                        prompts.json_schema_for_stage_output(stage.value)
                     ), stage
                 # the REPAIR call carries the authoritative full-draft contract
                 _url, repair_body, _headers = wire.posts[4]
-                assert _schema_of(repair_body) == prompts.json_schema_for_stage_output(
-                    "repair"
+                assert _enum_agnostic(_schema_of(repair_body)) == _enum_agnostic(
+                    prompts.json_schema_for_stage_output("repair")
                 )
                 assert _name_of(repair_body) == prompts.schema_id_for_generation_stage(
                     "repair"
@@ -765,14 +776,14 @@ def test_repair_remains_bounded_third_repair_rejected(database_url):
                 assert len(wire.posts) == 6, wire.posts
                 for index in (4, 5):
                     _url, body, _headers = wire.posts[index]
-                    assert _schema_of(body) == prompts.json_schema_for_stage_output(
-                        "repair"
+                    assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                        prompts.json_schema_for_stage_output("repair")
                     ), f"repair call #{index}"
                 # every stage call still carries that stage's PARSER-SHAPED
                 # canonical output schema (DEF-019)
                 for index, stage in enumerate(_REGISTRY_STAGES):
-                    assert _schema_of(wire.posts[index][1]) == prompts.json_schema_for_stage_output(
-                        stage.value
+                    assert _enum_agnostic(_schema_of(wire.posts[index][1])) == _enum_agnostic(
+                        prompts.json_schema_for_stage_output(stage.value)
                     ), stage
         finally:
             _dispose(application)
@@ -1007,13 +1018,13 @@ def test_concurrent_structured_output_attempts_are_schema_isolated(database_url)
         assert all(url == GROQ_ENDPOINT for url, _b, _h in posts_b)
         for index, (_url, body, _headers) in enumerate(posts_a):
             assert body["model"] == "MODEL-A"
-            assert _schema_of(body) == prompts.json_schema_for_stage_output(
-                _REGISTRY_STAGES[index].value
+            assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                prompts.json_schema_for_stage_output(_REGISTRY_STAGES[index].value)
             )
         for index, (_url, body, _headers) in enumerate(posts_b):
             assert body["model"] == "MODEL-B"
-            assert _schema_of(body) == prompts.json_schema_for_stage_output(
-                _REGISTRY_STAGES[index].value
+            assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                prompts.json_schema_for_stage_output(_REGISTRY_STAGES[index].value)
             )
         # no cross-talk in the wire bodies (each attempt's key/model only in
         # its own posts).

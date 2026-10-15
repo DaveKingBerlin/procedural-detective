@@ -40,6 +40,16 @@ _GOLDEN_PROMPT = (
 SENTINEL = fb.SENTINEL  # must appear ONLY in the mocked outbound header
 
 
+def _enum_agnostic(node):
+    """Structural view of a schema with every additive Phase43 reference
+    ``enum`` removed (the artifact assertions check stage/schema structure)."""
+    if isinstance(node, dict):
+        return {k: _enum_agnostic(v) for k, v in node.items() if k != "enum"}
+    if isinstance(node, list):
+        return [_enum_agnostic(item) for item in node]
+    return node
+
+
 def _golden_stage_strings():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from app.generation.provider import GenerationStage
@@ -373,12 +383,12 @@ def test_inprocess_driver_repair_exhaustion_artifact(tmp_path, monkeypatch):
             == "REPAIR_v1"
             for _u, body, _h in wire.posts
         )
-        assert (
-            prompts.json_schema_for_stage_output("repair")
-            in [
+        assert any(
+            _enum_agnostic(
                 (body.get("response_format") or {}).get("json_schema", {}).get("schema")
-                for _u, body, _h in wire.posts
-            ]
+            )
+            == _enum_agnostic(prompts.json_schema_for_stage_output("repair"))
+            for _u, body, _h in wire.posts
         )
     finally:
         driver.close()

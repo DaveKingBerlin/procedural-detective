@@ -179,8 +179,13 @@ def test_03_locked_constraints_unchanged():
     assert locked.witness in witnesses
 
 
-def test_04_malformed_evidence_triggers_repair_and_publishes():
-    """EVIDENCE returns non-JSON -> RECOVERABLE_REPAIR -> REPAIR fixes -> PUBLISHED."""
+def test_04_malformed_world_graph_triggers_repair_and_publishes():
+    """WORLD_GRAPH returns non-JSON -> RECOVERABLE_REPAIR -> REPAIR fixes -> PUBLISHED.
+
+    Phase43A: a malformed EVIDENCE stage is now owned by the deterministic
+    evidence completion (it supplies the canonical evidence), so the malformed
+    stage that exercises the normal repair owner is WORLD_GRAPH.
+    """
     clock = ManualClock()
     ids = IdSource()
     admission = _make_admission(clock, ids)
@@ -188,8 +193,8 @@ def test_04_malformed_evidence_triggers_repair_and_publishes():
     script = {
         GenerationStage.CASE_TRUTH: [_G[GenerationStage.CASE_TRUTH]],
         GenerationStage.PUBLIC_WORLD: [_G[GenerationStage.PUBLIC_WORLD]],
-        GenerationStage.EVIDENCE: ["malformed"],
-        GenerationStage.WORLD_GRAPH: [_G[GenerationStage.WORLD_GRAPH]],
+        GenerationStage.EVIDENCE: [_G[GenerationStage.EVIDENCE]],
+        GenerationStage.WORLD_GRAPH: ["malformed"],
         GenerationStage.REPAIR: [GOLDEN_FULL_DRAFT],
     }
     fake = FakeProvider(script)
@@ -367,23 +372,36 @@ def test_10_model_call_budget_exhausted_fails():
     assert len(fake.calls) == 8
 
 
-def _evidence_without(*evidence_ids):
-    doc = json.loads(_G[GenerationStage.EVIDENCE])
-    doc["evidence"] = [e for e in doc["evidence"] if e["id"] not in evidence_ids]
+def _public_without_motive_candidates():
+    """A structurally valid public world whose MOTIVE_CANDIDATE universe is
+    EMPTY (a universe defect, NOT an evidence-only gap). Phase43A completes
+    evidence-only ambiguity deterministically, so this non-evidence defect is
+    what still forces the bounded RECOVERABLE_REGENERATE path."""
+    doc = json.loads(_G[GenerationStage.PUBLIC_WORLD])
+    for motive in doc["motives"]:
+        motive["affordances"] = [
+            a for a in motive.get("affordances", []) if a != "MOTIVE_CANDIDATE"
+        ]
     return json.dumps(doc, indent=2, ensure_ascii=False, sort_keys=True)
 
 
 def test_11_regeneration_budget_exhausted_fails():
-    """Ambiguous evidence twice -> single full regeneration allowed -> FAILED."""
+    """A non-evidence universe defect twice -> single full regeneration allowed
+    -> FAILED.
+
+    Phase43A: an EVIDENCE-ONLY ambiguity is now completed deterministically by
+    the generic path (see ``test_phase43a_evidence_algebra``), so the
+    regeneration-exhaustion path is exercised with a defect the deterministic
+    completion must NOT touch (an empty motive universe)."""
     clock = ManualClock()
     ids = IdSource()
     admission = _make_admission(clock, ids)
     session = admission.create_anonymous_quota_session()
-    ambiguous = _evidence_without("cctv_michael_office_01")
+    degenerate = _public_without_motive_candidates()
     script = {
         GenerationStage.CASE_TRUTH: [_G[GenerationStage.CASE_TRUTH]] * 2,
-        GenerationStage.PUBLIC_WORLD: [_G[GenerationStage.PUBLIC_WORLD]] * 2,
-        GenerationStage.EVIDENCE: [ambiguous, ambiguous],
+        GenerationStage.PUBLIC_WORLD: [degenerate, degenerate],
+        GenerationStage.EVIDENCE: [_G[GenerationStage.EVIDENCE]] * 2,
         GenerationStage.WORLD_GRAPH: [_G[GenerationStage.WORLD_GRAPH]] * 2,
     }
     fake = FakeProvider(script)

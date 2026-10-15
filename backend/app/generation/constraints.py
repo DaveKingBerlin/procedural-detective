@@ -163,6 +163,10 @@ class LockedConstraints:
     weapon: str | None = None
     crime_time: str | None = None
     witness: str | None = None
+    # Phase43 (P43-FR-02) — the compact ``Location:`` prompt lock is an
+    # ADDITIVE field appended last so every existing positional/keyword
+    # construction stays byte-identical and an absent lock is a pure no-op.
+    location: str | None = None
 
     def locked_fields(self) -> tuple[tuple[str, str | None], ...]:
         """Deterministic (field, value-or-None) listing."""
@@ -173,6 +177,7 @@ class LockedConstraints:
             ("weapon", self.weapon),
             ("crime_time", self.crime_time),
             ("witness", self.witness),
+            ("location", self.location),
         )
 
     def violations_against(self, draft: "GeneratedDraft") -> tuple[str, ...]:
@@ -258,5 +263,27 @@ class LockedConstraints:
                 issues.append(
                     f"locked witness {self.witness!r} not found among draft persons "
                     "with role 'witness'"
+                )
+        if self.location is not None:
+            # Phase43 (P43-FR-02 / DEF-068) — the locked location BINDS the
+            # case's SCENE and/or ``crime.location_id`` (plus the scene's
+            # canonical ``environment_id`` kit). It is deliberately NOT matched
+            # against arbitrary declared red-herring locations: otherwise a
+            # provider could satisfy ``Location: apartment`` by declaring an
+            # unrelated location named ``apartment`` while the actual scene is a
+            # DIFFERENT kit, masking a genuine scene mismatch. A scene that is
+            # not the locked location/environment IS a violation.
+            candidates: list[str] = []
+            scene = getattr(draft, "scene", None)
+            if scene is not None:
+                candidates.append(getattr(scene, "location_id", "") or "")
+                candidates.append(getattr(scene, "name", "") or "")
+                candidates.append(getattr(scene, "environment_id", "") or "")
+            candidates.append(getattr(crime, "location_id", "") or "")
+            if not _identity_equivalent(self.location, *candidates):
+                issues.append(
+                    f"locked location {self.location!r} does not match the draft "
+                    f"scene location/name/environment or crime.location_id "
+                    f"{crime.location_id!r}"
                 )
         return tuple(sorted(set(issues)))

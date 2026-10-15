@@ -149,6 +149,17 @@ _SAFE_FIELDS = frozenset(
         "candidateCountBefore",
         "candidateCountAfter",
         "projectionOutcome",
+        # Phase43A — bounded deterministic evidence-completion telemetry
+        # (``evidence.completion.*``). Closed counts / dimension-name tuples /
+        # outcome tokens / a boolean idempotence marker ONLY. NEVER hidden
+        # truth, witness truthfulness, prompts or raw provider output.
+        "factsAddedCount",
+        "dimensionsBefore",
+        "dimensionsAfter",
+        "solverOutcomeBefore",
+        "solverOutcomeAfter",
+        "completionIdempotent",
+        "completionOutcome",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

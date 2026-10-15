@@ -62,6 +62,7 @@ from app.core.observability import emit_event
 from app.generation import prompts
 from app.generation import parser as stage_parser
 from app.generation import candidate_projection as candidate_projection_mod
+from app.generation import trusted_context as _trusted_context
 from app.domain.time_interval import (
     epoch_to_iso,
     parse_iso8601,
@@ -297,185 +298,53 @@ def parse_case_people(content: str) -> tuple[Any, dict[str, Any]]:
 # (``anna_weiss``, ``paul_becker``, ``bronze_ceremonial_ice_pick``, ``office``,
 # ...) by construction. Prompts only; parsers/validators are untouched.
 
-_HONORIFICS: frozenset[str] = frozenset(
-    {"dr", "mr", "mrs", "ms", "prof", "sir", "madam", "her", "his"}
-)
-
-
 def _identity_slug(value: str | None) -> str:
     """Deterministic lowercase snake id from a locked display value.
 
-    ASCII letters/digits only (mirrors ``normalize_identity``), honorifics
-    dropped, words joined with ``_``. ``"Dr. Anna Weiss"`` ->
-    ``"anna_weiss"``. Long values are truncated to the SAME 40-character
-    bound as ``semantic_object_id``/``composer._slugify`` (ADV-237: the id
-    sheet must NEVER diverge from the composed semantic object id for a
-    >40-char locked weapon â€” the weapon line uses ``semantic_object_id``
-    directly so sheet and composer ALWAYS agree).
+    Phase43 (P43-FR-01): the canonical implementation lives in the
+    provider-neutral ``app.generation.trusted_context`` module; this name
+    remains importable from ``app.services.ollama_driver`` with identical
+    behavior.
     """
-    words = [
-        word
-        for word in re.findall(r"[a-z0-9]+", str(value or "").casefold())
-        if word not in _HONORIFICS
-    ]
-    joined = " ".join(words)
-    return joined[:40].replace(" ", "_").strip("_")
+    return _trusted_context.identity_slug(value)
 
 
 def _locked_id_sheet(attempt: Any) -> str:
-    """The app-owned cross-stage id sheet (empty when nothing is locked)."""
-    locked = getattr(attempt, "locked", None)
-    if locked is None:
-        return ""
-    fields = {
-        key: value for key, value in locked.locked_fields() if value is not None
-    }
-    mapping = (
-        ("victim", "victim_id"),
-        ("murderer", "murderer_id"),
-        ("motive", "motive_id"),
-        ("weapon", "weapon_id"),
-        ("location", "location_id"),
-        ("witness", "witness_id"),
-    )
-    lines = [
-        "Locked identity sheet â€” use THESE exact id tokens for the locked "
-        "people/objects in your JSON (never invent alternative ids):"
-    ]
-    any_token = False
-    for key, id_name in mapping:
-        value = fields.get(key)
-        if value is None:
-            continue
-        if key == "weapon":
-            # ADV-237 â€” the WEAPON id token IS the pipeline's semantic object
-            # id (``semantic_object_id`` = the same 40-char-bounded slug the
-            # composer uses for the resolved semantic object). A locked weapon
-            # longer than 40 characters therefore ALWAYS gets the SAME
-            # truncated id in the sheet, the injection, the composition and the
-            # presence guard (no divergence: the composed object id ALWAYS
-            # equals the injected request id).
-            lines.append(f"- {id_name}: {semantic_object_id(value)}")
-        else:
-            lines.append(f"- {id_name}: {_identity_slug(value)}")
-        any_token = True
-    time_value = fields.get("crime_time")
-    if time_value and any_token:
-        lines.append(
-            f"- crime_time: the locked time is {time_value} â€” write "
-            f"crimeTime.canonical EXACTLY as {_today_date()}T{time_value}:00+02:00 "
-            "(today's date at the locked time, timezone +02:00)"
-        )
-    return "\n".join(lines) if any_token else ""
+    """The app-owned cross-stage id sheet (empty when nothing is locked).
 
-
-def _today_date() -> str:
-    """Deterministic ISO date of the run day (``YYYY-MM-DD``)."""
-    from datetime import datetime
-
-    return datetime.now().strftime("%Y-%m-%d")
+    Phase43 (P43-FR-01): the canonical implementation lives in the
+    provider-neutral ``app.generation.trusted_context`` module.
+    """
+    return _trusted_context.locked_id_sheet(attempt)
 
 
 def _approved_public_material(public: Any) -> str:
     """The approved public-id sheet from the PARSED CASE output (stage 2..N).
 
-    The evidence stage must reference the SAME person/location/motive ids the
-    CASE stage produced (a fresh id namespace per stage would break the
-    deterministic engine's referential integrity). The driver passes the
-    parsed public people/locations/motives forward as an approved allowlist,
-    PLUS the approved travel rules (the who solver can only exclude a suspect
-    through travel-rule-backed opportunity observations â€” a missing rule
-    makes an observation useless): sanitized public draft material (id +
-    name + role), never truth, never ids from hidden sections. Returns an
-    empty string when nothing parsed.
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``.
     """
-    lines = [
-        "APPROVED PUBLIC MATERIAL (reference ONLY these ids in your "
-        "propositions â€” never invent ids):"
-    ]
-    any_entry = False
-    for tag, entries, id_attr, name_attr in (
-        ("person", getattr(public, "persons", ()) or (), "person_id", "name"),
-        ("location", getattr(public, "locations", ()) or (), "location_id", "name"),
-        ("motive", getattr(public, "motives", ()) or (), "motive_id", "label"),
-    ):
-        for entry in entries:
-            value = getattr(entry, id_attr, None)
-            label = ""
-            if name_attr:
-                label = getattr(entry, name_attr, None)
-            if not value:
-                continue
-            lines.append(
-                f"- {tag} id {value}"
-                + (f": {label}" if label else "")
-            )
-            any_entry = True
-    for rule in getattr(public, "travel_rules", ()) or ():
-        frm = getattr(rule, "from_location_id", None)
-        to = getattr(rule, "to_location_id", None)
-        travel = getattr(rule, "travel_time_seconds", None)
-        if not frm or not to:
-            continue
-        lines.append(
-            f"- travel rule {frm} -> {to}: {travel}s"
-        )
-        any_entry = True
-    if not any_entry:
-        return ""
-    return "\n".join(lines)
+    return _trusted_context.approved_public_material(public)
 
 
 def _approved_travel_sheet(public: Any) -> str:
     """The focused APPROVED TRAVEL RULES block for the evidence prompt.
 
-    The who solver's impossible-opportunity exclusion requires a public
-    travel rule FROM the observation location TO the scene; a fact is useless
-    without the rule. This projection forwards every parsed travel rule so the
-    model can pick a genuinely distant location and the exclusion algebra
-    works. Empty when nothing parsed.
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``.
     """
-    rules = [
-        (getattr(r, "from_location_id"), getattr(r, "to_location_id"), getattr(r, "travel_time_seconds"))
-        for r in (getattr(public, "travel_rules", ()) or ())
-        if getattr(r, "from_location_id") and getattr(r, "to_location_id")
-    ]
-    if not rules:
-        return ""
-    lines = ["APPROVED TRAVEL RULES (the travel times between locations):"]
-    for frm, to, seconds in rules:
-        lines.append(f"- {frm} -> {to}: {seconds} seconds")
-    return "\n".join(lines)
+    return _trusted_context.approved_travel_sheet(public)
 
 
 def _weapon_evidence_id(attempt: Any, evidence_spec: Any) -> str:
     """The sealed evidence item id that references the LOCKED WEAPON object.
 
-    The world stage can then bind the weapon placement's ``evidenceId`` to a
-    REAL evidence id (data-level clickability: clicking the pick opens the
-    weapon evidence). Empty when no evidence references the weapon.
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``. The driver still calls THIS
+    module-level name so the ``test_phase38_driver_reuse`` monkeypatch seam
+    keeps working.
     """
-    locked = getattr(attempt, "locked", None)
-    weapon = getattr(locked, "weapon", None) if locked is not None else None
-    if not isinstance(weapon, str) or not weapon:
-        return ""
-    from app.generation.constraints import normalize_identity
-
-    # ADV-237 â€” the needle is the SINGLE slug source: evidence propositions
-    # reference the id-sheet token = ``semantic_object_id(weapon)`` (the same
-    # 40-char-bounded slug the composer materializes). ``normalize_identity``
-    # is invariant to "_"/" ", so this equals the raw locked text for short
-    # weapons and only differs when the 40-char truncation bites (the exact
-    # ADV-237 divergence: a >40-char locked weapon must still find its sealed
-    # evidence).
-    needle = normalize_identity(semantic_object_id(weapon))
-    for item in getattr(evidence_spec, "evidence", ()) or ():
-        item_id = getattr(item, "id", None)
-        for prop in getattr(item, "propositions", ()) or ():
-            object_id = getattr(prop, "object_id", None)
-            if isinstance(object_id, str) and normalize_identity(object_id) == needle:
-                return str(item_id) if item_id else ""
-    return ""
+    return _trusted_context.weapon_evidence_id(attempt, evidence_spec)
 
 
 # --------------------------------------------------------------------------- #
@@ -503,8 +372,8 @@ def _weapon_evidence_id(attempt: Any, evidence_spec: Any) -> str:
 #     fully solver-validated.
 
 # The app-owned "other sharp weapon" candidates the weapon solver tests
-# against the locked weapon (mirror of the kit base objects in ``_BASE``).
-_BASE_SHARP_WEAPON_IDS: tuple[str, ...] = ("kitchen_knife", "letter_opener", "scissors")
+# against the locked weapon (single canonical source: P43-FR-01).
+_BASE_SHARP_WEAPON_IDS: tuple[str, ...] = _trusted_context._BASE_SHARP_WEAPON_IDS
 
 # The FULL golden base object id set carried by EVERY driver-assembled draft
 # (identical to the fake/live golden world's object set). Phase 19 Fix B
@@ -531,164 +400,27 @@ OBJECTS_BASE_ALL_KITS: tuple[str, ...] = (
 _PER_KIT_SHARP_WEAPON_IDS: tuple[str, ...] = ("letter_opener", "scissors")
 
 # Default distant-location travel rule the driver may deterministically add so
-# an alternative suspect's observation actually proves the scene unreachable.
-_DEFAULT_DISTANT_TRAVEL_SECONDS = 1200
+# an alternative suspect's observation actually proves the scene unreachable
+# (single canonical source: P43-FR-01).
+_DEFAULT_DISTANT_TRAVEL_SECONDS = _trusted_context._DEFAULT_DISTANT_TRAVEL_SECONDS
 
 
 def _evidence_timeline(canonical: str) -> dict[str, str]:
     """The six deterministic evidence timestamps (same date/+02:00 as crime).
 
-    Derived by OFFSET from the locked canonical crime time so the evidence
-    window always bounds the canonical tick (the truth comparison stays
-    all_true) and the opportunity exclusions cover the whole window:
-    victim last seen 110s before, body found 91s after (23:43:31 for a
-    23:42:00 crime), scene observation 10s before (uncertainty 90 =>
-    [canonical-100, canonical+81) â€” the fixture-verified narrow window),
-    other-suspect observations 120s before (u 30), locked-person scene
-    presence 20s before (u 60), alibi departure 32 minutes before.
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``.
     """
-    tick, offset = parse_iso8601(canonical)
-    return {
-        "last_seen": epoch_to_iso(tick - 110, offset),
-        "body_found": epoch_to_iso(tick + 91, offset),
-        "scene_observation": epoch_to_iso(tick - 10, offset),
-        "alternate_observed": epoch_to_iso(tick - 120, offset),
-        "presence": epoch_to_iso(tick - 20, offset),
-        "alibi_departure": epoch_to_iso(tick - 1920, offset),
-    }
+    return _trusted_context.evidence_timeline(canonical)
 
 
 def _deduction_seed(attempt: Any, crime: Any, public: Any) -> str:
     """Concrete MUST-EMIT fact seed for the evidence prompt (app-owned).
 
-    Lists the EXACT ids and timestamps the evidence facts should reference:
-    the model's OWN person/motive/location tokens (parsed from its case
-    output) plus the locked ids and locked canonical time. Instructs FACTS
-    only, never conclusions, never the hidden answer. Empty when the parsed
-    case cannot seed (the model then works from the generic contract).
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``.
     """
-    from app.domain.eligibility import final_homicide_target_ids
-    from app.generation.constraints import normalize_identity
-
-    if crime is None:
-        return ""
-    scene_id = getattr(getattr(public, "scene", None), "location_id", None) or crime.location_id
-    murderer_id = crime.murderer_id
-    motive_id = crime.motive_id
-    weapon_id = crime.weapon_id
-    victim_id = crime.victim_id
-    canonical = getattr(getattr(crime, "crime_time", None), "canonical", None)
-    if not (scene_id and murderer_id and motive_id and weapon_id and victim_id and canonical):
-        return ""
-    try:
-        timeline = _evidence_timeline(canonical)
-    except (TypeError, ValueError):
-        return ""
-    # Phase41A — every NON-MURDERER FINAL HOMICIDE TARGET (public suspects AND
-    # witnesses, victim excluded) gets the impossible-opportunity exclusion, so
-    # classic suspect cases stay uniquely solvable once witnesses enter the WHO
-    # candidate universe and a witness-murderer case becomes uniquely solvable
-    # (all other targets excluded, murderer viable).
-    other_suspects = sorted(
-        target
-        for target in final_homicide_target_ids(public)
-        if target != murderer_id
-    )
-    other_motives = sorted(
-        m.motive_id
-        for m in (getattr(public, "motives", ()) or ())
-        if m.motive_id != motive_id
-    )
-    sharp_base = [
-        oid
-        for oid in _BASE_SHARP_WEAPON_IDS
-        if normalize_identity(oid) != normalize_identity(weapon_id)
-    ]
-    travel = _approved_travel_sheet(public)
-    lines = [
-        "DEDUCTION SEED (use THESE EXACT ids and timestamps â€” emit FACTS for "
-        "them, never conclusions):",
-        f"- locked person (place AT the scene around the crime time): {murderer_id}",
-        f"- scene location id: {scene_id}; victim id: {victim_id}",
-        f"- locked motive id: {motive_id}; locked weapon id: {weapon_id}",
-        (
-            f"- exclude these motives (MOTIVE_FACT_CONTRADICTED): "
-            f"{', '.join(other_motives) if other_motives else '(none yet â€” the case needs at least two alt motives)'}"
-        ),
-        (
-            f"- observe these other suspects at DISTANT locations (impossible "
-            f"opportunity, PERSON_OBSERVED_AT_LOCATION): "
-            f"{', '.join(other_suspects) if other_suspects else '(none yet â€” the case needs at least two alt suspects)'}"
-        ),
-        (
-            f"- other sharp weapons needing FORENSIC_WEAPON_MATCH "
-            f"match:false: {', '.join(sharp_base)}"
-        ),
-        (
-            f"- timestamps (ALL with the SAME date and +02:00 as the locked "
-            f"crime time {canonical}): victim last seen {timeline['last_seen']}; "
-            f"body found {timeline['body_found']}; scene observation "
-            f"{timeline['scene_observation']} (uncertaintySeconds 90); each "
-            f"other suspect observed at their distant location "
-            f"{timeline['alternate_observed']} (uncertaintySeconds 30); "
-            f"{murderer_id} at the scene {timeline['presence']} "
-            f"(uncertaintySeconds 60); alibi claimedDeparture "
-            f"{timeline['alibi_departure']}."
-        ),
-    ]
-    if travel:
-        lines.append(
-            "  Pick a DIFFERENT travel-rule location from this list for every "
-            "other suspect (the rule proves the scene is unreachable):\n" + travel
-        )
-    return "\n".join(lines)
-
-
-def _driver_clock_token(canonical: str) -> str:
-    """The deterministic ``HH:MM`` clock token of the case's canonical time.
-
-    The witness-grounding model (``app.domain.witness._time_anchors_of``)
-    recognises a bare clock token inside allowlisted statement/description
-    text as a TIME anchor, so a driver witness statement that states the time
-    derived from the case's OWN canonical crime/window data grounds the TIME
-    interview question. Never a golden/truth sentence — purely the case's own
-    canonical clock (DEF-079).
-    """
-    import datetime
-
-    try:
-        dt = datetime.datetime.fromisoformat(canonical)
-    except (TypeError, ValueError):
-        return ""
-    return f"{dt.hour:02d}:{dt.minute:02d}"
-
-
-def _driver_scene_label(public: Any, scene_id: str) -> str:
-    """A deterministic public scene NAME for a driver witness statement.
-
-    Prefers the scene location's PUBLIC name; falls back to the public
-    location whose ``location_id`` equals the scene id, then to the first
-    public location name — only the case's OWN public tokens are ever used
-    (never a golden/truth label, never random text). LOCATION interview
-    grounding matches word tokens of the public location names inside the
-    statement text, so labelling the scene deterministically makes the
-    driver witnesses genuinely locatable (DEF-079).
-    """
-    scene_name = str(
-        getattr(getattr(public, "scene", None), "name", None) or ""
-    ).strip()
-    if scene_name:
-        return scene_name
-    for loc in (getattr(public, "locations", ()) or ()):
-        if str(getattr(loc, "location_id", "") or "") == str(scene_id):
-            name = str(getattr(loc, "name", "") or "").strip()
-            if name:
-                return name
-    for loc in (getattr(public, "locations", ()) or ()):
-        name = str(getattr(loc, "name", "") or "").strip()
-        if name:
-            return name
-    return ""
+    return _trusted_context.deduction_seed(attempt, crime, public)
 
 
 def _evidence_gap_facts(
@@ -696,587 +428,26 @@ def _evidence_gap_facts(
 ) -> tuple[Any, tuple[Any, ...], tuple[str, ...]]:
     """The deterministic evidence projection (Phase17 Wave-2 acceptance path).
 
-    Hermes3:8b cannot be relied on to emit the complete solver-critical fact
-    algebra in one stable pass (its fact subset/timestamps vary run to run;
-    a single contradictory proposition â€” a ``match:true`` on an alternative
-    weapon, a false match on the locked weapon, an observation of the locked
-    person at a distant travel-rule-backed location, an off-seed time fact â€”
-    is enough to make the assembled evidence non-unique). The driver is the
-    sole trust boundary, so under the accepted Wave-2 contract the model emits
-    the CASE SKELETON and the driver OWNS the complete evidence algebra:
+    Phase43A (P43A-FR-01 / AC-02): the provider-neutral extraction lives in
+    ``app.generation.evidence_algebra.canonical_evidence_algebra``. This
+    module-level name is preserved (tests / import sites depend on it) and now
+    delegates with the attempt's hidden witness-truthfulness stamp. The
+    ``evidence_spec`` argument is retained for signature compatibility and is
+    intentionally unused: the canonical algebra is built from the model's OWN
+    public tokens + locked ids + locked canonical time.
 
-    - the published evidence set is built deterministically HERE from the
-      model's OWN public tokens (the persons/motives/locations/objects it
-      chose), the locked ids and the locked canonical time;
-    - the model's raw evidence propositions are NOT copied into the published
-      draft (nothing the model emits can silently weaken or poison the
-      deduction); the evidence stage still runs, parses and validates through
-      the same strict parser, and its prompts/projections are the shaping
-      surface;
-    - every generated fact is REAL discoverable evidence that passes the
-      strict parser, the full referential validation AND the deterministic
-      solver â€” the solver still derives the unique winner from the assembled
-      set (injection never bypasses the solver, never fakes: every fact
-      references model-chosen people/locations/motives/objects).
-
-    Returns ``(canonical_evidence_spec, extra_travel_rules, notes)``:
-
-    - ``canonical_evidence_spec`` â€” the complete EvidenceSetSpec (WHEN;
-      impossible-opportunity for every other suspect; presence + alibi for
-      the locked person; motive link + exclusions; weapon matches +
-      fingerprint);
-    - ``extra_travel_rules`` â€” ``TravelRuleSpec`` objects the driver appends
-      to the draft public so an opportunity observation is travel-rule-backed
-      (the who solver refuses to exclude without a rule);
-    - ``notes`` â€” sanitized audit lines (evidence id + fact kind) listing
-      exactly what was built and why (the operator/QA trace; never served).
+    Returns ``(canonical_evidence_spec, extra_travel_rules, notes)`` exactly as
+    before (byte-identical evidence sets for the same inputs).
     """
-    from app.domain.eligibility import final_homicide_target_ids
-    from app.generation.constraints import normalize_identity
-    from app.generation.schemas import EvidenceSetSpec, PropSpec, TravelRuleSpec
+    from app.generation import evidence_algebra
 
-    if crime is None or public is None:
-        return None, (), ()
-    scene_id = getattr(getattr(public, "scene", None), "location_id", None) or crime.location_id
-    murderer_id = crime.murderer_id
-    motive_id = crime.motive_id
-    weapon_id = crime.weapon_id
-    victim_id = crime.victim_id
-    canonical = getattr(getattr(crime, "crime_time", None), "canonical", None)
-    # Phase41 (§16-§19): a SUICIDE truth has NO murderer by contract. The
-    # deterministic evidence algebra MUST still run (WHEN + red-herring
-    # opportunity exclusions + motive contradictions + weapon forensics +
-    # witness statements) — the old bail on a missing murderer would make a
-    # SUICIDE case impossible to generate. A HOMICIDE truth still requires a
-    # murderer (a missing one is a truth-shape defect -> bail to the
-    # canonical validators).
-    from app.domain.resolution import ResolutionType
-
-    is_suicide = getattr(crime, "resolution_type", None) is ResolutionType.SUICIDE
-    if not (scene_id and motive_id and weapon_id and victim_id and canonical):
-        return None, (), ()
-    if not is_suicide and not murderer_id:
-        return None, (), ()
-    try:
-        timeline = _evidence_timeline(canonical)
-    except (TypeError, ValueError):
-        return None, (), ()
-
-    persons = {
-        p.person_id: getattr(p, "name", None)
-        for p in (getattr(public, "persons", ()) or ())
-    }
-    # Phase41A — the impossible-opportunity enumeration covers every OTHER
-    # FINAL HOMICIDE TARGET (public suspects AND witnesses, victim excluded),
-    # not only ``SUSPECT_ELIGIBLE`` suspects (REQUIREMENTS 31.1.1A / 31.10):
-    # once witnesses enter the WHO candidate universe they need evidence-backed
-    # exclusions too, and a witness-murderer case becomes uniquely solvable
-    # (every other target excluded, murderer viable).
-    other_suspects = sorted(
-        target
-        for target in final_homicide_target_ids(public)
-        if target != murderer_id
-    )
-    # The hidden statement-level witness-truthfulness stamps (Phase41A): the
-    # driver stamps a bounded deterministic set per seed (guilty witness
-    # SELF_PROTECTION / truthful; innocent PROTECT_OTHER / HIDE_UNRELATED_SECRET),
-    # which the evidence algebra consumes for statement text + contradiction
-    # records. Pure; derived from ``attempt._witness_truthfulness``.
-    from app.domain.witness_truth import WitnessStatementTruth
-
-    _stamped_deceptive: dict[str, str] = {}  # witness_id -> reason
-    for entry in (getattr(attempt, "_witness_truthfulness", ()) or ()):
-        if isinstance(entry, WitnessStatementTruth) and entry.truthfulness == "DECEPTIVE":
-            _stamped_deceptive[entry.witness_id] = entry.deception_reason or ""
-    other_motives = sorted(
-        m.motive_id
-        for m in (getattr(public, "motives", ()) or ())
-        if m.motive_id != motive_id
-    )
-    non_scene_locations = sorted(
-        loc.location_id
-        for loc in (getattr(public, "locations", ()) or ())
-        if loc.location_id != scene_id
-    )
-    travel_lookup: dict[tuple[str, str], int] = {}
-    for rule in (getattr(public, "travel_rules", ()) or ()):
-        frm = getattr(rule, "from_location_id", None)
-        to = getattr(rule, "to_location_id", None)
-        seconds = getattr(rule, "travel_time_seconds", None)
-        if frm and to and isinstance(seconds, int):
-            travel_lookup[(frm, to)] = seconds
-
-    extras: list[Any] = []
-    extra_rules: list[Any] = []
-    notes: list[str] = []
-
-    def _p(eid: str, title: str, description: str) -> dict[str, str]:
-        return {"title": title, "description": description}
-
-    def _person_label(person_id: str) -> str:
-        return persons.get(person_id) or person_id
-
-    def _location_label(location_id: str) -> str:
-        for loc in (getattr(public, "locations", ()) or ()):
-            if str(getattr(loc, "location_id", "") or "") == str(location_id):
-                return str(getattr(loc, "name", "") or "") or location_id
-        return location_id
-
-    # ---- WHEN (bounds the feasible window; canonical tick stays inside) ----
-    for eid, ptype, person, title, description in (
-        (
-            "d_ev_when_last_seen",
-            "VICTIM_LAST_SEEN_ALIVE_AT",
-            victim_id,
-            "Victim last seen",
-            "The victim was seen alive at the scene shortly before the incident.",
+    return evidence_algebra.canonical_evidence_algebra(
+        public,
+        crime,
+        witness_truthfulness=tuple(
+            getattr(attempt, "_witness_truthfulness", ()) or ()
         ),
-        (
-            "d_ev_when_body",
-            "BODY_FIRST_FOUND_AT",
-            None,
-            "Body discovered",
-            "The body was found at the scene shortly after the incident.",
-        ),
-        (
-            "d_ev_when_obs",
-            "CRIME_SCENE_OBSERVATION_AT",
-            None,
-            "Activity logged at the scene",
-            "A monitoring log records activity at the scene around the locked time.",
-        ),
-    ):
-        kwargs = {}
-        if person is not None:
-            kwargs["person_id"] = person
-        if ptype == "VICTIM_LAST_SEEN_ALIVE_AT":
-            observed_at, uncertainty = timeline["last_seen"], 0
-        elif ptype == "BODY_FIRST_FOUND_AT":
-            observed_at, uncertainty = timeline["body_found"], 0
-        else:
-            observed_at, uncertainty = timeline["scene_observation"], 90
-        extras.append(
-            _canonical_evidence_item(
-                eid=eid,
-                kind="witness_observation" if ptype != "CRIME_SCENE_OBSERVATION_AT" else "cctv",
-                propositions=(_canonical_prop(ptype, location_id=scene_id, observed_at=observed_at, uncertainty_seconds=uncertainty, **kwargs),),
-                title=title,
-                description=description,
-            )
-        )
-        notes.append(f"{eid}: canonical {ptype} ({observed_at})")
-
-    # ---- impossible-opportunity for every OTHER FINAL HOMICIDE TARGET -------
-    # Phase41A (REQUIREMENTS 31.1.1A / 31.10): every non-murderer final target
-    # (public suspects AND witnesses) gets an evidence-backed distant
-    # observation (kind ``cctv``) so the WHO solver — which iterates the final
-    # target universe — keeps ONLY the murderer viable.
-    #
-    # FIX-1 (ADV-41A-02): this record is shaped EXACTLY like any other
-    # opportunity/observation item — the SAME neutral ``d_ev_opp_<id>`` id
-    # namespace, ``cctv`` kind, title and description — for truthful AND
-    # deceptive witnesses alike. A deceptive INNOCENT witness's discoverable
-    # contradiction IS this ordinary distant record, so nothing in the public
-    # evidence can reveal deceptive-vs-truthful status; the
-    # ``DECEPTIVE_CLAIM_UNCONTRADICTED`` gate still finds it because
-    # ``mechanical_contradiction_fact_ids`` matches ANY mechanical record
-    # referencing the witness (Phase41A §26/§63, REQUIREMENTS §47A.4).
-    travel_notes: list[str] = []
-    opportunity_location: dict[str, str] = {}
-    for suspect in other_suspects:
-        distant = _canonical_distant_location(travel_lookup, non_scene_locations, scene_id)
-        if distant is None:
-            continue
-        opportunity_location[suspect] = distant
-        if (distant, scene_id) not in travel_lookup:
-            extra_rules.append(
-                TravelRuleSpec(
-                    from_location_id=distant,
-                    to_location_id=scene_id,
-                    travel_time_seconds=_DEFAULT_DISTANT_TRAVEL_SECONDS,
-                )
-            )
-            travel_lookup[(distant, scene_id)] = _DEFAULT_DISTANT_TRAVEL_SECONDS
-            travel_notes.append(
-                f"travel rule {distant}->{scene_id}={_DEFAULT_DISTANT_TRAVEL_SECONDS}s added"
-            )
-        eid = f"d_ev_opp_{normalize_identity(suspect) or 'target'}"
-        extras.append(
-            _canonical_evidence_item(
-                eid=eid,
-                kind="cctv",
-                propositions=(
-                    _canonical_prop(
-                        "PERSON_OBSERVED_AT_LOCATION",
-                        person_id=suspect,
-                        location_id=distant,
-                        observed_at=timeline["alternate_observed"],
-                        uncertainty_seconds=30,
-                    ),
-                ),
-                title="Person logged away from the scene",
-                description=(
-                    f"A monitoring log places {_person_label(suspect)} at a "
-                    "location away from the scene at the crime time."
-                ),
-            )
-        )
-        notes.append(
-            f"{eid}: canonical PERSON_OBSERVED_AT_LOCATION for {suspect} "
-            "(opportunity exclusion)"
-        )
-
-    # ---- presence + alibi for the LOCKED person (HOMICIDE only) -----------
-    # A SUICIDE truth has no murderer: the self-inflicted outcome is evidenced
-    # by the victim activity / scene / weapon forensics + the red-herring
-    # suspect exclusions, never by a killer-placement.
-    if not is_suicide:
-        extras.append(
-            _canonical_evidence_item(
-                eid="d_ev_presence",
-                kind="cctv",
-                propositions=(
-                    _canonical_prop(
-                        "PERSON_OBSERVED_AT_LOCATION",
-                        person_id=murderer_id,
-                        location_id=scene_id,
-                        observed_at=timeline["presence"],
-                        uncertainty_seconds=60,
-                    ),
-                ),
-                title="Person logged at the scene",
-                description=(
-                    f"A monitoring log places {_person_label(murderer_id)} at the "
-                    "scene around the locked time."
-                ),
-            )
-        )
-        notes.append(f"d_ev_presence: canonical scene presence for {murderer_id}")
-        extras.append(
-            _canonical_evidence_item(
-                eid="d_ev_alibi",
-                kind="testimonial",
-                propositions=(
-                    _canonical_prop(
-                        "ALIBI_TIME_CLAIM",
-                        person_id=murderer_id,
-                        structured={"claimedDeparture": timeline["alibi_departure"]},
-                    ),
-                ),
-                title="Alibi statement",
-                description="A statement claims the person had left before the locked time.",
-            )
-        )
-        notes.append(f"d_ev_alibi: canonical ALIBI_TIME_CLAIM for {murderer_id}")
-
-    # ---- motive: the locked motive (HOMICIDE: linked to the killer;
-    # SUICIDE: the victim's own) + red-herring exclusions -------------------
-    if is_suicide:
-        # FIX-6 (§15/§19): a SUICIDE truth still needs a UNIQUE motive
-        # deduction. The WHY solver only certifies a motive when it is
-        # SUPPORTED (``MOTIVE_LINKED_TO_PERSON``) and every alternative is
-        # contradicted — a bare exclusion set leaves the locked motive
-        # "unknown" (not unique) and the case would REGENERATE forever. The
-        # victim is the subject of a self-inflicted resolution, so the locked
-        # motive is deterministically linked to the VICTIM (never a murderer
-        # trace — the WHO solver only links suspects, so this never supports a
-        # person candidate).
-        extras.append(
-            _canonical_evidence_item(
-                eid="d_ev_motive_link",
-                kind="email",
-                propositions=(
-                    _canonical_prop(
-                        "MOTIVE_LINKED_TO_PERSON",
-                        person_id=victim_id,
-                        motive_id=motive_id,
-                    ),
-                ),
-                title="Recorded statement",
-                description=(
-                    f"A record connects the victim to the locked motive."
-                ),
-            )
-        )
-        notes.append(
-            f"d_ev_motive_link: canonical MOTIVE_LINKED_TO_PERSON {victim_id}->{motive_id} (suicide)"
-        )
-    else:
-        extras.append(
-            _canonical_evidence_item(
-                eid="d_ev_motive_link",
-                kind="email",
-                propositions=(
-                    _canonical_prop(
-                        "MOTIVE_LINKED_TO_PERSON",
-                        person_id=murderer_id,
-                        motive_id=motive_id,
-                    ),
-                ),
-                title="Recorded statement",
-                description=(
-                    f"A record connects {_person_label(murderer_id)} to the locked motive."
-                ),
-            )
-        )
-        notes.append(f"d_ev_motive_link: canonical MOTIVE_LINKED_TO_PERSON {murderer_id}->{motive_id}")
-    for motive in other_motives:
-        eid = f"d_ev_motive_x_{normalize_identity(motive) or 'motive'}"
-        extras.append(
-            _canonical_evidence_item(
-                eid=eid,
-                kind="email",
-                propositions=(_canonical_prop("MOTIVE_FACT_CONTRADICTED", motive_id=motive),),
-                title="Recorded statement",
-                description="A record contradicts the candidate motive.",
-            )
-        )
-        notes.append(f"{eid}: canonical MOTIVE_FACT_CONTRADICTED for {motive}")
-
-    # ---- weapon matches + fingerprint --------------------------------------
-    for obj in _BASE_SHARP_WEAPON_IDS:
-        if normalize_identity(obj) == normalize_identity(weapon_id):
-            continue
-        eid = f"d_ev_weapon_false_{normalize_identity(obj) or 'weapon'}"
-        extras.append(
-            _canonical_evidence_item(
-                eid=eid,
-                kind="forensic",
-                propositions=(
-                    _canonical_prop(
-                        "FORENSIC_WEAPON_MATCH", object_id=obj, structured={"match": False}
-                    ),
-                ),
-                title="Forensic comparison",
-                description="Forensic comparison excludes this object as the source.",
-            )
-        )
-        notes.append(f"{eid}: canonical FORENSIC_WEAPON_MATCH false for {obj}")
-    extras.append(
-        _canonical_evidence_item(
-            eid="d_ev_weapon_true",
-            kind="forensic",
-            propositions=(
-                _canonical_prop(
-                    "FORENSIC_WEAPON_MATCH", object_id=weapon_id, structured={"match": True}
-                ),
-            ),
-            title="Forensic comparison",
-            description="Forensic comparison identifies the locked object as the source.",
-        )
     )
-    notes.append(f"d_ev_weapon_true: canonical FORENSIC_WEAPON_MATCH true for {weapon_id}")
-    if not is_suicide:
-        # A victim fingerprint on the object is a normal self-inflicted-scene
-        # fact and is deliberately NOT asserted as a killer trace for SUICIDE.
-        extras.append(
-            _canonical_evidence_item(
-                eid="d_ev_fp",
-                kind="forensic",
-                propositions=(
-                    _canonical_prop(
-                        "OBJECT_CONTAINS_FINGERPRINT", object_id=weapon_id, person_id=murderer_id
-                    ),
-                ),
-                title="Latent fingerprint",
-                description="A latent fingerprint was lifted from the locked object.",
-            )
-        )
-        notes.append(f"d_ev_fp: canonical OBJECT_CONTAINS_FINGERPRINT on {weapon_id} for {murderer_id}")
-
-    # Phase35 witness completeness — the DRIVER is the earliest authoritative
-    # layer for local-model generation (it OWNS the complete evidence algebra;
-    # the model's raw evidence propositions are never copied). Every public
-    # role=='witness' person must be interviewable with a usable canonical
-    # witness statement (goldens each carry exactly this pattern; Phase35 §8/§36
-    # and the Phase35 case-quality validator ``WITNESS_STATEMENT_MISSING`` gate
-    # require it). The fact is a ``witness_statement`` attributed to the witness
-    # (WITNESS_CLAIMS proposition person_id + speakerName — both the canonical
-    # attribution signals of ``app.domain.witness.witness_attributed_to``).
-    # WITNESS_CLAIMS is NOT consumed by any Phase 3 deduction rule (golden
-    # comment), so the solver signature is byte-identical; the fact is real
-    # discoverable player-visible evidence. DEF-079: the statement is NOT a
-    # byte-identical generic sentence — it carries a TIME anchor and the
-    # LOCATION derived deterministically from the case's OWN canonical crime
-    # time and public scene name (plus the witness's own name), so the local
-    # path produces genuinely interviewable witnesses (``project_witness_statement``
-    # grounds TIME + LOCATION + OBSERVATION, not only OBSERVATION). No golden
-    # names, no story copying, no random text; deterministic and bounded.
-    #
-    # Phase41 (§11-§14) + Phase41A (§16-§18): a witness whose hidden
-    # statement-level truthfulness is DECEPTIVE gets a PLAYER-VISIBLE deceptive
-    # statement text; the contradiction path is an ORDINARY deterministic
-    # mechanical observation (never a special leak-marked record). The GUILTY
-    # deceptive witness (the HOMICIDE witness murderer — SELF_PROTECTION)
-    # claims to have left the scene and is contradicted by the ordinary scene
-    # ``d_ev_presence`` record. An INNOCENT deceptive witness (PROTECT_OTHER /
-    # HIDE_UNRELATED_SECRET) falsely claims to have BEEN at the scene and is
-    # contradicted by the ordinary distant ``d_ev_opp_<wid>`` opportunity
-    # record. FIX-1 (ADV-41A-02): BOTH contradiction records are shaped exactly
-    # like the evidence a truthful witness carries (neutral id/kind/title/
-    # description), so the public DTO can never reveal deceptive-vs-truthful
-    # status (§26/§63, REQUIREMENTS §47A.4). FIX-2 (ADV-41A-01): a TRUTHFUL
-    # non-murderer witness states where the deterministic model actually places
-    # them (the same distant location as their opportunity observation), so a
-    # truthful statement never contradicts its own published evidence. The
-    # solver-promoted facts (PERSON_OBSERVED_AT_LOCATION / ALIBI_TIME_CLAIM /
-    # MOTIVE_LINKED_TO_PERSON) remain deterministic WORLD facts — the claim
-    # text is never a deduction premise.
-    from app.generation.evidence_facts import (
-        deceptive_presence_statement_text,
-        deceptive_statement_text,
-    )
-
-    clock_token = _driver_clock_token(canonical)
-    scene_label = _driver_scene_label(public, scene_id)
-    for witness in sorted(
-        (
-            p
-            for p in (getattr(public, "persons", ()) or ())
-            if getattr(p, "role", None) == "witness"
-        ),
-        key=lambda p: str(getattr(p, "person_id", "") or ""),
-    ):
-        wid = getattr(witness, "person_id", None)
-        wname = getattr(witness, "name", "") or wid or "witness"
-        if not wid:
-            continue
-        eid = f"d_ev_witness_{normalize_identity(wid) or 'witness'}"
-        if any(str(getattr(e, "id", "")) == eid for e in extras):
-            continue
-        from app.generation.schemas import EvidenceSpec as _CanonicalEvidenceSpec
-
-        deceptive = wid in _stamped_deceptive
-        is_murderer = wid == murderer_id
-        # FIX-2 (ADV-41A-01): a TRUTHFUL non-murderer witness states where the
-        # deterministic model actually places them — the SAME distant location
-        # as their published opportunity observation — so their statement never
-        # contradicts their own evidence. Only a stamped DECEPTIVE witness makes
-        # a deliberately contradictory claim.
-        truthful_location_id = (
-            None if is_murderer else opportunity_location.get(wid)
-        )
-        truthful_location_label = (
-            _location_label(truthful_location_id) if truthful_location_id else ""
-        )
-        if deceptive and is_murderer and scene_label and clock_token:
-            # GUILTY deceptive witness (the witness murderer, SELF_PROTECTION):
-            # claims to have left the scene early; contradicted by the ordinary
-            # scene-presence observation (``d_ev_presence``), discoverable like
-            # any other record (no special/marked contradiction record).
-            statement, description = deceptive_statement_text(
-                wid, str(wname), scene_label, clock_token
-            )
-        elif deceptive and scene_label and clock_token:
-            # INNOCENT deceptive witness (Phase41A §17): falsely claims to have
-            # BEEN at the scene; the discoverable contradiction is the ordinary
-            # distant ``d_ev_opp_<wid>`` opportunity observation (neutral shape).
-            statement, description = deceptive_presence_statement_text(
-                wid, str(wname), scene_label, clock_token
-            )
-        elif truthful_location_label and clock_token:
-            # Truthful non-murderer witness: consistent with their published
-            # distant opportunity observation (same location).
-            statement = (
-                f"As {wname}, I was at the {truthful_location_label} around "
-                f"{clock_token} and noticed a few things from there."
-            )
-            description = (
-                f"{wname} was at the {truthful_location_label} around {clock_token}."
-            )
-        elif scene_label and clock_token:
-            statement = (
-                f"As {wname}, I was at the {scene_label} around {clock_token} "
-                "and noticed a few things that did not sit right."
-            )
-            description = (
-                f"{wname} was near the {scene_label} around {clock_token}."
-            )
-        elif clock_token:
-            statement = (
-                f"As {wname}, I was nearby around {clock_token} and noticed a "
-                "few things that did not sit right."
-            )
-            description = f"{wname} recounted the course of the evening."
-        else:
-            statement = (
-                "I was nearby during the evening and noticed a few "
-                "things that did not sit right."
-            )
-            description = f"{wname} recounted the course of the evening."
-        extras.append(
-            _CanonicalEvidenceSpec(
-                id=eid,
-                kind="witness_statement",
-                propositions=(_canonical_prop("WITNESS_CLAIMS", person_id=wid),),
-                source_ref={"kind": "record", "sourceId": f"record_{eid}"},
-                reliability="high",
-                presentation={
-                    "title": "Witness statement",
-                    "description": description,
-                    "speakerName": str(wname),
-                    "statement": statement,
-                },
-                discoverable=True,
-            )
-        )
-        notes.append(f"{eid}: canonical witness statement for {wid}")
-
-    if travel_notes:
-        notes.append("; ".join(travel_notes))
-    notes.append(
-        "the published evidence is the deterministic canonical algebra built "
-        "from the model's case skeleton (model evidence propositions are not "
-        "copied into the draft)"
-    )
-    return EvidenceSetSpec(evidence=tuple(extras)), tuple(extra_rules), tuple(notes)
-
-
-def _canonical_prop(ptype: str, **kwargs: Any) -> Any:
-    """One deterministic canonical proposition (PropSpec)."""
-    from app.generation.schemas import PropSpec
-
-    return PropSpec(type=ptype, **{k: v for k, v in kwargs.items() if v is not None})
-
-
-def _canonical_evidence_item(
-    eid: str, kind: str, propositions: tuple[Any, ...], title: str, description: str
-) -> Any:
-    """One deterministic canonical evidence item (EvidenceSpec)."""
-    from app.generation.schemas import EvidenceSpec
-
-    seen: set[str] = set()
-    unique: list[Any] = []
-    for prop in propositions:
-        key = repr(tuple(sorted(getattr(prop, "structured", {}).items()))) + str(getattr(prop, "type", ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(prop)
-    return EvidenceSpec(
-        id=eid,
-        kind=kind,
-        propositions=tuple(unique),
-        source_ref={"kind": "record", "sourceId": f"record_{eid}"},
-        reliability="high",
-        presentation={"title": title, "description": description},
-        discoverable=True,
-    )
-
-
-def _canonical_distant_location(
-    travel_lookup: dict[tuple[str, str], int],
-    non_scene_locations: list[str],
-    scene_id: str,
-) -> str | None:
-    """Deterministic non-scene location for an opportunity fact: prefers a
-    location ALREADY carrying a travel rule to the scene (>= 180s), then any
-    non-scene location (the caller adds its rule)."""
-    for loc in non_scene_locations:
-        seconds = travel_lookup.get((loc, scene_id))
-        if seconds is not None and seconds >= 180:
-            return loc
-    return non_scene_locations[0] if non_scene_locations else None
 
 
 # --------------------------------------------------------------------------- #
@@ -4825,9 +3996,21 @@ class OllamaStageDriver:
 
         merged_travel = tuple(public.travel_rules) if public is not None else ()
         if extra_travel_rules:
+            # Phase43A — extra rules may deterministically OVERRIDE a too-short
+            # same-endpoint rule (the evidence algebra replaces a rule that
+            # cannot prove unreachability). Drop the existing same-endpoint
+            # rules, then append the extras; when no endpoint collides this is
+            # byte-identical to the previous append-only merge.
+            override_endpoints = {
+                (rule.from_location_id, rule.to_location_id)
+                for rule in extra_travel_rules
+            }
             merged_travel = tuple(
-                dict.fromkeys(merged_travel + tuple(extra_travel_rules))
-            )
+                rule
+                for rule in merged_travel
+                if (rule.from_location_id, rule.to_location_id)
+                not in override_endpoints
+            ) + tuple(extra_travel_rules)
 
         # ---- Phase 19 Fix B.3 â€” fail-closed OBJECT PRESENCE GUARANTEE ----
         # Every semantic object the truth/evidence algebra references MUST be

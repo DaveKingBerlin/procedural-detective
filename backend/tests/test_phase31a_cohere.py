@@ -103,6 +103,24 @@ def _cohere_transport_schema(stage: GenerationStage) -> dict:
     return sa.adapt_schema_for_transport(canonical, adapter=adapter)
 
 
+def _enum_agnostic(node):
+    """Structural view of a schema with every additive Phase43 ``enum`` removed.
+
+    Phase43 (P43-FR-04) adds request-local reference ``enum`` constraints to the
+    transport schema; these pre-Phase-43 tests assert the STAGE STRUCTURE is
+    unchanged, so they compare the enum-agnostic projection of both sides.
+    """
+    if isinstance(node, dict):
+        return {
+            key: _enum_agnostic(value)
+            for key, value in node.items()
+            if key != "enum"
+        }
+    if isinstance(node, list):
+        return [_enum_agnostic(item) for item in node]
+    return node
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -309,8 +327,8 @@ def test_cohere_openrouter_request_uses_native_structured_output(database_url):
                     # The Cohere-compatible TRANSPORT representation (Track A:
                     # open-object nodes carry >= 1 required property while the
                     # canonical schema/fingerprint stay byte-identical).
-                    assert _schema_of(body) == _cohere_transport_schema(
-                        stage
+                    assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                        _cohere_transport_schema(stage)
                     ), stage
                     assert _name_of(body) == prompts.schema_id_for_generation_stage(
                         stage.value
@@ -398,8 +416,8 @@ def test_evidence_rejection_safe_error_classification(database_url):
                 # evidence call itself still carried the schema — now the
                 # Cohere-compatible TRANSPORT representation (Track A).
                 _url, body, _h = wire.posts[2]
-                assert _schema_of(body) == _cohere_transport_schema(
-                    GenerationStage.EVIDENCE
+                assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                    _cohere_transport_schema(GenerationStage.EVIDENCE)
                 )
                 assert _name_of(body) == "EVIDENCE_v1"
 
@@ -476,12 +494,16 @@ def test_schema_byte_length_recorded_safely_and_contents_not_logged(database_url
                         assert event["schemaId"] == (
                             prompts.schema_id_for_generation_stage(stage.value)
                         ), stage
-                        assert event["schemaFingerprint"] == (
-                            prompts.schema_fingerprint_for_stage_output(stage.value)
-                        ), stage
-                        assert event["requestSchemaByteLength"] == (
-                            prompts.schema_byte_length_for_stage_output(stage.value)
-                        ), stage
+                        # Phase43 — the fingerprint/byte length reflect the
+                        # ACTUAL rendered request schema (which now carries the
+                        # additive request-local reference enums), so assert the
+                        # safe SHAPE (a stable 64-hex token + a positive byte
+                        # count), never schema contents.
+                        fingerprint = event["schemaFingerprint"]
+                        assert isinstance(fingerprint, str) and len(fingerprint) == 64
+                        assert all(c in "0123456789abcdef" for c in fingerprint)
+                        assert isinstance(event["requestSchemaByteLength"], int)
+                        assert event["requestSchemaByteLength"] > 0
                         assert event["responseFormatType"] == "openai_json_schema"
                 # The EVIDENCE_v1 canonical byte length is deterministic.
                 # Phase31B aligned the evidence contract (closed reliability
@@ -944,15 +966,15 @@ def test_concurrent_requests_do_not_cross_schema_model_or_key_state(database_url
             # adapter state can cross the other's wire.
             evidence_index = _REGISTRY_STAGES.index(GenerationStage.EVIDENCE)
             _u, evidence_a, _h = posts_a[evidence_index]
-            assert _schema_of(evidence_a) == _cohere_transport_schema(
-                GenerationStage.EVIDENCE
+            assert _enum_agnostic(_schema_of(evidence_a)) == _enum_agnostic(
+                _cohere_transport_schema(GenerationStage.EVIDENCE)
             )
-            assert _schema_of(evidence_a) != prompts.json_schema_for_stage_output(
-                "evidence"
+            assert _enum_agnostic(_schema_of(evidence_a)) != _enum_agnostic(
+                prompts.json_schema_for_stage_output("evidence")
             )
             _u, evidence_b, _h = posts_b[evidence_index]
-            assert _schema_of(evidence_b) == prompts.json_schema_for_stage_output(
-                "evidence"
+            assert _enum_agnostic(_schema_of(evidence_b)) == _enum_agnostic(
+                prompts.json_schema_for_stage_output("evidence")
             )
             # No cross-talk anywhere on the wire.
             assert len(wire.posts) == 8
@@ -1101,8 +1123,8 @@ def test_non_cohere_provider_wire_keeps_canonical_evidence_schema(database_url):
                 assert res.json()["status"] == "PUBLISHED"
                 for index, stage in enumerate(_REGISTRY_STAGES):
                     _url, body, _h = wire.posts[index]
-                    assert _schema_of(body) == prompts.json_schema_for_stage_output(
-                        stage.value
+                    assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                        prompts.json_schema_for_stage_output(stage.value)
                     ), stage
         finally:
             _dispose(application)
@@ -1161,8 +1183,8 @@ def test_schema_conformant_evidence_still_passes_strict_parser(database_url):
                 evidence_wire = wire.posts[
                     _REGISTRY_STAGES.index(GenerationStage.EVIDENCE)
                 ][1]
-                assert _schema_of(evidence_wire) == _cohere_transport_schema(
-                    GenerationStage.EVIDENCE
+                assert _enum_agnostic(_schema_of(evidence_wire)) == _enum_agnostic(
+                    _cohere_transport_schema(GenerationStage.EVIDENCE)
                 )
         finally:
             _dispose(application)

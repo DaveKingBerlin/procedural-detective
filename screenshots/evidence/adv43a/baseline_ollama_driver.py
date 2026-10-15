@@ -1,0 +1,5188 @@
+﻿"""Phase 16_2 ├óÔé¼ÔÇØ the Local-Llama (Ollama) Stage Driver.
+
+``OllamaStageDriver`` walks the prompt-to-world pipeline with STRUCTURED
+per-stage LLM calls over the SAME ``GenerateRequest`` / ``ProviderResult``
+boundary (``OllamaProvider`` is the transport; nothing Ollama-specific leaks
+out of that adapter):
+
+    CASE/PEOPLE (CASE_TRUTH stage surface)
+      -> EVIDENCE (EVIDENCE stage surface)
+      -> WORLD_REQUIREMENTS (WORLD_REQUIREMENTS stage surface)
+      -> Environment Resolver -> Asset Oracle -> World Composer
+      -> ASSET_SPEC (only for unknown/REQUIRED objects the Oracle cannot
+         resolve) with a bounded ASSET_SPEC_REPAIR loop
+
+The driver PROPOSES structured facts; it NEVER decides who the murderer is or
+whether a case is solvable. It assembles a normal ``GeneratedDraft`` so the
+EXISTING deterministic validation suite (safety, solver, world, truth,
+publication gate) runs unchanged, and it is invoked from inside the EXISTING
+``GenerationController`` lifecycle (budget, repair/regenerate classification,
+publication CAS) ├óÔé¼ÔÇØ no parallel lifecycle is introduced.
+
+The driver's outcome when any stage yields terminal-unrepairable output is
+classified by the existing controller: a provider-level failure
+(``StageDriverProviderFailure``) fails the attempt; a stage parse/validation
+failure leaves ``attempt.deferred_structural`` populated so
+``pipeline.validate_draft`` classifies RECOVERABLE_REPAIR / REGENERATE /
+TERMINAL exactly as today.
+
+``OllamaAssetSpecProvider`` adapts the narrow ``AssetSpecProvider`` (used by
+``app.world.composer.compose_world``) to the Ollama provider: an ASSET_SPEC
+call followed by at most ``MAX_SPEC_REPAIR_PASSES`` ASSET_SPEC_REPAIR calls
+each re-parzed and re-validated with the strict Phase 13 validator before being
+returned. All calls consume the per-attempt provider-call budget.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import re
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping
+
+from app.generation.provider import (
+    GenerateRequest,
+    GenerationStage,
+    ProviderResult,
+    StageDriverProviderFailure,
+)
+from app.generation.budgets import (
+    CORE_BUCKET,
+    PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
+)
+from app.generation.failure_codes import (
+    GenerationFailureCode,
+    failure_code_for_budget_reason,
+    infer_failure_code,
+)
+from app.core.observability import emit_event
+from app.generation import prompts
+from app.generation import parser as stage_parser
+from app.generation import candidate_projection as candidate_projection_mod
+from app.generation import trusted_context as _trusted_context
+from app.domain.time_interval import (
+    epoch_to_iso,
+    parse_iso8601,
+)
+from app.world.composer import SemanticObjectResolutionError
+from app.world.environment import canonicalize_environment_hint
+from app.world.requirements import (
+    CRITICALITY_DECORATIVE,
+    CRITICALITY_REQUIRED,
+    MAX_OBJECT_REQUESTS,
+    ObjectRequest,
+    PlacementRelation,
+    RELATION_KINDS,
+    WorldRequirements,
+    semantic_object_id,
+)
+
+_PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
+
+
+def _dt(message: str) -> None:
+    """DEV-ONLY structured trace (Phase17E PART B); gated, default OFF.
+
+    Never logs prompts, truth, credentials or the Ollama URL.
+    """
+    if _PD_DEV_TRACE:
+        print(f"[PD-DEV-TRACE] {message}", flush=True)
+
+
+def _dt_remaining(attempt: Any) -> str:
+    budget = getattr(attempt, "budget", None)
+    if budget is None or not hasattr(budget, "remaining_seconds"):
+        return "none"
+    return str(int(budget.remaining_seconds() * 1000))
+
+
+def _remaining_ms(attempt: Any) -> int | None:
+    budget = getattr(attempt, "budget", None)
+    if budget is None or not hasattr(budget, "remaining_seconds"):
+        return None
+    return int(budget.remaining_seconds() * 1000)
+
+
+def _timeout_deadline_clip(
+    attempt: Any,
+    issued_timeout_seconds: float | None = None,
+    configured_timeout_seconds: float | None = None,
+) -> tuple[bool, str | None]:
+    """Phase38 ┬º25 ÔÇö closed deadline-clipped timeout metadata.
+
+    Phase38 DEF-094 ÔÇö the classification compares the ACTUAL server-issued
+    effective per-call timeout against the configured provider timeout: when
+    the deadline was the binding bound (remaining deadline at dispatch below
+    the configured timeout) the issued budget is below ``configured - margin``,
+    so a timeout at that budget means the GENERATION DEADLINE was the binding
+    limiter ÔÇö never ordinary provider slowness. This is robust against the
+    transport's documented reserve firing ~250ms early (remaining still >
+    0.1s) and against float epsilon at the exact boundary
+    (``remaining == 0.10000000000002274``). The legacy remaining-margin rule
+    (``budget.remaining_seconds() <= 0.1s``) is kept ONLY as the no-carrier
+    fallback. Returns the closed ``(deadlineClipped, timeoutSource)`` pair;
+    never raw exception text, never timing internals.
+    """
+    if issued_timeout_seconds is not None and configured_timeout_seconds is not None:
+        try:
+            issued = float(issued_timeout_seconds)
+            configured = float(configured_timeout_seconds)
+        except (TypeError, ValueError):
+            issued = None
+        if issued is not None and (
+            configured - PROVIDER_CALL_SAFETY_MARGIN_SECONDS - issued > 1e-9
+        ):
+            return True, "GENERATION_DEADLINE"
+        # An ample-deadline call issued the FULL configured timeout (or within
+        # the classification margin of it): an ordinary provider timeout,
+        # never a deadline clip.
+        return False, None
+    budget = getattr(attempt, "budget", None)
+    if budget is None or not hasattr(budget, "remaining_seconds"):
+        return False, None
+    if budget.remaining_seconds() <= PROVIDER_CALL_SAFETY_MARGIN_SECONDS + 1e-9:
+        return True, "GENERATION_DEADLINE"
+    return False, None
+
+
+def _structured_output_sent(provider: Any, *, provider_label: str) -> bool:
+    """Truthfully report whether THIS completed call used a structured schema.
+
+    ``OllamaProvider`` exposes the actual last-wire format through
+    ``structured_output_sent``.  The remote-client bridge always dispatches an
+    authoritative ``schemaId`` and receives a ``structuredOutput`` object, so
+    that transport is structured by contract.  Unknown/legacy providers fail
+    closed to ``False`` instead of repeating the old unconditional ``True``.
+    """
+    if provider_label == "remote_client":
+        return True
+    try:
+        marker = getattr(provider, "structured_output_sent", False)
+        return bool(marker() if callable(marker) else marker)
+    except Exception:  # noqa: BLE001 - observability must never break generation
+        return False
+
+# Bounded AssetSpec repair passes INSIDE one AssetSpec round-trip (Phase16_2
+# ├é┬º13: "bounded ├óÔÇ░┬ñ2 per driver").
+MAX_SPEC_REPAIR_PASSES = 2
+
+# Phase 19J ├é┬º20 ├óÔé¼ÔÇØ bounded activity-log repair passes INSIDE one activity-log
+# round-trip (like ASSET_SPEC_REPAIR: each pass is a REAL bounded provider
+# call; the global/core provider-call budgets stay authoritative). The repair
+# prompt carries ONLY machine-readable validation findings + the locked
+# canonical time.
+MAX_ACTIVITY_LOG_REPAIR_PASSES = 2
+
+# Phase38 DEF-098 (ADV-38-05) ÔÇö the legacy per-attempt stage-timing recorder
+# cap applies to budget-less callers only. Real attempts cap by their OWN
+# ``budget.max_calls`` legal provider-call envelope (see
+# ``OllamaStageDriver._stage_timing_cap``), which makes the
+# ``stageTimingSummary`` LOSS-LESS ÔÇö never a silent 32-token truncation. This
+# fixed bound only guards the defensively small budget-less test surface.
+_STAGE_TIMING_LEGACY_CAP = 32
+
+# The four (non-AssetSpec) stage surfaces the driver walks (in order).
+_DRIVER_STAGES = (
+    GenerationStage.CASE_TRUTH,
+    GenerationStage.EVIDENCE,
+    GenerationStage.WORLD_GRAPH,
+)
+
+
+class _DuplicateKeyError(ValueError):
+    pass
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateKeyError(key)
+        result[key] = value
+    return result
+
+
+def _consumer_accepts_bucket(consumer: Callable[..., Any]) -> bool:
+    """Whether a budget consumer accepts a positional bucket argument.
+
+    Phase 19 Fix C callers pass ``consumer(object_id)`` (ASSET:<objectId>
+    attribution); legacy zero-arg consumers (tests, older callers) still work
+    via the zero-arg invocation. Introspected once at construction.
+    """
+    import inspect
+
+    try:
+        signature = inspect.signature(consumer)
+    except (TypeError, ValueError):
+        return True  # flexible callable (partial/builtin): assume bucket-aware
+    for parameter in signature.parameters.values():
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            return True
+    return False
+
+
+def _parse_doc(content: str) -> dict[str, Any]:
+    """Strict single-document parse with duplicate-key rejection (mirror of the
+    strict generation parser) ├óÔé¼ÔÇØ returns the dict or raises ``ValueError``.
+
+    PD-SEC-09: the decode runs behind the SAME bounded depth preflight as the
+    generation parser (``bounded_json_loads``), so a deep nesting bomb in a
+    provider response raises a clean ``BoundedJsonError`` (a ``ValueError``)
+    instead of an uncaught ``RecursionError``.
+    """
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("provider output is empty")
+    from app.assets.depthguard import MAX_STRUCT_NESTING, bounded_json_loads
+
+    return bounded_json_loads(
+        content, object_pairs_hook=_reject_duplicate_keys, limit=MAX_STRUCT_NESTING
+    )
+
+
+# --------------------------------------------------------------------------- #
+# CASE/PEOPLE + WORLD_REQUIREMENTS strict parsing (reuses the authoritative
+# stage parsers where a section matches one; never a lenient analogue).
+# --------------------------------------------------------------------------- #
+
+
+def parse_case_people(content: str) -> tuple[Any, dict[str, Any]]:
+    """Strict-parse a CASE/PEOPLE stage response.
+
+    Returns ``(crime_spec, public_world_spec)`` where ``crime_spec`` is a
+    ``CrimeSpec`` and ``public_world_spec`` is a ``PublicWorldSpec`` (built by
+    the authoritative PUBLIC_WORLD parser from the persons/motives/locations/
+    travelRules/scene sections). NEVER coerces; raises ``ValueError`` carrying
+    the parsed structure on success only when the structure is valid.
+    """
+    data = _parse_doc(content)
+    if not isinstance(data, dict):
+        raise ValueError("case_people root must be a JSON object")
+    extra = set(data) - {"crime", "persons", "motives", "locations", "travelRules", "scene"}
+    if extra:
+        raise ValueError(f"case_people: unknown keys {sorted(extra)!r}")
+    if "crime" not in data:
+        raise ValueError("case_people: missing required key 'crime'")
+    crime = stage_parser.parse_stage(
+        GenerationStage.CASE_TRUTH,
+        json.dumps({"crime": data["crime"]}, sort_keys=True),
+        non_throwing=False,
+    )
+    public_payload = {key: val for key, val in data.items() if key in (
+        "persons", "motives", "locations", "travelRules", "scene"
+    )}
+    public_payload["objects"] = public_payload.get("objects", [])
+    public = stage_parser.parse_stage(
+        GenerationStage.PUBLIC_WORLD,
+        json.dumps(public_payload, sort_keys=True),
+        non_throwing=False,
+    )
+    return crime, public
+
+
+# --------------------------------------------------------------------------- #
+# cross-stage locked identity sheet (Phase17D integration)
+# --------------------------------------------------------------------------- #
+#
+# Hermes invents a fresh opaque id namespace in every independent stage call,
+# which makes the DETERMINISTIC engine's cross-stage referential integrity
+# impossible (crime.weaponId must resolve to an object, evidence person/location
+# ids must exist, world evidenceIds must be known evidence ids). The driver
+# projects ONE app-owned ID NAMESPACE derived from the LOCKED prompt into every
+# stage prompt, so every stage references the same tokens
+# (``anna_weiss``, ``paul_becker``, ``bronze_ceremonial_ice_pick``, ``office``,
+# ...) by construction. Prompts only; parsers/validators are untouched.
+
+def _identity_slug(value: str | None) -> str:
+    """Deterministic lowercase snake id from a locked display value.
+
+    Phase43 (P43-FR-01): the canonical implementation lives in the
+    provider-neutral ``app.generation.trusted_context`` module; this name
+    remains importable from ``app.services.ollama_driver`` with identical
+    behavior.
+    """
+    return _trusted_context.identity_slug(value)
+
+
+def _locked_id_sheet(attempt: Any) -> str:
+    """The app-owned cross-stage id sheet (empty when nothing is locked).
+
+    Phase43 (P43-FR-01): the canonical implementation lives in the
+    provider-neutral ``app.generation.trusted_context`` module.
+    """
+    return _trusted_context.locked_id_sheet(attempt)
+
+
+def _approved_public_material(public: Any) -> str:
+    """The approved public-id sheet from the PARSED CASE output (stage 2..N).
+
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``.
+    """
+    return _trusted_context.approved_public_material(public)
+
+
+def _approved_travel_sheet(public: Any) -> str:
+    """The focused APPROVED TRAVEL RULES block for the evidence prompt.
+
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``.
+    """
+    return _trusted_context.approved_travel_sheet(public)
+
+
+def _weapon_evidence_id(attempt: Any, evidence_spec: Any) -> str:
+    """The sealed evidence item id that references the LOCKED WEAPON object.
+
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``. The driver still calls THIS
+    module-level name so the ``test_phase38_driver_reuse`` monkeypatch seam
+    keeps working.
+    """
+    return _trusted_context.weapon_evidence_id(attempt, evidence_spec)
+
+
+# --------------------------------------------------------------------------- #
+# Phase17 Wave-2 ├óÔé¼ÔÇØ evidence algebra seeding + deterministic gap completion
+# --------------------------------------------------------------------------- #
+#
+# The WHO/WHY/WEAPON solvers need a COMPLETE fact algebra before any dimension
+# can be unique (a missing fact leaves a candidate viable and blocks the case).
+# An 8B-class model cannot be relied on to emit all ~16 solver-critical
+# propositions in one pass, so the driver does two things:
+#
+#  1. ``_deduction_seed`` ├óÔé¼ÔÇØ projects the EXACT ids/timestamps the evidence
+#     facts must reference into the evidence prompt (app-owned; derived from
+#     the model's own parsed people/motives/locations + the locked ids + the
+#     locked canonical time). Facts, never conclusions; no reveal.
+#
+#  2. ``_evidence_gap_facts`` ├óÔé¼ÔÇØ the deterministic acceptance path: after the
+#     model's evidence is parsed, the driver checks the required algebra and
+#     appends ONLY the missing solver-critical facts, derived exclusively from
+#     the model's own public tokens (persons/locations/motives/objects it
+#     chose), the locked ids and the locked canonical time. The appended facts
+#     are REAL discoverable evidence that still passes the strict parser, the
+#     full referential validation and the deterministic solver (which derives
+#     the unique winner from the assembled set). Nothing hidden, never faked,
+#     fully solver-validated.
+
+# The app-owned "other sharp weapon" candidates the weapon solver tests
+# against the locked weapon (single canonical source: P43-FR-01).
+_BASE_SHARP_WEAPON_IDS: tuple[str, ...] = _trusted_context._BASE_SHARP_WEAPON_IDS
+
+# The FULL golden base object id set carried by EVERY driver-assembled draft
+# (identical to the fake/live golden world's object set). Phase 19 Fix B
+# (├é┬º4.4): object IDENTITY exists independently of the per-kit PLACEMENT subset
+# (KIT_BASE_OBJECT_IDS) ├óÔé¼ÔÇØ a kit that cannot place letter_opener/scissors still
+# has them as world OBJECTS so weapon/evidence references stay valid.
+OBJECTS_BASE_ALL_KITS: tuple[str, ...] = (
+    "kitchen_knife",
+    "letter_opener",
+    "scissors",
+    "vase_01",
+    "apartment_table",
+    "apartment_door",
+    "apartment_lamp",
+    "apartment_laptop",
+    "victim_body_placeholder",
+)
+
+# Phase 19B ADV-219: the spare sharp objects whose PLACEMENT is per-kit
+# optional (composer ``KIT_BASE_OBJECT_IDS`` omits them on hotel_suite /
+# warehouse). They remain WORLD identity objects everywhere so forensic/
+# evidence references stay valid, but they are only WEAPON CANDIDATES on kits
+# that actually place them (the candidate universe mirrors the placed scene).
+_PER_KIT_SHARP_WEAPON_IDS: tuple[str, ...] = ("letter_opener", "scissors")
+
+# Default distant-location travel rule the driver may deterministically add so
+# an alternative suspect's observation actually proves the scene unreachable
+# (single canonical source: P43-FR-01).
+_DEFAULT_DISTANT_TRAVEL_SECONDS = _trusted_context._DEFAULT_DISTANT_TRAVEL_SECONDS
+
+
+def _evidence_timeline(canonical: str) -> dict[str, str]:
+    """The six deterministic evidence timestamps (same date/+02:00 as crime).
+
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``.
+    """
+    return _trusted_context.evidence_timeline(canonical)
+
+
+def _deduction_seed(attempt: Any, crime: Any, public: Any) -> str:
+    """Concrete MUST-EMIT fact seed for the evidence prompt (app-owned).
+
+    Phase43 (P43-FR-01): canonical implementation in
+    ``app.generation.trusted_context``.
+    """
+    return _trusted_context.deduction_seed(attempt, crime, public)
+
+
+def _driver_clock_token(canonical: str) -> str:
+    """The deterministic ``HH:MM`` clock token of the case's canonical time.
+
+    The witness-grounding model (``app.domain.witness._time_anchors_of``)
+    recognises a bare clock token inside allowlisted statement/description
+    text as a TIME anchor, so a driver witness statement that states the time
+    derived from the case's OWN canonical crime/window data grounds the TIME
+    interview question. Never a golden/truth sentence ÔÇö purely the case's own
+    canonical clock (DEF-079).
+    """
+    import datetime
+
+    try:
+        dt = datetime.datetime.fromisoformat(canonical)
+    except (TypeError, ValueError):
+        return ""
+    return f"{dt.hour:02d}:{dt.minute:02d}"
+
+
+def _driver_scene_label(public: Any, scene_id: str) -> str:
+    """A deterministic public scene NAME for a driver witness statement.
+
+    Prefers the scene location's PUBLIC name; falls back to the public
+    location whose ``location_id`` equals the scene id, then to the first
+    public location name ÔÇö only the case's OWN public tokens are ever used
+    (never a golden/truth label, never random text). LOCATION interview
+    grounding matches word tokens of the public location names inside the
+    statement text, so labelling the scene deterministically makes the
+    driver witnesses genuinely locatable (DEF-079).
+    """
+    scene_name = str(
+        getattr(getattr(public, "scene", None), "name", None) or ""
+    ).strip()
+    if scene_name:
+        return scene_name
+    for loc in (getattr(public, "locations", ()) or ()):
+        if str(getattr(loc, "location_id", "") or "") == str(scene_id):
+            name = str(getattr(loc, "name", "") or "").strip()
+            if name:
+                return name
+    for loc in (getattr(public, "locations", ()) or ()):
+        name = str(getattr(loc, "name", "") or "").strip()
+        if name:
+            return name
+    return ""
+
+
+def _evidence_gap_facts(
+    attempt: Any, crime: Any, public: Any, evidence_spec: Any
+) -> tuple[Any, tuple[Any, ...], tuple[str, ...]]:
+    """The deterministic evidence projection (Phase17 Wave-2 acceptance path).
+
+    Hermes3:8b cannot be relied on to emit the complete solver-critical fact
+    algebra in one stable pass (its fact subset/timestamps vary run to run;
+    a single contradictory proposition ├óÔé¼ÔÇØ a ``match:true`` on an alternative
+    weapon, a false match on the locked weapon, an observation of the locked
+    person at a distant travel-rule-backed location, an off-seed time fact ├óÔé¼ÔÇØ
+    is enough to make the assembled evidence non-unique). The driver is the
+    sole trust boundary, so under the accepted Wave-2 contract the model emits
+    the CASE SKELETON and the driver OWNS the complete evidence algebra:
+
+    - the published evidence set is built deterministically HERE from the
+      model's OWN public tokens (the persons/motives/locations/objects it
+      chose), the locked ids and the locked canonical time;
+    - the model's raw evidence propositions are NOT copied into the published
+      draft (nothing the model emits can silently weaken or poison the
+      deduction); the evidence stage still runs, parses and validates through
+      the same strict parser, and its prompts/projections are the shaping
+      surface;
+    - every generated fact is REAL discoverable evidence that passes the
+      strict parser, the full referential validation AND the deterministic
+      solver ├óÔé¼ÔÇØ the solver still derives the unique winner from the assembled
+      set (injection never bypasses the solver, never fakes: every fact
+      references model-chosen people/locations/motives/objects).
+
+    Returns ``(canonical_evidence_spec, extra_travel_rules, notes)``:
+
+    - ``canonical_evidence_spec`` ├óÔé¼ÔÇØ the complete EvidenceSetSpec (WHEN;
+      impossible-opportunity for every other suspect; presence + alibi for
+      the locked person; motive link + exclusions; weapon matches +
+      fingerprint);
+    - ``extra_travel_rules`` ├óÔé¼ÔÇØ ``TravelRuleSpec`` objects the driver appends
+      to the draft public so an opportunity observation is travel-rule-backed
+      (the who solver refuses to exclude without a rule);
+    - ``notes`` ├óÔé¼ÔÇØ sanitized audit lines (evidence id + fact kind) listing
+      exactly what was built and why (the operator/QA trace; never served).
+    """
+    from app.domain.eligibility import final_homicide_target_ids
+    from app.generation.constraints import normalize_identity
+    from app.generation.schemas import EvidenceSetSpec, PropSpec, TravelRuleSpec
+
+    if crime is None or public is None:
+        return None, (), ()
+    scene_id = getattr(getattr(public, "scene", None), "location_id", None) or crime.location_id
+    murderer_id = crime.murderer_id
+    motive_id = crime.motive_id
+    weapon_id = crime.weapon_id
+    victim_id = crime.victim_id
+    canonical = getattr(getattr(crime, "crime_time", None), "canonical", None)
+    # Phase41 (┬º16-┬º19): a SUICIDE truth has NO murderer by contract. The
+    # deterministic evidence algebra MUST still run (WHEN + red-herring
+    # opportunity exclusions + motive contradictions + weapon forensics +
+    # witness statements) ÔÇö the old bail on a missing murderer would make a
+    # SUICIDE case impossible to generate. A HOMICIDE truth still requires a
+    # murderer (a missing one is a truth-shape defect -> bail to the
+    # canonical validators).
+    from app.domain.resolution import ResolutionType
+
+    is_suicide = getattr(crime, "resolution_type", None) is ResolutionType.SUICIDE
+    if not (scene_id and motive_id and weapon_id and victim_id and canonical):
+        return None, (), ()
+    if not is_suicide and not murderer_id:
+        return None, (), ()
+    try:
+        timeline = _evidence_timeline(canonical)
+    except (TypeError, ValueError):
+        return None, (), ()
+
+    persons = {
+        p.person_id: getattr(p, "name", None)
+        for p in (getattr(public, "persons", ()) or ())
+    }
+    # Phase41A ÔÇö the impossible-opportunity enumeration covers every OTHER
+    # FINAL HOMICIDE TARGET (public suspects AND witnesses, victim excluded),
+    # not only ``SUSPECT_ELIGIBLE`` suspects (REQUIREMENTS 31.1.1A / 31.10):
+    # once witnesses enter the WHO candidate universe they need evidence-backed
+    # exclusions too, and a witness-murderer case becomes uniquely solvable
+    # (every other target excluded, murderer viable).
+    other_suspects = sorted(
+        target
+        for target in final_homicide_target_ids(public)
+        if target != murderer_id
+    )
+    # The hidden statement-level witness-truthfulness stamps (Phase41A): the
+    # driver stamps a bounded deterministic set per seed (guilty witness
+    # SELF_PROTECTION / truthful; innocent PROTECT_OTHER / HIDE_UNRELATED_SECRET),
+    # which the evidence algebra consumes for statement text + contradiction
+    # records. Pure; derived from ``attempt._witness_truthfulness``.
+    from app.domain.witness_truth import WitnessStatementTruth
+
+    _stamped_deceptive: dict[str, str] = {}  # witness_id -> reason
+    for entry in (getattr(attempt, "_witness_truthfulness", ()) or ()):
+        if isinstance(entry, WitnessStatementTruth) and entry.truthfulness == "DECEPTIVE":
+            _stamped_deceptive[entry.witness_id] = entry.deception_reason or ""
+    other_motives = sorted(
+        m.motive_id
+        for m in (getattr(public, "motives", ()) or ())
+        if m.motive_id != motive_id
+    )
+    non_scene_locations = sorted(
+        loc.location_id
+        for loc in (getattr(public, "locations", ()) or ())
+        if loc.location_id != scene_id
+    )
+    travel_lookup: dict[tuple[str, str], int] = {}
+    for rule in (getattr(public, "travel_rules", ()) or ()):
+        frm = getattr(rule, "from_location_id", None)
+        to = getattr(rule, "to_location_id", None)
+        seconds = getattr(rule, "travel_time_seconds", None)
+        if frm and to and isinstance(seconds, int):
+            travel_lookup[(frm, to)] = seconds
+
+    extras: list[Any] = []
+    extra_rules: list[Any] = []
+    notes: list[str] = []
+
+    def _p(eid: str, title: str, description: str) -> dict[str, str]:
+        return {"title": title, "description": description}
+
+    def _person_label(person_id: str) -> str:
+        return persons.get(person_id) or person_id
+
+    def _location_label(location_id: str) -> str:
+        for loc in (getattr(public, "locations", ()) or ()):
+            if str(getattr(loc, "location_id", "") or "") == str(location_id):
+                return str(getattr(loc, "name", "") or "") or location_id
+        return location_id
+
+    # ---- WHEN (bounds the feasible window; canonical tick stays inside) ----
+    for eid, ptype, person, title, description in (
+        (
+            "d_ev_when_last_seen",
+            "VICTIM_LAST_SEEN_ALIVE_AT",
+            victim_id,
+            "Victim last seen",
+            "The victim was seen alive at the scene shortly before the incident.",
+        ),
+        (
+            "d_ev_when_body",
+            "BODY_FIRST_FOUND_AT",
+            None,
+            "Body discovered",
+            "The body was found at the scene shortly after the incident.",
+        ),
+        (
+            "d_ev_when_obs",
+            "CRIME_SCENE_OBSERVATION_AT",
+            None,
+            "Activity logged at the scene",
+            "A monitoring log records activity at the scene around the locked time.",
+        ),
+    ):
+        kwargs = {}
+        if person is not None:
+            kwargs["person_id"] = person
+        if ptype == "VICTIM_LAST_SEEN_ALIVE_AT":
+            observed_at, uncertainty = timeline["last_seen"], 0
+        elif ptype == "BODY_FIRST_FOUND_AT":
+            observed_at, uncertainty = timeline["body_found"], 0
+        else:
+            observed_at, uncertainty = timeline["scene_observation"], 90
+        extras.append(
+            _canonical_evidence_item(
+                eid=eid,
+                kind="witness_observation" if ptype != "CRIME_SCENE_OBSERVATION_AT" else "cctv",
+                propositions=(_canonical_prop(ptype, location_id=scene_id, observed_at=observed_at, uncertainty_seconds=uncertainty, **kwargs),),
+                title=title,
+                description=description,
+            )
+        )
+        notes.append(f"{eid}: canonical {ptype} ({observed_at})")
+
+    # ---- impossible-opportunity for every OTHER FINAL HOMICIDE TARGET -------
+    # Phase41A (REQUIREMENTS 31.1.1A / 31.10): every non-murderer final target
+    # (public suspects AND witnesses) gets an evidence-backed distant
+    # observation (kind ``cctv``) so the WHO solver ÔÇö which iterates the final
+    # target universe ÔÇö keeps ONLY the murderer viable.
+    #
+    # FIX-1 (ADV-41A-02): this record is shaped EXACTLY like any other
+    # opportunity/observation item ÔÇö the SAME neutral ``d_ev_opp_<id>`` id
+    # namespace, ``cctv`` kind, title and description ÔÇö for truthful AND
+    # deceptive witnesses alike. A deceptive INNOCENT witness's discoverable
+    # contradiction IS this ordinary distant record, so nothing in the public
+    # evidence can reveal deceptive-vs-truthful status; the
+    # ``DECEPTIVE_CLAIM_UNCONTRADICTED`` gate still finds it because
+    # ``mechanical_contradiction_fact_ids`` matches ANY mechanical record
+    # referencing the witness (Phase41A ┬º26/┬º63, REQUIREMENTS ┬º47A.4).
+    travel_notes: list[str] = []
+    opportunity_location: dict[str, str] = {}
+    for suspect in other_suspects:
+        distant = _canonical_distant_location(travel_lookup, non_scene_locations, scene_id)
+        if distant is None:
+            continue
+        opportunity_location[suspect] = distant
+        if (distant, scene_id) not in travel_lookup:
+            extra_rules.append(
+                TravelRuleSpec(
+                    from_location_id=distant,
+                    to_location_id=scene_id,
+                    travel_time_seconds=_DEFAULT_DISTANT_TRAVEL_SECONDS,
+                )
+            )
+            travel_lookup[(distant, scene_id)] = _DEFAULT_DISTANT_TRAVEL_SECONDS
+            travel_notes.append(
+                f"travel rule {distant}->{scene_id}={_DEFAULT_DISTANT_TRAVEL_SECONDS}s added"
+            )
+        eid = f"d_ev_opp_{normalize_identity(suspect) or 'target'}"
+        extras.append(
+            _canonical_evidence_item(
+                eid=eid,
+                kind="cctv",
+                propositions=(
+                    _canonical_prop(
+                        "PERSON_OBSERVED_AT_LOCATION",
+                        person_id=suspect,
+                        location_id=distant,
+                        observed_at=timeline["alternate_observed"],
+                        uncertainty_seconds=30,
+                    ),
+                ),
+                title="Person logged away from the scene",
+                description=(
+                    f"A monitoring log places {_person_label(suspect)} at a "
+                    "location away from the scene at the crime time."
+                ),
+            )
+        )
+        notes.append(
+            f"{eid}: canonical PERSON_OBSERVED_AT_LOCATION for {suspect} "
+            "(opportunity exclusion)"
+        )
+
+    # ---- presence + alibi for the LOCKED person (HOMICIDE only) -----------
+    # A SUICIDE truth has no murderer: the self-inflicted outcome is evidenced
+    # by the victim activity / scene / weapon forensics + the red-herring
+    # suspect exclusions, never by a killer-placement.
+    if not is_suicide:
+        extras.append(
+            _canonical_evidence_item(
+                eid="d_ev_presence",
+                kind="cctv",
+                propositions=(
+                    _canonical_prop(
+                        "PERSON_OBSERVED_AT_LOCATION",
+                        person_id=murderer_id,
+                        location_id=scene_id,
+                        observed_at=timeline["presence"],
+                        uncertainty_seconds=60,
+                    ),
+                ),
+                title="Person logged at the scene",
+                description=(
+                    f"A monitoring log places {_person_label(murderer_id)} at the "
+                    "scene around the locked time."
+                ),
+            )
+        )
+        notes.append(f"d_ev_presence: canonical scene presence for {murderer_id}")
+        extras.append(
+            _canonical_evidence_item(
+                eid="d_ev_alibi",
+                kind="testimonial",
+                propositions=(
+                    _canonical_prop(
+                        "ALIBI_TIME_CLAIM",
+                        person_id=murderer_id,
+                        structured={"claimedDeparture": timeline["alibi_departure"]},
+                    ),
+                ),
+                title="Alibi statement",
+                description="A statement claims the person had left before the locked time.",
+            )
+        )
+        notes.append(f"d_ev_alibi: canonical ALIBI_TIME_CLAIM for {murderer_id}")
+
+    # ---- motive: the locked motive (HOMICIDE: linked to the killer;
+    # SUICIDE: the victim's own) + red-herring exclusions -------------------
+    if is_suicide:
+        # FIX-6 (┬º15/┬º19): a SUICIDE truth still needs a UNIQUE motive
+        # deduction. The WHY solver only certifies a motive when it is
+        # SUPPORTED (``MOTIVE_LINKED_TO_PERSON``) and every alternative is
+        # contradicted ÔÇö a bare exclusion set leaves the locked motive
+        # "unknown" (not unique) and the case would REGENERATE forever. The
+        # victim is the subject of a self-inflicted resolution, so the locked
+        # motive is deterministically linked to the VICTIM (never a murderer
+        # trace ÔÇö the WHO solver only links suspects, so this never supports a
+        # person candidate).
+        extras.append(
+            _canonical_evidence_item(
+                eid="d_ev_motive_link",
+                kind="email",
+                propositions=(
+                    _canonical_prop(
+                        "MOTIVE_LINKED_TO_PERSON",
+                        person_id=victim_id,
+                        motive_id=motive_id,
+                    ),
+                ),
+                title="Recorded statement",
+                description=(
+                    f"A record connects the victim to the locked motive."
+                ),
+            )
+        )
+        notes.append(
+            f"d_ev_motive_link: canonical MOTIVE_LINKED_TO_PERSON {victim_id}->{motive_id} (suicide)"
+        )
+    else:
+        extras.append(
+            _canonical_evidence_item(
+                eid="d_ev_motive_link",
+                kind="email",
+                propositions=(
+                    _canonical_prop(
+                        "MOTIVE_LINKED_TO_PERSON",
+                        person_id=murderer_id,
+                        motive_id=motive_id,
+                    ),
+                ),
+                title="Recorded statement",
+                description=(
+                    f"A record connects {_person_label(murderer_id)} to the locked motive."
+                ),
+            )
+        )
+        notes.append(f"d_ev_motive_link: canonical MOTIVE_LINKED_TO_PERSON {murderer_id}->{motive_id}")
+    for motive in other_motives:
+        eid = f"d_ev_motive_x_{normalize_identity(motive) or 'motive'}"
+        extras.append(
+            _canonical_evidence_item(
+                eid=eid,
+                kind="email",
+                propositions=(_canonical_prop("MOTIVE_FACT_CONTRADICTED", motive_id=motive),),
+                title="Recorded statement",
+                description="A record contradicts the candidate motive.",
+            )
+        )
+        notes.append(f"{eid}: canonical MOTIVE_FACT_CONTRADICTED for {motive}")
+
+    # ---- weapon matches + fingerprint --------------------------------------
+    for obj in _BASE_SHARP_WEAPON_IDS:
+        if normalize_identity(obj) == normalize_identity(weapon_id):
+            continue
+        eid = f"d_ev_weapon_false_{normalize_identity(obj) or 'weapon'}"
+        extras.append(
+            _canonical_evidence_item(
+                eid=eid,
+                kind="forensic",
+                propositions=(
+                    _canonical_prop(
+                        "FORENSIC_WEAPON_MATCH", object_id=obj, structured={"match": False}
+                    ),
+                ),
+                title="Forensic comparison",
+                description="Forensic comparison excludes this object as the source.",
+            )
+        )
+        notes.append(f"{eid}: canonical FORENSIC_WEAPON_MATCH false for {obj}")
+    extras.append(
+        _canonical_evidence_item(
+            eid="d_ev_weapon_true",
+            kind="forensic",
+            propositions=(
+                _canonical_prop(
+                    "FORENSIC_WEAPON_MATCH", object_id=weapon_id, structured={"match": True}
+                ),
+            ),
+            title="Forensic comparison",
+            description="Forensic comparison identifies the locked object as the source.",
+        )
+    )
+    notes.append(f"d_ev_weapon_true: canonical FORENSIC_WEAPON_MATCH true for {weapon_id}")
+    if not is_suicide:
+        # A victim fingerprint on the object is a normal self-inflicted-scene
+        # fact and is deliberately NOT asserted as a killer trace for SUICIDE.
+        extras.append(
+            _canonical_evidence_item(
+                eid="d_ev_fp",
+                kind="forensic",
+                propositions=(
+                    _canonical_prop(
+                        "OBJECT_CONTAINS_FINGERPRINT", object_id=weapon_id, person_id=murderer_id
+                    ),
+                ),
+                title="Latent fingerprint",
+                description="A latent fingerprint was lifted from the locked object.",
+            )
+        )
+        notes.append(f"d_ev_fp: canonical OBJECT_CONTAINS_FINGERPRINT on {weapon_id} for {murderer_id}")
+
+    # Phase35 witness completeness ÔÇö the DRIVER is the earliest authoritative
+    # layer for local-model generation (it OWNS the complete evidence algebra;
+    # the model's raw evidence propositions are never copied). Every public
+    # role=='witness' person must be interviewable with a usable canonical
+    # witness statement (goldens each carry exactly this pattern; Phase35 ┬º8/┬º36
+    # and the Phase35 case-quality validator ``WITNESS_STATEMENT_MISSING`` gate
+    # require it). The fact is a ``witness_statement`` attributed to the witness
+    # (WITNESS_CLAIMS proposition person_id + speakerName ÔÇö both the canonical
+    # attribution signals of ``app.domain.witness.witness_attributed_to``).
+    # WITNESS_CLAIMS is NOT consumed by any Phase 3 deduction rule (golden
+    # comment), so the solver signature is byte-identical; the fact is real
+    # discoverable player-visible evidence. DEF-079: the statement is NOT a
+    # byte-identical generic sentence ÔÇö it carries a TIME anchor and the
+    # LOCATION derived deterministically from the case's OWN canonical crime
+    # time and public scene name (plus the witness's own name), so the local
+    # path produces genuinely interviewable witnesses (``project_witness_statement``
+    # grounds TIME + LOCATION + OBSERVATION, not only OBSERVATION). No golden
+    # names, no story copying, no random text; deterministic and bounded.
+    #
+    # Phase41 (┬º11-┬º14) + Phase41A (┬º16-┬º18): a witness whose hidden
+    # statement-level truthfulness is DECEPTIVE gets a PLAYER-VISIBLE deceptive
+    # statement text; the contradiction path is an ORDINARY deterministic
+    # mechanical observation (never a special leak-marked record). The GUILTY
+    # deceptive witness (the HOMICIDE witness murderer ÔÇö SELF_PROTECTION)
+    # claims to have left the scene and is contradicted by the ordinary scene
+    # ``d_ev_presence`` record. An INNOCENT deceptive witness (PROTECT_OTHER /
+    # HIDE_UNRELATED_SECRET) falsely claims to have BEEN at the scene and is
+    # contradicted by the ordinary distant ``d_ev_opp_<wid>`` opportunity
+    # record. FIX-1 (ADV-41A-02): BOTH contradiction records are shaped exactly
+    # like the evidence a truthful witness carries (neutral id/kind/title/
+    # description), so the public DTO can never reveal deceptive-vs-truthful
+    # status (┬º26/┬º63, REQUIREMENTS ┬º47A.4). FIX-2 (ADV-41A-01): a TRUTHFUL
+    # non-murderer witness states where the deterministic model actually places
+    # them (the same distant location as their opportunity observation), so a
+    # truthful statement never contradicts its own published evidence. The
+    # solver-promoted facts (PERSON_OBSERVED_AT_LOCATION / ALIBI_TIME_CLAIM /
+    # MOTIVE_LINKED_TO_PERSON) remain deterministic WORLD facts ÔÇö the claim
+    # text is never a deduction premise.
+    from app.generation.evidence_facts import (
+        deceptive_presence_statement_text,
+        deceptive_statement_text,
+    )
+
+    clock_token = _driver_clock_token(canonical)
+    scene_label = _driver_scene_label(public, scene_id)
+    for witness in sorted(
+        (
+            p
+            for p in (getattr(public, "persons", ()) or ())
+            if getattr(p, "role", None) == "witness"
+        ),
+        key=lambda p: str(getattr(p, "person_id", "") or ""),
+    ):
+        wid = getattr(witness, "person_id", None)
+        wname = getattr(witness, "name", "") or wid or "witness"
+        if not wid:
+            continue
+        eid = f"d_ev_witness_{normalize_identity(wid) or 'witness'}"
+        if any(str(getattr(e, "id", "")) == eid for e in extras):
+            continue
+        from app.generation.schemas import EvidenceSpec as _CanonicalEvidenceSpec
+
+        deceptive = wid in _stamped_deceptive
+        is_murderer = wid == murderer_id
+        # FIX-2 (ADV-41A-01): a TRUTHFUL non-murderer witness states where the
+        # deterministic model actually places them ÔÇö the SAME distant location
+        # as their published opportunity observation ÔÇö so their statement never
+        # contradicts their own evidence. Only a stamped DECEPTIVE witness makes
+        # a deliberately contradictory claim.
+        truthful_location_id = (
+            None if is_murderer else opportunity_location.get(wid)
+        )
+        truthful_location_label = (
+            _location_label(truthful_location_id) if truthful_location_id else ""
+        )
+        if deceptive and is_murderer and scene_label and clock_token:
+            # GUILTY deceptive witness (the witness murderer, SELF_PROTECTION):
+            # claims to have left the scene early; contradicted by the ordinary
+            # scene-presence observation (``d_ev_presence``), discoverable like
+            # any other record (no special/marked contradiction record).
+            statement, description = deceptive_statement_text(
+                wid, str(wname), scene_label, clock_token
+            )
+        elif deceptive and scene_label and clock_token:
+            # INNOCENT deceptive witness (Phase41A ┬º17): falsely claims to have
+            # BEEN at the scene; the discoverable contradiction is the ordinary
+            # distant ``d_ev_opp_<wid>`` opportunity observation (neutral shape).
+            statement, description = deceptive_presence_statement_text(
+                wid, str(wname), scene_label, clock_token
+            )
+        elif truthful_location_label and clock_token:
+            # Truthful non-murderer witness: consistent with their published
+            # distant opportunity observation (same location).
+            statement = (
+                f"As {wname}, I was at the {truthful_location_label} around "
+                f"{clock_token} and noticed a few things from there."
+            )
+            description = (
+                f"{wname} was at the {truthful_location_label} around {clock_token}."
+            )
+        elif scene_label and clock_token:
+            statement = (
+                f"As {wname}, I was at the {scene_label} around {clock_token} "
+                "and noticed a few things that did not sit right."
+            )
+            description = (
+                f"{wname} was near the {scene_label} around {clock_token}."
+            )
+        elif clock_token:
+            statement = (
+                f"As {wname}, I was nearby around {clock_token} and noticed a "
+                "few things that did not sit right."
+            )
+            description = f"{wname} recounted the course of the evening."
+        else:
+            statement = (
+                "I was nearby during the evening and noticed a few "
+                "things that did not sit right."
+            )
+            description = f"{wname} recounted the course of the evening."
+        extras.append(
+            _CanonicalEvidenceSpec(
+                id=eid,
+                kind="witness_statement",
+                propositions=(_canonical_prop("WITNESS_CLAIMS", person_id=wid),),
+                source_ref={"kind": "record", "sourceId": f"record_{eid}"},
+                reliability="high",
+                presentation={
+                    "title": "Witness statement",
+                    "description": description,
+                    "speakerName": str(wname),
+                    "statement": statement,
+                },
+                discoverable=True,
+            )
+        )
+        notes.append(f"{eid}: canonical witness statement for {wid}")
+
+    if travel_notes:
+        notes.append("; ".join(travel_notes))
+    notes.append(
+        "the published evidence is the deterministic canonical algebra built "
+        "from the model's case skeleton (model evidence propositions are not "
+        "copied into the draft)"
+    )
+    return EvidenceSetSpec(evidence=tuple(extras)), tuple(extra_rules), tuple(notes)
+
+
+def _canonical_prop(ptype: str, **kwargs: Any) -> Any:
+    """One deterministic canonical proposition (PropSpec)."""
+    from app.generation.schemas import PropSpec
+
+    return PropSpec(type=ptype, **{k: v for k, v in kwargs.items() if v is not None})
+
+
+def _canonical_evidence_item(
+    eid: str, kind: str, propositions: tuple[Any, ...], title: str, description: str
+) -> Any:
+    """One deterministic canonical evidence item (EvidenceSpec)."""
+    from app.generation.schemas import EvidenceSpec
+
+    seen: set[str] = set()
+    unique: list[Any] = []
+    for prop in propositions:
+        key = repr(tuple(sorted(getattr(prop, "structured", {}).items()))) + str(getattr(prop, "type", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(prop)
+    return EvidenceSpec(
+        id=eid,
+        kind=kind,
+        propositions=tuple(unique),
+        source_ref={"kind": "record", "sourceId": f"record_{eid}"},
+        reliability="high",
+        presentation={"title": title, "description": description},
+        discoverable=True,
+    )
+
+
+def _canonical_distant_location(
+    travel_lookup: dict[tuple[str, str], int],
+    non_scene_locations: list[str],
+    scene_id: str,
+) -> str | None:
+    """Deterministic non-scene location for an opportunity fact: prefers a
+    location ALREADY carrying a travel rule to the scene (>= 180s), then any
+    non-scene location (the caller adds its rule)."""
+    for loc in non_scene_locations:
+        seconds = travel_lookup.get((loc, scene_id))
+        if seconds is not None and seconds >= 180:
+            return loc
+    return non_scene_locations[0] if non_scene_locations else None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 19J ├óÔé¼ÔÇØ activity-log persistence helpers (server-owned presentation only)
+# --------------------------------------------------------------------------- #
+
+
+def _first_time_bearing_observed_at(item: Any) -> str | None:
+    """The FIRST parseable ``observed_at`` of an evidence fact (or None).
+
+    The canonical time the server locks into the activity-log prompt comes from
+    the fact's OWN canonical proposition (the solver input is never touched).
+    """
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    for prop in getattr(item, "propositions", ()) or ():
+        raw = getattr(prop, "observed_at", None)
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            parse_iso8601_to_epoch(raw)
+        except (TypeError, ValueError):
+            continue
+        return raw
+    return None
+
+
+def _log_order_flags(entries: Any) -> tuple[bool, bool]:
+    """Deterministic ordering/dedupe flags of one parsed log (repair feedback)."""
+    non_chronological = False
+    duplicate_timestamp = False
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    previous: int | None = None
+    seen: set[int] = set()
+    for entry in entries:
+        try:
+            tick = parse_iso8601_to_epoch(getattr(entry, "timestamp", ""))
+        except (TypeError, ValueError):
+            continue
+        if previous is not None and tick <= previous:
+            non_chronological = True
+        if tick in seen:
+            duplicate_timestamp = True
+        seen.add(tick)
+        previous = tick
+    return non_chronological, duplicate_timestamp
+
+
+def _canonical_row_from_entries(
+    entries: Any,
+    canonical_tick: int,
+) -> Any | None:
+    """The FIRST parsed row whose instant equals the canonical tick (or None).
+
+    Used by Phase 26C2 Option B: when a count-invalid ORIGINAL (or an earlier
+    valid-shaped attempt) already emitted the app-owned canonical instant, that
+    exact MODEL-AUTHORED row is the only candidate ever re-inserted later. We
+    never synthesize text ÔÇö only reuse a row the model itself produced whose
+    instant equals the locked canonical time.
+    """
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    for entry in entries:
+        try:
+            tick = parse_iso8601_to_epoch(getattr(entry, "timestamp", ""))
+        except (TypeError, ValueError):
+            continue
+        if tick == canonical_tick:
+            return entry
+    return None
+
+
+def _canonical_row_player_safe(
+    entry: Any,
+    *,
+    person_names: tuple[str, ...],
+    weapon_names: tuple[str, ...],
+    motive_names: tuple[str, ...],
+    location_ids: tuple[str, ...],
+    location_names: tuple[str, ...],
+) -> bool:
+    """Whether a candidate canonical row is player-safe (NEVER reinsertable
+    otherwise). The row must pass the EXACT same lexical scans the strict
+    validator runs on every row (unsafe/truth/entity), so a re-inserted row can
+    never leak CaseTruth, hidden names, weapons/motives or locations that the
+    model's own original row already violated."""
+    from app.domain.activity_log import (
+        activity_text_unsafe_tokens,
+        entity_leak_tokens,
+        truth_leak_tokens,
+    )
+
+    activity = getattr(entry, "activity", "") or ""
+    if activity_text_unsafe_tokens(activity):
+        return False
+    if truth_leak_tokens(activity):
+        return False
+    if entity_leak_tokens(
+        activity,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+    ):
+        return False
+    return True
+
+
+def _reinsert_canonical_row(
+    entries: list[Any],
+    known_row: Any,
+    canonical_tick: int,
+) -> list[Any] | None:
+    """Deterministically reinsert a known canonical row at its chronological
+    position and re-sort by tick so the restored list is strictly increasing.
+
+    Returns ``None`` (FAIL-CLOSED ÔÇö restore not attempted) when the known row
+    does not actually carry the canonical instant, when the current log already
+    contains that instant (a duplicate is NEVER created), or when any current
+    timestamp is unparseable (the whole candidate would be rejected by the
+    strict validator anyway). No blind reordering is invented: the full
+    validator reruns on the restored candidate and remains the final authority.
+    """
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    if known_row is None:
+        return None
+    try:
+        known_tick = parse_iso8601_to_epoch(getattr(known_row, "timestamp", ""))
+    except (TypeError, ValueError):
+        return None
+    if known_tick != canonical_tick:
+        return None
+    ticks: list[int] = []
+    for entry in entries:
+        try:
+            ticks.append(parse_iso8601_to_epoch(getattr(entry, "timestamp", "")))
+        except (TypeError, ValueError):
+            return None
+    if canonical_tick in ticks:
+        # the canonical instant is ALREADY present -> never a second occurrence
+        return None
+    if len(set(ticks)) != len(ticks):
+        # duplicate instants elsewhere -> the full validator rejects anyway;
+        # restore must not mask them (fail-closed, chronology stays valid).
+        return None
+    restored = list(entries) + [known_row]
+    restored.sort(key=lambda e: parse_iso8601_to_epoch(getattr(e, "timestamp", "")))
+    return restored
+
+
+def _restore_canonical_row_candidate(
+    entries: list[Any],
+    known_row: Any,
+    canonical_time: str,
+    *,
+    person_names: tuple[str, ...],
+    weapon_names: tuple[str, ...],
+    motive_names: tuple[str, ...],
+    location_ids: tuple[str, ...],
+    location_names: tuple[str, ...],
+    before_minutes: int,
+    after_minutes: int,
+) -> list[Any] | None:
+    """Phase 26C2 Option B ÔÇö server-side safe canonical-row restoration.
+
+    Accepts a repaired count-valid log that fails ONLY on canonical-time-missing
+    and deterministically re-inserts the model's OWN previously-validated
+    canonical row (the row the strict validator already approved in an earlier
+    attempt of the same fact). Returns the restored list ONLY when the FULL
+    existing validator re-accepts it (no rows outside 15..20, no duplication,
+    chronology valid, canonical exactly once, no leaks); returns ``None`` on any
+    remaining violation so the bounded repair loop continues unchanged
+    (fail-closed ÔÇö the validator is ALWAYS the final authority).
+    """
+    from app.domain.activity_log import (
+        ActivityLogValidatorCode,
+        MAX_ACTIVITY_LOG_ENTRIES,
+        MIN_ACTIVITY_LOG_ENTRIES,
+        validate_activity_log,
+    )
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    if known_row is None:
+        return None
+    if not (MIN_ACTIVITY_LOG_ENTRIES <= len(entries) <= MAX_ACTIVITY_LOG_ENTRIES):
+        # Option B targets the count-valid canonical-missing failure ONLY;
+        # a count-invalid log must first be repaired by the model.
+        return None
+    try:
+        canonical_tick = parse_iso8601_to_epoch(canonical_time)
+    except (TypeError, ValueError):
+        return None
+    restored = _reinsert_canonical_row(entries, known_row, canonical_tick)
+    if restored is None:
+        return None
+    restored_count = len(restored)
+    if not (
+        MIN_ACTIVITY_LOG_ENTRIES
+        <= restored_count
+        <= MAX_ACTIVITY_LOG_ENTRIES
+    ):
+        return None
+    final_codes = validate_activity_log(
+        restored,
+        canonical_time=canonical_time,
+        person_names=person_names,
+        weapon_names=weapon_names,
+        motive_names=motive_names,
+        location_ids=location_ids,
+        location_names=location_names,
+        before_minutes=before_minutes,
+        after_minutes=after_minutes,
+    )
+    if final_codes:
+        return None
+    return restored
+
+
+def _bounded_item_count_candidate(count: int) -> int | str:
+    """A bounded item-count candidate: the int up to the parse bound, else a
+    token (``>=65``) above it ÔÇö never an unbounded length on the wire."""
+    from app.domain.activity_log import _MAX_PARSED_ENTRIES
+
+    if int(count) > _MAX_PARSED_ENTRIES:
+        return f">={_MAX_PARSED_ENTRIES + 1}"
+    return int(count)
+
+
+# Phase19J-RI (ADV-B) ÔÇö the per-key cap for the allowlisted ``topLevelKeys``
+# shape field. Keeps EVERY emitted key a bounded shape token (never a raw
+# length/content-unbounded provider key name on the wire).
+_MAX_SHAPE_KEY_CHARS = 40
+
+
+def _bounded_shape_key(value: Any) -> str:
+    """A bounded, control-free SHAPE token for one raw top-level key.
+
+    Caps the length at ``_MAX_SHAPE_KEY_CHARS`` (40) and strips every
+    control / non-printable / Unicode-format character, so a 5000-char or
+    prose-bearing provider key name can never leak content into the
+    allowlisted ``topLevelKeys`` telemetry field. A sanitized key that
+    differs from the raw key is fine (it is a shape token, not content).
+    Deterministic and bounded in both length and value set.
+    """
+    if value is None:
+        return "<none>"
+    raw = "".join(
+        ch
+        for ch in str(value)[: _MAX_SHAPE_KEY_CHARS]
+        if ch.isprintable()
+    ).strip()
+    if not raw:
+        return "<unsafe-or-empty>"
+    return raw
+
+
+_EVIDENCE_EXPECTED_SCHEMA_ID = "EVIDENCE_v1"
+_EVIDENCE_COLLECTION_FIELD = "evidence"
+_EVIDENCE_SAFE_TOP_LEVEL_KEYS = frozenset({_EVIDENCE_COLLECTION_FIELD})
+
+
+def _bounded_evidence_item_count(count: int) -> int | str:
+    """Bound an untrusted evidence collection length for telemetry."""
+    from app.generation.schemas import MAX_EVIDENCE_ITEMS
+
+    if int(count) > MAX_EVIDENCE_ITEMS:
+        return f">={MAX_EVIDENCE_ITEMS + 1}"
+    return int(count)
+
+
+def _safe_evidence_top_level_keys(data: Mapping[Any, Any]) -> list[str]:
+    """Return only closed-vocabulary evidence key-shape tokens.
+
+    Unknown provider keys may themselves contain names, clue prose, URLs or
+    control characters.  They are therefore represented by ONE constant token
+    rather than truncated/echoed.  This is intentionally stricter than a
+    generic printable-key sanitizer: no raw key content crosses the telemetry
+    boundary.
+    """
+    present = {
+        str(key)
+        for key in data
+        if isinstance(key, str) and key in _EVIDENCE_SAFE_TOP_LEVEL_KEYS
+    }
+    result = sorted(present)
+    if any(
+        not isinstance(key, str) or key not in _EVIDENCE_SAFE_TOP_LEVEL_KEYS
+        for key in data
+    ):
+        result.append("<unknown>")
+    return result
+
+
+def _evidence_diagnostic_shape(content: str | None) -> dict[str, Any]:
+    """SAFE structural metadata for one completed EVIDENCE response.
+
+    The result contains types, allowlisted key-shape tokens and a bounded
+    collection count only.  Evidence text, ids, people, motives, weapons,
+    timestamps and every nested value are deliberately ignored.
+    """
+    from app.assets.depthguard import MAX_STRUCT_NESTING, bounded_json_loads
+
+    base: dict[str, Any] = {
+        "topLevelType": "non-json",
+        "topLevelKeys": [],
+        "candidateItemCount": None,
+        "validatorCode": "EVIDENCE_JSON_INVALID",
+    }
+    if not isinstance(content, str) or not content.strip():
+        return base
+    try:
+        data = bounded_json_loads(
+            content,
+            object_pairs_hook=_reject_duplicate_keys,
+            limit=MAX_STRUCT_NESTING,
+        )
+    except _DuplicateKeyError:
+        return {**base, "validatorCode": "EVIDENCE_DUPLICATE_KEY"}
+    except (TypeError, ValueError):
+        return base
+    if isinstance(data, list):
+        return {
+            **base,
+            "topLevelType": "array",
+            "candidateItemCount": _bounded_evidence_item_count(len(data)),
+            "validatorCode": "EVIDENCE_ROOT_NOT_OBJECT",
+        }
+    if not isinstance(data, dict):
+        return {
+            **base,
+            "topLevelType": "scalar",
+            "validatorCode": "EVIDENCE_ROOT_NOT_OBJECT",
+        }
+    keys = _safe_evidence_top_level_keys(data)
+    result = {
+        **base,
+        "topLevelType": "object",
+        "topLevelKeys": keys,
+    }
+    collection = data.get(_EVIDENCE_COLLECTION_FIELD)
+    if isinstance(collection, list):
+        result["candidateItemCount"] = _bounded_evidence_item_count(len(collection))
+    if set(data) != {_EVIDENCE_COLLECTION_FIELD}:
+        result["validatorCode"] = "EVIDENCE_TOP_LEVEL_KEYS_INVALID"
+        return result
+    if not isinstance(collection, list):
+        result["validatorCode"] = "EVIDENCE_COLLECTION_NOT_ARRAY"
+        return result
+    result["validatorCode"] = None
+    return result
+
+
+def _evidence_validator_code(error: BaseException) -> str:
+    """Map strict parser findings to a stable, content-free code.
+
+    Parser findings can contain raw provider ids/values, so they are inspected
+    in-process but never logged.  The emitted value comes from this closed
+    vocabulary only.
+    """
+    issues = tuple(str(issue) for issue in getattr(error, "issues", ()) or ())
+    diagnostic = " ".join(issues).casefold()
+    if not diagnostic:
+        return "EVIDENCE_DTO_INVALID"
+    classifiers = (
+        ("exceeds max_provider_output_chars", "EVIDENCE_RESPONSE_SIZE_INVALID"),
+        ("not valid json", "EVIDENCE_JSON_INVALID"),
+        ("duplicate key", "EVIDENCE_DUPLICATE_KEY"),
+        ("unknown proposition type", "EVIDENCE_PROPOSITION_TYPE_INVALID"),
+        ("duplicate evidence id", "EVIDENCE_DUPLICATE_ID"),
+        ("exceeds max_evidence_items", "EVIDENCE_COLLECTION_SIZE_INVALID"),
+        ("unknown key", "EVIDENCE_UNKNOWN_FIELD"),
+        ("missing required key", "EVIDENCE_REQUIRED_FIELD_MISSING"),
+        ("reliability must be one of", "EVIDENCE_ENUM_INVALID"),
+        ("not a valid in-domain iso-8601", "EVIDENCE_TIMESTAMP_INVALID"),
+        ("outside supported solver domain", "EVIDENCE_TIMESTAMP_INVALID"),
+        ("requires structured", "EVIDENCE_PROPOSITION_SCHEMA_INVALID"),
+        ("must be a json array", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be a json object", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be a non-empty string", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be a string", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be a bool", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("must be an integer", "EVIDENCE_FIELD_TYPE_INVALID"),
+        ("exceeds", "EVIDENCE_FIELD_SIZE_INVALID"),
+    )
+    for needle, code in classifiers:
+        if needle in diagnostic:
+            return code
+    return "EVIDENCE_DTO_INVALID"
+
+
+def _activity_log_diagnostic_shape(content: str | None) -> dict[str, Any]:
+    """SAFE structural SHAPE of one unparseable activity-log response.
+
+    Phase19J-RI diagnostic harness (shape ONLY, never content): returns the
+    top-level JSON type, bounded top-level key names, the expected top-level
+    keys, a bounded item-count candidate and a STABLE parse-failure class
+    token (``empty`` / ``non_json`` / ``root_not_object`` /
+    ``unknown_top_level_keys`` / ``entries_not_array`` /
+    ``entries_exceed_parse_bound`` / ``entry_not_object`` /
+    ``entry_unknown_keys`` / ``entry_timestamp_invalid`` /
+    ``entry_activity_type_invalid`` / ``entry_activity_invalid`` /
+    ``schema_invalid_unclassified``).
+
+    The raw provider text, timestamps and activity strings NEVER appear, so
+    the event can be emitted without leaking generated content, prompts or
+    CaseTruth (Phase19J ┬º40 / Phase19J-RI). ADV-B: every ``topLevelKeys``
+    member is a bounded (<= 40 chars), control-stripped shape token ÔÇö raw,
+    length/content-unbounded provider key names never reach the event.
+    """
+    from app.assets.depthguard import bounded_json_loads
+    from app.domain.activity_log import (
+        ACTIVITY_LOG_ACTIVITY_TYPES,
+        _MAX_PARSED_ENTRIES,
+    )
+    from app.domain.time_interval import parse_iso8601_to_epoch
+
+    base: dict[str, Any] = {
+        "topLevelType": None,
+        "topLevelKeys": [],
+        "expectedTopLevelKeys": ["entries"],
+        "itemCountCandidate": None,
+    }
+
+    def shape(**extra: Any) -> dict[str, Any]:
+        out = dict(base)
+        out.update(extra)
+        return out
+
+    if not isinstance(content, str) or not content.strip():
+        return shape(topLevelType="non-json", parseFailureClass="empty")
+    try:
+        data = bounded_json_loads(content)
+    except (TypeError, ValueError):
+        return shape(topLevelType="non-json", parseFailureClass="non_json")
+    if isinstance(data, list):
+        return shape(
+            topLevelType="array",
+            itemCountCandidate=_bounded_item_count_candidate(len(data)),
+            parseFailureClass="root_not_object",
+        )
+    if not isinstance(data, dict):
+        return shape(topLevelType="scalar", parseFailureClass="root_not_object")
+    top_keys = sorted(_bounded_shape_key(key) for key in data)[:8]
+    if set(data) != {"entries"}:
+        return shape(
+            topLevelType="object",
+            topLevelKeys=top_keys,
+            parseFailureClass="unknown_top_level_keys",
+        )
+    raw_entries = data.get("entries")
+    if not isinstance(raw_entries, list):
+        return shape(
+            topLevelType="object",
+            topLevelKeys=top_keys,
+            parseFailureClass="entries_not_array",
+        )
+    count = len(raw_entries)
+    if count > _MAX_PARSED_ENTRIES:
+        return shape(
+            topLevelType="object",
+            topLevelKeys=top_keys,
+            itemCountCandidate=_bounded_item_count_candidate(count),
+            parseFailureClass="entries_exceed_parse_bound",
+        )
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_not_object",
+            )
+        extra_keys = set(item) - {"timestamp", "activityType", "activity"}
+        if extra_keys:
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_unknown_keys",
+            )
+        timestamp = item.get("timestamp")
+        activity_type = item.get("activityType")
+        activity = item.get("activity")
+        if not isinstance(timestamp, str) or not timestamp:
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_timestamp_invalid",
+            )
+        try:
+            parse_iso8601_to_epoch(timestamp)
+        except (TypeError, ValueError):
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_timestamp_invalid",
+            )
+        if (
+            not isinstance(activity_type, str)
+            or not activity_type
+            or activity_type not in ACTIVITY_LOG_ACTIVITY_TYPES
+        ):
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_activity_type_invalid",
+            )
+        if not isinstance(activity, str):
+            return shape(
+                topLevelType="object",
+                topLevelKeys=top_keys,
+                itemCountCandidate=count,
+                parseFailureClass="entry_activity_invalid",
+            )
+    # Every structural check above passed (each item is well-formed under the
+    # closed schema and the count is within the parse bound) ÔÇö the parse still
+    # failed only through a deeper defensive rejection. Stable token, never
+    # content.
+    return shape(
+        topLevelType="object",
+        topLevelKeys=top_keys,
+        itemCountCandidate=count,
+        parseFailureClass="schema_invalid_unclassified",
+    )
+
+
+def _with_activity_log_events(
+    item: Any, entries: tuple[Any, ...], version_marker: str
+) -> Any:
+    """Rebuild ONE evidence fact with the accepted log persisted into its
+    public presentation (``events`` + ``activityLogVersion``).
+
+    Propositions (the solver input) and every other public field are
+    byte-identical; only the player-facing presentation gains the log rows
+    (Phase19J ├é┬º19/├é┬º27/├é┬º28/├é┬º52).
+    """
+    from app.generation.schemas import EvidenceSpec
+
+    signature: dict[str, Any] = {
+        "id": item.id,
+        "kind": item.kind,
+        "propositions": item.propositions,
+        "source_ref": item.source_ref,
+        "reliability": item.reliability,
+        "discoverable": item.discoverable,
+    }
+    presentation = dict(getattr(item, "presentation", {}) or {})
+    presentation["events"] = [entry.to_event() for entry in entries]
+    presentation["activityLogVersion"] = version_marker
+    signature["presentation"] = presentation
+    return EvidenceSpec(**signature)
+
+
+def _evidence_set_summary(evidence_spec: Any) -> dict[str, Any]:
+    """Deterministic sanitized evidence summary for operator diagnostics.
+
+    Counts per proposition type PLUS per-object forensics match values PLUS
+    the evidence-item count ├óÔé¼ÔÇØ structure only, never content, never ids."
+    """
+    counts: dict[str, int] = {}
+    match_vals: dict[str, list[bool]] = {}
+    item_count = 0
+    for item in getattr(evidence_spec, "evidence", ()) or ():
+        item_count += 1
+        if not getattr(item, "discoverable", True):
+            continue
+        for prop in getattr(item, "propositions", ()) or ():
+            ptype = getattr(prop, "type", "")
+            counts[ptype] = counts.get(ptype, 0) + 1
+            if ptype == "FORENSIC_WEAPON_MATCH":
+                obj = getattr(prop, "object_id", None)
+                match = getattr(prop, "structured", {}) if hasattr(prop, "structured") else {}
+                value = match.get("match") if isinstance(match, Mapping) else None
+                if isinstance(value, bool) and isinstance(obj, str) and obj:
+                    match_vals.setdefault(obj, []).append(value)
+    return {
+        "evidenceItems": item_count,
+        "propositionTypeCounts": dict(sorted(counts.items())),
+        "forensicMatchValues": {k: v for k, v in sorted(match_vals.items())},
+    }
+
+
+def parse_world_requirements(
+    content: str,
+    canonical_fallback: str | None = None,
+    *,
+    case_id: str | None = None,
+    attempt_id: str | None = None,
+) -> WorldRequirements:
+    """Strict-parse a WORLD_REQUIREMENTS stage response into the typed
+    ``WorldRequirements`` (bounded ObjectRequests / PlacementRelations).
+
+    Phase 19 Fix A ├óÔé¼ÔÇØ canonical environment handling: the raw
+    ``environmentHint`` is canonicalized through ``app.world.environment``
+    (trim/lowercase/space->underscore/hyphen->underscore + the closed five-id
+    alias map). A REJECTED hint (path-like / ``..`` / absolute / URL scheme /
+    unsupported token) NEVER fails the stage and NEVER enters the remote-repair
+    path: the deterministic user/prompt-derived fallback
+    (``canonical_fallback``, e.g. "hotel_suite" from the prompt's "Location:
+    hotel suite" line) is used when available, otherwise the hint stays None
+    (the environment resolver falls back to the documented default kit). All
+    of this is LOCAL ├óÔé¼ÔÇØ zero provider calls, zero budget consumption. Only
+    genuine semantic content gaps (e.g. a malformed object/relation structure)
+    raise and route through the bounded retry.
+    """
+    from app.world.extract import unsafe_object_match
+
+    data = _parse_doc(content)
+    if not isinstance(data, dict):
+        raise ValueError("world_requirements root must be a JSON object")
+    objects: list[ObjectRequest] = []
+    unsafe_notes: list[str] = []
+    for index, item in enumerate(data.get("objects") or ()):
+        if not isinstance(item, dict):
+            raise ValueError(f"world_requirements.objects[{index}] must be an object")
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"world_requirements.objects[{index}]: name required")
+        # ADV-235 ├óÔé¼ÔÇØ the world stage parser applies the SAME KNOWN-UNSAFE gate
+        # as the extractor's safe-fail: a model-invented request whose name
+        # matches UNSAFE_OBJECT_TERMS (word-boundary NFKC-casefold) is NEVER
+        # composed here ├óÔé¼ÔÇØ it is recorded as a sanitized note and skipped, so a
+        # hostile/unsafe noun cannot be smuggled into the composition through
+        # the model's world response either.
+        unsafe_term = unsafe_object_match(name)
+        if unsafe_term:
+            unsafe_notes.append(
+                f"unsafeUnsupported: known-unsafe object term {unsafe_term!r} "
+                "was not composed"
+            )
+            continue
+        criticality = item.get("criticality")
+        if criticality not in (CRITICALITY_REQUIRED, CRITICALITY_DECORATIVE):
+            criticality = CRITICALITY_DECORATIVE
+        try:
+            objects.append(
+                ObjectRequest(
+                    requested_name=name,
+                    category_hint=item.get("categoryHint"),
+                    subtype_hint=item.get("subtypeHint"),
+                    tags=tuple(item.get("tags") or ()),
+                    required_interaction=item.get("requiredInteraction"),
+                    evidence_id=item.get("evidenceId"),
+                    criticality=criticality,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"world_requirements.objects[{index}] invalid: {exc}"
+            ) from None
+
+    relations: list[PlacementRelation] = []
+    for index, item in enumerate(data.get("relations") or ()):
+        if not isinstance(item, dict):
+            raise ValueError(f"world_requirements.relations[{index}] must be an object")
+        kind = item.get("kind")
+        if kind not in RELATION_KINDS:
+            raise ValueError(
+                f"world_requirements.relations[{index}]: kind {kind!r} not in "
+                f"{list(RELATION_KINDS)!r}"
+            )
+        try:
+            relations.append(PlacementRelation(kind=kind, target=item.get("target") or ""))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"world_requirements.relations[{index}] invalid: {exc}"
+            ) from None
+
+    # ---- Phase 19 Fix A: deterministic LOCAL environmentHint handling ------
+    # Canonicalize the raw hint. A rejected value is repaired locally (prompt
+    # fallback / default kit) and NEVER triggers a remote repair provider call.
+    raw_hint = data.get("environmentHint")
+    environment_hint, env_issues = canonicalize_environment_hint(raw_hint)
+    if environment_hint is None and raw_hint is not None and env_issues:
+        # Deterministic local recovery: the already-known canonical location
+        # extracted from the USER PROMPT is authoritative when available.
+        if canonical_fallback is not None:
+            fallback_hint, _fallback_issues = canonicalize_environment_hint(
+                canonical_fallback
+            )
+            if fallback_hint is not None:
+                environment_hint = fallback_hint
+                emit_event(
+                    "environment.fallback.used",
+                    caseId=case_id,
+                    generationAttemptId=attempt_id,
+                    stage=GenerationStage.WORLD_GRAPH.value,
+                    environmentId=fallback_hint,
+                    reasonCode="ENVIRONMENT_HINT_REJECTED",
+                    fallbackSource="USER_LOCATION",
+                )
+        if environment_hint is None:
+            # No authoritative recovery is available: the hint stays None and
+            # the environment resolver falls back to the default kit. Local,
+            # zero provider calls.
+            emit_event(
+                "environment.fallback.used",
+                caseId=case_id,
+                generationAttemptId=attempt_id,
+                stage=GenerationStage.WORLD_GRAPH.value,
+                environmentId="",
+                reasonCode="ENVIRONMENT_HINT_REJECTED",
+                fallbackSource="DEFAULT_KIT",
+            )
+    elif raw_hint is not None and environment_hint != raw_hint:
+        emit_event(
+            "environment.canonicalized",
+            caseId=case_id,
+            generationAttemptId=attempt_id,
+            stage=GenerationStage.WORLD_GRAPH.value,
+            environmentId=environment_hint or "",
+            reasonCode="ENVIRONMENT_HINT_CANONICALIZED",
+        )
+
+    try:
+        return WorldRequirements(
+            environment_hint=environment_hint,
+            location_tokens=tuple(data.get("locationTokens") or ()),
+            objects=tuple(objects),
+            relations=tuple(sorted(set(relations), key=lambda r: (r.kind, r.target))),
+            unsafe_unsupported=tuple(
+                dict.fromkeys([*(data.get("unsafeUnsupported") or ()), *unsafe_notes])
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"world_requirements invalid: {exc}") from None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 19E ├óÔé¼ÔÇØ DETERMINISTIC WEAPON-LOCK INJECTION (the GENERAL ``fork`` fix).
+# --------------------------------------------------------------------------- #
+#
+# A CaseTruth-declared weapon is a REQUIRED semantic world object REGARDLESS of
+# what the model's WORLD_REQUIREMENTS stage returns and REGARDLESS of catalog
+# membership. The merge below runs AFTER the model's world response is parsed
+# (and in the deterministic extractor for the non-LLM paths), so the run can
+# never die at the fail-closed object-presence guard simply because the model
+# omitted the weapon or because the deterministic extractor could not emit it
+# (head word not in the noun lexicon / not in the known table). This is the
+# general rule ├óÔé¼ÔÇØ the SAME code path serves fork / hammer / screwdriver /
+# rolling pin / glass bottle / letter-opener variants / any locked weapon.
+# No fork / whitelist special-casing anywhere.
+
+
+def inject_locked_weapon_request(
+    world_reqs: WorldRequirements, attempt: Any
+) -> WorldRequirements:
+    """Phase 19E ├é┬º2 ├óÔé¼ÔÇØ merge the locked CaseTruth weapon into world requirements.
+
+    Match is on SEMANTIC IDENTITY (the slug of the requested name normalizes to
+    the locked weapon id):
+
+      * a request already matching the locked weapon (e.g. the model emitted
+        ``"fork"`` or ``"kitchen knife"``) is upgraded to REQUIRED and kept ├óÔé¼ÔÇØ
+        never a second request, never a duplicate placement;
+      * otherwise a NEW ``ObjectRequest(requested_name=<locked weapon display
+        name>, criticality="required")`` is appended. The semantic id (slug of
+        the locked name == the id-sheet weapon id) is preserved; the RENDER
+        representation resolves independently (catalog / catalog variant /
+        validated declarative AssetSpec) in the composer.
+      * the ``MAX_OBJECT_REQUESTS`` bound is preserved by deterministically
+        dropping the last DECORATIVE unseen request (the REQUIRED weapon never
+        loses its slot to optional decoration);
+      * a hostile locked value (URL/path/control chars/oversized) is left
+        unchanged ├óÔé¼ÔÇØ the presence guard then FAILS CLOSED downstream (nothing
+        publishes), exactly the safe behavior for an unrepresentable weapon.
+      * ADV-235 (fail-closed safety): a locked weapon matching
+        ``UNSAFE_OBJECT_TERMS`` (word-boundary NFKC-casefold match ├óÔé¼ÔÇØ the SAME
+        matching the extractor's safe-fail uses, shared via
+        ``app.world.extract.unsafe_object_match``) is NEVER composed and NEVER
+        upgraded. It is recorded as a sanitized ``unsafeUnsupported`` note and
+        the merge SKIPS the injection; any world request whose semantic id
+        matches the locked weapon is also REMOVED (a model-invented unsafe
+        request never materializes). The attempt then FAILS CLOSED through the
+        object-presence guard (crime.weapon_id referenced but not represented
+        -> ``SemanticObjectResolutionError`` -> ``VALIDATION_FAILED``, nothing
+        publishes). Safe arbitrary weapons (fork/hammer/...) are unaffected.
+
+    Zero provider calls: this merge is LOCAL and deterministic.
+    """
+    from app.generation.constraints import normalize_identity
+    from app.world.extract import unsafe_object_match
+
+    if not isinstance(world_reqs, WorldRequirements):
+        raise TypeError("inject_locked_weapon_request requires a WorldRequirements")
+    locked = getattr(attempt, "locked", None)
+    weapon = getattr(locked, "weapon", None) if locked is not None else None
+    if not isinstance(weapon, str) or not weapon:
+        return world_reqs
+    if unsafe_object_match(weapon):
+        # ADV-235 ├óÔé¼ÔÇØ an unsafe locked weapon is NEVER materialized by the
+        # injection. Record the sanitized safe-fail note and drop any world
+        # request whose semantic id equals the locked weapon (so nothing named
+        # like the unsafe weapon survives the merge); the driver's presence
+        # guard then FAILS CLOSED (VALIDATION_FAILED, never a publish).
+        note = (
+            "unsafeUnsupported: known-unsafe object term "
+            f"{unsafe_object_match(weapon)!r} was not composed"
+        )
+        needle = normalize_identity(semantic_object_id(weapon))
+        kept: list[Any] = []
+        for request in world_reqs.objects:
+            if request is None:
+                continue
+            if (
+                isinstance(getattr(request, "requested_name", None), str)
+                and normalize_identity(semantic_object_id(request.requested_name)) == needle
+            ):
+                continue  # the unsafe semantic object is never composed
+            kept.append(request)
+        notes = tuple(dict.fromkeys([*world_reqs.unsafe_unsupported, note]))
+        return WorldRequirements(
+            environment_hint=world_reqs.environment_hint,
+            location_tokens=world_reqs.location_tokens,
+            objects=tuple(kept),
+            relations=world_reqs.relations,
+            unsafe_unsupported=notes,
+        )
+    needle = normalize_identity(semantic_object_id(weapon))
+    if not needle:
+        return world_reqs
+
+    matched = False
+    objects: list[Any] = []
+    for request in world_reqs.objects:
+        if (
+            request is not None
+            and isinstance(getattr(request, "requested_name", None), str)
+            and normalize_identity(semantic_object_id(request.requested_name)) == needle
+        ):
+            matched = True
+            if request.criticality != CRITICALITY_REQUIRED:
+                request = ObjectRequest(
+                    requested_name=request.requested_name,
+                    category_hint=request.category_hint,
+                    subtype_hint=request.subtype_hint,
+                    tags=request.tags,
+                    required_interaction=request.required_interaction,
+                    evidence_id=request.evidence_id,
+                    required_evidence_capabilities=request.required_evidence_capabilities,
+                    variant_params=request.variant_params,
+                    criticality=CRITICALITY_REQUIRED,
+                )
+                emit_event(
+                    "world.weapon.locked.upgraded",
+                    generationAttemptId=getattr(attempt, "attempt_id", None),
+                    semanticObjectId=request.requested_name,
+                )
+        objects.append(request)
+
+    if not matched:
+        try:
+            injected = ObjectRequest(
+                requested_name=weapon, criticality=CRITICALITY_REQUIRED
+            )
+        except (TypeError, ValueError):
+            # hostile locked weapon: leave the world as-is; the fail-closed
+            # presence guard handles it (nothing publishes).
+            return world_reqs
+        if len(objects) >= MAX_OBJECT_REQUESTS:
+            for index in range(len(objects) - 1, -1, -1):
+                candidate = objects[index]
+                if (
+                    candidate is not None
+                    and getattr(candidate, "criticality", "") == CRITICALITY_DECORATIVE
+                ):
+                    del objects[index]
+                    break
+            else:
+                return world_reqs
+        objects.append(injected)
+        emit_event(
+            "world.weapon.locked.injected",
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            semanticObjectId=weapon,
+        )
+
+    return WorldRequirements(
+        environment_hint=world_reqs.environment_hint,
+        location_tokens=world_reqs.location_tokens,
+        objects=tuple(objects),
+        relations=world_reqs.relations,
+        unsafe_unsupported=world_reqs.unsafe_unsupported,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# AssetSpec adapter (implements app.assets.spec_provider.AssetSpecProvider)
+# --------------------------------------------------------------------------- #
+
+
+class OllamaAssetSpecProvider:
+    """Bridges the world composer's narrow spec-provider to the Ollama adapter.
+
+    One ASSET_SPEC call + at most ``MAX_SPEC_REPAIR_PASSES`` ASSET_SPEC_REPAIR
+    calls. Every response is strictly Phase-13 parsed and validated BEFORE the
+    Phase 17 geometry-quality validator runs (``schema-valid !=
+    geometrically-valid``); each call consumes the per-attempt provider-call
+    budget via a provided ``budget_consumer`` (returns True when a call is
+    available).
+
+    Phase 17 flow (Deterministic Geometry Quality Gate ├óÔé¼ÔÇØ Phase17 ├é┬º2/├é┬º10):
+
+        LLM AssetSpec
+          -> strict Phase 13 parse/validation
+          -> Geometry Quality Validator (app.assets.geometry_quality)
+          -> PASS  -> raw candidate is returned for the trusted compiler
+             FAIL  -> structured sanitized geometry diagnostics ->
+                      ASSET_SPEC_REPAIR (bounded) -> re-run BOTH validations
+
+    A repair result is NEVER trusted incrementally: the full Phase 13 + Phase 17
+    validation run again before any candidate is accepted. The budget stays the
+    existing ``MAX_SPEC_REPAIR_PASSES`` (<=2); the global per-attempt provider
+    and model-call budgets are authoritative (this provider consumes them via
+    ``budget_consumer`` inside ``_roundtrip``).
+
+    Internal (non-API, non-player-facing) trace:
+
+    - ``last_geometry_report`` ├óÔé¼ÔÇØ the final ``GeometryReport`` (None when the
+      round-trip never reached the geometry stage with a parsed spec);
+    - ``last_geometry_metrics`` ├óÔé¼ÔÇØ the sanitized metrics dict (see
+      ``_record_geometry_metrics``): issueCountBeforeRepair, repairAttempts,
+      finalPartCount, finalBoundingBox, declaredDimensions,
+      silhouettePassed, generatedOnFirstPass / repaired;
+    - ``last_repair_trace`` ├óÔé¼ÔÇØ the sanitized per-pass diagnostics list (one
+      entry per validation pass, order preserved): every entry carries the
+      Phase 13 structural issue strings and the Phase 17 geometry issues
+      (code/classification/message/partId) for THAT pass. Never serialized,
+      never served; read by the smoke CLI to report "each repair attempt's
+      issues".
+    - ``request_calls`` ├óÔé¼ÔÇØ the true request-level provider-call count for the
+      last round-trip (initial + repairs); the smoke CLI reports this as
+      ``providerCalls`` (Phase17C ├é┬º8).
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: Any,
+        attempt_id: str,
+        budget_consumer: Callable[..., bool],
+        locked: Any = None,
+        seed: int | None = None,
+        model_label: str = "",
+        configured_timeout_seconds: float | None = None,
+        timeout_provider: Callable[[], float] | None = None,
+        metrics_provider: Callable[[], Any] | None = None,
+        provider_label: str = "ollama",
+        record_stage_timing: Callable[[Any, int, str], None] | None = None,
+    ) -> None:
+        self._provider = provider
+        self._attempt_id = attempt_id
+        self._budget_consumer = budget_consumer
+        self._locked = locked
+        self._seed = seed
+        self._model_label = model_label
+        self._provider_label = provider_label if provider_label else "ollama"
+        self._configured_timeout_seconds = configured_timeout_seconds
+        self._timeout_provider = timeout_provider
+        self._metrics_provider = metrics_provider
+        # Phase38 ┬º30 ÔÇö the driver's bounded stage-timing recorder (per-call
+        # closed ``stage:ms:outcome`` tokens; never prompts/responses), so the
+        # ASSET_SPEC / ASSET_SPEC_REPAIR calls appear in ``stageTimingSummary``
+        # exactly like every other driver stage.
+        self._record_stage_timing = record_stage_timing
+        # Phase 19 Fix C: the budget consumer may be bucket-aware
+        # (``consumer(object_id)`` -> ASSET:<objectId> accounting) or a legacy
+        # zero-arg consumer (tests/older callers) ├óÔé¼ÔÇØ introspected once here.
+        self._bucket_aware = _consumer_accepts_bucket(budget_consumer)
+        # Phase 19 Fix C ceiling flags: a procedural-asset-count ceiling or a
+        # failed-asset ceiling hit is recorded here (the driver reads the flag
+        # AFTER composition and raises the specific typed code ├óÔé¼ÔÇØ the composer
+        # itself can never see the raw provider).
+        self.procedural_asset_ceiling_hit = False
+        self.failed_asset_threshold_hit = False
+        # ``calls``: number of ``generate()`` invocations on THIS spec provider
+        # (always 1 ├óÔé¼ÔÇØ the outer AssetSpec round-trip). ``request_calls``: the
+        # number of REAL request-level provider calls (each ASSET_SPEC/REPAIR
+        # attempt is exactly one ``provider.generate`` transport request) ├óÔé¼ÔÇØ
+        # initial + N repairs = N + 1 (Phase17C ├é┬º8 accounting). The smoke tool
+        # reports ``request_calls`` so provider-consumption accounting matches
+        # the true Ollama request count while ``calls`` keeps the outer
+        # round-trip semantics.
+        self.calls: int = 0
+        self.request_calls: int = 0
+        # Phase 17 internal trace (never serialized, never served).
+        self.last_geometry_report: Any = None
+        self.last_geometry_metrics: dict[str, Any] | None = None
+        # Phase17B: sanitized per-pass diagnostics trace (repair-path
+        # diagnostics for the smoke CLI; never serialized, never served).
+        self.last_repair_trace: list[dict[str, Any]] = []
+
+    def generate(self, request: Any) -> Any:
+        from app.assets.spec_provider import (
+            AssetSpecRequest,
+            AssetSpecResponse,
+        )
+        from app.assets.specs import parse_asset_spec, validate_asset_spec
+        from app.assets.geometry_quality import validate_geometry
+
+        request = (
+            request if isinstance(request, AssetSpecRequest) else AssetSpecRequest(**dict(request))
+        )
+        self.calls += 1
+        self.last_repair_trace = []
+        concept = request.requested_name
+        category_hint = request.category_hint or None
+        self._last_concept = concept
+
+        # Phase 19 Fix C: record this semantic object's entry into the
+        # procedural-asset path (a DISTINCT-object ceiling guard, never a
+        # model call). When the ceiling is already reached the object cannot
+        # enter the provider path ├óÔé¼ÔÇØ fail this asset, the driver sees the flag.
+        budget = self._metrics_provider() if self._metrics_provider is not None else None
+        if budget is not None and hasattr(budget, "consume_procedural_asset"):
+            if not budget.consume_procedural_asset(concept):
+                self.procedural_asset_ceiling_hit = True
+                return AssetSpecResponse(
+                    error="procedural asset count ceiling exceeded for this generation"
+                )
+
+        # initial ASSET_SPEC call
+        prompt = prompts.build_asset_spec_prompt(concept, category_hint)
+        try:
+            content = self._roundtrip(prompt, GenerationStage.ASSET_SPEC, concept)
+        except StageDriverProviderFailure as exc:
+            self._record_budget_failure(exc)
+            raise
+        if content is None:
+            return self._fail_asset("asset spec generation unavailable")
+
+        candidate = content
+        repair_attempts = 0
+        issue_count_before_repair: int | None = None
+        final_spec: Any = None
+        final_report: Any = None
+
+        for _pass in range(MAX_SPEC_REPAIR_PASSES + 1):
+            # ---- 1. Phase 13 schema/security validation FIRST ----------------
+            struct_issues = validate_asset_spec(candidate)
+            geometry_report = None
+            spec = None
+            if not struct_issues:
+                spec = parse_asset_spec(candidate)
+            if spec is not None:
+                # ---- 2. Phase 17 geometry-quality gate SECOND ----------------
+                geometry_report = validate_geometry(spec, requested_name=concept)
+
+            # Sanitized per-pass diagnostics (order preserved; never raw text).
+            trace_entry = self._trace_entry(struct_issues, geometry_report)
+            trace_entry["pass"] = _pass
+            self.last_repair_trace.append(trace_entry)
+
+            accepted = (
+                not struct_issues
+                and geometry_report is not None
+                and geometry_report.valid
+            )
+            if accepted:
+                if issue_count_before_repair is None:
+                    issue_count_before_repair = 0
+                final_spec = spec
+                final_report = geometry_report
+                break
+            if issue_count_before_repair is None:
+                issue_count_before_repair = len(struct_issues) + (
+                    len(geometry_report.issues) if geometry_report is not None else 0
+                )
+                final_report = geometry_report  # first failing report (trace)
+            if _pass >= MAX_SPEC_REPAIR_PASSES:
+                break
+
+            # bounded repair: structured sanitized diagnostics into the repair
+            # prompt; the repair decides NOTHING about trust.
+            diagnostics = self._repair_diagnostics(candidate, struct_issues, geometry_report)
+            repair_prompt = prompts.build_asset_spec_repair_prompt(
+                concept, candidate, diagnostics
+            )
+            try:
+                content = self._roundtrip(
+                    repair_prompt, GenerationStage.ASSET_SPEC_REPAIR, concept
+                )
+            except StageDriverProviderFailure as exc:
+                self._record_budget_failure(exc)
+                raise
+            if content is None:
+                self._record_geometry_metrics(
+                    issue_count_before_repair, repair_attempts, final_report
+                )
+                return self._fail_asset("asset spec repair unavailable")
+            repair_attempts += 1
+            candidate = content
+
+        if final_spec is None or final_report is None or not final_report.valid:
+            self._record_geometry_metrics(
+                issue_count_before_repair, repair_attempts, final_report
+            )
+            return self._fail_asset(
+                "asset spec could not be made geometrically valid within "
+                "the repair budget"
+            )
+        self._record_geometry_metrics(
+            issue_count_before_repair, repair_attempts, final_report
+        )
+        return AssetSpecResponse(content=candidate)
+
+    def _record_failed_asset(self, reason_code: str) -> bool:
+        """Shared failed-asset accounting + sanitized event.
+
+        Used by BOTH the return path (``_fail_asset``) and the exception path
+        (ADV-213 ``_record_budget_failure``) so a per-asset budget exhaustion
+        counts toward ``MAX_FAILED_ASSETS_PER_GENERATION`` exactly like any
+        other failed procedural asset. Returns True when recording this NEW
+        failure exceeded the failed-asset threshold (the caller raises the
+        narrowed flag / code).
+        """
+        concept = getattr(self, "_last_concept", "")
+        budget = self._metrics_provider() if self._metrics_provider is not None else None
+        exceeded = False
+        if budget is not None and hasattr(budget, "mark_failed_asset"):
+            exceeded = not budget.mark_failed_asset(concept)
+        if exceeded:
+            self.failed_asset_threshold_hit = True
+        emit_event(
+            "generation.asset.failed",
+            generationAttemptId=self._attempt_id,
+            semanticObjectId=concept,
+            reasonCode=reason_code,
+            failedAssetCount=(
+                budget.failed_asset_count
+                if budget is not None and hasattr(budget, "failed_asset_count")
+                else None
+            ),
+            assetCallCount=(
+                budget.asset_call_count(concept)
+                if budget is not None and hasattr(budget, "asset_call_count")
+                else None
+            ),
+        )
+        return exceeded
+
+    def _record_budget_failure(self, exc: StageDriverProviderFailure) -> None:
+        """ADV-213/ADV-220 ├óÔé¼ÔÇØ classified failed-asset accounting for an
+        exception-style budget failure raised inside ``_roundtrip``.
+
+        A PER-ASSET exhaustion is attributable to THIS semantic object: record
+        the failed asset (mark_failed_asset + sanitized event) BEFORE the typed
+        failure propagates ├óÔé¼ÔÇØ exactly once per failed object (the tracker's
+        set-membership no-op prevents double counting). GLOBAL exhaustion is a
+        terminal attempt condition never attributed to one object (no
+        accounting). The typed failure then continues to the composer, which
+        classifies it BY OBJECT CRITICALITY (ADV-220): a DECORATIVE object
+        below the failed-asset ceiling follows the bounded fallback (skip with
+        a player-safe note; never a silent partial world), a DECORATIVE object
+        at/over the ceiling surfaces the terminal ``MAX_FAILED_ASSETS_EXCEEDED``
+        code, and a REQUIRED/essential object keeps the narrow
+        ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED code.
+        """
+        if (
+            getattr(exc, "code", None)
+            == GenerationFailureCode.ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED.value
+        ):
+            self._record_failed_asset(
+                GenerationFailureCode.ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED.value
+            )
+
+    def _fail_asset(self, message: str) -> Any:
+        """Record ONE failed procedural asset + emit the sanitized event.
+
+        ``budget.mark_failed_asset`` tracks DISTINCT failed semantic objects
+        against ``MAX_FAILED_ASSETS_PER_GENERATION``; when recording this NEW
+        failure would exceed the threshold, the flag is raised so the driver
+        fails the attempt with the narrow ``MAX_FAILED_ASSETS_EXCEEDED`` code
+        (an essential/evidence asset must never silently disappear). Determin-
+        istic local repairs never reach this path ├óÔé¼ÔÇØ only a failed PROVIDER
+        round-trip does.
+        """
+        from app.assets.spec_provider import AssetSpecResponse
+
+        self._record_failed_asset("ASSET_SPEC_FAILED")
+        return AssetSpecResponse(error=message)
+
+    def _repair_diagnostics(
+        self, candidate: str, struct_issues: Any, geometry_report: Any
+    ) -> tuple[str, ...]:
+        """Sanitized structured diagnostics for one repair request.
+
+        Includes the structured INVALID_IDENTIFIER / MATERIAL_NOT_ALLOWED
+        diagnostics for the RAW candidate (Phase 13 already validates grammar and
+        materials ├óÔé¼ÔÇØ this deterministic scan surfaces them in repair diagnostics
+        too, Phase17 ├é┬º5/├é┬º7) plus the geometry-quality issues when the candidate
+        parsed, plus the Phase 13 structural issue strings when it did not.
+        """
+        from app.assets.geometry_quality import (
+            GeometryIssue,
+            inspect_raw_spec_issues,
+        )
+
+        lines: list[str] = []
+
+        def _render(issue: Any) -> str:
+            where = f" part {issue.partId}" if getattr(issue, "partId", None) else ""
+            allowed = ""
+            if getattr(issue, "allowed", ()):
+                allowed = " (allowed: " + ", ".join(issue.allowed) + ")"
+            return f"[{issue.classification} {issue.code}]{where}: {issue.message}{allowed}"
+
+        raw_issues = inspect_raw_spec_issues(candidate) or ()
+        for issue in raw_issues:
+            lines.append(_render(issue))
+        if geometry_report is not None:
+            for issue in geometry_report.issues:
+                lines.append(_render(issue))
+        if struct_issues:
+            lines.extend(str(issue) for issue in struct_issues)
+        # deterministic, de-duplicated
+        seen: set[str] = set()
+        out: list[str] = []
+        for line in lines:
+            if line not in seen:
+                seen.add(line)
+                out.append(line)
+        return tuple(out)
+
+    def _trace_entry(
+        self, struct_issues: Any, geometry_report: Any
+    ) -> dict[str, Any]:
+        """Sanitized per-pass diagnostics (never raw candidate text, never
+        player-facing). Structural issue strings are app-owned deterministic
+        messages; geometry issues carry only code/classification/message/partId.
+        """
+        geometry: list[dict[str, Any]] = []
+        if geometry_report is not None:
+            geometry = [
+                {
+                    "code": issue.code,
+                    "classification": issue.classification,
+                    "message": issue.message,
+                    "partId": issue.partId,
+                }
+                for issue in geometry_report.issues
+            ]
+        return {
+            "structuralIssues": [str(issue) for issue in (struct_issues or ())],
+            "geometryIssues": geometry,
+        }
+
+    def _record_geometry_metrics(
+        self,
+        issue_count_before_repair: int | None,
+        repair_attempts: int,
+        final_report: Any,
+    ) -> None:
+        """Internal per-AssetSpec quality metrics (never player-facing, never
+        serialized). Used for QA/showcase evidence and the smoke CLI output."""
+        report = final_report
+        if report is None:
+            self.last_geometry_metrics = {
+                "issueCountBeforeRepair": int(issue_count_before_repair or 0),
+                "repairAttempts": int(repair_attempts),
+                "finalPartCount": 0,
+                "finalBoundingBox": None,
+                "declaredDimensions": None,
+                "silhouettePassed": False,
+                "generatedOnFirstPass": False,
+                "repaired": False,
+            }
+            return
+        metrics = report.metrics
+        bbox = (
+            {
+                "min": list(metrics.estimated_bounding_box[0]),
+                "max": list(metrics.estimated_bounding_box[1]),
+                "span": list(metrics.span),
+            }
+            if metrics.estimated_bounding_box is not None
+            else None
+        )
+        self.last_geometry_report = report
+        self.last_geometry_metrics = {
+            "issueCountBeforeRepair": int(issue_count_before_repair or 0),
+            "repairAttempts": int(repair_attempts),
+            "finalPartCount": int(metrics.part_count),
+            "finalBoundingBox": bbox,
+            "declaredDimensions": list(metrics.declared_dimensions),
+            "silhouettePassed": bool(metrics.silhouette_passed),
+            "generatedOnFirstPass": bool(issue_count_before_repair == 0),
+            "repaired": bool(repair_attempts > 0),
+        }
+
+    def _roundtrip(
+        self, prompt: str, stage: GenerationStage, concept: str
+    ) -> str | None:
+        """One bounded budgeted Ollama call; returns raw content or None.
+
+        Every invocation consumes exactly one modeling request: consumed the
+        per-attempt provider-call budget (CORE or ASSET:<objectId> bucket ├óÔé¼ÔÇØ
+        Phase 19 Fix C) AND counted on ``self.request_calls`` (Phase17C ├é┬º8 ├óÔé¼ÔÇØ a
+        repair attempt is a REAL request-level provider call, never a free
+        local reprocessing). A per-asset or global exhaustion surfaces the
+        narrowest failure code (ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED vs
+        PROVIDER_CALL_BUDGET_EXHAUSTED).
+        """
+        effective_timeout = self._effective_timeout()
+        if effective_timeout <= 0:
+            raise StageDriverProviderFailure(
+                "generation deadline exceeded",
+                code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
+            )
+        if self._bucket_aware:
+            available = bool(self._budget_consumer(concept))
+        else:
+            available = bool(self._budget_consumer())
+        if not available:
+            reason = "model call budget exhausted"
+            budget = self._metrics_provider() if self._metrics_provider is not None else None
+            if budget is not None and hasattr(budget, "exhausted_reason"):
+                reason = budget.exhausted_reason(concept) or reason
+            if "asset model call budget" in (reason or ""):
+                emit_event(
+                    "provider.asset_budget.exhausted",
+                    generationAttemptId=self._attempt_id,
+                    semanticObjectId=concept,
+                    reasonCode="ASSET_PROVIDER_CALL_BUDGET_EXHAUSTED",
+                    assetCallCount=(
+                        budget.asset_call_count(concept)
+                        if budget is not None and hasattr(budget, "asset_call_count")
+                        else None
+                    ),
+                    remainingGlobalCalls=(
+                        budget.remaining_global_calls()
+                        if budget is not None and hasattr(budget, "remaining_global_calls")
+                        else None
+                    ),
+                )
+            raise StageDriverProviderFailure(
+                reason,
+                code=failure_code_for_budget_reason(reason),
+            )
+        self.request_calls += 1
+        request = GenerateRequest(
+            attempt_id=self._attempt_id,
+            stage=stage,
+            prompt_context=prompt,
+            locked=self._locked,
+            seed=self._seed,
+            timeout_seconds=effective_timeout,
+        )
+        budget = self._metrics_provider() if self._metrics_provider is not None else None
+        configured_timeout_ms = (
+            int(float(self._configured_timeout_seconds) * 1000)
+            if self._configured_timeout_seconds is not None else None
+        )
+        emit_event(
+            "provider.call.start",
+            generationAttemptId=self._attempt_id,
+            stage=stage.value,
+            provider=self._provider_label,
+            model=self._model_label or None,
+            configuredProviderTimeoutMs=configured_timeout_ms,
+            effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+            deadlineRemainingMs=(
+                int(budget.remaining_seconds() * 1000)
+                if budget is not None and hasattr(budget, "remaining_seconds") else None
+            ),
+            providerCallCount=getattr(budget, "calls", None),
+            repairCount=getattr(budget, "repair_passes", None),
+            regenerationCount=getattr(budget, "regenerations", None),
+            requestBytes=len(prompt.encode("utf-8")),
+        )
+        _t0 = time.perf_counter()
+        result = self._provider.generate(request)
+        if _PD_DEV_TRACE:
+            if result.content is not None:
+                summary = "ok(content)"
+            elif result.timed_out:
+                summary = "FAILED(timed_out)"
+            else:
+                summary = "FAILED(error=%s)" % (result.error or "unknown")
+            _dt(
+                "assetspec.call.done stage=%s %s elapsedMs=%d requestCalls=%d"
+                % (
+                    stage.value,
+                    summary,
+                    int((time.perf_counter() - _t0) * 1000),
+                    self.request_calls,
+                )
+            )
+        if result.timed_out:
+            self._record_roundtrip_timing(
+                stage, int((time.perf_counter() - _t0) * 1000), "timeout"
+            )
+            emit_event(
+                "provider.call.timeout",
+                generationAttemptId=self._attempt_id,
+                stage=stage.value,
+                provider=self._provider_label,
+                failureCode=GenerationFailureCode.PROVIDER_TIMEOUT.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=(
+                    int(budget.remaining_seconds() * 1000)
+                    if budget is not None and hasattr(budget, "remaining_seconds") else None
+                ),
+            )
+            raise StageDriverProviderFailure(
+                "provider request timed out",
+                code=GenerationFailureCode.PROVIDER_TIMEOUT,
+                # Phase38 DEF-094 ÔÇö carry the ACTUAL server-issued budget and
+                # the configured timeout so the controller classifies the
+                # deadline clip against the issued value.
+                issued_timeout_seconds=effective_timeout,
+                configured_timeout_seconds=(
+                    float(self._configured_timeout_seconds)
+                    if self._configured_timeout_seconds is not None else None
+                ),
+            )
+        if result.error is not None:
+            code = infer_failure_code(result.error)
+            self._record_roundtrip_timing(
+                stage, int((time.perf_counter() - _t0) * 1000), "error"
+            )
+            emit_event(
+                "provider.call.error",
+                generationAttemptId=self._attempt_id,
+                stage=stage.value,
+                provider=self._provider_label,
+                failureCode=code.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=(
+                    int(budget.remaining_seconds() * 1000)
+                    if budget is not None and hasattr(budget, "remaining_seconds") else None
+                ),
+            )
+            raise StageDriverProviderFailure(
+                "provider returned an unusable response",
+                code=infer_failure_code(result.error),
+            )
+        if result.content is None:
+            self._record_roundtrip_timing(
+                stage, int((time.perf_counter() - _t0) * 1000), "error"
+            )
+            emit_event(
+                "provider.call.error",
+                generationAttemptId=self._attempt_id,
+                stage=stage.value,
+                provider=self._provider_label,
+                failureCode=GenerationFailureCode.PROVIDER_INVALID_RESPONSE.value,
+                elapsedMs=int((time.perf_counter() - _t0) * 1000),
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=(
+                    int(budget.remaining_seconds() * 1000)
+                    if budget is not None and hasattr(budget, "remaining_seconds") else None
+                ),
+            )
+            raise StageDriverProviderFailure(
+                "provider returned an invalid response",
+                code=GenerationFailureCode.PROVIDER_INVALID_RESPONSE,
+            )
+        self._record_roundtrip_timing(
+            stage, int((time.perf_counter() - _t0) * 1000), "success"
+        )
+        emit_event(
+            "provider.call.complete",
+            generationAttemptId=self._attempt_id,
+            stage=stage.value,
+            provider=self._provider_label,
+            model=self._model_label or None,
+            success=True,
+            elapsedMs=int((time.perf_counter() - _t0) * 1000),
+            configuredProviderTimeoutMs=configured_timeout_ms,
+            effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+            responseBytes=len(result.content.encode("utf-8")),
+            structuredOutput=_structured_output_sent(
+                self._provider, provider_label=self._provider_label
+            ),
+deadlineRemainingMs=(
+                int(budget.remaining_seconds() * 1000)
+                if budget is not None and hasattr(budget, "remaining_seconds") else None
+            ),
+            providerCallCount=getattr(budget, "calls", None),
+            repairCount=getattr(budget, "repair_passes", None),
+            regenerationCount=getattr(budget, "regenerations", None),
+        )
+        return result.content
+
+    def _record_roundtrip_timing(
+        self, stage: GenerationStage, elapsed_ms: int, outcome: str
+    ) -> None:
+        """Phase38 ┬º30 ÔÇö record ONE safe stage-timing token for an
+        ASSET_SPEC / ASSET_SPEC_REPAIR round-trip (only closed stage names,
+        integer milliseconds and closed outcomes; never prompts/responses)."""
+        if self._record_stage_timing is None:
+            return
+        try:
+            self._record_stage_timing(stage, max(0, int(elapsed_ms)), outcome)
+        except Exception:  # noqa: BLE001 - observability never breaks generation
+            pass
+
+    def _effective_timeout(self) -> float:
+        if self._timeout_provider is None:
+            return max(0.0, float(self._configured_timeout_seconds or 60.0))
+        return max(0.0, float(self._timeout_provider()))
+
+
+# --------------------------------------------------------------------------- #
+# ADV-218 ├óÔé¼ÔÇØ sanitized semantic-object-id rendering for internal validation
+# messages. Ids are only length-bounded upstream (``_str_field``), so hostile
+# weaponId / evidence object_id values (URLs, control characters) are scrubbed
+# before they are embedded in exception/log text. Failure-code semantics are
+# untouched ├óÔé¼ÔÇØ only the message text is sanitized and bounded.
+# --------------------------------------------------------------------------- #
+
+_SAFE_MESSAGE_ID_CHARS: frozenset[str] = frozenset(
+    "abcdefghijklmnopqrstuvwxyz0123456789_-."
+)
+# URL-scheme tokens never echoed into an internal validation message.
+_FORBIDDEN_URL_TOKENS_IN_MESSAGE: tuple[str, ...] = (
+    "http:",
+    "https:",
+    "ftp:",
+    "data:",
+    "file:",
+    "javascript:",
+    "//",
+)
+_MAX_MESSAGE_IDS = 4
+_MAX_MESSAGE_ID_LENGTH = 48
+
+
+def _sanitize_object_id_for_message(
+    raw: Any, *, max_len: int = _MAX_MESSAGE_ID_LENGTH
+) -> str:
+    """ADV-218 ├óÔé¼ÔÇØ sanitize ONE semantic object id before embedding it in an
+    internal validation/log message.
+
+    The sanitizer never echoes control characters or URL-scheme / scheme-slash
+    tokens (a hostile URL-bearing id degrades to the deterministic
+    ``"<url-suppressed>"`` placeholder), projects the remainder onto the safe
+    id alphabet, bounds length, and returns a deterministic placeholder when
+    nothing safe survives. The failure-code semantics (VALIDATION_FAILED) are
+    unchanged ├óÔé¼ÔÇØ only the message text is scrubbed.
+    """
+    if not isinstance(raw, str) or not raw:
+        return "<unknown>"
+    raw_lowered = raw.casefold()
+    if any(token in raw_lowered for token in _FORBIDDEN_URL_TOKENS_IN_MESSAGE):
+        return "<url-suppressed>"
+    scrubbed: list[str] = []
+    for ch in raw:
+        codepoint = ord(ch)
+        if codepoint < 0x20 or codepoint == 0x7F:
+            # control characters are never echoed
+            continue
+        scrubbed.append(ch if ch in _SAFE_MESSAGE_ID_CHARS else "_")
+    text = "".join(scrubbed)
+    text = "_".join(part for part in text.split("_") if part)
+    if not text:
+        return "<unprintable>"
+    return text[:max_len]
+
+
+def _sanitize_object_ids_for_message(missing: Iterable[Any]) -> str:
+    """ADV-218 ├óÔé¼ÔÇØ join the sanitized missing ids (bounded count + length)."""
+    rendered = ", ".join(
+        _sanitize_object_id_for_message(oid) for oid in missing[:_MAX_MESSAGE_IDS]
+    )
+    if len(missing) > _MAX_MESSAGE_IDS:
+        rendered += ", ..."
+    return rendered
+
+
+# --------------------------------------------------------------------------- #
+# the stage driver
+# --------------------------------------------------------------------------- #
+
+
+class OllamaStageDriver:
+    """Walks the structured per-stage pipeline and assembles a ``GeneratedDraft``.
+
+    ``provider_factory`` returns a FRESH ``OllamaProvider`` per attempt (the
+    same factory the service uses for ollama) so transport state never leaks
+    across attempts. ``oracle`` (Asset Oracle), ``spec_provider`` (an
+    ``AssetSpecProvider`` for the ASSET_SPEC path ├óÔé¼ÔÇØ normally an
+    ``OllamaAssetSpecProvider``) and ``cache`` are shared.
+    """
+
+    def __init__(
+        self,
+        *,
+        settings: Any,
+        provider_factory: Callable[[], Any],
+        generated_cache: Any = None,
+        catalog: Any = None,
+        spec_provider: Any = None,
+        session_scope: str | None = None,
+        provider_label: str = "ollama",
+        provider_model: str | None = None,
+    ) -> None:
+        from app.assets.generated_cache import GeneratedAssetCache
+
+        self._settings = settings
+        self._provider_factory = provider_factory
+        # Fresh bounded generated-asset cache per driver so repeated prompt runs
+        # (and tests) stay isolated and deterministic ├óÔé¼ÔÇØ no cross-run pollution.
+        self._generated_cache = generated_cache if generated_cache is not None else GeneratedAssetCache()
+        self._catalog = catalog
+        self._spec_provider = spec_provider
+        # Phase 22 ├óÔé¼ÔÇØ the remote-client back-end is bound to the attempt's
+        # creator session scope (the provider then selects the bridge for that
+        # scope; see RemoteClientProvider.bind_session_scope).
+        self._session_scope = session_scope
+        # Truthful observability label: "ollama" for the server-local provider
+        # (byte-identical events), "remote_client" for the bridge transport.
+        self._provider_label = provider_label if provider_label else "ollama"
+        # Phase 25 ÔÇö the FROZEN per-attempt model for driver events. Legacy
+        # behavior is unchanged when a caller does not pass one (the label
+        # decides between the settings model and None).
+        self._event_model = (
+            provider_model
+            if provider_model is not None
+            else getattr(settings, "ollama_model", None)
+            if self._provider_label == "ollama"
+            else None
+        )
+# Phase17 Wave-2: parsed CASE/PEOPLE outputs cached per attempt id so a
+        # second pass (repair/regeneration) never re-pays the case call ÔÇö the
+        # public world the evidence was regenerated against stays identical.
+        self._case_outputs: dict[str, tuple[Any, Any]] = {}
+        # Phase38 ÔÇö per-attempt VALIDATED-stage reuse caches. Only closed parsed
+        # canonical objects and public evidence ids are cached (never prompts,
+        # never raw provider responses, never hidden content). Each stage is
+        # keyed by an attempt id and cleared on a FULL regeneration (see
+        # ``reset_attempt_cache``), so unaffected validated stages are reused
+        # across targeted repairs while changed upstream inputs invalidate
+        # their dependents.
+        self._evidence_cache: dict[str, tuple[Any, tuple[Any, ...]]] = {}  # attempt_id -> (EvidenceSetSpec after projection, extra_rules)
+        self._activity_cache: dict[
+            str, dict[str, tuple[tuple[Any, ...], str]]
+        ] = {}                                      # attempt_id -> {evidence_id: (entries, canonical)}
+        self._world_cache: dict[str, tuple[Any, Any, str]] = {}  # attempt_id -> (world_reqs, composition, weapon_evidence_id)
+        # Phase17 Wave-2: audit trace of the deterministic evidence completion
+        # (sanitized "id: injected fact kind" lines; never serialized/served ├óÔé¼ÔÇØ
+        # read by the smoke CLI and operator tests).
+        self.last_evidence_injections: tuple[str, ...] = ()
+        self.last_evidence_completed: bool = False
+        # Phase17 Wave-2: deterministic per-pass evidence summary (fact-type
+        # counts + match-value counts ONLY ├óÔé¼ÔÇØ never raw content, never the
+        # prompt); read by the smoke CLI/operator tests.
+        self.last_evidence_summary: dict[str, Any] = {}
+        # Per-attempt, bounded safe provider timing tokens. Each token contains
+        # only a closed stage name, integer milliseconds and a closed outcome.
+        # Raw prompts/responses and generated identifiers never enter it.
+        self._stage_timings: dict[str, list[str]] = {}
+
+    def stage_timing_summary(self, attempt_id: str) -> tuple[str, ...]:
+        """Return the safe per-attempt timing tokens for final lifecycle events.
+
+        Phase38 DEF-098 (ADV-38-05) ÔÇö the summary is LOSS-LESS up to the
+        attempt's legal global provider-call envelope: the recorder caps by
+        ``budget.max_calls`` (each REAL budgeted provider call records exactly
+        one token, and ``max_calls`` is the hard envelope), so
+        ``len(summary) == providerCallCount`` always reconciles ÔÇö never a
+        silent 32-token truncation.
+        """
+        return tuple(self._stage_timings.get(str(attempt_id), ()))
+
+    def reset_attempt_cache(self, attempt_id: str) -> None:
+        """Discard the per-attempt validated-stage caches for a full
+        regeneration (the controller calls this exactly when a regeneration
+        discards the staged outputs).
+
+        The parsed CASE/PEOPLE cache is deliberately KEPT: Phase17 Wave-2
+        regeneration semantics make regeneration free of the case call (the
+        evidence loop keeps its room under the call budget). Only the
+        evidence / activity-log / world outputs ÔÇö which regeneration MUST
+        rebuild against the same case ÔÇö are dropped.
+        """
+        aid = str(attempt_id)
+        self._evidence_cache.pop(aid, None)
+        self._activity_cache.pop(aid, None)
+        self._world_cache.pop(aid, None)
+
+    @staticmethod
+    def _stage_timing_cap(attempt: Any) -> int:
+        """The DEF-098 per-attempt recorder cap.
+
+        ``budget.max_calls`` IS the legal global provider-call envelope for
+        the attempt (e.g. 720) and the recorder emits exactly one token per
+        REAL budgeted provider call, so capping at the envelope is LOSS-LESS ÔÇö
+        the summary always reconciles with ``providerCallCount``. Budget-less
+        legacy callers keep the old fixed bound (no real budgeted call can be
+        recorded without a budget anyway, so the bound is never silently
+        reached in production).
+        """
+        budget = getattr(attempt, "budget", None)
+        max_calls = getattr(budget, "max_calls", None) if budget is not None else None
+        if isinstance(max_calls, int) and max_calls > 0:
+            return max_calls
+        return _STAGE_TIMING_LEGACY_CAP
+
+    def _record_stage_timing(
+        self, attempt: Any, stage: GenerationStage, elapsed_ms: int, outcome: str
+    ) -> None:
+        closed_outcome = outcome if outcome in {"success", "timeout", "error"} else "error"
+        entries = self._stage_timings.setdefault(str(attempt.attempt_id), [])
+        if len(entries) < self._stage_timing_cap(attempt):
+            entries.append(f"{stage.value}:{max(0, int(elapsed_ms))}:{closed_outcome}")
+
+    # -- public driver entry points (controller lifecycle) -------------------
+
+    def run_into(
+        self,
+        attempt: Any,
+        diagnostics: tuple[str, ...] = (),
+        repair_plan: Any = None,
+    ) -> None:
+        """Fresh (or repair) staged run; sets ``attempt.draft`` on success.
+
+        Provider-level failures raise ``StageDriverProviderFailure`` (the
+        controller fails the attempt). Parse/validation failures leave
+        ``attempt.deferred_structural`` populated and ``attempt.draft`` set to
+        whatever assembled, so ``pipeline.validate_draft`` classifies them via
+        the EXISTING controller.
+
+        ``repair_plan`` is a Phase38 ``RepairPlan`` (closed owner set). When
+        absent this is the PRE-Phase-38 full rerun (evidence + logs + world +
+        composition, cached case reused) ÔÇö byte-identical behavior for every
+        legacy caller. When present the driver reruns ONLY the owning stages
+        and reuses the unaffected validated outputs (never reusing an output
+        whose inputs changed).
+        """
+        from app.generation import pipeline
+        from app.generation.repair_routing import RepairPlan
+
+        if repair_plan is None:
+            repair_plan = RepairPlan.default_full_rerun(diagnostics)
+
+        _t0 = time.perf_counter()
+        if _PD_DEV_TRACE:
+            _dt(
+                "driver.run_into.start repairDiagnostics=%d deadlineRemainingMs=%s "
+                "planOwners=%s"
+                % (
+                    len(diagnostics),
+                    _dt_remaining(attempt),
+                    ",".join(o.value for o in repair_plan.repair_owners),
+                )
+            )
+        deferred: list[str] = []
+        provider = self._provider_factory()
+        # Phase 22 ÔÇö bind the remote-client provider to the attempt's creator
+        # session scope so it can select the right bridge (a no-op for every
+        # other provider; ollama behavior is byte-identical).
+        if self._session_scope is not None and hasattr(provider, "bind_session_scope"):
+            provider.bind_session_scope(self._session_scope)
+        budget_consumer = self._make_budget_consumer(attempt)
+
+        locked_map = self._locked_map(attempt)
+        id_sheet = _locked_id_sheet(attempt)
+
+        # --- 1. CASE/PEOPLE ---------------------------------------------------
+        # Cached across repair passes EXCEPT when the repair owner is the
+        # CASE/PEOPLE data itself (a Phase35 public-role/candidate/witness
+        # defect): the driver then REGENERATES the stage so the owner data can
+        # actually change ÔÇö while PRESERVING CaseTruth secrecy: the original
+        # crime (truth) is kept, only the PUBLIC output is replaced (┬º15).
+        #
+        # Phase40 (┬º14) refinement: when the ONLY case-affecting defect is the
+        # closed candidate-integrity set, the cached parsed persons are reused
+        # and corrected by the trusted deterministic projection (step 1b) ÔÇö
+        # ZERO CASE_PEOPLE provider calls (the main Phase-40 performance
+        # guarantee). When the projection cannot honour the closed rules it
+        # DECLINES and the driver falls back to the canonical CASE_PEOPLE
+        # provider repair in the SAME pass (┬º41).
+        cached_case = self._case_outputs.get(attempt.attempt_id)
+        rerun_case = bool(repair_plan.rerun_case)
+        candidate_only_repair = bool(
+            getattr(repair_plan, "candidate_integrity_only", False)
+        )
+        if candidate_only_repair and not repair_plan.rerun_evidence:
+            # Phase40 ┬º16 (defense in depth) ÔÇö the deterministic projection
+            # changes the candidate universe; the candidate-dependent evidence
+            # MUST be regenerated from the corrected universe even when a
+            # hand-built plan omitted the evidence flag. Replacement is safe:
+            # RepairPlan is frozen; the surviving fields are unchanged.
+            repair_plan = dataclasses.replace(
+                repair_plan,
+                rerun_evidence=True,
+                rerun_activity_log=True,
+            )
+        provider_case_repair_needed = True
+        crime: Any = None
+        public: Any = None
+        if cached_case is not None and not rerun_case:
+            crime, public = cached_case
+            provider_case_repair_needed = False
+        elif (
+            cached_case is not None
+            and rerun_case
+            and candidate_only_repair
+            and not repair_plan.is_default_full_rerun
+        ):
+            # Phase 40 ┬º14 ÔÇö candidate-only integrity repair: try the trusted
+            # deterministic projection FIRST (deterministic; zero calls). On
+            # success the cached persons are reused (the step-1b chokepoint
+            # re-applies the projection and emits the single bounded telemetry
+            # event). On decline, fall through to the canonical provider repair.
+            old_crime, old_public = cached_case
+            probe = candidate_projection_mod.project_candidate_integrity(
+                tuple(getattr(old_public, "persons", ()) or ()),
+                getattr(old_crime, "murderer_id", None),
+                getattr(old_crime, "resolution_type", None),
+            )
+            if probe.outcome in (
+                candidate_projection_mod.CandidateProjectionOutcome.NO_CHANGE,
+                candidate_projection_mod.CandidateProjectionOutcome.CORRECTED,
+            ):
+                crime, public = old_crime, old_public
+                provider_case_repair_needed = False
+        if provider_case_repair_needed:
+            case_prompt = prompts.build_case_people_prompt(
+                attempt.prompt, locked_map, id_sheet=id_sheet
+            )
+            if cached_case is not None and rerun_case:
+                # Phase35 ┬º37 ÔÇö the bounded safe CASE-QUALITY FIX CONTEXT (never
+                # truth): allowed person ids + PUBLIC roles + witness/candidate
+                # ids + the safe quality issue codes. The driver path, exactly
+                # like the generic REPAIR stage, receives the fix context.
+                try:
+                    case_prompt = (
+                        f"{case_prompt}\n\n{pipeline.case_quality_repair_context(attempt)}"
+                    )
+                except Exception:  # noqa: BLE001 - guidance never breaks generation
+                    pass
+            parsed_case = self._stage_parse(
+                provider,
+                attempt,
+                GenerationStage.CASE_TRUTH,
+                case_prompt,
+                budget_consumer,
+                parse_case_people,
+                "case_people",
+                deferred,
+            )
+            new_crime, new_public = (parsed_case or (None, None))
+            if new_crime is not None and new_public is not None:
+                # A broken FIRST pass must be re-tried; only a VALID parsed
+                # case is cached (the cache makes regeneration free of the case
+                # call so the 8-call budget has room for the evidence loop).
+                if cached_case is not None and rerun_case:
+                    # PHASE35 case repair: adopt ONLY the regenerated PUBLIC
+                    # (roles/candidates can change); the locked-solver truth
+                    # stays the ORIGINAL crime ÔÇö secret, immutable, and the
+                    # evaluation semantic for the re-validated draft.
+                    old_crime, _old_public = cached_case
+                    crime, public = old_crime, new_public
+                else:
+                    crime, public = new_crime, new_public
+                self._case_outputs[attempt.attempt_id] = (crime, public)
+            elif cached_case is not None:
+                # A broken re-run falls back to the cached parse (unchanged
+                # default); validation still re-runs and may classify again.
+                crime, public = cached_case
+            else:
+                crime, public = None, None
+
+        # --- 1b. Phase40 trusted candidate-integrity projection --------------
+        # The canonical chokepoint (┬º15): runs on EVERY parsed/validated case
+        # (fresh parse, cached reuse or engine repair) BEFORE any candidate-
+        # dependent evidence, so evidence/activity logs are never built from a
+        # candidate universe the trusted backend already knows is impossible.
+        # Corrects ONLY victim/witness eligibility removal + murderer
+        # eligibility retention; preserves every other person field/order. A
+        # declined projection keeps the raw public so the canonical validators
+        # still classify it (┬º35/┬º36).
+        if crime is not None and public is not None:
+            crime, public = self._project_candidate_integrity(
+                crime, public, attempt
+            )
+            self._stamp_witness_truthfulness(attempt, crime, public)
+            self._case_outputs[attempt.attempt_id] = (crime, public)
+
+        # --- 2. EVIDENCE ------------------------------------------------------
+        # Reused when (a) the case is unchanged, (b) the plan did not invalidate
+        # evidence and (c) a validated projection exists (Phase38 ┬º12/┬º33).
+        cached_evidence = self._evidence_cache.get(attempt.attempt_id)
+        evidence_was_rerun = cached_evidence is None or repair_plan.rerun_evidence
+        if cached_evidence is not None and not repair_plan.rerun_evidence:
+            evidence_spec, extra_rules = cached_evidence
+            evidence_trace: dict[str, Any] = {}
+        else:
+            approved_material = _approved_public_material(public)
+            deduction_seed = _deduction_seed(attempt, crime, public)
+            is_rerun = cached_case is not None
+            deduction_feedback = self._evidence_feedback(attempt, diagnostics, is_rerun)
+            evidence_prompt = prompts.build_evidence_prompt(
+                attempt.prompt,
+                locked_map,
+                id_sheet=id_sheet,
+                approved_people=approved_material,
+                deduction_seed=deduction_seed,
+                deduction_feedback=deduction_feedback,
+            )
+            evidence_spec, evidence_trace = self._evidence_stage_parse(
+                provider,
+                attempt,
+                evidence_prompt,
+                budget_consumer,
+            )
+
+            # --- 2b. deterministic evidence completion (Phase17 Wave-2) -------
+            # app-owned projection: policy-sanitizes contradictory model facts
+            # and closes ONLY the solver-critical gaps; facts reference the
+            # model's own public tokens + locked ids + locked canonical time;
+            # still fully solver-validated. Never hides, never fakes, never
+            # bypasses the solver.
+            projection_started = time.perf_counter()
+            completed_spec, extra_rules, injected = _evidence_gap_facts(
+                attempt, crime, public, evidence_spec
+            )
+            if evidence_spec is None:
+                # The rejected raw evidence is never retained in ``deferred``
+                # and never enters the draft. The existing driver-owned
+                # projection is the local recovery path; normal draft/solver
+                # validation below remains the authority for whether it can
+                # publish.
+                emit_event(
+                    "evidence.local_projection.used",
+                    generationAttemptId=getattr(attempt, "attempt_id", None),
+                    reasonCode=GenerationFailureCode.STRUCTURED_OUTPUT_INVALID.value,
+                    originalStage=GenerationStage.EVIDENCE.value,
+                    providerCallCount=getattr(attempt.budget, "calls", None),
+                    projectionValid=completed_spec is not None,
+                    elapsedMs=int((time.perf_counter() - projection_started) * 1000),
+                )
+            projection_result = (
+                "NOT_USED"
+                if evidence_spec is not None
+                else "LOCAL_PROJECTION_ACCEPTED"
+                if completed_spec is not None
+                else "LOCAL_PROJECTION_REJECTED"
+            )
+            emit_event(
+                "evidence.structured_output.completed",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                stage=GenerationStage.EVIDENCE.value,
+                structuredOutput=evidence_trace.get("structuredOutput"),
+                responseBytes=evidence_trace.get("responseBytes"),
+                topLevelType=evidence_trace.get("topLevelType"),
+                topLevelKeys=evidence_trace.get("topLevelKeys"),
+                expectedSchemaId=_EVIDENCE_EXPECTED_SCHEMA_ID,
+                collectionField=_EVIDENCE_COLLECTION_FIELD,
+                candidateItemCount=evidence_trace.get("candidateItemCount"),
+                parseSuccess=evidence_trace.get("parseSuccess"),
+                validatorCode=evidence_trace.get("validatorCode"),
+                adapterProjectionResult=projection_result,
+            )
+            self.last_evidence_injections = tuple(injected)
+            self.last_evidence_completed = bool(injected or extra_rules)
+            if completed_spec is not None:
+                evidence_spec = completed_spec
+            self.last_evidence_summary = _evidence_set_summary(evidence_spec)
+            if evidence_spec is not None:
+                # Only a VALID post-projection evidence is cached (a rejected
+                # projection must re-run like today).
+                self._evidence_cache[attempt.attempt_id] = (
+                    evidence_spec, tuple(extra_rules),
+                )
+
+        # --- 2c. Phase 19J ÔÇö ACTIVITY_LOG generation (driver-internal stage)
+        # Triggered ONLY when a published evidence fact requires an
+        # ACTIVITY_LOG representation (kind -> renderType == ACTIVITY_LOG) AND
+        # carries a time-bearing observed_at; everything else costs ZERO extra
+        # provider calls (Phase19J ┬º4). Each triggered fact performs ONE
+        # bounded CORE-bucket provider call (+ at most
+        # MAX_ACTIVITY_LOG_REPAIR_PASSES bounded repair calls on validation
+        # failure). Generated logs are validated HERE and persisted into the
+        # fact's public ``presentation.events`` BEFORE world composition /
+        # publication, so gameplay/interaction/reload call ZERO providers and
+        # the published case contains the final accepted log (Phase19J
+        # ┬º3/┬º18/┬º19).
+        if evidence_spec is not None:
+            # Phase38 ┬º13 ÔÇö when the plan does not invalidate the activity-log
+            # stage, every per-item validated log is REUSED (never re-paid);
+            # otherwise the affected stage is regenerated.
+            #
+            # Phase40 ┬º16/┬º17/┬º38 ÔÇö a candidate-only integrity repair reruns
+            # the dependent evidence (the universe changed) but the surviving
+            # evidence items are byte-identical (same ids, same canonical
+            # times), so every unaffected per-item log IS REUSED while only
+            # changed/removed candidate-derived items are rebuilt. Do not force
+            # ALL logs to rerun.
+            candidate_only_repair = bool(
+                getattr(repair_plan, "candidate_integrity_only", False)
+            )
+            reuse_validated_logs = (
+                candidate_only_repair
+                or (not repair_plan.rerun_activity_log and not evidence_was_rerun)
+            )
+            evidence_spec = self._activity_log_stage(
+                provider,
+                attempt,
+                crime,
+                public,
+                evidence_spec,
+                budget_consumer,
+                reuse_validated_logs=reuse_validated_logs,
+            )
+
+        # --- 3. WORLD_REQUIREMENTS --------------------------------------------
+        weapon_evidence_id = _weapon_evidence_id(attempt, evidence_spec)
+        cached_world = self._world_cache.get(attempt.attempt_id)
+        if cached_world is not None:
+            cached_world_reqs, cached_composition, cached_weapon_evidence_id = cached_world
+        else:
+            cached_world_reqs, cached_composition, cached_weapon_evidence_id = (
+                None, None, None,
+            )
+        world_inputs_changed = cached_world is not None and (
+            cached_weapon_evidence_id != weapon_evidence_id
+        )
+        rerun_world_flag = (
+            repair_plan.rerun_world
+            or world_inputs_changed
+            or (cached_world is None)
+        )
+        if cached_world is not None and not rerun_world_flag and not repair_plan.recompose:
+            # Unaffected validated world + composition reused (zero provider
+            # calls for the world graph AND the procedural-asset path).
+            world_reqs = cached_world_reqs
+            composition = cached_composition
+        else:
+            if rerun_world_flag:
+                world_prompt = prompts.build_world_requirements_prompt(
+                    attempt.prompt,
+                    locked_map,
+                    id_sheet=id_sheet,
+                    weapon_evidence_id=weapon_evidence_id,
+                )
+                # Phase 19 Fix A: the DETERMINISTIC prompt extractor is the
+                # authoritative fallback for a rejected LLM environmentHint
+                # (the user prompt's "Location: ..." line). LOCAL ÔÇö zero calls.
+                from app.world.extract import extract_world_requirements
+
+                deterministic_hint = None
+                try:
+                    deterministic_world = extract_world_requirements(
+                        attempt.prompt, attempt.locked
+                    )
+                    deterministic_hint = (
+                        deterministic_world.environment_hint
+                        if deterministic_world is not None
+                        else None
+                    )
+                except Exception:  # noqa: BLE001 - extraction never breaks generation
+                    deterministic_hint = None
+                world_reqs = WorldRequirements()
+                parsed_world = self._stage_parse(
+                    provider,
+                    attempt,
+                    GenerationStage.WORLD_GRAPH,
+                    world_prompt,
+                    budget_consumer,
+                    lambda content: parse_world_requirements(
+                        content,
+                        canonical_fallback=deterministic_hint,
+                        case_id=getattr(attempt, "case_id", None),
+                        attempt_id=getattr(attempt, "attempt_id", None),
+                    ),
+                    "world_requirements",
+                    deferred,
+                )
+                if parsed_world is not None:
+                    world_reqs = parsed_world
+
+                # Phase 19E ┬º2 ÔÇö DETERMINISTIC WEAPON-LOCK INJECTION (the
+                # GENERAL rule, no fork/whitelist special-casing): the
+                # CaseTruth-declared weapon is a REQUIRED semantic world object
+                # regardless of catalog membership. Local merge, zero calls.
+                world_reqs = inject_locked_weapon_request(world_reqs, attempt)
+            else:
+                # ASSET_SPEC-only repair: reuse the validated world graph and
+                # recompose (the procedural-asset path re-runs).
+                world_reqs = cached_world_reqs
+
+            # --- 4. world composition (Environment Resolver + Asset Oracle) ---
+            spec_adapter = (
+                self._spec_adapter(provider, attempt, budget_consumer)
+                if self._spec_provider is None
+                else self._spec_provider
+            )
+            composition = self._compose_world(attempt, world_reqs, spec_adapter, deferred)
+
+            # Phase 19 Fix C: a procedural-asset-count ceiling or the
+            # failed-asset threshold hit INSIDE the asset provider is a
+            # terminal, narrow cause (never repaired, never published).
+            if getattr(spec_adapter, "procedural_asset_ceiling_hit", False):
+                raise StageDriverProviderFailure(
+                    "procedural asset count ceiling exceeded",
+                    code=GenerationFailureCode.MAX_PROCEDURAL_ASSETS_EXCEEDED,
+                )
+            if getattr(spec_adapter, "failed_asset_threshold_hit", False):
+                raise StageDriverProviderFailure(
+                    "maximum failed assets exceeded",
+                    code=GenerationFailureCode.MAX_FAILED_ASSETS_EXCEEDED,
+                )
+            self._world_cache[attempt.attempt_id] = (
+                world_reqs, composition, weapon_evidence_id,
+            )
+
+        # --- 4b. deterministic placement-evidence projection + reconciliation
+        # The composer flags an evidence-linked placement with an empty
+        # interaction BEFORE the driver's app-owned projection grants the
+        # documented 'inspect' interaction; once the projection ran, those
+        # stale issues are satisfied and must not block the pass.
+        projected_placements = None
+        if composition is not None and evidence_spec is not None:
+            weapon_evidence_id = _weapon_evidence_id(attempt, evidence_spec)
+            projected_placements = _project_placement_evidence(
+                composition.placements,
+                evidence_spec,
+                weapon_evidence_id,
+            )
+            deferred = _reconcile_evidence_interaction(deferred, projected_placements)
+
+        # --- 5. assemble the GeneratedDraft -----------------------------------
+        attempt.deferred_structural = tuple(sorted(set(deferred)))
+        try:
+            attempt.draft = self._assemble(
+                attempt,
+                crime,
+                public,
+                evidence_spec,
+                world_reqs,
+                composition,
+                projected_placements=projected_placements,
+                extra_travel_rules=tuple(extra_rules),
+            )
+        except SemanticObjectResolutionError as exc:
+            # Phase 19 Fix B.3 ÔÇö fail closed with a SANITIZED typed message
+            # (public identifiers only) and a canonical code; never publish a
+            # case with a dangling weapon/evidence id. Phase 26C5 ┬º15: the
+            # precise WORLD_ASSET_UNRESOLVED code (not the generic
+            # VALIDATION_FAILED) makes the asset-resolution boundary
+            # root-cause-obvious in internal logs.
+            raise StageDriverProviderFailure(
+                str(exc),
+                code=GenerationFailureCode.WORLD_ASSET_UNRESOLVED,
+            ) from None
+        attempt._phase3_cache = None
+        # Phase 19 Fix C ┬º8/┬º13 ÔÇö sanitized monotonic accounting snapshot
+        # (structure only; never raw prompts / truth / provider responses).
+        budget = getattr(attempt, "budget", None)
+        if budget is not None and hasattr(budget, "snapshot"):
+            snap = budget.snapshot()
+            emit_event(
+                "provider.budget.snapshot",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                globalCallCount=snap.get("globalCallCount"),
+                coreCallCount=snap.get("coreCallCount"),
+                assetCallCount=snap.get("assetCallCount"),
+                remainingGlobalCalls=snap.get("remainingGlobalCalls"),
+                remainingCoreCalls=snap.get("remainingCoreCalls"),
+                proceduralAssetCount=snap.get("proceduralAssetCount"),
+                failedAssetCount=snap.get("failedAssetCount"),
+            )
+        if _PD_DEV_TRACE:
+            _dt(
+                "driver.run_into.end elapsedMs=%d deferredStructural=%d "
+                "draftSet=%s deadlineRemainingMs=%s"
+                % (
+                    int((time.perf_counter() - _t0) * 1000),
+                    len(attempt.deferred_structural),
+                    attempt.draft is not None,
+                    _dt_remaining(attempt),
+                )
+            )
+
+    # -- Phase 40 -- trusted candidate-integrity projection ------------------
+
+# -- Phase 41 -- deterministic deceptive-witness stamping ----------------
+
+    def _stamp_witness_truthfulness(self, attempt: Any, crime: Any, public: Any) -> None:
+        """Phase41 + Phase41A ÔÇö stamp the hidden statement-level witness
+        truthfulness onto the attempt (┬º11-┬º14, ┬º16-┬º18).
+
+        The map is derived DETERMINISTICALLY from ``(crime, public, seed)``:
+        a HOMICIDE witness murderer MAY lie to protect themselves
+        (``SELF_PROTECTION``) and a bounded innocent-witness deception branch
+        (``PROTECT_OTHER`` / ``HIDE_UNRELATED_SECRET``) is reachable across
+        seeds ÔÇö the case generation ``attempt.seed`` selects the branch with a
+        pure ``seed -> stamps`` function. Pure and idempotent.
+        ``pipeline.assemble`` lifts the stamp into
+        ``CaseTruth.witness_truthfulness``; it is NEVER part of the serialized
+        draft and NEVER a public DTO / telemetry field.
+        """
+        from app.generation import evidence_facts
+
+        stamped = evidence_facts.deceptive_witness_truths(
+            crime, public, seed=getattr(attempt, "seed", None)
+        )
+        attempt._witness_truthfulness = tuple(stamped)
+
+    def _project_candidate_integrity(
+        self,
+        crime: Any,
+        public: Any,
+        attempt: Any,
+    ) -> tuple[Any, Any]:
+        """Phase40 ÔÇö apply the trusted deterministic candidate-integrity
+        projection at the canonical chokepoint (┬º15).
+
+        Runs on EVERY parsed/validated case (fresh, cached reuse or repair)
+        BEFORE candidate-dependent evidence generation, so evidence/activity
+        logs are never built from a candidate universe the trusted backend
+        already knows is impossible. Corrects ONLY the impossible
+        candidate-affordance combinations (┬º7): victim/witness SUSPECT_ELIGIBLE
+        removal + murderer eligibility retention ÔÇö preserving person id/name/
+        role/presentedData/unrelated affordances/ordering.
+
+        Pure: no provider call, no clock, no randomness (the projection module
+        is deterministic and idempotent). Never exposed to prompts: the
+        murderer id is read ONLY in this trusted backend layer.
+
+        Returns the (possibly corrected) ``(crime, public)``. A declined/
+        escalated projection leaves the public UNCHANGED so the canonical
+        validators and repair routing stay authoritative (┬º13/┬º35)."""
+        result = candidate_projection_mod.project_candidate_integrity(
+            tuple(getattr(public, "persons", ()) or ()),
+            getattr(crime, "murderer_id", None),
+            getattr(crime, "resolution_type", None),
+        )
+        # Bounded truthful telemetry (┬º43): closed outcome + booleans + counts.
+        # NEVER the hidden murderer id, names, person records, prompts or raw
+        # provider output. Phase41 (┬º23): safe bounded final-choice telemetry
+        # (counts + a public-role predicate). NEVER the resolution truth, the
+        # true option index or witness truthfulness.
+        from app.domain.eligibility import (
+            final_homicide_target_ids,
+            has_public_victim,
+        )
+
+        homicide_target_count = len(final_homicide_target_ids(public))
+        suicide_option = has_public_victim(public)
+        final_option_count = homicide_target_count + (1 if suicide_option else 0)
+        witness_target_count = sum(
+            1
+            for p in (getattr(public, "persons", ()) or ())
+            if str(getattr(p, "role", "")) == "witness"
+            and p.person_id
+            in set(final_homicide_target_ids(public))
+        )
+        emit_event(
+            "candidate_integrity.projection",
+            caseId=getattr(attempt, "case_id", None),
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            victimEligibilityRemoved=result.victim_eligibility_removed,
+            witnessEligibilityRemovedCount=result.witness_eligibility_removed_count,
+            murdererEligibilityAdded=result.murderer_eligibility_added,
+            candidateCountBefore=result.candidate_count_before,
+            candidateCountAfter=result.candidate_count_after,
+            projectionOutcome=result.outcome.value,
+            finalOptionCount=final_option_count,
+            homicideTargetCount=homicide_target_count,
+            witnessTargetCount=witness_target_count,
+            hasSuicideOption=suicide_option,
+        )
+        if (
+            result.outcome
+            in (
+                candidate_projection_mod.CandidateProjectionOutcome.NO_CHANGE,
+                candidate_projection_mod.CandidateProjectionOutcome.CORRECTED,
+            )
+            and result.corrected_persons is not getattr(public, "persons", None)
+        ):
+            public = dataclasses.replace(public, persons=result.corrected_persons)
+        return crime, public
+
+    def _make_budget_consumer(self, attempt: Any) -> Callable[[str | None], bool]:
+        """Budget consumer with Phase 19 Fix C bucket attribution.
+
+        ``consumer(None)`` / ``consumer(CORE_BUCKET)`` reserves a CORE bucket
+        call (case/evidence/world + repair/regeneration). The CORE bucket is
+        the NON-STRING sentinel ONLY (ADV-216): ``consumer(object_id)`` with
+        ANY string ├óÔé¼ÔÇØ even the literal ``"core"`` ├óÔé¼ÔÇØ reserves an ASSET:<objectId>
+        bucket call (procedural ASSET_SPEC / ASSET_SPEC_REPAIR / geometry).
+        Deterministic local repairs never touch this consumer.
+        """
+
+        def _consume(bucket: str | None = None) -> bool:
+            budget = attempt.budget
+            if budget is None:
+                return False
+            if budget.deadline_passed():
+                return False
+            return budget.consume_call(bucket=bucket)
+
+        return _consume
+
+    # -- Phase 19J ├óÔé¼ÔÇØ ACTIVITY_LOG generation stage ----------------------------
+
+    def _activity_log_stage(
+        self,
+        provider: Any,
+        attempt: Any,
+        crime: Any,
+        public: Any,
+        evidence_spec: Any,
+        budget_consumer: Callable[[str | None], bool],
+        *,
+        reuse_validated_logs: bool = False,
+    ) -> Any:
+        """Phase19J ├é┬º4 trigger + generation walk over the composed evidence.
+
+        ONLY evidence facts whose kind maps to ``renderType == ACTIVITY_LOG``
+        AND that carry a time-bearing ``observed_at`` get a generated log (one
+        bounded CORE-bucket provider call each). Facts without an
+        activity-log requirement cost ZERO extra provider calls. The validated
+        log is persisted into the fact's public ``presentation.events``
+        (``{time, action}`` events shape without ``personId``) plus the
+        ``ACTIVITY_LOG_v1`` version marker.
+
+        Solver isolation (Phase19J ├é┬º27/├é┬º28): ONLY the public presentation is
+        enriched ÔÇö canonical propositions (the solver input) are untouched, so
+        the solver signature is byte-identical with and without the rich log.
+
+        Phase38 ┬º13 (activity-log granularity): every successfully validated
+        log is cached per evidence item (public id only). When
+        ``reuse_validated_logs`` is True AND a cached validated entry exists
+        for an item whose upstream canonical time is unchanged, that item is
+        REUSED (zero provider calls) instead of regenerated ÔÇö the exact rule
+        "do not reuse outputs whose inputs changed". A defect owner that
+        invalidates the logs (evidence change / case change / activity-log
+        owner) regenerates the affected items.
+        """
+        from app.domain.activity_log import (
+            ACTIVITY_LOG_VERSION_MARKER,
+            MIN_ACTIVITY_LOG_ENTRIES,
+            WINDOW_DEFAULT_AFTER_MINUTES,
+            WINDOW_DEFAULT_BEFORE_MINUTES,
+            activity_log_window_satisfiable,
+        )
+        from app.domain.render import EvidenceRenderType, render_type_for_kind
+        from app.generation.schemas import EvidenceSetSpec
+
+        if evidence_spec is None:
+            return None
+        # ADV-257 ├óÔé¼ÔÇØ an operator-configured 0-sided window is HONORED (never
+        # silently coerced to the default): ``0 = no span in that direction``.
+        # Only an ABSENT setting falls back to the default. The hard total-span
+        # clamp (120 min) stays in the pure validator (activity_log_window_bounds).
+        before_raw = getattr(self._settings, "activity_log_window_before_minutes", None)
+        after_raw = getattr(self._settings, "activity_log_window_after_minutes", None)
+        before = (
+            WINDOW_DEFAULT_BEFORE_MINUTES
+            if before_raw is None
+            else max(0, int(before_raw))
+        )
+        after = (
+            WINDOW_DEFAULT_AFTER_MINUTES
+            if after_raw is None
+            else max(0, int(after_raw))
+        )
+        # Phase19J-RI (ADV-C) fail-fast OPERATOR GUARD: an unsatisfiable window
+        # (total clamped span below ``MIN - 1`` seconds ÔÇö e.g. a 0/0 setting)
+        # can never hold the 15 distinct strictly-increasing rows the strict
+        # validator demands, so every prompt built for it would contradict
+        # itself. Raise a clear sanitized operator-config error BEFORE any
+        # provider call (the cached-CASE path above already paid ZERO provider
+        # calls for the activity-log stage itself). The pure domain guard
+        # mirrors the validator's OWN clamping math; the validator is NOT
+        # weakened ÔÇö the guard only converts a silent long tail into a loud
+        # operator mistake.
+        if not activity_log_window_satisfiable(before, after):
+            from app.services.generation import ProviderConfigError
+
+            raise ProviderConfigError(
+                "activity-log window config error: before="
+                f"{before} after={after} cannot geometrically hold "
+                f"{MIN_ACTIVITY_LOG_ENTRIES} distinct strictly-increasing "
+                "timestamps (configure at least 1 minute of total span; the "
+                "default before=60 after=60 is fine)"
+            )
+        persons, weapons, motives, location_ids, location_names = (
+            self._activity_log_forbidden_tokens(attempt, crime, public)
+        )
+        per_item_cache = self._activity_cache.setdefault(str(attempt.attempt_id), {})
+        enriched: list[Any] = []
+        for item in getattr(evidence_spec, "evidence", ()) or ():
+            kind = str(getattr(item, "kind", "") or "")
+            if (
+                str(render_type_for_kind(kind))
+                != EvidenceRenderType.ACTIVITY_LOG.value
+            ):
+                enriched.append(item)
+                continue
+            canonical = _first_time_bearing_observed_at(item)
+            if canonical is None:
+                # no time-bearing evidence -> no log requirement -> no call
+                enriched.append(item)
+                continue
+            item_id = str(getattr(item, "id", "") or "")
+            cached_entry = per_item_cache.get(item_id)
+            if (
+                reuse_validated_logs
+                and cached_entry is not None
+                and cached_entry[1] == canonical
+            ):
+                # Phase38 reuse: the item's upstream canonical time is
+                # unchanged and a fully validated log exists ÔÇö re-attach it
+                # without any provider call.
+                enriched.append(
+                    _with_activity_log_events(
+                        item, cached_entry[0], ACTIVITY_LOG_VERSION_MARKER
+                    )
+                )
+                continue
+            entries = self._generate_activity_log(
+                provider,
+                attempt,
+                item_id,
+                canonical,
+                person_names=persons,
+                weapon_names=weapons,
+                motive_names=motives,
+                location_ids=location_ids,
+                location_names=location_names,
+                before_minutes=before,
+                after_minutes=after,
+                budget_consumer=budget_consumer,
+            )
+            # Only a SUCCESSFULLY validated entry may be reused later
+            # (``_generate_activity_log`` raises on terminal failure).
+            per_item_cache[item_id] = (entries, canonical)
+            enriched.append(_with_activity_log_events(item, entries, ACTIVITY_LOG_VERSION_MARKER))
+        return EvidenceSetSpec(evidence=tuple(enriched))
+
+    def _activity_log_forbidden_tokens(
+        self, attempt: Any, crime: Any, public: Any
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """The FIRST-VERSION canonical name set for entity-leak rejection.
+
+        Returns ``(person_names, weapon_names, motive_names, location_ids,
+        location_names)`` ├óÔé¼ÔÇØ the case's OWN canonical names/ids (public persons
+        + ids, motive labels + ids, location names + ids, the locked weapon
+        display name + the crime weapon id, the crime motive/location ids).
+        The activity-log validator rejects any occurrence in log text by
+        default (Phase19J ├é┬º23/├é┬º24/├é┬º25/├é┬º26).
+        """
+        from app.domain.activity_log import entity_leak_tokens  # noqa: F401
+
+        persons: set[str] = set()
+        weapons: set[str] = set()
+        motives: set[str] = set()
+        location_ids: set[str] = set()
+        location_names: set[str] = set()
+        if public is not None:
+            for person in getattr(public, "persons", ()) or ():
+                name = getattr(person, "name", None)
+                if isinstance(name, str) and name:
+                    persons.add(name)
+                pid = getattr(person, "person_id", None)
+                if isinstance(pid, str) and pid:
+                    persons.add(pid)
+            for motive in getattr(public, "motives", ()) or ():
+                label = getattr(motive, "label", None)
+                if isinstance(label, str) and label:
+                    motives.add(label)
+                mid = getattr(motive, "motive_id", None)
+                if isinstance(mid, str) and mid:
+                    motives.add(mid)
+            for loc in getattr(public, "locations", ()) or ():
+                name = getattr(loc, "name", None)
+                if isinstance(name, str) and name:
+                    location_names.add(name)
+                lid = getattr(loc, "location_id", None)
+                if isinstance(lid, str) and lid:
+                    location_ids.add(lid)
+            scene = getattr(public, "scene", None)
+            if scene is not None:
+                sname = getattr(scene, "name", None)
+                if isinstance(sname, str) and sname:
+                    location_names.add(sname)
+                slid = getattr(scene, "location_id", None)
+                if isinstance(slid, str) and slid:
+                    location_ids.add(slid)
+        locked = getattr(attempt, "locked", None)
+        weapon_display = getattr(locked, "weapon", None) if locked is not None else None
+        if isinstance(weapon_display, str) and weapon_display:
+            weapons.add(weapon_display)
+        if crime is not None:
+            wid = getattr(crime, "weapon_id", None)
+            if isinstance(wid, str) and wid:
+                weapons.add(wid)
+            mid = getattr(crime, "motive_id", None)
+            if isinstance(mid, str) and mid:
+                motives.add(mid)
+            lid = getattr(crime, "location_id", None)
+            if isinstance(lid, str) and lid:
+                location_ids.add(lid)
+        return (
+            tuple(sorted(persons)),
+            tuple(sorted(weapons)),
+            tuple(sorted(motives)),
+            tuple(sorted(location_ids)),
+            tuple(sorted(location_names)),
+        )
+
+    def _generate_activity_log(
+        self,
+        provider: Any,
+        attempt: Any,
+        evidence_id: str,
+        canonical: str,
+        *,
+        person_names: tuple[str, ...],
+        weapon_names: tuple[str, ...],
+        motive_names: tuple[str, ...],
+        location_ids: tuple[str, ...],
+        location_names: tuple[str, ...],
+        before_minutes: int,
+        after_minutes: int,
+        budget_consumer: Callable[[str | None], bool],
+    ) -> tuple[Any, ...]:
+        """ONE bounded activity-log round-trip (initial + repair passes).
+
+        Provider-level failures (timeout / transport / budget) propagate as
+        ``StageDriverProviderFailure`` ├óÔé¼ÔÇØ the attempt fails with the provider's
+        typed code (the UI shows the provider-unavailable mapping ONLY then).
+        A VALIDATION failure after the bounded repair budget surfaces the
+        specific typed validator code (the UI maps it to the Phase19J ├é┬º39 safe
+        copy: "A piece of scene evidence could not be generated safely.
+        Try again or adjust the prompt.").
+
+        Safe observability (Phase19J ├é┬º40): only sanitized counts/codes are
+        emitted ├óÔé¼ÔÇØ NEVER CaseTruth, raw provider responses, full log text,
+        prompts or hidden evidence.
+        """
+        from app.domain.activity_log import (
+            ActivityLogValidatorCode,
+            parse_activity_log,
+            primary_validator_code,
+            repair_findings,
+            validate_activity_log,
+        )
+        from app.generation.failure_codes import GenerationFailureCode
+        from app.generation import prompts
+
+        generation_attempt_id = getattr(attempt, "attempt_id", None)
+        case_id = getattr(attempt, "case_id", None)
+        evidence_id_safe = _sanitize_object_id_for_message(evidence_id) or "<unknown>"
+        attempt_clock = time.perf_counter()
+        from app.domain.time_interval import parse_iso8601_to_epoch
+
+        try:
+            canonical_tick_epoch = parse_iso8601_to_epoch(canonical)
+        except (TypeError, ValueError):
+            canonical_tick_epoch = None
+
+        # Phase 37 ÔÇö the SINGLE collision-checked safe neutral vocabulary for
+        # THIS case, computed ONCE by the deterministic builder (exact existing
+        # entity-leak collider against the hidden forbidden tokens; never
+        # rendered with the hidden values) and passed into BOTH the initial and
+        # the repair prompt, so an ENTITY_LEAK repair is bound to the SAME
+        # proven-safe closed output set. Fail-closed (Phase37 ┬º16/┬º17): a
+        # pathological forbidden set that leaves fewer than the minimum
+        # collision-free phrases fails with a typed activity-log code BEFORE any
+        # provider call ÔÇö the server never supplies a colliding phrase.
+        try:
+            safe_vocabulary = prompts.activity_log_safe_neutral_vocabulary(
+                person_names=person_names,
+                weapon_names=weapon_names,
+                motive_names=motive_names,
+                location_ids=location_ids,
+                location_names=location_names,
+            )
+        except (TypeError, ValueError):
+            raise StageDriverProviderFailure(
+                "activity log safe neutral vocabulary exhausted for this case",
+                code=GenerationFailureCode(
+                    ActivityLogValidatorCode.ACTIVITY_LOG_ENTITY_LEAK.value
+                ),
+            ) from None
+
+        def _elapsed() -> int:
+            return int((time.perf_counter() - attempt_clock) * 1000)
+
+        emit_event(
+            "activity_log.generation.started",
+            caseId=case_id,
+            generationAttemptId=generation_attempt_id,
+            evidenceIdSafe=evidence_id_safe,
+            providerCallCount=getattr(attempt.budget, "calls", None),
+        )
+        prompt = prompts.build_activity_log_prompt(
+            canonical,
+            before_minutes=before_minutes,
+            after_minutes=after_minutes,
+            # Phase19J-RI (ADV-D): the canonical forbidden-name sets are
+            # accepted ONLY for the deterministic scaffold collision check
+            # (reserved fallback pool); they are NEVER rendered into the
+            # prompt text (ADV-256 holds ÔÇö the model still sees only the
+            # canonical time + window + neutral rules).
+            person_names=person_names,
+            weapon_names=weapon_names,
+            motive_names=motive_names,
+            location_ids=location_ids,
+            location_names=location_names,
+            # Phase 37 ÔÇö the SAME collision-checked safe neutral vocabulary
+            # (computed once above) is injected into BOTH stages: the initial
+            # prompt's ACTIVITY TEXT RULES + SAFE NEUTRAL ACTIVITY VOCABULARY
+            # and the repair prompt's dedicated ENTITY_LEAK directive (┬º10/┬º11).
+            safe_vocabulary=safe_vocabulary,
+        )
+        # ADV-256 ├óÔé¼ÔÇØ the activity-log stages never receive the FULL locked
+        # identity sheet. The provider appends every non-None locked field to
+        # the prompt under "Locked user constraints (must be respected
+        # exactly):", so passing ``attempt.locked`` would hand the model that
+        # is generating neutral noise the murderer/motive/weapon/victim/
+        # witness answers. These stages receive a TIME-ONLY projection: the
+        # canonical evidence time and nothing else (Phase19J ├é┬º10/├é┬º20/├é┬º41).
+        from app.generation.constraints import LockedConstraints
+
+        locked_projection = LockedConstraints(crime_time=canonical)
+        stage = GenerationStage.ACTIVITY_LOG
+        codes: tuple[Any, ...] = ()
+        entries: list[Any] = []
+        non_chronological = False
+        duplicate_timestamp = False
+        parse_error = False
+        # Phase 26 Fix-B (H5/┬º6): the safe parse-failure SHAPE (class token +
+        # bounded item-count candidate) of the LAST unparsable response ÔÇö the
+        # exact failure context a contract-guided repair needs. Captured in the
+        # except branch; carried into the repair prompt builder (never raw text).
+        parse_shape: dict[str, Any] | None = None
+        repair_attempts = 0
+        # Phase 26C2 (Option B) ÔÇö the player-safe canonical row captured from
+        # the ORIGINAL count-invalid log (the R2 defect: the count repair DROPS
+        # the canonical-time row). A row is ONLY ever reused when the ORIGINAL
+        # attempt's ONLY failure was the entry-count bound (the strict validator
+        # therefore already accepted the row's text, order, window and canonical
+        # multiplicity), the row text itself passes the SAME player-safety
+        # scans, and the FULL validator re-accepts the restored candidate.
+        known_canonical_row: Any | None = None
+
+        for pass_index in range(MAX_ACTIVITY_LOG_REPAIR_PASSES + 1):
+            # Phase19J-RI accounting note: this driver-local repair loop is
+            # bounded by ``MAX_ACTIVITY_LOG_REPAIR_PASSES`` and its OWN
+            # counter ÔÇö it deliberately never touches
+            # ``budget.consume_repair_pass()``. Every call in the loop is a
+            # normal CORE-bucket provider call through ``_call``, so
+            # ``provider.call.start`` reports ``repairCount=0`` for
+            # stage=activity_log_repair BY DESIGN (separate-stage accounting;
+            # budgets and ceilings are unchanged).
+            # Per-pass parse context (Phase 26 Fix-B): reset so a stale
+            # parse-error shape from a previous pass can never bleed into the
+            # next repair's contract guidance.
+            parse_error = False
+            parse_shape = None
+            _call_started = time.perf_counter()
+            content = self._call(
+                provider,
+                attempt,
+                stage,
+                prompt,
+                budget_consumer,
+                locked=locked_projection,
+            )
+            if content is None:
+                # _call returns None only when content was empty after a
+                # successful provider result -> treat as schema-invalid.
+                codes = (ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,)
+                entries = []
+            else:
+                try:
+                    entries = parse_activity_log(content)
+                    codes = validate_activity_log(
+                        entries,
+                        canonical_time=canonical,
+                        person_names=person_names,
+                        weapon_names=weapon_names,
+                        motive_names=motive_names,
+                        location_ids=location_ids,
+                        location_names=location_names,
+                        before_minutes=before_minutes,
+                        after_minutes=after_minutes,
+                    )
+                    non_chronological, duplicate_timestamp = _log_order_flags(
+                        entries
+                    )
+                    # Phase 26C2 (H6) ÔÇö capture the model's OWN canonical row
+                    # from the ORIGINAL (first) log whose ONLY failure is the
+                    # 15..20 count bound (the R2 source evidence: the strict
+                    # validator therefore already approved the row's text,
+                    # order, window and canonical multiplicity). Only the
+                    # ORIGINAL attempt participates ÔÇö a later repair that is
+                    # itself count-invalid does NOT re-arm the restoration
+                    # (the Fix-B pinned chains keep their terminal outcome). The
+                    # row text must be player-safe and is NEVER synthesized.
+                    if (
+                        pass_index == 0
+                        and known_canonical_row is None
+                        and set(codes)
+                        == {
+                            ActivityLogValidatorCode.ACTIVITY_LOG_ENTRY_COUNT_INVALID
+                        }
+                        and entries
+                    ):
+                        captured = _canonical_row_from_entries(
+                            entries, canonical_tick_epoch
+                        )
+                        if captured is not None and _canonical_row_player_safe(
+                            captured,
+                            person_names=person_names,
+                            weapon_names=weapon_names,
+                            motive_names=motive_names,
+                            location_ids=location_ids,
+                            location_names=location_names,
+                        ):
+                            known_canonical_row = captured
+                except (TypeError, ValueError):
+                    # structural parse failure -> schema-invalid category
+                    codes = (ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID,)
+                    entries = []
+                    parse_error = True
+                    # Phase 26C2 (Option B safety) ÔÇö a structurally unparsable
+                    # response BREAKS the canonical-row evidence chain: the
+                    # model has demonstrated unreliable shape adherence, so the
+                    # previously captured canonical row is NOT carried across
+                    # the break (fail-closed; the bounded repair continues
+                    # exactly as before and the Fix-B terminal chains stay
+                    # terminal). Only a later parsed count-invalid log may
+                    # recapture it.
+                    known_canonical_row = None
+                    parse_shape = _activity_log_diagnostic_shape(content)
+                    # Phase19J-RI ÔÇö SAFE diagnostic harness (SHAPE only, never
+                    # content): capture WHY the parse failed (top-level type /
+                    # bounded keys / bounded item-count candidate / stable
+                    # class token) so the real Hermes failure class can be
+                    # diagnosed without ever logging the generated text,
+                    # prompts or CaseTruth (Phase19J ┬º40).
+                    shape = parse_shape
+                    emit_event(
+                        "activity_log.parse_failed",
+                        caseId=case_id,
+                        generationAttemptId=generation_attempt_id,
+                        evidenceIdSafe=evidence_id_safe,
+                        providerCallCount=getattr(attempt.budget, "calls", None),
+                        topLevelType=shape.get("topLevelType"),
+                        topLevelKeys=shape.get("topLevelKeys"),
+                        expectedTopLevelKeys=shape.get("expectedTopLevelKeys"),
+                        itemCountCandidate=shape.get("itemCountCandidate"),
+                        parseFailureClass=shape.get("parseFailureClass"),
+                    )
+            entry_count = len(entries) if entries else 0
+            canonical_present = _canonical_row_from_entries(
+                entries, canonical_tick_epoch
+            ) is not None
+            emit_event(
+                "activity_log.generation.complete",
+                caseId=case_id,
+                generationAttemptId=generation_attempt_id,
+                evidenceIdSafe=evidence_id_safe,
+                entryCount=entry_count,
+                providerCallCount=getattr(attempt.budget, "calls", None),
+                elapsedMs=int((time.perf_counter() - _call_started) * 1000),
+                success=not codes,
+                canonicalRowPresent=canonical_present,
+            )
+            if not codes:
+                if repair_attempts:
+                    emit_event(
+                        "activity_log.repair.complete",
+                        caseId=case_id,
+                        generationAttemptId=generation_attempt_id,
+                        evidenceIdSafe=evidence_id_safe,
+                        entryCount=entry_count,
+                        providerCallCount=getattr(attempt.budget, "calls", None),
+                        elapsedMs=_elapsed(),
+                        success=True,
+                    )
+                return tuple(entries)
+
+            # Phase 26C2 (Option B) ÔÇö deterministic server-side canonical-row
+            # restoration (safety contract in ``_restore_canonical_row_candidate``):
+            # a count-valid log that fails ONLY on CANONICAL_TIME_MISSING gets
+            # the model's OWN previously-validated canonical row re-inserted at
+            # its chronological position, then the FULL existing validator is
+            # rerun and MUST re-accept the candidate. This consumes NO provider
+            # call, NO repair budget and NEVER invents semantics; when the
+            # candidate still violates any rule (or no known row exists) the
+            # bounded repair loop continues UNCHANGED (fail-closed).
+            if set(codes) == {
+                ActivityLogValidatorCode.ACTIVITY_LOG_CANONICAL_TIME_MISSING
+            }:
+                restored = _restore_canonical_row_candidate(
+                    entries,
+                    known_canonical_row,
+                    canonical,
+                    person_names=person_names,
+                    weapon_names=weapon_names,
+                    motive_names=motive_names,
+                    location_ids=location_ids,
+                    location_names=location_names,
+                    before_minutes=before_minutes,
+                    after_minutes=after_minutes,
+                )
+                if restored is not None:
+                    emit_event(
+                        "activity_log.canonical_row_restored",
+                        caseId=case_id,
+                        generationAttemptId=generation_attempt_id,
+                        evidenceIdSafe=evidence_id_safe,
+                        entryCount=len(restored),
+                        canonicalRowPresent=True,
+                        canonicalRowRestored=True,
+                        providerCallCount=getattr(attempt.budget, "calls", None),
+                        elapsedMs=_elapsed(),
+                    )
+                    if repair_attempts:
+                        emit_event(
+                            "activity_log.repair.complete",
+                            caseId=case_id,
+                            generationAttemptId=generation_attempt_id,
+                            evidenceIdSafe=evidence_id_safe,
+                            entryCount=len(restored),
+                            providerCallCount=getattr(attempt.budget, "calls", None),
+                            elapsedMs=_elapsed(),
+                            success=True,
+                        )
+                    return tuple(restored)
+
+            validator = primary_validator_code(codes)
+            emit_event(
+                "activity_log.validation_failed",
+                caseId=case_id,
+                generationAttemptId=generation_attempt_id,
+                evidenceIdSafe=evidence_id_safe,
+                entryCount=entry_count,
+                validatorCode=validator.value if validator is not None else None,
+                providerCallCount=getattr(attempt.budget, "calls", None),
+                elapsedMs=_elapsed(),
+            )
+            if pass_index >= MAX_ACTIVITY_LOG_REPAIR_PASSES:
+                break
+            findings = repair_findings(
+                codes,
+                entry_count=entry_count,
+                non_chronological=non_chronological,
+                duplicate_timestamp=duplicate_timestamp,
+            )
+            emit_event(
+                "activity_log.repair.started",
+                caseId=case_id,
+                generationAttemptId=generation_attempt_id,
+                evidenceIdSafe=evidence_id_safe,
+                entryCount=entry_count,
+                validatorCode=validator.value if validator is not None else None,
+                providerCallCount=getattr(attempt.budget, "calls", None),
+                elapsedMs=_elapsed(),
+            )
+            repair_attempts += 1
+            # Phase 26 Fix-B (┬º6): the repair receives the EXACT validator
+            # failure code + the safe parse-failure class (when the last
+            # response failed to parse), so the bounded repair is contract-
+            # guided instead of generic. Never raw provider text.
+            prompt = prompts.build_activity_log_repair_prompt(
+                canonical,
+                findings,
+                before_minutes=before_minutes,
+                after_minutes=after_minutes,
+                person_names=person_names,
+                weapon_names=weapon_names,
+                motive_names=motive_names,
+                location_ids=location_ids,
+                location_names=location_names,
+                validator_code=(
+                    validator.value if validator is not None else None
+                ),
+                parse_failure_class=(
+                    parse_shape.get("parseFailureClass")
+                    if parse_error and parse_shape is not None
+                    else None
+                ),
+                # Phase 37 ÔÇö SAME safe vocabulary as the initial prompt.
+                safe_vocabulary=safe_vocabulary,
+            )
+            stage = GenerationStage.ACTIVITY_LOG_REPAIR
+            # fall through to the next bounded pass (no other state needed)
+
+        validator = primary_validator_code(codes) or (
+            ActivityLogValidatorCode.ACTIVITY_LOG_SCHEMA_INVALID
+        )
+        emit_event(
+            "activity_log.repair.complete",
+            caseId=case_id,
+            generationAttemptId=generation_attempt_id,
+            evidenceIdSafe=evidence_id_safe,
+            entryCount=len(entries) if entries else 0,
+            validatorCode=validator.value,
+            providerCallCount=getattr(attempt.budget, "calls", None),
+            elapsedMs=_elapsed(),
+            success=False,
+        )
+        # A provider RESPONDED but the log could not be validated within the
+        # bounded repair budget: this is NOT a provider failure. The typed
+        # validator code fails the attempt; the public UI maps it to the
+        # Phase19J ├é┬º39 safe copy (never "AI unavailable" for a validation
+        # failure after a successful provider response).
+        raise StageDriverProviderFailure(
+            "activity log could not be generated safely within the bounded "
+            "repair budget",
+            code=GenerationFailureCode(validator.value),
+        )
+
+    def _configured_provider_timeout(self) -> float:
+        """The operator-configured PER-CALL timeout source.
+
+        Ollama -> OLLAMA_TIMEOUT_SECONDS; the remote-client bridge ->
+        BRIDGE_JOB_DEADLINE_SECONDS (the per-job cap the dispatch clamps to).
+        """
+        if getattr(self._settings, "generation_provider", None) == "remote_client":
+            return float(
+                getattr(self._settings, "bridge_job_deadline_seconds", 120.0) or 120.0
+            )
+        return float(getattr(self._settings, "ollama_timeout_seconds", 60.0) or 60.0)
+
+    def _effective_timeout(self, attempt: Any | None = None) -> float:
+        budget = getattr(attempt, "budget", None)
+        if budget is None:
+            return max(0.0, self._configured_provider_timeout())
+        return budget.effective_provider_timeout(
+            self._configured_provider_timeout(),
+            safety_margin_seconds=PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
+        )
+
+    def _evidence_feedback(
+        self,
+        attempt: Any,
+        diagnostics: tuple[str, ...],
+        is_rerun: bool,
+    ) -> str:
+        """Sanitized re-run feedback token for the EVIDENCE prompt.
+
+        On a repair/regeneration pass the previous validation's sanitized
+        diagnostics are appended, plus the still-viable/unknown candidate ids
+        (PUBLIC candidate ids only ├óÔé¼ÔÇØ the id sheet/approved material already
+        carry them, never truth), so the second pass targets exactly the fact
+        groups that were missing. Empty on the first run.
+        """
+        if not is_rerun or not diagnostics:
+            return ""
+        lines = [
+            "PREVIOUS-PASS FEEDBACK (from the deterministic validation of "
+            "your LAST evidence ├óÔé¼ÔÇØ re-emit the COMPLETE fact set, fixing "
+            "exactly these gaps):"
+        ]
+        for line in diagnostics:
+            lines.append(f"- {line}")
+        proof = getattr(attempt, "solver_proof", None)
+        if proof is not None:
+            for name, dim in (
+                ("suspect", proof.who),
+                ("motive", proof.why),
+                ("weapon", proof.weapon),
+            ):
+                if dim is None or getattr(dim, "unique", False):
+                    continue
+                viable = list(getattr(dim, "viable", ()) or ())
+                unknown = list(getattr(dim, "unknown_remaining", ()) or ())
+                lines.append(
+                    f"- {name} dimension was NOT unique: viable "
+                    f"{viable}; unknown/unsupported {unknown}"
+                )
+        return "\n".join(lines)
+
+    def _spec_adapter(self, provider: Any, attempt: Any, budget: Callable[[], bool]) -> Any:
+        # Phase38 ┬º30 ÔÇö the driver's safe stage-timing recorder is wired into
+        # the asset-spec round-trip so ASSET_SPEC / ASSET_SPEC_REPAIR appear in
+        # ``stageTimingSummary`` exactly like every other provider stage
+        # (closing the reconcilability gap in the real provider-call count).
+        def _record(stage: GenerationStage, elapsed_ms: int, outcome: str) -> None:
+            self._record_stage_timing(attempt, stage, elapsed_ms, outcome)
+
+        return OllamaAssetSpecProvider(
+            provider=provider,
+            attempt_id=attempt.attempt_id,
+            budget_consumer=budget,
+            locked=attempt.locked,
+            seed=attempt.seed,
+            model_label=self._event_model or "",
+            configured_timeout_seconds=self._configured_provider_timeout(),
+            timeout_provider=lambda: self._effective_timeout(attempt),
+            metrics_provider=lambda: attempt.budget,
+            provider_label=self._provider_label,
+            record_stage_timing=_record,
+        )
+
+    def _call(
+        self,
+        provider: Any,
+        attempt: Any,
+        stage: GenerationStage,
+        prompt: str,
+        budget: Callable[[str | None], bool],
+        *,
+        locked: Any | None = None,
+    ) -> str | None:
+        """ONE bounded budgeted stage call; returns content or raises typed.
+
+        ``locked`` overrides the request's locked-constraints projection.
+        ``None`` means the attempt's FULL locked constraints travel with the
+        request (the general stages need the identity sheet). The ACTIVITY_LOG
+        stages pass a TIME-ONLY projection (ADV-256) so the provider's
+        "Locked user constraints" block carries the canonical evidence time and
+        NO murderer/motive/weapon/victim/witness material.
+        """
+        effective_timeout = self._effective_timeout(attempt)
+        configured_timeout_ms = int(self._configured_provider_timeout() * 1000)
+        if effective_timeout <= 0:
+            raise StageDriverProviderFailure(
+                "generation deadline exceeded",
+                code=GenerationFailureCode.GENERATION_DEADLINE_EXCEEDED,
+            )
+        if not budget(CORE_BUCKET):
+            raise StageDriverProviderFailure(
+                "model call budget exhausted",
+                code=failure_code_for_budget_reason(
+                    attempt.budget.exhausted_reason(CORE_BUCKET)
+                    if getattr(attempt, "budget", None) is not None
+                    else "model call budget exhausted"
+                ),
+            )
+        request = GenerateRequest(
+            attempt_id=attempt.attempt_id,
+            stage=stage,
+            prompt_context=prompt,
+            locked=attempt.locked if locked is None else locked,
+            diagnostics=(),
+            seed=attempt.seed,
+            timeout_seconds=effective_timeout,
+        )
+        deadline_before_ms = _remaining_ms(attempt)
+        provider_call_index = getattr(attempt.budget, "calls", None)
+        emit_event(
+            "provider.call.start",
+            caseId=getattr(attempt, "case_id", None),
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            stage=stage.value,
+            provider=self._provider_label,
+            model=self._event_model,
+            configuredGenerationDeadlineMs=(
+                int(attempt.budget.deadline_seconds * 1000)
+                if getattr(attempt, "budget", None) is not None else None
+            ),
+            deadlineRemainingMs=_remaining_ms(attempt),
+            deadlineRemainingBeforeMs=deadline_before_ms,
+            configuredProviderTimeoutMs=int(self._configured_provider_timeout() * 1000),
+            effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+            providerCallCount=getattr(attempt.budget, "calls", None),
+            providerCallIndex=provider_call_index,
+            repairCount=getattr(attempt.budget, "repair_passes", None),
+            regenerationCount=getattr(attempt.budget, "regenerations", None),
+            requestBytes=len(prompt.encode("utf-8")),
+        )
+        _t0 = time.perf_counter()
+        try:
+            result: ProviderResult = self._invoke(provider, request)
+        except StageDriverProviderFailure as exc:
+            # Phase38 DEF-094 ÔÇö a nested transport (remote-client bridge,
+            # direct Ollama, ...) that times out carries the ACTUAL budget it
+            # was dispatched with. Backfill the ACTUAL server-issued effective
+            # timeout + configured provider timeout when the carrier did not
+            # attach it, so the controller always classifies against the
+            # issued budget (robust to the transport reserve and float
+            # epsilon) ÔÇö never a remaining-seconds float check.
+            if getattr(exc, "issued_timeout_seconds", None) is None:
+                exc.issued_timeout_seconds = effective_timeout
+                exc.configured_timeout_seconds = self._configured_provider_timeout()
+            elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+            deadline_after_ms = _remaining_ms(attempt)
+            self._record_stage_timing(attempt, stage, elapsed_ms, "error")
+            emit_event(
+                "provider.call.error",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                stage=stage.value,
+                provider=self._provider_label,
+                failureCode=getattr(exc, "code", GenerationFailureCode.PROVIDER_UNAVAILABLE.value),
+                elapsedMs=elapsed_ms,
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=deadline_after_ms,
+                deadlineRemainingBeforeMs=deadline_before_ms,
+                deadlineRemainingAfterMs=deadline_after_ms,
+                providerCallCount=provider_call_index,
+                providerCallIndex=provider_call_index,
+                repairCount=getattr(attempt.budget, "repair_passes", None),
+                regenerationCount=getattr(attempt.budget, "regenerations", None),
+            )
+            raise
+        elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+        deadline_after_ms = _remaining_ms(attempt)
+        if _PD_DEV_TRACE:
+            if result.content is not None:
+                summary = "ok(content)"
+            elif result.timed_out:
+                summary = "FAILED(timed_out)"
+            else:
+                summary = "FAILED(error=%s)" % (result.error or "unknown")
+            _dt(
+                "driver.call.done stage=%s %s elapsedMs=%d calls=%s "
+                "deadlineRemainingMs=%s"
+                % (
+                    stage.value,
+                    summary,
+                    int((time.perf_counter() - _t0) * 1000),
+                    getattr(attempt.budget, "calls", "?"),
+                    _dt_remaining(attempt),
+                )
+            )
+        if result.timed_out:
+            self._record_stage_timing(attempt, stage, elapsed_ms, "timeout")
+            clipped, source = _timeout_deadline_clip(
+                attempt,
+                issued_timeout_seconds=effective_timeout,
+                configured_timeout_seconds=self._configured_provider_timeout(),
+            )
+            emit_event(
+                "provider.call.timeout",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                stage=stage.value,
+                provider=self._provider_label,
+                failureCode=GenerationFailureCode.PROVIDER_TIMEOUT.value,
+                # Phase38 ┬º25 ÔÇö closed deadline-clipped metadata (the controller
+                # classifies the terminal code deterministically; the event is
+                # tied to the UNDERLYING cause).
+                deadlineClipped=clipped or None,
+                timeoutSource=source,
+                elapsedMs=elapsed_ms,
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=_remaining_ms(attempt),
+                deadlineRemainingBeforeMs=deadline_before_ms,
+                deadlineRemainingAfterMs=deadline_after_ms,
+                providerCallCount=provider_call_index,
+                providerCallIndex=provider_call_index,
+                repairCount=getattr(attempt.budget, "repair_passes", None),
+                regenerationCount=getattr(attempt.budget, "regenerations", None),
+            )
+            raise StageDriverProviderFailure(
+                "provider request timed out",
+                code=GenerationFailureCode.PROVIDER_TIMEOUT,
+                # Phase38 DEF-094 ÔÇö carry the ACTUAL server-issued budget and
+                # the configured provider timeout so the controller classifies
+                # the deadline clip against the issued value (robust to the
+                # reserve firing early and float epsilon at the boundary).
+                issued_timeout_seconds=effective_timeout,
+                configured_timeout_seconds=self._configured_provider_timeout(),
+            )
+        if result.error is not None:
+            code = infer_failure_code(result.error)
+            self._record_stage_timing(attempt, stage, elapsed_ms, "error")
+            emit_event(
+                "provider.call.error",
+                caseId=getattr(attempt, "case_id", None),
+                generationAttemptId=getattr(attempt, "attempt_id", None),
+                stage=stage.value,
+                provider=self._provider_label,
+                failureCode=code.value,
+                elapsedMs=elapsed_ms,
+                configuredProviderTimeoutMs=configured_timeout_ms,
+                effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+                deadlineRemainingMs=_remaining_ms(attempt),
+                deadlineRemainingBeforeMs=deadline_before_ms,
+                deadlineRemainingAfterMs=deadline_after_ms,
+                providerCallCount=provider_call_index,
+                providerCallIndex=provider_call_index,
+                repairCount=getattr(attempt.budget, "repair_passes", None),
+                regenerationCount=getattr(attempt.budget, "regenerations", None),
+            )
+            raise StageDriverProviderFailure(
+                "provider returned an unusable response", code=code
+            )
+        if result.content is None:
+            self._record_stage_timing(attempt, stage, elapsed_ms, "error")
+            raise StageDriverProviderFailure(
+                "provider returned an invalid response",
+                code=GenerationFailureCode.PROVIDER_INVALID_RESPONSE,
+            )
+        self._record_stage_timing(attempt, stage, elapsed_ms, "success")
+        emit_event(
+            "provider.call.complete",
+            caseId=getattr(attempt, "case_id", None),
+            generationAttemptId=getattr(attempt, "attempt_id", None),
+            stage=stage.value,
+            provider=self._provider_label,
+            model=self._event_model,
+            success=True,
+            elapsedMs=elapsed_ms,
+            requestBytes=len(prompt.encode("utf-8")),
+            responseBytes=len(result.content.encode("utf-8")),
+            structuredOutput=_structured_output_sent(
+                provider, provider_label=self._provider_label
+            ),
+            configuredProviderTimeoutMs=configured_timeout_ms,
+            effectiveProviderTimeoutMs=int(effective_timeout * 1000),
+            deadlineRemainingMs=_remaining_ms(attempt),
+            deadlineRemainingBeforeMs=deadline_before_ms,
+            deadlineRemainingAfterMs=deadline_after_ms,
+            providerCallCount=provider_call_index,
+            providerCallIndex=provider_call_index,
+            repairCount=getattr(attempt.budget, "repair_passes", None),
+            regenerationCount=getattr(attempt.budget, "regenerations", None),
+        )
+        return result.content
+
+    def _stage_parse(
+        self,
+        provider: Any,
+        attempt: Any,
+        stage: GenerationStage,
+        prompt: str,
+        budget: Callable[[], bool],
+        parse_fn: Callable[[str], Any],
+        label: str,
+        deferred: list[str],
+        *,
+        retry_on_parse_failure: bool = True,
+    ) -> Any:
+        """ONE stage call + strict parse, with an optional bounded retry.
+
+        Real Hermes occasionally slips a single stage contract (e.g. omits a
+        required proposition field) even after the smoke determinism fixes;
+        a stage REPEAT with the sanitized strict-parse issue as feedback fixes
+        those without weakening the parser. Every attempt is a REAL budgeted
+        provider call; the global 8-call budget stays authoritative. Provider
+        failures are never retried (terminal per attempt).  Callers with an
+        application-owned deterministic replacement may set
+        ``retry_on_parse_failure=False``: the rejected raw response is then
+        neither retried nor recorded as a deferred draft defect.  The caller
+        must still route its replacement through normal validation.
+        """
+        content = self._call(provider, attempt, stage, prompt, budget)
+        if content is None:
+            deferred.append(f"{label} stage produced no usable content")
+            return None
+        try:
+            return parse_fn(content)
+        except (TypeError, ValueError) as exc:
+            if not retry_on_parse_failure:
+                return None
+            retry_prompt = (
+                f"{prompt}\n\nThe previous response failed the strict "
+                f"application parser: {exc}\n"
+                "Return ONLY a corrected, complete JSON document for this "
+                "stage that fixes every issue listed above."
+            )
+            retry_content = self._call(provider, attempt, stage, retry_prompt, budget)
+            if retry_content is not None:
+                try:
+                    return parse_fn(retry_content)
+                except (TypeError, ValueError) as exc2:
+                    deferred.append(f"{label} stage parse failed: {exc2}")
+                    return None
+            deferred.append(f"{label} stage parse failed: {exc}")
+            return None
+
+    def _evidence_stage_parse(
+        self,
+        provider: Any,
+        attempt: Any,
+        prompt: str,
+        budget: Callable[[str | None], bool],
+    ) -> tuple[Any, dict[str, Any]]:
+        """Call and strictly parse EVIDENCE with safe structural trace data.
+
+        Evidence deliberately has no remote parse retry because the existing
+        deterministic local projection is its bounded recovery path.  The
+        returned diagnostic dictionary contains only closed structural tokens,
+        booleans, byte/count values and the truthful transport-schema flag.
+        """
+        content = self._call(
+            provider,
+            attempt,
+            GenerationStage.EVIDENCE,
+            prompt,
+            budget,
+        )
+        # ``_call`` raises for a missing result, but keep the defensive branch
+        # so this helper remains total if that contract is ever relaxed.
+        if content is None:
+            trace = _evidence_diagnostic_shape(None)
+            trace.update(
+                structuredOutput=_structured_output_sent(
+                    provider, provider_label=self._provider_label
+                ),
+                responseBytes=0,
+                parseSuccess=False,
+            )
+            return None, trace
+
+        trace = _evidence_diagnostic_shape(content)
+        trace.update(
+            structuredOutput=_structured_output_sent(
+                provider, provider_label=self._provider_label
+            ),
+            responseBytes=len(content.encode("utf-8")),
+            parseSuccess=False,
+        )
+        try:
+            parsed = stage_parser.parse_stage(
+                GenerationStage.EVIDENCE,
+                content,
+                non_throwing=False,
+            )
+        except (TypeError, ValueError) as exc:
+            # A more specific structural code wins; otherwise classify the
+            # strict DTO/parser finding without ever emitting its raw message.
+            if trace.get("validatorCode") is None:
+                trace["validatorCode"] = _evidence_validator_code(exc)
+            return None, trace
+        trace["parseSuccess"] = True
+        trace["validatorCode"] = "EVIDENCE_ACCEPTED"
+        return parsed, trace
+
+    @staticmethod
+    def _invoke(provider: Any, request: GenerateRequest) -> ProviderResult:
+        result = provider.generate(request)
+        if not isinstance(result, ProviderResult):
+            raise StageDriverProviderFailure("provider returned an invalid result type")
+        return result
+
+    # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _locked_map(attempt: Any) -> Mapping[str, Any] | None:
+        locked = getattr(attempt, "locked", None)
+        if locked is None:
+            return None
+        return {key: value for key, value in locked.locked_fields() if value is not None}
+
+    def _compose_world(
+        self,
+        attempt: Any,
+        world_reqs: WorldRequirements,
+        spec_adapter: Any,
+        deferred: list[str],
+    ) -> Any:
+        """Environment Resolver -> Asset Oracle -> World Composer."""
+        from app.environments.compose import scene_for_kit
+        from app.environments.manifests import load_environment
+        from app.environments.resolver import FALLBACK_ENVIRONMENT_ID
+        from app.world.composer import WorldComposition, compose_world
+
+        try:
+            hint = world_reqs.environment_hint or FALLBACK_ENVIRONMENT_ID
+            # Phase 19 Fix A: an already-canonical value passes cleanly; a
+            # hand-built WorldRequirements with a path-like hint is rejected
+            # here deterministically (never a file path, never a provider
+            # call) and falls back to the default kit.
+            canonical, _env_issues = canonicalize_environment_hint(hint)
+            if canonical is not None:
+                hint = canonical
+            else:
+                hint = FALLBACK_ENVIRONMENT_ID
+            kit = load_environment(str(hint))
+        except Exception:  # noqa: BLE001 - environment failure degrades safe
+            deferred.append("world_requirements stage: unsupported environment")
+            return None
+        try:
+            composition = compose_world(
+                world_reqs,
+                env_resolver=None,
+                oracle=None,
+                spec_provider=spec_adapter,
+                cache=self._generated_cache,
+                evidence_placements=(),
+                catalog=self._catalog,
+                kit=kit,
+                max_world_objects=int(
+                    getattr(self._settings, "max_world_objects_per_kit", 32)
+                ),
+            )
+        except StageDriverProviderFailure:
+            # ADV-213: a TYPED provider failure (per-asset/global budget
+            # exhaustion, deadline, timeout) is the attempt's narrow cause ├óÔé¼ÔÇØ
+            # never absorbed into a generic "world composition failed" deferral.
+            raise
+        except Exception:  # noqa: BLE001 - compose degrades safe
+            deferred.append("world composition failed for the requested world")
+            return None
+        if not isinstance(composition, WorldComposition):
+            deferred.append("world composition produced no usable result")
+            return None
+        if composition.issues:
+            deferred.extend(composition.issues)
+        return composition
+
+    def _assemble(
+        self,
+        attempt: Any,
+        crime: Any,
+        public: Any,
+        evidence_spec: Any,
+        world_reqs: WorldRequirements,
+        composition: Any,
+        *,
+        projected_placements: Any = None,
+        extra_travel_rules: tuple[Any, ...] = (),
+    ) -> Any:
+        """Build the ``GeneratedDraft`` from the staged outputs + composition.
+
+        ``projected_placements`` (when supplied by ``run_into``) are the
+        already-projected placements ├óÔé¼ÔÇØ the driver's single trust boundary
+        computes them ONCE and reconciles the composer's stale interaction
+        issues against them. ``extra_travel_rules`` are the deterministic
+        travel rules the evidence completion added (merged into the draft's
+        public travel rules)."""
+        from app.environments.compose import scene_for_kit
+        from app.environments.manifests import load_environment
+        from app.environments.resolver import FALLBACK_ENVIRONMENT_ID
+        from app.generation.publish import build_published_case_version  # noqa: F401
+        from app.generation.schemas import (
+            GeneratedDraft,
+            LocationSpec,
+            ObjectSpec,
+            SceneSpec,
+            WorldGraphLocationSpec,
+            WorldGraphSpec,
+        )
+
+        if crime is None:
+            # no case truth -> validate_draft reports "incomplete" (controller
+            # classifies TERMINAL/REPAIR through the normal path).
+            return None
+
+        # Resolve the final kit for the scene + world graph.
+        hint = (world_reqs.environment_hint if world_reqs else None) or FALLBACK_ENVIRONMENT_ID
+        canonical, _env_issues = canonicalize_environment_hint(hint)
+        if canonical is not None:
+            hint = canonical
+        else:
+            hint = FALLBACK_ENVIRONMENT_ID
+        try:
+            kit = load_environment(str(hint))
+        except Exception:  # noqa: BLE001
+            kit = None
+
+        # composition placements -> world graph + new public objects.
+        placements: list[Any] = []
+        new_objects: list[ObjectSpec] = []
+        if composition is not None:
+            if projected_placements is not None:
+                placements = list(projected_placements)
+            else:
+                weapon_evidence_id = _weapon_evidence_id(attempt, evidence_spec)
+                placements = list(
+                    _project_placement_evidence(
+                        composition.placements,
+                        evidence_spec,
+                        weapon_evidence_id,
+                    )
+                )
+
+        # base public objects (full golden base set). The OBJECTS list carries
+        # the complete golden base identity set on EVERY kit (the same set the
+        # fake/live golden world uses) so every evidence/identity reference ├óÔé¼ÔÇØ
+        # including the sharp-weapon forensics ├óÔé¼ÔÇØ stays valid on kits whose
+        # PLACEMENT subset omits a spare weapon (hotel_suite/warehouse). The
+        # per-kit placement subset (KIT_BASE_OBJECT_IDS) is a PLACEMENT concern
+        # (anchor capacity), the object identity set is not.
+        #
+        # ADV-219 (Phase 19B): the player-visible WEAPON CANDIDATE universe is
+        # derived from the PUBLIC world objects actually PLACED in the scene.
+        # A spare sharp object (letter_opener / scissors) that this kit cannot
+        # place stays a WORLD identity object (forensic/evidence references on
+        # those kits keep resolving, the presence guard stays clean) BUT is
+        # demoted to INSPECTABLE-only ├óÔé¼ÔÇØ it can never be a POTENTIAL_WEAPON
+        # candidate the player could not find in the scene. Kits that DO place
+        # them (apartment/office/mansion) keep them as weapon candidates.
+        placed_object_ids = {p.object_id for p in placements if getattr(p, "object_id", None)}
+        objects: list[ObjectSpec] = []
+        if kit is not None:
+            for object_id in OBJECTS_BASE_ALL_KITS:
+                spec = _base_object_spec(object_id)
+                if spec is None or any(o.object_id == spec.object_id for o in objects):
+                    continue
+                if object_id in _PER_KIT_SHARP_WEAPON_IDS and object_id not in placed_object_ids:
+                    spec = dataclasses.replace(spec, affordances=("INSPECTABLE",))
+                objects.append(spec)
+        if composition is not None:
+            for obj in composition.new_objects:
+                if not any(o.object_id == obj.object_id for o in objects):
+                    new_objects.append(_enhance_weapon(attempt, obj))
+        objects = [*objects, *new_objects]
+
+        # FIX-3 (ADV-41-05) / FIX-1 (ADV-41A-02) ÔÇö DISCOVERABLE witness
+        # observations. Every mechanical observation referencing a public
+        # witness (the ordinary ``d_ev_opp_<wid>`` distant opportunity record,
+        # and ``d_ev_presence`` for a witness murderer) is bound to an
+        # app-owned INSPECTABLE camera placement, so the player can discover it
+        # through the ordinary object-interaction path BEFORE accusation
+        # (``project_discovery`` refuses evidence with no placement). The
+        # binding is witness-uniform and id-prefix-independent ÔÇö a deceptive
+        # witness's contradiction is just an ordinary observation, so nothing
+        # in the world can reveal deceptive-vs-truthful status. The camera is
+        # INSPECTABLE-only ÔÇö it never enters the weapon universe or the suspect
+        # candidates.
+        contradiction_objects, contradiction_placements = _contradiction_world_placements(
+            evidence_spec, public, kit
+        )
+        objects = [*objects, *contradiction_objects]
+        placements.extend(contradiction_placements)
+
+        scene: SceneSpec | None = None
+        world_graph = WorldGraphSpec()
+        if kit is not None:
+            scene = scene_for_kit(kit, public.scene if public is not None else None)
+            if composition is not None:
+                world_graph = WorldGraphSpec(
+                    locations=tuple(
+                        WorldGraphLocationSpec(
+                            location_id=zone.zone_id,
+                            template=f"{kit.environment_id}_template",
+                            rooms=zone.rooms,
+                        )
+                        for zone in kit.zones
+                    ),
+                    placements=tuple(placements),
+                )
+
+        merged_travel = tuple(public.travel_rules) if public is not None else ()
+        if extra_travel_rules:
+            merged_travel = tuple(
+                dict.fromkeys(merged_travel + tuple(extra_travel_rules))
+            )
+
+        # ---- Phase 19 Fix B.3 ├óÔé¼ÔÇØ fail-closed OBJECT PRESENCE GUARANTEE ----
+        # Every semantic object the truth/evidence algebra references MUST be
+        # present as exactly one public object. The canonical evidence algebra
+        # is deterministic and complete by construction, so a missing reference
+        # is a genuine contract violation ├óÔé¼ÔÇØ never repairable, never silently
+        # dropped. Raise a TYPED sanitized error (the caller fails closed and
+        # nothing is published). Catalog alias / procedural resolution already
+        # ran above (in the composer), so this guard only fires when no safe
+        # representation could be produced.
+        semantic_object_ids: set[str] = {
+            o.object_id for o in objects if o.object_id
+        }
+        referenced: set[str] = set()
+        if getattr(crime, "weapon_id", None):
+            referenced.add(crime.weapon_id)
+        if evidence_spec is not None:
+            for item in getattr(evidence_spec, "evidence", ()) or ():
+                for proposition in getattr(item, "propositions", ()) or ():
+                    object_id = getattr(proposition, "object_id", None)
+                    if isinstance(object_id, str) and object_id:
+                        referenced.add(object_id)
+        missing = sorted(r for r in referenced if r not in semantic_object_ids)
+        if missing:
+            # ADV-218: the referenced ids are only length-bounded upstream
+            # (``_str_field``), so they are SANITIZED before embedding in this
+            # internal validation message ├óÔé¼ÔÇØ never a raw hostile URL / control
+            # character in the typed error text. The failure-code semantics
+            # (VALIDATION_FAILED, fail closed, nothing published) are unchanged.
+            raise SemanticObjectResolutionError(
+                "essential semantic object(s) referenced by the crime/evidence "
+                "algebra could not be represented in the world: "
+                + _sanitize_object_ids_for_message(missing)
+            )
+
+        return GeneratedDraft(
+            crime=crime,
+            persons=tuple(public.persons) if public is not None and public.persons else (),
+            motives=tuple(public.motives) if public is not None and public.motives else (),
+            objects=tuple(objects),
+            locations=(
+                tuple(public.locations)
+                if public is not None and public.locations
+                else (LocationSpec(location_id=crime.location_id, name=crime.location_id),)
+            ),
+            travel_rules=merged_travel,
+            scene=scene,
+            evidence=tuple(evidence_spec.evidence) if evidence_spec is not None else (),
+            world_graph=world_graph,
+            # ADV-153: the DECORATIVE-unresolved warnings are stored with the
+            # published draft (player-safe, bounded, sanitized) exactly like
+            # the fake/live composition path.
+            composition_notes=(
+                tuple(composition.composition_notes)
+                if composition is not None
+                else ()
+            ),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# base kit object specs (app-owned mirror of the golden base set so the weapon/
+# evidence candidate universes stay correct for a driver-produced draft).
+# --------------------------------------------------------------------------- #
+
+
+_EVIDENCE_INTERACTION_ISSUE_RE = re.compile(
+    r"^world\.evidence-interaction: evidence-linked object '([^']*)' requires a "
+    r"non-empty interaction$"
+)
+
+
+def _reconcile_evidence_interaction(
+    deferred: list[str], projected_placements: Any
+) -> list[str]:
+    """Drop stale evidence-interaction issues the driver's projection resolved.
+
+    The world composer validates BEFORE the app-owned ``_project_placement_
+    evidence`` runs and flags any evidence-linked placement whose interaction
+    is still empty. That same projection deterministically grants the
+    documented ``inspect`` interaction to every evidence-linked placement, so
+    once the projection ran the invariant ('an evidence-linked placement must
+    have a non-empty interaction') IS satisfied. This reconciliation removes
+    only the issues for placements the projection actually fixed (deferred
+    world issues are the DRIVER's own sanitized bucket ├óÔé¼ÔÇØ the composer and the
+    validators are untouched)."""
+    if not projected_placements:
+        return list(deferred)
+    fixed: set[str] = set()
+    for placement in projected_placements:
+        if (
+            getattr(placement, "evidence_id", None) is not None
+            and getattr(placement, "interaction", "")
+        ):
+            fixed.add(str(getattr(placement, "object_id", "")))
+    out: list[str] = []
+    for line in deferred:
+        match = _EVIDENCE_INTERACTION_ISSUE_RE.match(line)
+        if match is not None and match.group(1) in fixed:
+            continue
+        out.append(line)
+    return out
+
+
+# ADV-222 (Phase 19C ├é┬º5): the universally-placed DEVICE object of every kit
+# base world (the golden "laptop") whose authored association does not survive
+# into a driver world (the canonical algebra carries no email read) is re-bound
+# to the canonical scene activity-log record (``d_ev_when_obs``,
+# CRIME_SCENE_OBSERVATION_AT). This makes a TIME-BEARING fact PLAYER-REACHABLE
+# in every published driver world ├óÔé¼ÔÇØ WHEN becomes derivable from discoverable
+# evidence exactly like WHO/WHY/WEAPON. No showcase special-casing: the rule is
+# the general device-log anchor for the kit base world (laptop/terminal in
+# every kit), gated on the placement being AUTHORED as evidence-bearing.
+_WHEN_ACTIVITY_LOG_ANCHOR_OBJECTS: frozenset[str] = frozenset(
+    {"apartment_laptop"}
+)
+_CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID = "d_ev_when_obs"
+
+
+def _when_activity_log_evidence_id(evidence_spec: Any) -> str | None:
+    """The canonical scene activity-log evidence id when the published world
+    carries it (the driver's deterministic WHEN algebra always does), else
+    ``None`` (the device placement then stays decorative ├óÔé¼ÔÇØ never fabricated)."""
+    if evidence_spec is None:
+        return None
+    for item in getattr(evidence_spec, "evidence", ()) or ():
+        if str(getattr(item, "id", "")) == _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID:
+            return _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# FIX-3 (ADV-41-05) / FIX-1 (ADV-41A-02) ÔÇö DISCOVERABLE witness observations
+# --------------------------------------------------------------------------- #
+#
+# A materially deceptive witness claim must always be checkable BEFORE
+# accusation (Phase41 ┬º14). The DRIVER's canonical algebra already emits an
+# ORDINARY mechanical observation for every relevant person (``d_ev_opp_<wid>``
+# distant opportunity exclusions; ``d_ev_presence`` scene presence for the
+# murderer). FIX-1 removed the special ``d_ev_contradict_*`` leak-marked record
+# entirely: the contradiction IS one of those ordinary observations.
+#
+# Such a record is only ``discoverable`` ON PAPER: without a world placement
+# linking it, ``InvestigationService.discover_evidence`` 404s ("evidence is not
+# reachable") and a lie could never be challenged. The driver therefore injects
+# an app-owned CCTV/access-reader placement bound to every discoverable
+# mechanical observation that references a public WITNESS, so the player can
+# inspect the camera and discover the record through the ordinary
+# object-interaction path. The binding rule is id-prefix-independent and
+# witness-uniform (every witness ÔÇö truthful or deceptive ÔÇö gets exactly one
+# bound camera), so the public world can never reveal deceptive-vs-truthful
+# status. The camera is INSPECTABLE-only (never a POTENTIAL_WEAPON, never a
+# suspect candidate) and is a registered logical asset (``CAMERA_HALL_01``) ÔÇö
+# deterministic, zero provider calls, and the exact same placement/evidence
+# contract the world graph validates.
+
+# The registered world asset bound to each witness-observation record (a CCTV /
+# security camera). ``CAMERA_HALL_01`` is already in the frozen AssetRegistry
+# (``app.generation.safety.AssetRegistry``) so no registry/catalog change is
+# needed and the world-graph asset-reference gate stays green.
+_CONTRADICTION_ASSET_ID = "CAMERA_HALL_01"
+
+
+def _contradiction_record_ids(evidence_spec: Any, public: Any) -> tuple[str, ...]:
+    """Sorted ids of the DISCOVERABLE mechanical observations that reference a
+    public WITNESS ÔÇö the neutral, id-prefix-independent contradiction surface.
+
+    FIX-1 (ADV-41A-02): the driver no longer stamps any public leak marker on a
+    deception contradiction. ANY mechanical observation (``cctv`` /
+    ``view_record`` ÔÇª) that references a public witness is a placement-
+    discoverable contradiction candidate: a deceptive INNOCENT witness is
+    contradicted by their ordinary distant ``d_ev_opp_<wid>`` observation and a
+    deceptive GUILTY witness (the witness murderer) by their ordinary
+    ``d_ev_presence`` scene observation. Truthful witnesses carry the SAME
+    ordinary records (every witness gets exactly one bound camera), so the
+    placement set can never distinguish deceptive from truthful status
+    (REQUIREMENTS ┬º47A.4 / Phase41A ┬º26/┬º63).
+    """
+    from app.generation.evidence_facts import MECHANICAL_CONTRADICTION_KINDS
+
+    witness_ids = {
+        str(getattr(p, "person_id", "") or "")
+        for p in (getattr(public, "persons", ()) or ())
+        if str(getattr(p, "role", "")) == "witness"
+    }
+    hits: set[str] = set()
+    for item in (getattr(evidence_spec, "evidence", ()) or ()):
+        item_id = str(getattr(item, "id", ""))
+        if str(getattr(item, "kind", "") or "") not in MECHANICAL_CONTRADICTION_KINDS:
+            continue
+        if getattr(item, "discoverable", True) is False:
+            continue
+        referenced = {
+            str(getattr(p, "person_id", "") or "")
+            for p in getattr(item, "propositions", ()) or ()
+        }
+        if referenced & witness_ids:
+            hits.add(item_id)
+    return tuple(sorted(h for h in hits if h))
+
+
+def _contradiction_anchor(kit: Any) -> tuple[str, str] | None:
+    """``(anchor_id, zone_id)`` of the kit's CCTV/access-control anchor.
+
+    Deterministic preference: the first (alphabetical) CCTV anchor, then the
+    first ACCESS_CONTROL anchor, then the first non-exclusive GENERIC_PROP.
+    Every kit ships a CCTV + ACCESS_CONTROL anchor (the Phase-11 kit
+    manifests), so this is normally the CCTV anchor. Returns None only when
+    the kit carries none of those anchor types (never fabricates).
+    """
+    if kit is None:
+        return None
+    for anchor_type in ("CCTV", "ACCESS_CONTROL", "GENERIC_PROP"):
+        candidates = sorted(
+            (
+                a
+                for a in getattr(kit, "anchors", ()) or ()
+                if getattr(a, "type", "") == anchor_type
+                and (
+                    anchor_type != "GENERIC_PROP"
+                    or not getattr(a, "exclusive", False)
+                )
+            ),
+            key=lambda a: str(getattr(a, "anchor_id", "") or ""),
+        )
+        if candidates:
+            anchor = candidates[0]
+            return (
+                str(getattr(anchor, "anchor_id", "")),
+                str(getattr(anchor, "zone_id", "")),
+            )
+    return None
+
+
+def _contradiction_world_placements(
+    evidence_spec: Any, public: Any, kit: Any
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    """The app-owned camera ``(objects, placements)`` binding every discoverable
+    witness-observation record to a world placement (FIX-3 / FIX-1).
+
+    Deterministic and bounded: exactly one INSPECTABLE camera object +
+    placement per witness-referencing mechanical observation (normally one per
+    public witness). Each placement carries ``interaction="inspect"`` and the
+    observation ``evidence_id`` so ``project_discovery`` / the interact gate
+    surface it. The binding is uniform across truthful and deceptive witnesses,
+    so the injected world can never leak truthfulness (FIX-1, ADV-41A-02).
+    """
+    from app.generation.constraints import normalize_identity
+    from app.generation.schemas import ObjectSpec, PlacementSpec
+
+    record_ids = _contradiction_record_ids(evidence_spec, public)
+    if not record_ids:
+        return (), ()
+    anchor = _contradiction_anchor(kit)
+    if anchor is None:
+        return (), ()
+    anchor_id, zone_id = anchor
+    objects: list[Any] = []
+    placements: list[Any] = []
+    for record_id in record_ids:
+        camera_id = f"cctv_camera_{normalize_identity(record_id) or 'witness'}"
+        objects.append(
+            ObjectSpec(
+                object_id=camera_id,
+                asset_id=_CONTRADICTION_ASSET_ID,
+                affordances=("INSPECTABLE",),
+                subtype="camera",
+            )
+        )
+        placements.append(
+            PlacementSpec(
+                object_id=camera_id,
+                asset_id=_CONTRADICTION_ASSET_ID,
+                location_id=zone_id,
+                anchor=anchor_id,
+                interaction="inspect",
+                evidence_id=record_id,
+            )
+        )
+    return tuple(objects), tuple(placements)
+
+
+def _evidence_bind_rank(item: Any, needle: str) -> int:
+    """The SEMANTIC priority of ``item`` as the published evidence binding for
+    the object ``needle`` (ADV-223).
+
+    When TWO canonical facts reference the same object the resolve rule must
+    pick the fact whose KIND/ROLE matches the object's published role, not an
+    arbitrary id order. The documented priority list (lower wins):
+
+      0 ├óÔé¼ÔÇØ the evidence carries a ``FORENSIC_WEAPON_MATCH`` proposition for the
+          object (the weapon-match record ├óÔé¼ÔÇØ what a sharp weapon's published
+          "forensic comparison" role points at);
+      1 ├óÔé¼ÔÇØ the evidence carries an ``OBJECT_CONTAINS_FINGERPRINT`` proposition
+          for the object (the latent-print forensics role);
+      2 ├óÔé¼ÔÇØ any other FORENSIC-kind evidence referencing the object;
+      3 ├óÔé¼ÔÇØ any other evidence (generic cctv/witness/email extras).
+
+    Ties break by evidence id order (``_first_evidence_referencing_object``).
+    """
+    from app.generation.constraints import normalize_identity
+
+    for prop in getattr(item, "propositions", ()) or ():
+        if normalize_identity(getattr(prop, "object_id", None)) != needle:
+            continue
+        ptype = str(getattr(prop, "type", "") or "")
+        if ptype == "FORENSIC_WEAPON_MATCH":
+            return 0
+        if ptype == "OBJECT_CONTAINS_FINGERPRINT":
+            return 1
+    if str(getattr(item, "kind", "") or "") == "forensic":
+        return 2
+    return 3
+
+
+def _first_evidence_referencing_object(
+    evidence_spec: Any, object_id: str
+) -> str | None:
+    """The ROLE-MATCHED (semantic) real evidence id whose propositions
+    reference ``object_id`` (normalized comparison), or ``None`` when no
+    published evidence references the object.
+
+    Phase 19C: the driver's canonical evidence algebra always emits forensic
+    comparison records for the kit base sharp weapons
+    (``d_ev_weapon_false_kitchenknife`` etc.), so a base sharp-object
+    placement whose composer evidence id (``forensic_knife_match_01`` ...)
+    does not exist in the driver world is re-bound to that REAL record ├óÔé¼ÔÇØ the
+    same experience the golden world gives (knife -> forensic comparison).
+
+    ADV-223: the pick is SEMANTIC, not alphabetical ├óÔé¼ÔÇØ among the candidate
+    facts referencing the object the one whose kind/role best matches the
+    object's published role wins (see ``_evidence_bind_rank`` for the
+    documented priority list); ties break by evidence id. Deterministic and
+    stable across runs (evidence ORDER independent); never fabricates.
+    """
+    from app.generation.constraints import normalize_identity
+
+    needle = normalize_identity(str(object_id or ""))
+    if not needle:
+        return None
+    matches: list[tuple[int, str]] = []
+    for item in getattr(evidence_spec, "evidence", ()) or ():
+        item_id = str(getattr(item, "id", ""))
+        if not item_id:
+            continue
+        for prop in getattr(item, "propositions", ()) or ():
+            prop_id = normalize_identity(getattr(prop, "object_id", None))
+            if prop_id and prop_id == needle:
+                matches.append((_evidence_bind_rank(item, needle), item_id))
+                break
+    if not matches:
+        return None
+    return sorted(matches)[0][1]
+
+
+def _project_placement_evidence(
+    placements: Any,
+    evidence_spec: Any,
+    weapon_evidence_id: str,
+) -> tuple[Any, ...]:
+    """Deterministic placement├óÔÇáÔÇÖevidence referential projection (Phase17D).
+
+    The model's world output may attach fabricated evidenceIds (or copy a
+    sheet line) to placements; the strict engine REJECTS any evidenceId that
+    is not a real parsed evidence id. The DRIVER is the sole trust boundary
+    and projects the reference exactly as it projects weapon affordances
+    (``_enhance_weapon``): every placement keeps its evidenceId ONLY when it
+    is a REAL parsed evidence id; the LOCKED weapon placement is bound to the
+    SEALED weapon evidence id when one exists; everything else degrades to
+    ``None`` (a decorative placement). Never fabricates evidence, never drops
+    a placement, never serializes.
+
+    Phase 19C general rule (no object is special-cased): the composer wires
+    the GOLDEN evidence associations onto the kit base placements
+    (``_GOLDEN_OBJECT_FACTS``: knife -> forensic_knife_match_01, laptop ->
+    email_thomas_01, ...) but the DRIVER replaces the published evidence with
+    its canonical ``d_ev_*`` algebra ├óÔé¼ÔÇØ those golden ids do not exist in the
+    driver world. A placement whose composer evidence id is dropped must
+    NEVER publish as an interactable-but-evidence-less dead-end. Resolution:
+
+    - the placement is re-bound to the ROLE-MATCHED real canonical evidence
+      fact whose propositions reference the object (``kitchen_knife`` ->
+      ``d_ev_weapon_false_kitchenknife``, ``letter_opener`` ->
+      ``d_ev_weapon_false_letteropener``, ``scissors`` ->
+      ``d_ev_weapon_false_scissors``), exactly like the golden experience;
+    - a placement that was AUTHORED as evidence-bearing (composer evidence id
+      non-empty) but for which NO canonical evidence references the object
+      (e.g. a LAPTOP ├óÔé¼ÔÇØ a driver world carries no laptop email) is bound to
+      the canonical scene activity-log record when one exists
+      (``d_ev_when_obs`` ├óÔé¼ÔÇØ ADV-222: the player can then derive WHEN from
+      discoverable evidence), otherwise it is published DECORATIVE
+      (interaction "") so it never misleads the player into an interaction
+      with nothing to find;
+    - a placement that was NEVER authored as evidence-bearing (composer
+      evidence id ``None``) and carries an explicit requested interaction is
+      an INFORMATIONAL object (ADV-224): it is NEVER rebound/upgraded to an
+      evidence object ├óÔé¼ÔÇØ its interaction stays (the frontend renders the
+      Phase 19C "Nothing relevant was found on <X>." feedback for a 200
+      ``discovery: null`` response), exactly as before.
+    """
+    from app.generation.constraints import normalize_identity
+    from app.generation.schemas import PlacementSpec
+
+    valid_ids = {
+        str(getattr(item, "id", ""))
+        for item in (getattr(evidence_spec, "evidence", ()) or ())
+    }
+    locked_weapon_slug = (
+        normalize_identity(_weapon_object_id_from_evidence(evidence_spec, weapon_evidence_id))
+        if weapon_evidence_id
+        else ""
+    )
+    projected: list[Any] = []
+    for placement in placements:
+        existing = getattr(placement, "evidence_id", None)
+        evidence_id = existing if existing in valid_ids else None
+        if (
+            evidence_id is None
+            and weapon_evidence_id
+            and weapon_evidence_id in valid_ids
+            and locked_weapon_slug
+            and normalize_identity(str(getattr(placement, "object_id", "")))
+            == locked_weapon_slug
+        ):
+            evidence_id = weapon_evidence_id
+        if not isinstance(placement, PlacementSpec):
+            projected.append(placement)
+            continue
+        interaction = getattr(placement, "interaction", "")
+        if evidence_id is None and interaction:
+            # Phase 19C resolution (see docstring): the composer's evidence
+            # association does not survive into the driver world.
+            #
+            # ADV-224: only placements AUTHORED as evidence-bearing (composer
+            # evidence id non-empty, dropped by the driver) ├óÔé¼ÔÇØ or the locked
+            # weapon object ├óÔé¼ÔÇØ may be rebound/upgraded. A NEVER-authored
+            # informational object that a canonical fact happens to reference
+            # MUST stay informational (interaction unchanged, discovery null).
+            is_locked_weapon_object = (
+                bool(weapon_evidence_id)
+                and weapon_evidence_id in valid_ids
+                and bool(locked_weapon_slug)
+                and normalize_identity(str(getattr(placement, "object_id", "")))
+                == locked_weapon_slug
+            )
+            if existing is not None or is_locked_weapon_object:
+                rebound = _first_evidence_referencing_object(
+                    evidence_spec, str(getattr(placement, "object_id", ""))
+                )
+                if rebound is not None:
+                    evidence_id = rebound
+                elif existing is not None:
+                    # ADV-222: an authored device placement with no referencing
+                    # fact keeps WHEN derivable from discoverable evidence by
+                    # binding the canonical scene activity-log record.
+                    if (
+                        str(getattr(placement, "object_id", ""))
+                        in _WHEN_ACTIVITY_LOG_ANCHOR_OBJECTS
+                        and _when_activity_log_evidence_id(evidence_spec)
+                    ):
+                        evidence_id = _CANONICAL_WHEN_ACTIVITY_EVIDENCE_ID
+                    else:
+                        # Authored as evidence-bearing but no real association
+                        # exists in THIS world -> decorative, never a
+                        # misleading dead-end.
+                        interaction = ""
+        # An evidence-linked placement MUST be directly interactable (the
+        # safety engine refuses an evidence-linked object with an empty
+        # interaction). The locked weapon placement (and any other
+        # evidence-linked placement) receives the deterministic inspect
+        # interaction exactly as ``_enhance_weapon`` grants affordances.
+        if evidence_id is not None and not interaction:
+            interaction = "inspect"
+        projected.append(
+            dataclasses.replace(placement, evidence_id=evidence_id, interaction=interaction)
+        )
+    return tuple(projected)
+
+
+def _weapon_object_id_from_evidence(evidence_spec: Any, weapon_evidence_id: str) -> str:
+    """The locked-weapon object id the sealed weapon evidence references."""
+    for item in getattr(evidence_spec, "evidence", ()) or ():
+        if str(getattr(item, "id", "")) != weapon_evidence_id:
+            continue
+        for prop in getattr(item, "propositions", ()) or ():
+            object_id = getattr(prop, "object_id", None)
+            if isinstance(object_id, str) and object_id:
+                return object_id
+        return ""
+    return ""
+
+
+def _enhance_weapon(attempt: Any, obj: ObjectSpec) -> ObjectSpec:
+    """Deterministically grant weapon affordances to a crime-critical unknown
+    object that IS the locked weapon.
+
+    The LLM proposes the object; the DETERMINISTIC driver decides universe
+    membership. When a procedural object's id normalizes to the LOCKED weapon
+    it enters the weapon universe (POTENTIAL_WEAPON + POTENTIAL_SHARP_WEAPON)
+    so the solver can derive it ├óÔé¼ÔÇØ this is the showcase path that lets a
+    crime-critical unseen object be the actual weapon the deduction proves.
+    """
+    from app.generation.constraints import normalize_identity
+    from app.generation.schemas import ObjectSpec
+
+    locked = getattr(attempt, "locked", None)
+    weapon = getattr(locked, "weapon", None) if locked is not None else None
+    if not isinstance(weapon, str) or not weapon:
+        return obj
+    # ADV-237 ├óÔé¼ÔÇØ compare against the SINGLE slug source (semantic_object_id):
+    # ``obj.object_id`` is the composed SEMANTIC id (40-char truncated for
+    # long names); the raw locked text normalizes to the FULL string for a
+    # >40-char weapon and would never match. The needle must be the SAME
+    # truncated id the sheet/injection/composer use so a long locked weapon
+    # still enters the POTENTIAL_WEAPON universe.
+    if normalize_identity(semantic_object_id(weapon)) != normalize_identity(obj.object_id):
+        return obj
+    return ObjectSpec(
+        object_id=obj.object_id,
+        asset_id=obj.asset_id,
+        affordances=("INSPECTABLE", "POTENTIAL_WEAPON", "POTENTIAL_SHARP_WEAPON"),
+        subtype=obj.subtype,
+    )
+
+
+def _base_object_spec(object_id: str) -> ObjectSpec | None:
+    from app.generation.schemas import ObjectSpec
+
+    _BASE: dict[str, tuple[str, tuple[str, ...], str | None]] = {
+        "kitchen_knife": (
+            "PROP_KITCHEN_KNIFE_01",
+            ("INSPECTABLE", "POTENTIAL_WEAPON", "POTENTIAL_SHARP_WEAPON"),
+            "sharp_weapon",
+        ),
+        "letter_opener": (
+            "PROP_LETTER_OPENER_01",
+            ("INSPECTABLE", "POTENTIAL_WEAPON", "POTENTIAL_SHARP_WEAPON"),
+            "sharp_weapon",
+        ),
+        "scissors": (
+            "PROP_SCISSORS_01",
+            ("INSPECTABLE", "POTENTIAL_WEAPON", "POTENTIAL_SHARP_WEAPON"),
+            "sharp_weapon",
+        ),
+        "vase_01": ("PROP_VASE_01", ("INSPECTABLE",), None),
+        "apartment_table": ("PROP_TABLE_01", ("INSPECTABLE",), "furniture"),
+        "apartment_door": ("DOOR_APARTMENT_01", ("INSPECTABLE",), "door"),
+        "apartment_lamp": ("PROP_LAMP_01", ("INSPECTABLE",), "light"),
+        "apartment_laptop": ("PROP_LAPTOP_01", ("INSPECTABLE",), "electronics"),
+        "victim_body_placeholder": ("PROP_BODY_PLACEHOLDER_01", ("INSPECTABLE",), "victim_body"),
+    }
+    entry = _BASE.get(object_id)
+    if entry is None:
+        return None
+    asset_id, affordances, subtype = entry
+    return ObjectSpec(
+        object_id=object_id,
+        asset_id=asset_id,
+        affordances=affordances,
+        subtype=subtype,
+    )
+
+
+__all__ = [
+    "MAX_ACTIVITY_LOG_REPAIR_PASSES",
+    "MAX_SPEC_REPAIR_PASSES",
+    "OllamaAssetSpecProvider",
+    "OllamaStageDriver",
+    "StageDriverProviderFailure",
+    "inject_locked_weapon_request",
+    "parse_case_people",
+    "parse_world_requirements",
+    "_BASE_SHARP_WEAPON_IDS",
+    "_approved_travel_sheet",
+    "_deduction_seed",
+    "_evidence_gap_facts",
+    "_evidence_timeline",
+    "_reconcile_evidence_interaction",
+]

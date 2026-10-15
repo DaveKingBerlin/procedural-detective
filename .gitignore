@@ -151,6 +151,8 @@ activemq-data/
 .env
 .env.local-qa-backup
 .env.benchmark
+.env.investigation
+.env.investigation.*
 .envrc
 .venv
 env/
