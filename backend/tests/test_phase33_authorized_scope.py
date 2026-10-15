@@ -12,6 +12,7 @@ fixtures only — no provider bodies, no CaseTruth.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -254,10 +255,33 @@ def test_phase33_repair_context_carries_scope_and_witness_contract():
     context = _request_context(attempt, GenerationStage.REPAIR)
     for asset_id in sorted(AssetRegistry.ASSET_IDS):
         assert asset_id in context
-    for anchor in sorted(ANCHOR_ALLOWLIST):
-        assert anchor in context
     assert "LOCKED WITNESS CONTRACT" in context
     assert "AUTHORIZED GENERATION SCOPE" in context
+    # Phase43 (P43-FR-10 / DEF-063) — the WORLD_GRAPH/REPAIR scope is
+    # KIT-SCOPED: only the resolved selected kit's anchors are offered and the
+    # other kits' exclusive anchors are withheld (the model is never handed the
+    # multi-kit anchor table). The repair context also serializes the CURRENT
+    # draft, so the assertion is on the appended SCOPE block.
+    assert pipeline.selected_environment_kit(attempt) == "office"
+    table = dict(prompts._kit_anchor_table())
+    selected_anchors = set(table["office"])
+    scope = prompts.generation_scope_block("office")
+    assert scope in context
+    for anchor in selected_anchors:
+        assert anchor in scope
+    other_anchors = {
+        anchor for kit, ids in table.items() if kit != "office" for anchor in ids
+    }
+    for anchor in sorted(other_anchors - selected_anchors):
+        assert not _has_token(scope, anchor), anchor
+
+
+def _has_token(text: str, token: str) -> bool:
+    """True when ``token`` appears as a standalone id token (not a substring of
+    a longer id such as ``office_document_01``)."""
+    return re.search(
+        r"(?<![A-Za-z0-9_])" + re.escape(token) + r"(?![A-Za-z0-9_])", text
+    ) is not None
 
 
 def test_phase33_world_graph_context_carries_asset_and_anchor_scope():
@@ -266,8 +290,19 @@ def test_phase33_world_graph_context_carries_asset_and_anchor_scope():
     assert "AUTHORIZED GENERATION SCOPE" in context
     for asset_id in sorted(AssetRegistry.ASSET_IDS):
         assert asset_id in context
-    for anchor in sorted(ANCHOR_ALLOWLIST):
-        assert anchor in context
+    # Phase43 (P43-FR-10 / DEF-063) — kit-scoped anchors. The WORLD_GRAPH
+    # context does not serialize the draft, so the FULL rendered message is
+    # asserted: no other-kit-exclusive anchor is offered anywhere.
+    assert pipeline.selected_environment_kit(attempt) == "office"
+    table = dict(prompts._kit_anchor_table())
+    selected_anchors = set(table["office"])
+    for anchor in selected_anchors:
+        assert _has_token(context, anchor), anchor
+    other_anchors = {
+        anchor for kit, ids in table.items() if kit != "office" for anchor in ids
+    }
+    for anchor in sorted(other_anchors - selected_anchors):
+        assert not _has_token(context, anchor), anchor
 
 
 def test_phase33_public_world_context_carries_witness_contract():

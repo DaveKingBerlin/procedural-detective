@@ -176,7 +176,7 @@ def _medium_hotel_payload():
         _j(cp),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
         *_alog_posts('2026-09-11T21:18:00+02:00'),
-        _j(_world("kitchen knife")),
+        _j(_world("kitchen knife", "hotel_suite")),
     ]
     prompt = (
         "Victim: Dr. Anna Weiss\nMurderer: Paul Becker\nMotive: stolen research data\n"
@@ -265,11 +265,11 @@ def test_adv222_every_driver_kit_carries_a_reachable_when_fact():
     from app.services.publication import serialize_published_payload
 
     for env_hint, world_req, weapon_obj in (
-        ("apartment", _world("kitchen knife"), "kitchen_knife"),
-        ("office", _world("kitchen knife"), "kitchen_knife"),
-        ("hotel suite", _world("kitchen knife"), "kitchen_knife"),
-        ("warehouse", _world("kitchen knife"), "kitchen_knife"),
-        ("mansion", _world("kitchen knife"), "kitchen_knife"),
+        ("apartment", _world("kitchen knife", "apartment"), "kitchen_knife"),
+        ("office", _world("kitchen knife", "office"), "kitchen_knife"),
+        ("hotel suite", _world("kitchen knife", "hotel_suite"), "kitchen_knife"),
+        ("warehouse", _world("kitchen knife", "warehouse"), "kitchen_knife"),
+        ("mansion", _world("kitchen knife", "mansion"), "kitchen_knife"),
     ):
         cp = _case_people(weapon=weapon_obj)
         cp["crime"]["crimeTime"] = {

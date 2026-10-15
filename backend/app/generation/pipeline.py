@@ -24,6 +24,7 @@ COMPLETE validation suite again, never incremental trust).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -41,7 +42,14 @@ from app.domain.public import (
 )
 from app.domain.solver import solve_case
 from app.domain.truth import CaseTruth, Crime, CrimeTime
-from app.generation import case_quality, parser, prompt as prompt_mod, prompts, safety
+from app.generation import (
+    case_quality,
+    parser,
+    prompt as prompt_mod,
+    prompts,
+    safety,
+    trusted_context,
+)
 from app.generation.budgets import BudgetTracker
 from app.generation.constraints import LockedConstraints
 from app.generation.provider import GenerateRequest, GenerationStage
@@ -141,6 +149,12 @@ class AttemptRecord:
     # lifted into ``CaseTruth.witness_truthfulness`` by ``_draft_to_phase3``.
     # NEVER serialized into the draft, NEVER a public DTO / telemetry field.
     _witness_truthfulness: tuple[Any, ...] = ()
+    # Phase43 (P43-FR-08) — REPAIR scope snapshot. ``build_request`` records
+    # the pre-repair declaration ids + the owner-authorized section set so
+    # ``apply_repair`` can reject unauthorized identifier churn. Both are
+    # attempt-local, never serialized, never emitted; cleared on regeneration.
+    _repair_pre_ids: dict[str, tuple[str, ...]] | None = None
+    _repair_authorized_sections: frozenset[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -445,17 +459,31 @@ def _stage_context(attempt: AttemptRecord, stage: GenerationStage) -> str:
     the Phase33 RAD-1 "missing trusted context" / "ambiguous guidance" gaps
     without changing a single validation semantics.
 
-    Phase35 §37: the REPAIR stage additionally receives the bounded safe
+Phase35 §37: the REPAIR stage additionally receives the bounded safe
     CASE-QUALITY FIX CONTEXT — allowed person IDs + public roles, witness IDs,
     suspect candidate IDs, the required witness-kind evidence vocabulary and
-    the SAFE quality issue codes from the report. Never CaseTruth/murderer
+    the safe quality issue codes from the report. Never CaseTruth/murderer
     through public diagnostics; the canonical truth stays server-side.
+
+    Phase43 (P43-FR-03/07/10): every controller stage additionally renders an
+    AUTHORITATIVE provider-neutral block (``_authoritative_stage_block``) built
+    from ``trusted_context`` + already-parsed validated stage outputs — the
+    canonical locked-ID sheet, the immutable crime ids, the approved public /
+    travel / deduction material, the ONE selected environment kit + its
+    kit-scoped anchors/assets, and the provider-facing camelCase repair shape —
+    so the generic Frontier path carries the same identity/quality/world
+    contracts the Ollama driver already consumes. Still NEVER a CaseTruth
+    object or hidden solver internals.
     """
     if stage is GenerationStage.REPAIR:
         material: Any = attempt.draft
         if material is None:
             material = dict(attempt.stage_outputs)
-        text = safety.sanitize_for_repair(material)
+            text = safety.sanitize_for_repair(material)
+        else:
+            # Phase43 (P43-FR-07) — present the provider-facing camelCase
+            # protocol shape so the model sees ONE canonical namespace.
+            text = provider_facing_draft_json(material)
     else:
         material_context: dict[str, Any] = {"prompt": attempt.prompt}
         if attempt.prompt_note:
@@ -479,8 +507,20 @@ def _stage_context(attempt: AttemptRecord, stage: GenerationStage) -> str:
             if evidence_set is not None:
                 material_context["evidence"] = evidence_set
         text = safety.sanitize_for_repair(material_context)
+    # Phase43 (P43-FR-03) — the per-stage AUTHORITATIVE canonical-ID / quality
+    # / world block (provider-neutral, built from trusted state only).
+    authoritative = _authoritative_stage_block(attempt, stage)
+    if authoritative:
+        text = f"{text}\n\n{authoritative}"
     if stage in _SCOPE_STAGES:
-        scope = prompts.generation_scope_block()
+        # Phase43 (P43-FR-10 / DEF-063) — the WORLD_GRAPH and REPAIR contexts
+        # are KIT-SCOPED: only the resolved selected environment kit's anchors
+        # are offered; other kits' anchors are never presented as options. The
+        # PUBLIC_WORLD context keeps the original (no-arg) scope bytes.
+        if stage in (GenerationStage.WORLD_GRAPH, GenerationStage.REPAIR):
+            scope = prompts.generation_scope_block(selected_environment_kit(attempt))
+        else:
+            scope = prompts.generation_scope_block()
         if stage in _WITNESS_SCOPE_STAGES:
             scope += "\n\n" + prompts.locked_witness_contract_line()
         if stage is GenerationStage.REPAIR:
@@ -589,6 +629,655 @@ def _public_role_label(person_id: str, role: Any) -> str:
     return f"{person_id} (<invalid>)"
 
 
+# --------------------------------------------------------------------------- #
+# Phase43 — provider-neutral trusted ID / world contracts for the generic path
+# --------------------------------------------------------------------------- #
+#
+# ``FrontierProvider`` runs the GENERIC controller pipeline (no stage driver),
+# so ``_stage_context`` is the model-visible contract. The helpers below render
+# the SAME authoritative canonical-ID / Phase41A quality / world contracts the
+# Ollama driver already consumes (``trusted_context``), derived ONLY from
+# already-parsed validated stage state + the locked constraints — never from raw
+# provider output and never from hidden CaseTruth/solver internals.
+
+_DECLARATION_SECTIONS: tuple[str, ...] = (
+    "persons",
+    "motives",
+    "objects",
+    "locations",
+    "evidence",
+)
+
+_UNIVERSE_KEYS: tuple[str, ...] = (
+    "personIds",
+    "locationIds",
+    "motiveIds",
+    "objectIds",
+    "evidenceIds",
+    "assetIds",
+    "anchors",
+    "roles",
+    "affordances",
+    # DEF-062 (ADV-43-01) — role-scoped LOCKED reference universes. The
+    # ``case_truth`` stage may constrain a crime reference ONLY when THAT role
+    # is locked; these keys carry just the locked canonical ids per role.
+    "lockedVictimIds",
+    "lockedMurdererIds",
+    "lockedWitnessIds",
+    "lockedMotiveIds",
+    "lockedWeaponIds",
+    "lockedLocationIds",
+)
+
+# Provider-facing draft serialization drops these server-internal keys.
+_CAMEL_DROP_KEYS: frozenset[str] = frozenset(
+    {"compositionNotes", "resolutionProvenance", "generatedDefinition"}
+)
+
+_KIT_UNRESOLVED_LINE = (
+    "SELECTED ENVIRONMENT KIT: (must be selected — no location/environment "
+    "could be resolved; do NOT assume or mix anchors from multiple kits)"
+)
+
+
+def _camel_key(key: str) -> str:
+    if "_" not in key:
+        return key
+    head, *rest = key.split("_")
+    return head + "".join(part[:1].upper() + part[1:] for part in rest)
+
+
+def _camelize(node: Any) -> Any:
+    if isinstance(node, Mapping):
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            camel = _camel_key(str(key))
+            if camel in _CAMEL_DROP_KEYS:
+                continue
+            out[camel] = _camelize(value)
+        return out
+    if isinstance(node, (list, tuple)):
+        return [_camelize(item) for item in node]
+    return node
+
+
+def provider_facing_draft(draft: Any) -> dict[str, Any]:
+    """Deterministic provider-facing (camelCase) projection of a draft (FR-07).
+
+    Converts the internal snake_case spec tree into the SAME key namespace the
+    repair RESPONSE contract uses (``personId`` / ``worldGraph`` /
+    ``crimeTime`` ...) so the model sees ONE canonical protocol shape. Only
+    server-internal keys (``compositionNotes`` / ``resolutionProvenance`` /
+    ``generatedDefinition``) are dropped.
+    """
+    if draft is None:
+        return {}
+    return _camelize(safety._spec_to_plain(draft))
+
+
+def provider_facing_draft_json(draft: Any) -> str:
+    """Deterministic JSON text of ``provider_facing_draft`` (stable bytes)."""
+    return json.dumps(
+        provider_facing_draft(draft),
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def current_declaration_ids(draft: Any) -> dict[str, tuple[str, ...]]:
+    """Declaration ids per section (FR-08).
+
+    Returns a closed-key mapping (``persons`` / ``motives`` / ``objects`` /
+    ``locations`` / ``evidence``) of the sorted ids DECLARED by the draft.
+    Locked canonical ids are handled separately by ``_locked_canonical_ids``
+    (they are a property of the attempt, not the draft). An incomplete/absent
+    draft yields empty tuples.
+    """
+    if draft is None:
+        return {section: () for section in _DECLARATION_SECTIONS}
+
+    def _ids(entries: Any, attr: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                value
+                for value in (
+                    getattr(entry, attr, None) for entry in (entries or ())
+                )
+                if isinstance(value, str) and value
+            )
+        )
+
+    return {
+        "persons": _ids(getattr(draft, "persons", ()), "person_id"),
+        "motives": _ids(getattr(draft, "motives", ()), "motive_id"),
+        "objects": _ids(getattr(draft, "objects", ()), "object_id"),
+        "locations": _ids(getattr(draft, "locations", ()), "location_id"),
+        "evidence": _ids(getattr(draft, "evidence", ()), "id"),
+    }
+
+
+def _locked_canonical_ids(attempt: AttemptRecord) -> dict[str, str]:
+    """Canonical locked ids keyed by locked field (victim/murderer/...)."""
+    out: dict[str, str] = {}
+    for identity in trusted_context.locked_identities(getattr(attempt, "locked", None)):
+        out.setdefault(identity.field, identity.canonical_id)
+    return out
+
+
+def _crime_from_attempt(attempt: AttemptRecord) -> Any:
+    crime = attempt.stage_outputs.get(GenerationStage.CASE_TRUTH)
+    if crime is None and attempt.draft is not None:
+        crime = attempt.draft.crime
+    return crime
+
+
+def _public_world_from_attempt(attempt: AttemptRecord) -> Any:
+    public = attempt.stage_outputs.get(GenerationStage.PUBLIC_WORLD)
+    if public is not None:
+        return public
+    return attempt.draft
+
+
+def _evidence_from_attempt(attempt: AttemptRecord) -> Any:
+    evidence = attempt.stage_outputs.get(GenerationStage.EVIDENCE)
+    if evidence is not None:
+        return evidence
+    return attempt.draft
+
+
+def selected_environment_kit(attempt: AttemptRecord) -> str | None:
+    """Deterministic resolution of the ONE authoritative environment kit (FR-10).
+
+    Priority order (all TRUSTED inputs): locked ``location`` -> the parsed
+    scene's ``environment_id`` -> the parsed scene/location id or name -> the
+    parsed crime location -> an explicit ``Location:`` prompt line. Each
+    candidate is canonicalized through
+    ``app.world.environment.canonicalize_environment_hint``; the FIRST value
+    that canonicalizes onto a supported kit wins. Returns ``None`` when no kit
+    can be resolved (the caller must then state that a kit must be selected —
+    never dump all kits' anchors as equal options).
+    """
+    from app.world.environment import canonicalize_environment_hint
+
+    candidates: list[Any] = []
+    locked = getattr(attempt, "locked", None)
+    if locked is not None:
+        candidates.append(getattr(locked, "location", None))
+    public = _public_world_from_attempt(attempt)
+    scene = getattr(public, "scene", None) if public is not None else None
+    if scene is not None:
+        candidates.append(getattr(scene, "environment_id", None))
+        candidates.append(getattr(scene, "name", None))
+        candidates.append(getattr(scene, "location_id", None))
+    crime = _crime_from_attempt(attempt)
+    if crime is not None:
+        candidates.append(getattr(crime, "location_id", None))
+    for line in (attempt.prompt or "").splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("location:"):
+            candidates.append(stripped.split(":", 1)[1].strip())
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        kit, _issues = canonicalize_environment_hint(candidate)
+        if kit is not None:
+            return kit
+    return None
+
+
+def _kit_anchors(kit_id: str | None) -> tuple[str, ...]:
+    if not kit_id:
+        return ()
+    try:
+        table = dict(prompts._kit_anchor_table())
+    except Exception:  # noqa: BLE001 - manifest unavailability degrades safely
+        return ()
+    return table.get(kit_id, ())
+
+
+def trusted_reference_universe(
+    attempt: AttemptRecord, stage: GenerationStage
+) -> dict[str, tuple[str, ...]] | None:
+    """Closed reference universe for ``stage`` from TRUSTED canonical state.
+
+    Built ONLY from already-validated parsed stage outputs / the assembled
+    draft / the locked constraints — NEVER from raw provider output. Returns
+    ``None`` (fail-open to the un-narrowed schema) when no trustworthy universe
+    exists for that stage.
+    """
+    buckets: dict[str, set[str]] = {key: set() for key in _UNIVERSE_KEYS}
+
+    def add(key: str, value: Any) -> None:
+        if isinstance(value, str) and value:
+            buckets[key].add(value)
+
+    for identity in trusted_context.locked_identities(getattr(attempt, "locked", None)):
+        if identity.field in ("victim", "murderer", "witness"):
+            add("personIds", identity.canonical_id)
+        elif identity.field == "motive":
+            add("motiveIds", identity.canonical_id)
+        elif identity.field == "weapon":
+            add("objectIds", identity.canonical_id)
+        elif identity.field == "location":
+            add("locationIds", identity.canonical_id)
+        # DEF-062 — the role-scoped locked bucket, populated ONLY for the roles
+        # that actually carry a locked value (so case_truth narrows per role).
+        locked_role_key = {
+            "victim": "lockedVictimIds",
+            "murderer": "lockedMurdererIds",
+            "witness": "lockedWitnessIds",
+            "motive": "lockedMotiveIds",
+            "weapon": "lockedWeaponIds",
+            "location": "lockedLocationIds",
+        }.get(identity.field)
+        if locked_role_key is not None:
+            add(locked_role_key, identity.canonical_id)
+
+    crime = attempt.stage_outputs.get(GenerationStage.CASE_TRUTH)
+    if crime is None and attempt.draft is not None:
+        crime = attempt.draft.crime
+    if crime is not None:
+        add("personIds", getattr(crime, "victim_id", None))
+        add("personIds", getattr(crime, "murderer_id", None))
+        add("motiveIds", getattr(crime, "motive_id", None))
+        add("objectIds", getattr(crime, "weapon_id", None))
+        add("locationIds", getattr(crime, "location_id", None))
+
+    public = attempt.stage_outputs.get(GenerationStage.PUBLIC_WORLD)
+    if public is None and attempt.draft is not None:
+        public = attempt.draft
+    if public is not None:
+        for person in getattr(public, "persons", ()) or ():
+            add("personIds", getattr(person, "person_id", None))
+        for motive in getattr(public, "motives", ()) or ():
+            add("motiveIds", getattr(motive, "motive_id", None))
+        for obj in getattr(public, "objects", ()) or ():
+            add("objectIds", getattr(obj, "object_id", None))
+        for location in getattr(public, "locations", ()) or ():
+            add("locationIds", getattr(location, "location_id", None))
+        scene = getattr(public, "scene", None)
+        if scene is not None:
+            add("locationIds", getattr(scene, "location_id", None))
+
+    evidence = attempt.stage_outputs.get(GenerationStage.EVIDENCE)
+    if evidence is None and attempt.draft is not None:
+        evidence = attempt.draft
+    if evidence is not None:
+        for item in getattr(evidence, "evidence", ()) or ():
+            add("evidenceIds", getattr(item, "id", None))
+
+    if attempt.draft is not None:
+        for location in getattr(attempt.draft.world_graph, "locations", ()) or ():
+            add("locationIds", getattr(location, "location_id", None))
+
+    # The world stages additionally narrow against the application-owned
+    # composition vocabulary + the ONE selected kit's anchors.
+    if stage in (GenerationStage.WORLD_GRAPH, GenerationStage.REPAIR):
+        try:
+            for asset_id in prompts._composition_asset_ids():
+                add("assetIds", asset_id)
+        except Exception:  # noqa: BLE001 - catalog unavailability degrades safely
+            pass
+        for anchor in _kit_anchors(selected_environment_kit(attempt)):
+            add("anchors", anchor)
+
+    universe = {key: tuple(sorted(values)) for key, values in buckets.items()}
+    if not any(universe.values()):
+        return None
+    return universe
+
+
+def _authorized_repair_sections(attempt: AttemptRecord) -> frozenset[str] | None:
+    """Owner-authorized declaration sections for a REPAIR (FR-08 / DEF-065).
+
+    Declaration ids are IMMUTABLE BY DEFAULT: a structural / cross-stage
+    (``UNKNOWN``) owner authorizes NO declaration replacement, so this returns
+    an EMPTY frozenset — never ``None`` ("all sections authorized"), which was
+    the ADV-43-03 fail-open. Only a report whose owner explicitly names a
+    declaration-owning stage authorizes that stage's sections. Locked ids are
+    ALWAYS immutable regardless of this scope (enforced in
+    ``_repair_id_churn_issues``).
+    """
+    report = getattr(attempt, "last_validation", None)
+    if report is None:
+        return frozenset()
+    try:
+        from app.generation.repair_routing import RepairOwner, RepairPlan
+
+        plan = RepairPlan.from_report(report)
+    except Exception:  # noqa: BLE001 - scope derivation is immutable-by-default
+        return frozenset()
+    if plan.is_default_full_rerun:
+        # Structural / safety / UNKNOWN owner: no declaration may be replaced.
+        return frozenset()
+    owners = set(plan.repair_owners)
+    sections: set[str] = set()
+    if RepairOwner.CASE_TRUTH in owners or RepairOwner.CASE_PEOPLE in owners:
+        sections.update({"persons", "motives"})
+    if RepairOwner.EVIDENCE in owners or RepairOwner.ACTIVITY_LOG in owners:
+        sections.add("evidence")
+    if RepairOwner.WORLD_GRAPH in owners:
+        sections.update({"objects", "world_graph", "locations"})
+    if RepairOwner.ASSET_SPEC in owners:
+        sections.add("objects")
+    return frozenset(sections)
+
+
+def _authoritative_case_truth_block(attempt: AttemptRecord) -> str:
+    parts: list[str] = []
+    sheet = trusted_context.render_locked_identity_sheet(
+        getattr(attempt, "locked", None)
+    )
+    if sheet:
+        parts.append(sheet)
+    parts.append(trusted_context.PHASE41A_QUALITY_RULES)
+    parts.append(
+        "RESOLUTION SEMANTICS (authoritative):\n"
+        "- HOMICIDE names a NON-VICTIM murderer: murdererId is the canonical "
+        "non-victim person id and resolutionType=HOMICIDE.\n"
+        "- SUICIDE sets resolutionType=SUICIDE and murdererId=null (there is "
+        "no murderer)."
+    )
+    return "\n\n".join(parts)
+
+
+def _authoritative_public_world_block(attempt: AttemptRecord) -> str:
+    crime = _crime_from_attempt(attempt)
+    lines = [
+        "IMMUTABLE CRIME IDENTIFIERS (reuse THESE EXACT ids — never rename, "
+        "replace or substitute display names):"
+    ]
+    if crime is not None:
+        from app.domain.resolution import ResolutionType
+
+        is_suicide = getattr(crime, "resolution_type", None) is ResolutionType.SUICIDE
+        lines.append(f"- victimId: {getattr(crime, 'victim_id', '')}")
+        if is_suicide:
+            lines.append("- murdererId: null (SUICIDE)")
+        elif getattr(crime, "murderer_id", None):
+            lines.append(f"- murdererId: {crime.murderer_id}")
+        lines.append(f"- motiveId: {getattr(crime, 'motive_id', '')}")
+        lines.append(f"- weaponId: {getattr(crime, 'weapon_id', '')}")
+        lines.append(f"- locationId: {getattr(crime, 'location_id', '')}")
+    else:
+        lines.append("- (case truth not yet available)")
+    locked_ids = _locked_canonical_ids(attempt)
+    if "witness" in locked_ids:
+        lines.append(f"- locked witnessId: {locked_ids['witness']}")
+    lines.append(
+        "The locked location/motive/weapon identity is immutable; the public "
+        "world MAY create new red-herring people/motives/locations, but it "
+        "MUST NOT rename locked canonical ids or invent ids for locked "
+        "entities."
+    )
+    # Phase43 (P43-FR-06) — the exact affordability contract the derivation
+    # consumes: without it the generic Frontier path emitted motives/objects
+    # with only VISIBLE_CHARACTER (motive/weapon universe empty on the live
+    # Easy case). Guidance only; the validators remain authoritative.
+    lines.append(
+        "AFFORDANCE CONTRACT (authoritative — the candidate universes are "
+        "derived from these exact tokens):\n"
+        "- every victim/witness person carries ONLY VISIBLE_CHARACTER;\n"
+        "- every suspect person (including the murderer) carries "
+        "SUSPECT_ELIGIBLE;\n"
+        "- every motive's affordances MUST contain MOTIVE_CANDIDATE;\n"
+        "- every weapon object's affordances MUST contain POTENTIAL_WEAPON "
+        "(and POTENTIAL_SHARP_WEAPON for a knife/sharp weapon);\n"
+        "- affordance tokens are EXACTLY: SUSPECT_ELIGIBLE, MOTIVE_CANDIDATE, "
+        "POTENTIAL_WEAPON, POTENTIAL_SHARP_WEAPON, POTENTIAL_BLUNT_WEAPON, "
+        "POTENTIAL_POISON, INSPECTABLE, VISIBLE_CHARACTER."
+    )
+    return (
+        "\n".join(lines)
+        + "\n\n"
+        + trusted_context.PHASE41A_QUALITY_RULES
+        # Phase43 (P43-FR-06) — the generic Frontier path now also carries the
+        # canonical shared case-quality rules the Ollama path already supplies
+        # (single source, no drift): exact roles/affordances, the mandatory
+        # witness statement and the resolve-every-id rule. Guidance only; the
+        # validators remain authoritative.
+        + "\n\n"
+        + prompts.CASE_QUALITY_RULES
+    )
+
+
+def _authoritative_evidence_block(attempt: AttemptRecord) -> str:
+    public = _public_world_from_attempt(attempt)
+    crime = _crime_from_attempt(attempt)
+    parts: list[str] = []
+    if public is not None:
+        approved = trusted_context.approved_public_material(public)
+        if approved:
+            parts.append(approved)
+        travel = trusted_context.approved_travel_sheet(public)
+        if travel:
+            parts.append(travel)
+    if crime is not None and public is not None:
+        seed = trusted_context.deduction_seed(attempt, crime, public)
+        if seed:
+            parts.append(seed)
+    enum_lines = [
+        "AUTHORITATIVE ID ENUMERATIONS (referenced ids MUST come from these "
+        "closed lists):"
+    ]
+
+    def _line(label: str, entries: Any, attr: str) -> None:
+        ids = sorted(
+            value
+            for value in (getattr(entry, attr, None) for entry in (entries or ()))
+            if isinstance(value, str) and value
+        )
+        enum_lines.append(f"- {label}: " + (", ".join(ids) if ids else "(none)"))
+
+    if public is not None:
+        _line("personIds", getattr(public, "persons", ()), "person_id")
+        _line("locationIds", getattr(public, "locations", ()), "location_id")
+        _line("motiveIds", getattr(public, "motives", ()), "motive_id")
+        _line("objectIds", getattr(public, "objects", ()), "object_id")
+    parts.append("\n".join(enum_lines))
+    parts.append(trusted_context.PHASE41A_QUALITY_RULES)
+    # Phase43 (P43-FR-06) — the EVIDENCE stage must be told that every public
+    # witness needs a usable witness_statement evidence item. This canonical
+    # shared rule is what the Ollama evidence prompt already supplies; without
+    # it the generic Frontier path produced WITNESS_STATEMENT_MISSING on the
+    # live Easy case (the sole initial-pass validator defect). Guidance only;
+    # the case-quality validator stays authoritative.
+    parts.append(prompts.CASE_QUALITY_RULES)
+    parts.append(
+        "Use exact IDs from the authoritative lists. Never invent, rename, "
+        "translate, slug, expand, or substitute display names for IDs."
+    )
+    return "\n\n".join(part for part in parts if part)
+
+
+def _authoritative_world_graph_block(attempt: AttemptRecord) -> str:
+    kit = selected_environment_kit(attempt)
+    lines: list[str] = []
+    if kit:
+        lines.append(f"SELECTED ENVIRONMENT KIT (authoritative — exactly ONE kit): {kit}")
+        anchors = _kit_anchors(kit)
+        lines.append(f"- selectedEnvironmentKit: {kit}")
+        lines.append(
+            "- allowedAnchors (this kit ONLY): "
+            + (", ".join(anchors) if anchors else "(none derived)")
+        )
+    else:
+        lines.append(_KIT_UNRESOLVED_LINE)
+    try:
+        assets = prompts._composition_asset_ids()
+    except Exception:  # noqa: BLE001
+        assets = ()
+    lines.append(
+        "- allowedAssetIds (composition-usable): "
+        + (", ".join(assets) if assets else "(none)")
+    )
+    public = _public_world_from_attempt(attempt)
+    evidence = _evidence_from_attempt(attempt)
+    object_ids = sorted(
+        value
+        for value in (
+            getattr(obj, "object_id", None)
+            for obj in (getattr(public, "objects", ()) or ())
+        )
+        if isinstance(value, str) and value
+    )
+    location_ids = sorted(
+        value
+        for value in (
+            getattr(loc, "location_id", None)
+            for loc in (getattr(public, "locations", ()) or ())
+        )
+        if isinstance(value, str) and value
+    )
+    if public is not None and getattr(public, "scene", None) is not None:
+        scene_id = getattr(public.scene, "location_id", None)
+        if isinstance(scene_id, str) and scene_id and scene_id not in location_ids:
+            location_ids = sorted({*location_ids, scene_id})
+    evidence_ids = sorted(
+        value
+        for value in (
+            getattr(item, "id", None)
+            for item in (getattr(evidence, "evidence", ()) or ())
+        )
+        if isinstance(value, str) and value
+    )
+    lines.append("- currentObjectIds: " + (", ".join(object_ids) or "(none)"))
+    lines.append("- currentLocationIds: " + (", ".join(location_ids) or "(none)"))
+    lines.append("- currentEvidenceIds: " + (", ".join(evidence_ids) or "(none)"))
+    return "\n".join(lines)
+
+
+def _authoritative_repair_block(attempt: AttemptRecord) -> str:
+    parts: list[str] = []
+    draft = attempt.draft
+    if draft is not None:
+        parts.append(
+            "PROVIDER-FACING DRAFT (canonical camelCase protocol shape — "
+            "respond with THESE field names):\n"
+            + provider_facing_draft_json(draft)
+        )
+    ids = current_declaration_ids(draft)
+    id_lines = [
+        "CURRENT DECLARATION IDS (immutable unless the repair owner authorizes "
+        "that section; references reuse them, they do not declare them):"
+    ]
+    for section in _DECLARATION_SECTIONS:
+        values = ids.get(section, ())
+        id_lines.append(f"- {section}: " + (", ".join(values) if values else "(none)"))
+    parts.append("\n".join(id_lines))
+
+    locked_ids = _locked_canonical_ids(attempt)
+    locked_lines = [
+        "AUTHORITATIVE LOCKED IDS (IMMUTABLE — never rename, replace or "
+        "substitute; a changed/removed locked id is an unauthorized repair):"
+    ]
+    for field, label in (
+        ("victim", "victimId"),
+        ("murderer", "murdererId"),
+        ("motive", "motiveId"),
+        ("weapon", "weaponId"),
+        ("location", "locationId"),
+    ):
+        if field in locked_ids:
+            locked_lines.append(f"- {label}: {locked_ids[field]}")
+    if "witness" in locked_ids:
+        locked_lines.append(
+            "- a locked Witness is TERMINAL (a missing/renamed locked witness "
+            "cannot be repaired) — never rename the locked witness"
+        )
+    parts.append("\n".join(locked_lines))
+
+    scope = getattr(attempt, "_repair_authorized_sections", None)
+    if scope is None:
+        parts.append(
+            "REPAIR SCOPE: the reported defects below are cross-stage / "
+            "structural; the whole draft may be corrected, but declaration ids "
+            "in sections unrelated to a reported defect MUST be preserved "
+            "unchanged."
+        )
+    else:
+        parts.append(
+            "REPAIR SCOPE (owner-authorized declaration sections ONLY): "
+            + ", ".join(sorted(scope))
+            + ". Declaration ids in every OTHER section are IMMUTABLE."
+        )
+
+    universe = trusted_reference_universe(attempt, GenerationStage.REPAIR) or {}
+    crime = _crime_from_attempt(attempt)
+    # The CURRENT declaration allowlists are derived from the DRAFT's declared
+    # ids + the crime ids (both already generated), never from locked display
+    # values: a locked witness that is missing from the draft is TERMINAL and
+    # unreachable by repair, so its raw value is never echoed here.
+    allow: dict[str, set[str]] = {
+        "personIds": set(ids.get("persons", ())),
+        "locationIds": set(ids.get("locations", ())),
+        "motiveIds": set(ids.get("motives", ())),
+        "objectIds": set(ids.get("objects", ())),
+        "evidenceIds": set(ids.get("evidence", ())),
+        "assetIds": set(universe.get("assetIds", ())),
+        "anchors": set(universe.get("anchors", ())),
+    }
+    if crime is not None:
+        for identifier in (getattr(crime, "victim_id", None), getattr(crime, "murderer_id", None)):
+            if isinstance(identifier, str) and identifier:
+                allow["personIds"].add(identifier)
+        for key, value in (
+            ("locationIds", getattr(crime, "location_id", None)),
+            ("motiveIds", getattr(crime, "motive_id", None)),
+            ("objectIds", getattr(crime, "weapon_id", None)),
+        ):
+            if isinstance(value, str) and value:
+                allow[key].add(value)
+    allow_lines = [
+        "REQUEST ID ALLOWLISTS (references MUST use these exact current ids):"
+    ]
+    for key in (
+        "personIds",
+        "locationIds",
+        "motiveIds",
+        "objectIds",
+        "evidenceIds",
+        "assetIds",
+        "anchors",
+    ):
+        values = tuple(sorted(allow[key]))
+        allow_lines.append(f"- {key}: " + (", ".join(values) if values else "(none)"))
+    parts.append("\n".join(allow_lines))
+
+    kit = selected_environment_kit(attempt)
+    if kit:
+        parts.append(
+            f"SELECTED ENVIRONMENT KIT: {kit}; allowedAnchors: "
+            + ", ".join(_kit_anchors(kit))
+        )
+    else:
+        parts.append(_KIT_UNRESOLVED_LINE)
+    # DEF-061 (P43-FR-06 / DoD#6) — the generic Frontier REPAIR context carries
+    # the SAME shared Phase 41A quality rules the initial stages receive.
+    parts.append(trusted_context.PHASE41A_QUALITY_RULES)
+    # Phase43 (P43-FR-06) — and the canonical shared case-quality rules (exact
+    # roles/affordances, the mandatory per-witness witness_statement and the
+    # resolve-every-id rule), so a full-draft repair can restore the exact
+    # shapes the validators require.
+    parts.append(prompts.CASE_QUALITY_RULES)
+    return "\n\n".join(parts)
+
+
+def _authoritative_stage_block(attempt: AttemptRecord, stage: GenerationStage) -> str:
+    if stage is GenerationStage.CASE_TRUTH:
+        return _authoritative_case_truth_block(attempt)
+    if stage is GenerationStage.PUBLIC_WORLD:
+        return _authoritative_public_world_block(attempt)
+    if stage is GenerationStage.EVIDENCE:
+        return _authoritative_evidence_block(attempt)
+    if stage is GenerationStage.WORLD_GRAPH:
+        return _authoritative_world_graph_block(attempt)
+    if stage is GenerationStage.REPAIR:
+        return _authoritative_repair_block(attempt)
+    return ""
+
+
 def build_request(
     attempt: AttemptRecord,
     stage: GenerationStage,
@@ -610,6 +1299,15 @@ def build_request(
     controller's strict parsers reject. ``json_schema_for_generation_stage``
     (the Ollama/transport contract) and every other consumer are unchanged.
     """
+    # Phase43 (P43-FR-08) — snapshot the pre-repair declaration ids + the
+    # owner-authorized section scope so a successful full-draft REPAIR parse
+    # can reject unauthorized identifier churn. Deterministic; attempt-local.
+    if stage is GenerationStage.REPAIR:
+        pre_draft = current_draft(attempt)
+        attempt._repair_pre_ids = (
+            current_declaration_ids(pre_draft) if pre_draft is not None else None
+        )
+        attempt._repair_authorized_sections = _authorized_repair_sections(attempt)
     return GenerateRequest(
         attempt_id=attempt.attempt_id,
         stage=stage,
@@ -618,8 +1316,12 @@ def build_request(
         diagnostics=tuple(diagnostics),
         seed=attempt.seed,
         timeout_seconds=timeout_seconds,
-        json_schema=prompts.json_schema_for_stage_output(stage.value),
+        json_schema=prompts.json_schema_for_stage_output(
+            stage.value,
+            reference_universe=trusted_reference_universe(attempt, stage),
+        ),
         schema_id=prompts.schema_id_for_generation_stage(stage.value),
+        selected_environment_kit=selected_environment_kit(attempt),
     )
 
 
@@ -644,6 +1346,63 @@ def apply_stage_output(attempt: AttemptRecord, stage: GenerationStage, content: 
     attempt.stage_done.add(stage)
 
 
+def _repair_id_churn_issues(attempt: AttemptRecord, new_draft: GeneratedDraft) -> tuple[str, ...]:
+    """FR-08 — deterministic unauthorized-identifier-churn detection.
+
+    Compares the new draft's DECLARATION ids per section against the snapshot
+    taken by ``build_request``. A removed/changed LOCKED canonical id is always
+    unauthorized; a removed/changed NON-locked declaration id is unauthorized
+    unless its section was owner-authorized. Returns sorted deterministic issue
+    tokens, or ``()`` when the snapshot is absent (fail-open — no snapshot means
+    the repair was not scope-tracked).
+
+    ADDITIONS (Phase43 live-acceptance fix): an ADDED declaration id does NOT
+    rename/remove any existing id, so it is NOT churn. Detecting churn purely
+    from removals/renames is sufficient — a rename that "replaces" an id still
+    REMOVES the old id and is therefore caught by ``pre_ids - new_ids`` above.
+    Rejecting additions outright discarded the WHOLE repair draft on every pass
+    (a rejected repair never applies), so a draft missing required entities
+    (e.g. the live Easy ``FINAL_TARGET_UNIVERSE_EMPTY`` case) could never be
+    corrected: every repair pass stayed UNCHANGED and the attempt ended
+    ``REPAIR_BUDGET_EXHAUSTED``.
+
+    A TARGETED owner repair (non-empty authorized scope) still forbids additions
+    OUTSIDE the authorized sections — arbitrary fabricated declarations are
+    never accepted as a side effect of a scoped repair. A FULL-RERUN repair
+    (empty authorized scope: structural/safety/UNKNOWN owner) rebuilds the whole
+    draft and MAY add the missing declarations; the complete validation suite
+    (and the solver) remains the sole acceptance authority afterwards, and
+    locked/removed existing ids are still protected above.
+    """
+    pre = getattr(attempt, "_repair_pre_ids", None)
+    if pre is None:
+        return ()
+    locked_ids = set(_locked_canonical_ids(attempt).values())
+    authorized = getattr(attempt, "_repair_authorized_sections", None)
+    # A non-empty authorized scope is a TARGETED owner repair: additions outside
+    # the authorized sections are unauthorized. ``None`` (untracked) is
+    # fail-open; the empty frozenset (full-rerun/UNKNOWN owner) rebuilds the
+    # whole draft and permits additions.
+    targeted_scope = authorized is not None and len(authorized) > 0
+    new = current_declaration_ids(new_draft)
+    issues: list[str] = []
+    for section in _DECLARATION_SECTIONS:
+        pre_ids = set(pre.get(section, ()))
+        new_ids = set(new.get(section, ()))
+        section_authorized = authorized is None or section in authorized
+        for identifier in sorted(pre_ids - new_ids):
+            if identifier in locked_ids:
+                issues.append(f"repair locked id changed: {section} {identifier}")
+            elif not section_authorized:
+                issues.append(f"repair id churn: {section} {identifier}")
+        if targeted_scope and not section_authorized:
+            for identifier in sorted(new_ids - pre_ids):
+                if identifier in locked_ids:
+                    continue
+                issues.append(f"repair id churn: {section} {identifier} (added)")
+    return tuple(sorted(set(issues)))
+
+
 def apply_repair(attempt: AttemptRecord, content: str) -> tuple[str, ...]:
     """Apply a REPAIR (full-draft) provider output.
 
@@ -651,6 +1410,12 @@ def apply_repair(attempt: AttemptRecord, content: str) -> tuple[str, ...]:
     recorded, the previous draft is kept). A successful parse REPLACES the
     whole draft and clears stale deferred issues; the caller MUST rerun the
     complete validation suite afterwards (REQUIREMENTS 32.13).
+
+    Phase43 (P43-FR-08): a successful parse that changes/removes a LOCKED id —
+    or an unrelated declaration id outside the owner-authorized repair scope —
+    is REJECTED as unauthorized churn: the pre-existing draft is kept and the
+    deterministic issue tokens are recorded so validation classifies the
+    attempt exactly as before (never a silent namespace rewrite).
     """
     issues = parser.collect_full_draft_issues(content)
     if issues:
@@ -659,6 +1424,12 @@ def apply_repair(attempt: AttemptRecord, content: str) -> tuple[str, ...]:
         )
         return tuple(sorted(set(issues)))
     draft = parser.parse_full_draft(content, non_throwing=True)
+    churn = _repair_id_churn_issues(attempt, draft)
+    if churn:
+        attempt.deferred_structural = tuple(
+            sorted(set(attempt.deferred_structural) | set(churn))
+        )
+        return tuple(sorted(set(churn)))
     attempt.draft = draft
     attempt.stage_outputs = {}
     attempt.stage_done = set()
@@ -896,9 +1667,13 @@ __all__ = [
     "apply_repair",
     "apply_stage_output",
     "build_request",
+    "current_declaration_ids",
     "current_draft",
     "normalize_prompt",
+    "provider_facing_draft",
+    "selected_environment_kit",
     "time_proof_checks_passed",
+    "trusted_reference_universe",
     "validate_draft",
     "_draft_to_phase3",
 ]

@@ -38,6 +38,7 @@ Design rules (deterministic-testing policy):
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -278,31 +279,48 @@ def test_phase33_b_disallowed_anchor_rejected():
 
 
 def test_phase33_b_repair_context_missing_authoritative_anchor_vocabulary():
-    """MODEL-FACING GAP (RED on the current code): the REPAIR prompt context
-    does NOT carry the anchor-id vocabulary (``_WORLD_FIELD_RULES`` teaches
-    relation kinds + environmentHint but never anchor ids), so a model cannot
-    know any legal anchor.
+    """The REPAIR prompt context carries the authoritative anchor vocabulary.
 
-    Phase33.md RAD-1 classification: **Missing trusted context**. Green once
-    the RAD-2 scope block states ANCHOR_ALLOWLIST.
+    Phase43 (P43-FR-10 / DEF-063): the Frontier REPAIR context is KIT-SCOPED —
+    it supplies the resolved SELECTED kit's anchors (here ``office``) and never
+    offers anchors exclusive to a different kit.
     """
     attempt = _attempt(parse_full_draft(_draft_json(anchor="under_the_rug")))
     request, _report = _repair_request(attempt)
 
     context = request.prompt_context
     assert "under_the_rug" in context  # the draft's own invalid anchor
-    for anchor in sorted(ANCHOR_ALLOWLIST):
+    assert pipeline.selected_environment_kit(attempt) == "office"
+    table = dict(prompts._kit_anchor_table())
+    selected_anchors = set(table["office"])
+    for anchor in sorted(selected_anchors):
         assert anchor in context, (
             f"REPAIR prompt context lacks the authoritative anchor {anchor!r} — "
             "no legal anchor is known to the model (Phase33 RAD-1 'Missing "
             "trusted context')"
         )
+    other_anchors = {
+        anchor for kit, ids in table.items() if kit != "office" for anchor in ids
+    }
+    for anchor in sorted(other_anchors - selected_anchors):
+        assert not _has_id_token(context, anchor), anchor
 
+    # The Ollama repair TEMPLATE still renders the full shared scope block
+    # (no-argument ``generation_scope_block`` — byte-identical multi-kit
+    # vocabulary for the transport-agnostic driver path).
     rendered = prompts.build_repair_prompt(request.prompt_context, request.diagnostics)
     for anchor in sorted(ANCHOR_ALLOWLIST):
         assert anchor in rendered, (
             f"REPAIR template lacks anchor {anchor!r} in its scope block"
         )
+
+
+def _has_id_token(text: str, token: str) -> bool:
+    """True when ``token`` appears as a standalone id token (not a substring of
+    a longer id such as ``office_document_01``)."""
+    return re.search(
+        r"(?<![A-Za-z0-9_])" + re.escape(token) + r"(?![A-Za-z0-9_])", text
+    ) is not None
 
 
 # ---------------------------------------------------------------------------

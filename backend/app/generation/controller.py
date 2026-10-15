@@ -1101,6 +1101,15 @@ class GenerationController:
                 request_schema_byte_length if native_structured else None
             ),
             responseFormatType=(response_format_type if native_structured else None),
+            # Phase43 (P43-FR-12) — bounded, non-secret contract diagnostics.
+            requestPromptBytes=len(request.prompt_context.encode("utf-8")),
+            selectedEnvironmentKit=request.selected_environment_kit,
+            repairAuthorizedSections=(
+                tuple(sorted(attempt._repair_authorized_sections))
+                if stage is GenerationStage.REPAIR
+                and attempt._repair_authorized_sections is not None
+                else None
+            ),
             configuredProviderTimeoutMs=(
                 int(self._provider_timeout_seconds * 1000)
                 if self._provider_timeout_seconds is not None else None
@@ -1215,6 +1224,11 @@ class GenerationController:
         attempt._phase3_cache = None
         attempt.solver_proof = None
         attempt.last_validation = None
+        # Phase43 (P43-FR-09) — clear the per-attempt REPAIR scope snapshot so a
+        # regenerated attempt never inherits a stale pre-repair id set. Locked
+        # constraints (and thus the canonical locked ids) are preserved.
+        attempt._repair_pre_ids = None
+        attempt._repair_authorized_sections = None
         reset_cache = getattr(self._driver, "reset_attempt_cache", None)
         if callable(reset_cache):
             try:

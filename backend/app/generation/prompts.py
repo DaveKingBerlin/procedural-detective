@@ -35,6 +35,7 @@ mechanism.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -85,6 +86,7 @@ from app.generation.schemas import (
     AFFORDANCE_VOCABULARY,
     MAX_SINGLE_TEXT_FIELD_CHARS,
 )
+from app.generation.trusted_context import PHASE41A_QUALITY_RULES
 from app.world.environment import ENVIRONMENT_IDS
 
 # --- schema-contract builder (deterministic, authoritative) ----------------
@@ -504,7 +506,14 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
             "crime": {
                 "type": "string (e.g. murder)",
                 "victimId": "person id",
-                "murdererId": "person id",
+                # Phase43 (P43-FR-05) — HOMICIDE needs a non-empty canonical
+                # person id; SUICIDE carries a JSON null (the hint mentions
+                # "null" so ``_key_required`` makes this key OPTIONAL and
+                # ``_hint_json_types`` derives the ["string","null"] union).
+                "murdererId": (
+                    "the canonical murderer person id for HOMICIDE, or null "
+                    "for SUICIDE"
+                ),
                 "motiveId": "motive id",
                 "weaponId": "object id",
                 "locationId": "location id",
@@ -512,6 +521,15 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
                     "canonical": _CANONICAL_TIMESTAMP_HINT,
                     "accusationToleranceSeconds": "non-negative int",
                 },
+                # Phase43 (P43-FR-05) — REQUIRED closed resolution token. The
+                # hint deliberately does NOT contain the substring "null" so
+                # ``_key_required`` keeps the key required; ``_enum_token_list``
+                # derives the {HOMICIDE, SUICIDE} enum.
+                "resolutionType": (
+                    "HOMICIDE|SUICIDE resolution token; enum HOMICIDE,SUICIDE "
+                    "(use EXACTLY one token: HOMICIDE when a murderer is named, "
+                    "SUICIDE for a self-inflicted resolution)"
+                ),
             },
             "persons": [
                 {
@@ -1093,7 +1111,9 @@ def _stage_output_contract(stage_value: str) -> Mapping[str, Any] | None:
     return _stage_contract(contract_stage)
 
 
-def json_schema_for_stage_output(stage_value: str) -> dict[str, Any] | None:
+def json_schema_for_stage_output(
+    stage_value: str, *, reference_universe: Mapping[str, Any] | None = None
+) -> dict[str, Any] | None:
     """The parser-shaped JSON Schema the Frontier adapter sends as native
     structured output for a controller-pipeline stage (DEF-019).
 
@@ -1101,11 +1121,202 @@ def json_schema_for_stage_output(stage_value: str) -> dict[str, Any] | None:
     accepts for that stage (``case_truth`` -> ``{crime}``, ``world_graph`` ->
     ``{worldGraph}``, ``evidence`` / ``public_world`` / ``repair`` unchanged),
     derived from the SAME trusted contract sources as the Ollama transport
-    schemas. ``None`` for unknown/unmapped values (fail-closed)."""
+    schemas. ``None`` for unknown/unmapped values (fail-closed).
+
+    Phase43 (P43-FR-04): when ``reference_universe`` is supplied, ONLY the
+    reference fields (never declaration-defining ids) are narrowed to the
+    request-local closed enums — see ``narrow_stage_output_schema``. The
+    NO-ARGUMENT call is byte-identical to before (many tests assert this); the
+    new behavior is opt-in and used only by ``pipeline.build_request``.
+    """
+    if reference_universe is not None:
+        return narrow_stage_output_schema(
+            stage_value, reference_universe=reference_universe
+        )
     contract = _stage_output_contract(stage_value)
     if contract is None:
         return None
     return _contract_to_json_schema(contract)
+
+
+# --------------------------------------------------------------------------- #
+# Phase43 (P43-FR-04) — request-local reference enums.
+# --------------------------------------------------------------------------- #
+#
+# The valid reference universe is ALREADY known once a prior stage has been
+# validated into trusted canonical state. Where that is true, the transport
+# schema constrains the reference fields with closed enums so a strict
+# structured-output provider cannot emit a reference outside the current
+# universe BEFORE canonical validation. This NEVER weakens the strict parser:
+# ``narrow_stage_output_schema`` returns a FRESH deep copy and only ADDS
+# ``enum`` constraints to reference fields; the parser/validators stay the sole
+# acceptance authority.
+#
+# Only REFERENCE fields are narrowed — never declaration-defining ids (a
+# ``persons[].personId`` that DECLARES a person stays a free string so
+# red-herrings can be created). The closed universe keys are documented here:
+#
+#   personIds, locationIds, motiveIds, objectIds, evidenceIds, assetIds,
+#   anchors, roles, affordances
+_REFERENCE_UNIVERSE_KEYS: tuple[str, ...] = (
+    "personIds",
+    "locationIds",
+    "motiveIds",
+    "objectIds",
+    "evidenceIds",
+    "assetIds",
+    "anchors",
+    "roles",
+    "affordances",
+)
+
+
+def _reference_id_tuple(reference_universe: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    """Deterministic sorted unique non-empty string tuple for one universe key."""
+    if not isinstance(reference_universe, Mapping):
+        return ()
+    value = reference_universe.get(key)
+    if value is None or isinstance(value, (str, bytes)):
+        return ()
+    seen: set[str] = set()
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return ()
+    for item in iterator:
+        if isinstance(item, str) and item:
+            seen.add(item)
+    return tuple(sorted(seen))
+
+
+def _set_reference_enum(node: Any, values: tuple[str, ...], *, nullable: bool) -> None:
+    """Add a closed ``enum`` to one reference schema node (in place, fresh copy).
+
+    The node's declared ``type`` is preserved; ``nullable`` appends a JSON
+    ``null`` branch so a ``["string","null"]`` union keeps its null validity
+    (e.g. ``murdererId`` for SUICIDE, ``evidenceId`` for a decorative pick).
+    Every list is already sorted, so the enum is deterministic.
+    """
+    if not isinstance(node, dict) or not values:
+        return
+    enum: list[Any] = list(values)
+    if nullable:
+        enum.append(None)
+    node["enum"] = enum
+
+
+def _schema_props(node: Any) -> dict[str, Any]:
+    if isinstance(node, Mapping):
+        props = node.get("properties")
+        if isinstance(props, Mapping):
+            return props  # type: ignore[return-value]
+    return {}
+
+
+def _narrow_case_truth(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    # DEF-062 (ADV-43-01): each crime reference is constrained ONLY when THAT
+    # specific role is LOCKED. The case_truth stage CREATES the crime; an
+    # unlocked victim/murderer/motive/weapon/location has no canonical id yet
+    # (the person declarations come later from public_world), so its reference
+    # must stay a free string — otherwise a fresh murderer becomes unrepresentable
+    # or a victim==murderer shape is forced. The role-scoped locked-* universe
+    # keys are populated only from the locked constraints.
+    crime = _schema_props(props.get("crime"))
+    _set_reference_enum(crime.get("victimId"), _reference_id_tuple(universe, "lockedVictimIds"), nullable=False)
+    _set_reference_enum(crime.get("murdererId"), _reference_id_tuple(universe, "lockedMurdererIds"), nullable=True)
+    _set_reference_enum(crime.get("motiveId"), _reference_id_tuple(universe, "lockedMotiveIds"), nullable=False)
+    _set_reference_enum(crime.get("weaponId"), _reference_id_tuple(universe, "lockedWeaponIds"), nullable=False)
+    _set_reference_enum(crime.get("locationId"), _reference_id_tuple(universe, "lockedLocationIds"), nullable=False)
+
+
+def _narrow_evidence(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    evidence = props.get("evidence")
+    items = _schema_props(_array_items(evidence))
+    propositions = _schema_props(_array_items(items.get("propositions")))
+    _set_reference_enum(propositions.get("personId"), _reference_id_tuple(universe, "personIds"), nullable=False)
+    _set_reference_enum(propositions.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+    _set_reference_enum(propositions.get("objectId"), _reference_id_tuple(universe, "objectIds"), nullable=False)
+    _set_reference_enum(propositions.get("motiveId"), _reference_id_tuple(universe, "motiveIds"), nullable=False)
+
+
+def _narrow_world_graph(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    world_graph = _schema_props(props.get("worldGraph"))
+    placements = _schema_props(_array_items(world_graph.get("placements")))
+    _set_reference_enum(placements.get("objectId"), _reference_id_tuple(universe, "objectIds"), nullable=False)
+    _set_reference_enum(placements.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+    _set_reference_enum(placements.get("evidenceId"), _reference_id_tuple(universe, "evidenceIds"), nullable=True)
+    _set_reference_enum(placements.get("assetId"), _reference_id_tuple(universe, "assetIds"), nullable=False)
+    _set_reference_enum(placements.get("anchor"), _reference_id_tuple(universe, "anchors"), nullable=False)
+    locations = _schema_props(_array_items(world_graph.get("locations")))
+    _set_reference_enum(locations.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+
+
+def _narrow_public_world(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    # Only the SCENE location is a reference to an already-existing (crime)
+    # location; declared persons/motives/objects/locations and the travel rules
+    # between those declarations stay free so red-herrings can be created.
+    scene = _schema_props(props.get("scene"))
+    _set_reference_enum(scene.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+
+
+def _narrow_repair(props: Mapping[str, Any], universe: Mapping[str, Any]) -> None:
+    # The draft's crime.* ids reference the (locked/current) entities; the
+    # DECLARATION arrays stay free (a repair may add/keep red-herring people).
+    crime = _schema_props(props.get("crime"))
+    _set_reference_enum(crime.get("victimId"), _reference_id_tuple(universe, "personIds"), nullable=False)
+    _set_reference_enum(crime.get("murdererId"), _reference_id_tuple(universe, "personIds"), nullable=True)
+    _set_reference_enum(crime.get("motiveId"), _reference_id_tuple(universe, "motiveIds"), nullable=False)
+    _set_reference_enum(crime.get("weaponId"), _reference_id_tuple(universe, "objectIds"), nullable=False)
+    _set_reference_enum(crime.get("locationId"), _reference_id_tuple(universe, "locationIds"), nullable=False)
+    # DEF-064 (ADV-43-02): the KNOWN world-graph / evidence reference universes
+    # are already computed for repair (``trusted_reference_universe``), so the
+    # same reference enums the world_graph / evidence stages use also constrain
+    # the full-draft repair references. Declaration-defining arrays
+    # (persons[].personId, objects[].objectId, evidence[].id, top-level
+    # locations[].locationId) stay free.
+    _narrow_world_graph(props, universe)
+    _narrow_evidence(props, universe)
+
+
+def _array_items(node: Any) -> Any:
+    if isinstance(node, Mapping):
+        items = node.get("items")
+        if isinstance(items, Mapping):
+            return items
+    return {}
+
+
+_NARROWERS: Mapping[str, Any] = {
+    "case_truth": _narrow_case_truth,
+    "evidence": _narrow_evidence,
+    "world_graph": _narrow_world_graph,
+    "public_world": _narrow_public_world,
+    "repair": _narrow_repair,
+}
+
+
+def narrow_stage_output_schema(
+    stage_value: str, *, reference_universe: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """A deep-copied, path-aware narrowing of the parser-shaped stage schema.
+
+    Returns a FRESH schema (the source contract is never mutated) with closed
+    ``enum`` constraints added ONLY to explicit REFERENCE fields at known stage
+    paths. The source is never modified, and the strict parser/validators are
+    untouched. When ``stage_value`` is unknown the base ``None`` is returned.
+    """
+    schema = json_schema_for_stage_output(stage_value)
+    if schema is None or not isinstance(reference_universe, Mapping):
+        return schema
+    narrowed = copy.deepcopy(schema)
+    narrower = _NARROWERS.get(stage_value)
+    if narrower is None:
+        return narrowed
+    try:
+        narrower(_schema_props(narrowed), reference_universe)
+    except Exception:  # noqa: BLE001 - narrowing is additive best-effort
+        return schema
+    return narrowed
 
 
 # --------------------------------------------------------------------------- #
@@ -1346,7 +1557,59 @@ def _kit_anchor_table() -> tuple[tuple[str, tuple[str, ...]], ...]:
     )
 
 
-def generation_scope_block() -> str:
+_NO_KIT_ARGUMENT: Any = object()
+"""Sentinel default for ``generation_scope_block`` (P43-FR-10 / DEF-063).
+
+The NO-ARGUMENT call must stay byte-identical (Ollama templates and many tests
+rely on it). Passing ANY value (including ``None``/``""`` for an unresolved kit)
+opts into the kit-scoped rendering: only the SELECTED kit's anchors are offered
+and other kits' anchors are never presented as options."""
+
+
+def _kit_scoped_anchor_block(
+    environment_id: Any, kit_table: tuple[tuple[str, tuple[str, ...]], ...]
+) -> str:
+    """The anchor guidance for ONE selected environment kit (DEF-063).
+
+    Only the selected kit's manifest-derived anchors are listed; anchors that
+    belong exclusively to any OTHER kit are NEVER offered. When the kit is
+    unresolved (``None``/``""``/unknown id) no kit anchors are offered at all —
+    the model is told a kit must be selected rather than handed the multi-kit
+    vocabulary to infer from.
+    """
+    selected = (
+        environment_id
+        if isinstance(environment_id, str) and environment_id.strip()
+        else None
+    )
+    if selected is None:
+        return (
+            "- SELECTED ENVIRONMENT KIT: (must be selected — no location/"
+            "environment could be resolved). Anchors are KIT/ENVIRONMENT-SCOPED; "
+            "NO kit anchors are offered here and anchors from multiple kits MUST "
+            "NOT be assumed or mixed. Select exactly one kit first.\n"
+        )
+    anchors = dict(kit_table).get(selected) if kit_table else None
+    if anchors is None:
+        return (
+            f"- SELECTED ENVIRONMENT KIT: {selected!r} — anchors are KIT/"
+            "ENVIRONMENT-SCOPED; only this kit's anchors are valid, but no anchor "
+            "vocabulary could be derived for it. Anchors from any OTHER kit are "
+            "NOT valid for this case and MUST NOT be used.\n"
+        )
+    return (
+        f"- SELECTED ENVIRONMENT KIT: {selected!r} — worldGraph.placements[]"
+        ".anchor MUST be an anchor of THIS kit (anchors are KIT/ENVIRONMENT-"
+        "SCOPED; a cross-kit anchor from a DIFFERENT kit fails composition: "
+        "'unknown anchor ... in kit ...'). The selected kit's anchor vocabulary "
+        "is:\n"
+        f"      kit {selected!r}: {', '.join(anchors)}\n"
+        "- Anchors belonging to any OTHER kit are NOT valid for this case and "
+        "MUST NOT be used.\n"
+    )
+
+
+def generation_scope_block(environment_id: Any = _NO_KIT_ARGUMENT) -> str:
     """Deterministic, authoritative asset/anchor/interaction scope block.
 
     Rendered from the frozen registries AND the Asset Oracle catalog
@@ -1363,11 +1626,20 @@ def generation_scope_block() -> str:
     kit/environment-scoped: the per-kit anchor vocabularies are derived from
     the environment manifests (``_kit_anchor_table``), because a placement is
     valid only when its anchor exists in the case's OWN kit.
+
+    Phase43 (P43-FR-10 / DEF-063): when ``environment_id`` is supplied (the
+    resolved SELECTED kit — ``None``/``""`` when unresolved) only that kit's
+    anchors are offered and every other kit's anchors are withheld, so the
+    model is never handed the full multi-kit anchor table. The NO-ARGUMENT
+    call keeps the original multi-kit vocabulary byte-identically.
     """
     guaranteed = _composition_asset_ids()
     registry_only = _registry_only_asset_ids()
     kit_table = _kit_anchor_table()
-    if kit_table:
+    kit_scoped = environment_id is not _NO_KIT_ARGUMENT
+    if kit_scoped:
+        anchor_block = _kit_scoped_anchor_block(environment_id, kit_table)
+    elif kit_table:
         anchor_block = (
             "- worldGraph.placements[].anchor MUST be an anchor of the CASE'S "
             "OWN environment kit — anchors are KIT/ENVIRONMENT-SCOPED, and a "
@@ -1564,8 +1836,12 @@ _CASE_FIELD_RULES = (
     "- The document keys are EXACTLY: crime, persons, motives, locations, "
     "travelRules, scene.\n"
     "- crime uses EXACTLY: type, victimId, murdererId, motiveId, weaponId, "
-    "locationId, crimeTime (camelCase - never snake_case variants like "
-    "crime_time, never renamed or dropped keys).\n"
+    "locationId, crimeTime, resolutionType (camelCase - never snake_case "
+    "variants like crime_time, never renamed or dropped keys).\n"
+    "- resolutionType is EXACTLY one token from HOMICIDE, SUICIDE: a HOMICIDE "
+    "names a NON-EMPTY murdererId (a canonical person id, never a display "
+    "name), while a SUICIDE sets murdererId to the JSON null value and names "
+    "no murderer.\n"
     "- crimeTime uses EXACTLY: canonical (ISO-8601 timestamp) and "
     "accusationToleranceSeconds (a plain non-negative integer).\n"
     "- person role is one exact token from: victim, suspect, witness, family, "
@@ -1750,6 +2026,7 @@ CASE_PEOPLE_PROMPT_v1 = (
     + schema_contract("case_people")
     + _CASE_FIELD_RULES
     + "\n\n" + CASE_QUALITY_RULES
+    + "\n\n" + PHASE41A_QUALITY_RULES
     + "\n\nSanitized user prompt:\n__PROMPT__\n\n"
     "LOCKED user constraints (MUST be respected EXACTLY - never change a "
     "locked value):\n__LOCKED__\n\n"
@@ -1810,6 +2087,7 @@ EVIDENCE_PROMPT_v1 = (
     + schema_contract("evidence")
     + _EVIDENCE_FIELD_RULES
     + "\n\n" + CASE_QUALITY_RULES
+    + "\n\n" + PHASE41A_QUALITY_RULES
     + _EVIDENCE_DEDUCTION_CONTRACT
     + "\n\nSanitized user prompt:\n__PROMPT__\n\n"
     "LOCKED user constraints:\n__LOCKED__\n\n"
@@ -1900,6 +2178,7 @@ REPAIR_PROMPT_v1 = (
     + "\n\n__PREVIOUS_DRAFT__\n\n"
     "SANITIZED validation issues to fix:\n__ISSUES__\n\n"
     + "\n\n" + CASE_QUALITY_RULES
+    + "\n\n" + PHASE41A_QUALITY_RULES
     + _SCOPE_AND_WITNESS_TEXT
     + "\n\n"
     + _NO_INTERNALS
@@ -3314,6 +3593,7 @@ __all__ = [
     "ASSET_SPEC_REPAIR_PROMPT_v1",
     "CASE_PEOPLE_PROMPT_v1",
     "CASE_QUALITY_RULES",
+    "PHASE41A_QUALITY_RULES",
     "CONTRACT_KEYS",
     "EVIDENCE_PROMPT_v1",
     "REPAIR_PROMPT_v1",

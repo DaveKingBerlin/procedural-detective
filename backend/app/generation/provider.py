@@ -82,6 +82,12 @@ class GenerateRequest:
     # Optional so FakeProvider and legacy callers remain unchanged.
     json_schema: dict | None = None
     schema_id: str | None = None
+    # Phase43 (P43-FR-12) — bounded, non-secret diagnostic only: the ONE
+    # selected environment kit id for this request (None when no kit could be
+    # resolved). Never truth, never provider/browser supplied; emitted only as
+    # a closed observability token. Additive (default None) so every existing
+    # construction stays valid.
+    selected_environment_kit: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_id, str) or not self.attempt_id:

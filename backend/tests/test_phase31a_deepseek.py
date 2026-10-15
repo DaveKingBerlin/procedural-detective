@@ -196,6 +196,17 @@ def _name_of(post_body: dict) -> str | None:
     return inner.get("name")
 
 
+def _enum_agnostic(node):
+    """Structural view of a schema with every additive Phase43 reference
+    ``enum`` removed (the pre-Phase-43 tests assert stage structure; Phase43
+    P43-FR-04 only ADDS request-local reference enums)."""
+    if isinstance(node, dict):
+        return {k: _enum_agnostic(v) for k, v in node.items() if k != "enum"}
+    if isinstance(node, list):
+        return [_enum_agnostic(item) for item in node]
+    return node
+
+
 def _json_events(log_text: str) -> list[dict]:
     events = []
     for line in log_text.splitlines():
@@ -417,8 +428,8 @@ def test_repair_failure_sets_and_outcomes_recorded(database_url):
                 for index in (4, 5):
                     _url, body, _h = wire.posts[index]
                     assert _name_of(body) == "REPAIR_v1"
-                    assert _schema_of(body) == prompts.json_schema_for_stage_output(
-                        "repair"
+                    assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                        prompts.json_schema_for_stage_output("repair")
                     )
                 repair_completes = [
                     e for e in events
@@ -586,8 +597,8 @@ def test_golden_fixtures_still_parse_and_publish(database_url):
                 assert len(wire.posts) == 4
                 for index, stage in enumerate(_REGISTRY_STAGES):
                     _url, body, _h = wire.posts[index]
-                    assert _schema_of(body) == prompts.json_schema_for_stage_output(
-                        stage.value
+                    assert _enum_agnostic(_schema_of(body)) == _enum_agnostic(
+                        prompts.json_schema_for_stage_output(stage.value)
                     ), stage
         finally:
             _dispose(application)
@@ -1029,8 +1040,8 @@ def test_repair_envelope_wrapped_full_draft_publishes(database_url):
                 # The repair wire is unchanged: REPAIR_v1 + structured output.
                 _url, repair_body, _h = wire.posts[4]
                 assert _name_of(repair_body) == "REPAIR_v1"
-                assert _schema_of(repair_body) == prompts.json_schema_for_stage_output(
-                    "repair"
+                assert _enum_agnostic(_schema_of(repair_body)) == _enum_agnostic(
+                    prompts.json_schema_for_stage_output("repair")
                 )
                 events = _json_events(log_buffer.getvalue())
                 repair_completes = [

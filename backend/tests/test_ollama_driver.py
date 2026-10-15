@@ -121,9 +121,9 @@ def _evidence(weapon_obj="bronze_ceremonial_ice_pick", murderer="paul_becker"):
     ]}
 
 
-def _world(unknown_name="bronze ceremonial ice pick"):
+def _world(unknown_name="bronze ceremonial ice pick", environment_hint="office"):
     return {
-        "environmentHint": "office", "locationTokens": ["office"],
+        "environmentHint": environment_hint, "locationTokens": [environment_hint],
         "objects": [{"name": unknown_name, "categoryHint": "decor", "criticality": "required"}],
         "relations": [{"kind": "on_desk", "target": unknown_name}],
         "unsafeUnsupported": [],

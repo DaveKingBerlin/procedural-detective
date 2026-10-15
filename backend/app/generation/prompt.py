@@ -6,7 +6,8 @@ Rules (deterministic):
 
 - Recognized keys (case-insensitive, colon-delimited): ``victim``,
   ``murderer``, ``motive``, ``weapon``, ``time`` (also spelled
-  ``Crime time:`` / ``crime time`` / ``crime_time``), ``witness``.
+  ``Crime time:`` / ``crime time`` / ``crime_time``), ``witness``,
+  ``location``.
 - Values are trimmed and used VERBATIM otherwise — identity strings, never
   normalized through smarts (canonicalization to case ids is the fixture /
   pipeline product decision, not the parsers job).
@@ -40,6 +41,8 @@ _KEY_ALIASES: dict[str, str] = {
     "crime time": "crime_time",
     "crime_time": "crime_time",
     "witness": "witness",
+    # Phase43 (P43-FR-02) — the compact ``Location: apartment`` lock.
+    "location": "location",
 }
 
 _EMPTY_NOTE = "no structured constraints recognized"
@@ -70,7 +73,7 @@ def parse_prompt(
     if not prompt.strip():
         return (LockedConstraints(), _EMPTY_NOTE)
 
-    values: dict[str, str] = {}
+    values: dict[str, str | None] = {}
     recognized: list[str] = []
     for raw_line in prompt.splitlines():
         line = raw_line.strip()
@@ -82,7 +85,9 @@ def parse_prompt(
             continue  # unknown key -> ignored
         if field in values:
             raise PromptError(f"duplicate prompt key {raw_key.strip()!r}")
-        values[field] = raw_value.strip()
+        # DEF-067 (ADV-43-08): an empty/whitespace value is treated as ABSENT
+        # (``None``) so it can never become an empty locked identity.
+        values[field] = raw_value.strip() or None
         recognized.append(field)
 
     locked = LockedConstraints(
@@ -92,6 +97,7 @@ def parse_prompt(
         weapon=values.get("weapon"),
         crime_time=values.get("crime_time"),
         witness=values.get("witness"),
+        location=values.get("location"),
     )
     if not recognized:
         return (locked, _EMPTY_NOTE)
