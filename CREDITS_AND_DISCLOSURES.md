@@ -24,7 +24,7 @@ Main dependencies include:
 
 - **Backend:** FastAPI, Pydantic, SQLAlchemy, Alembic, uvicorn, httpx
 - **Frontend:** React, React DOM, React Router, Babylon.js, Vite, TypeScript, Vitest, Playwright
-- **Optional bridge:** websockets, httpx
+- **Optional bridge:** websockets, httpx, certifi
 
 The direct dependencies use permissive open-source licences such as **MIT, BSD-3-Clause and Apache-2.0**.
 

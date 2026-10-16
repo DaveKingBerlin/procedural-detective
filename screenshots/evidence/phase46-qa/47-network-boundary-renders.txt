@@ -1,0 +1,49 @@
+Phase 46 independent QA - Task 1: production Compose network boundary
+===================================================================
+Repo:   C:\Users\Fujitsu\coding\procedural-detective
+Branch: phase46/submission-hardening (HEAD 4c1cf02 == main; implementation uncommitted)
+Env:    Docker Compose v5.2.0; renders are client-side `config --format json`
+Date:   2026-10-16
+Owner:  independent QA
+
+A. STANDALONE docker-compose.prod.yml (canonical production)
+------------------------------------------------------------
+docker compose -f docker-compose.prod.yml config --format json:
+  service=procedural-detective  ports=None          expose=['8000']
+  service=caddy                 ports=[80:80, 443:443]
+=> backend publishes NO host port; exposes :8000 (Docker-internal); only Caddy
+   publishes 80/443.                         [PASS]
+
+B. MERGED base+prod (the DISALLOWED chain)
+------------------------------------------
+docker compose -f docker-compose.yml -f docker-compose.prod.yml config --format json:
+  service=procedural-detective  ports=[8000:8000]   expose=['8000']
+  service=caddy                 ports=[80:80, 443:443]
+=> the merged chain INHERITS the base dev `8000:8000` by port concatenation,
+   which is exactly the reason production is standalone.  [REPORTED, as designed]
+
+Release check on the real shipped chain:
+  [report] prod-merge-config: the base+prod merge inherits the base dev backend
+  :8000 host mapping ... this merged chain is NOT a supported production
+  topology - production MUST use standalone `docker compose -f
+  docker-compose.prod.yml` (ADR-007). Edge/expose/11434 boundaries are intact.
+  (0 fails)                                   [PASS - report only]
+
+C. HOSTILE proof - production file gains a backend host port
+------------------------------------------------------------
+Temp copy of docker-compose.prod.yml (NEVER the tracked file) with an added
+backend `ports: - "8000:8000"`, rendered as [docker-compose.yml, hostile-prod.yml]:
+  check_prod_merge_effective_config(...) ->
+  [fail] prod-merge-config: docker-compose.prod.yml publishes a backend host
+  port (`ports:`) - production must expose :8000 privately only (PD-SEC-03 /
+  ADR-007): the base+prod merge would leak it            [FAIL as required]
+
+=> The regression check FAILS when `8000:8000` reappears in production.  [PASS]
+
+D. Canonical documentation / scripts
+------------------------------------
+- README + docs/DEPLOYMENT.md §1/§20 canonical production command = standalone
+  `docker compose -f docker-compose.prod.yml up -d`; the merged invocation
+  appears ONLY in explicit "do NOT use" warnings.        [PASS]
+- build-docker.{sh,bat} / start-server.{sh,bat}: dev -> docker-compose.yml;
+  netcup|prod -> docker-compose.prod.yml.                [PASS]

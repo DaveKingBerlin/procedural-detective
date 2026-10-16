@@ -10,8 +10,8 @@ before you investigate, accuse and reveal the truth in 3D.
 
 **Repository:** <https://github.com/DaveKingBerlin/procedural-detective>
 
-**Hosted demo URL:** `TBD after hosting is chosen` (hosting may not exist yet;
-the deployment target is a single container — see `docs/DEPLOYMENT.md`)
+**Hosted demo URL:** <https://detective.daves-web.de/> (single-container
+deployment — see `docs/DEPLOYMENT.md`)
 
 **Demo video URL:** `TBD after recording` (storyboard reference:
 `docs/demo-storyboard.md`)

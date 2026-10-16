@@ -95,6 +95,27 @@ Verifies that the submission tree is release-safe BEFORE packaging/judging:
        ``privileged: true`` (P29-03). The rendered-model gate
        (``check_prod_effective_config``) asserts the same invariants on the
        AUTHORITATIVE compose render.
+   12. PHASE 46 — MERGED PROD COMPOSE BOUNDARY (ADR-007) — production is
+       STANDALONE; the base+prod merge is NOT supported.
+       ``check_prod_merge_effective_config`` renders the exact disallowed chain
+       (``docker-compose.yml`` + ``docker-compose.prod.yml``), asserts Caddy
+       publishes EXACTLY ``80``/``443``, the backend ``expose``s ``8000``, no
+       service publishes ``11434`` and the PRODUCTION file never introduces a
+       backend host port (the ``8000:8000`` regression); the base dev ``:8000``
+       inheritance is REPORTED, never silently accepted as production.
+   13. PHASE 46 — APPLICATION BEARER-TOKEN HYGIENE — ``scan_app_bearer_tokens``
+       fails on the application's OWN bearer-token shapes in tracked evidence
+       (``creatorAccessToken`` / ``playthroughAccessToken`` /
+       ``anonymousSessionToken`` and the ``pd_playthrough_token`` localStorage
+       key associated with a ≥40-char urlsafe value — case-insensitive, quoted
+       or unquoted, ``:``/``=``/``,``/``=>`` separated, bracket-accessed, or on
+       the next line). Only a LITERAL value association triggers it; a code
+       reference / fixture that builds the value from a variable does not.
+       Sanctioned test/exemption trees apply as for ``scan_credentials``; token
+       VALUES are never printed. Phase46 §2 also excludes QA evidence
+       (``screenshots/``) and coverage output (``htmlcov/`` / ``coverage/`` /
+       ``.coverage`` / ``.coverage.*`` / ``coverage.xml``) from the Docker build
+       context.
 
 The production-DEPLOYMENT checks (7, 8, 9, 11) apply ONLY when the deployment
 artifacts exist: a document tree without ``docker-compose.prod.yml`` or the
@@ -283,7 +304,75 @@ _DOCKERIGNORE_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
         ".ollama local config",
         re.compile(r"^\s*\.ollama/?\s*(?:#.*)?$", re.MULTILINE | re.IGNORECASE),
     ),
+    # Phase 46 §2/§3 — QA/evidence artifacts and coverage output never enter
+    # the build context. None of these are runtime inputs (the Dockerfile COPY
+    # surface is backend/ + assets/ + docker/ + the built SPA; test/probe trees
+    # and evidence are execution-time material only).
+    (
+        "screenshots/evidence/ directory",
+        re.compile(
+            r"^\s*screenshots/evidence/?\s*(?:#.*)?$",
+            re.MULTILINE | re.IGNORECASE,
+        ),
+    ),
+    (
+        "screenshots/ directory",
+        re.compile(
+            r"^\s*screenshots/?\s*(?:#.*)?$", re.MULTILINE | re.IGNORECASE
+        ),
+    ),
+    (
+        "htmlcov/ coverage output",
+        re.compile(r"^\s*htmlcov/?\s*(?:#.*)?$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        "coverage/ output",
+        re.compile(r"^\s*coverage/?\s*(?:#.*)?$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        ".coverage file",
+        re.compile(r"^\s*\.coverage\s*$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        ".coverage.* parallel fragments",
+        re.compile(r"^\s*\.coverage\.\*\s*$", re.MULTILINE | re.IGNORECASE),
+    ),
+    (
+        "coverage.xml report",
+        re.compile(r"^\s*coverage\.xml\s*$", re.MULTILINE | re.IGNORECASE),
+    ),
 )
+
+# The literal `.dockerignore` exclusion LINES every release tree must carry —
+# the copy-paste form of ``_DOCKERIGNORE_PATTERNS`` for synthetic fixtures in
+# the release-guard tests (DEF-110). Keeping this in one place means a new
+# required pattern cannot silently drift from the fixtures that assert the
+# gate passes on a well-formed ``.dockerignore``.
+DOCKERIGNORE_REQUIRED_LINES: tuple[str, ...] = (
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "logs/",
+    "*.log",
+    "*.db",
+    "*.sqlite",
+    "*.sqlite3",
+    "tmp/",
+    "temp/",
+    ".ollama/",
+    "screenshots/",
+    "screenshots/evidence/",
+    "htmlcov/",
+    "coverage/",
+    ".coverage",
+    ".coverage.*",
+    "coverage.xml",
+)
+
+
+def required_dockerignore_text() -> str:
+    """The canonical required ``.dockerignore`` body (see above)."""
+    return "\n".join(DOCKERIGNORE_REQUIRED_LINES) + "\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -956,7 +1045,8 @@ def check_dockerignore(repo_root: Path) -> list[Finding]:
         Finding(
             "dockerignore", "ok",
             ".dockerignore excludes .env / .env.* (keeps .env.example), logs, "
-            "runtime DBs, tmp/temp and local Ollama config from the build context",
+            "runtime DBs, tmp/temp, local Ollama config, QA evidence "
+            "(screenshots/) and coverage output from the build context",
         )
     ]
 
@@ -1033,6 +1123,123 @@ def scan_credentials(repo_root: Path, tracked: list[str]) -> list[Finding]:
                 "credentials", "ok",
                 "no PEM private key / provider API-key / git-host PAT / AWS "
                 "access-key / Vault token literal in the tracked release surface",
+            )
+        )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
+# Phase 46 §2 — application-issued bearer-token patterns in tracked evidence
+# --------------------------------------------------------------------------- #
+#
+# The application issues SHORT-LIVED bearer tokens (``secrets.token_urlsafe``
+# values — ≥40 urlsafe chars) and exposes them in JSON fields:
+#
+#   creatorAccessToken / playthroughAccessToken / anonymousSessionToken
+#
+# and persists the playthrough token under the localStorage key
+# ``pd_playthrough_token``. QA evidence must never re-introduce a REAL token
+# value into the tracked tree. This scan matches a field/key NAME ASSOCIATED
+# with a real-looking ≥40-char urlsafe VALUE in any of the common serializations
+# (quoted/unquoted, ``:``/``=``/``,``/``=>`` separated, bracket access, value on
+# the next line, case-insensitive field names), so:
+#
+#   * a legitimate test fixture that merely references the field name, or
+#     assigns a NON-literal (e.g. ``setItem("pd_playthrough_token", token)``),
+#     is NOT a leak and is NOT flagged;
+#   * the sanctioned test/example trees exempted from ``scan_credentials``
+#     (``backend/tests/`` / ``bridge/tests/`` / ``e2e/probes/`` / frontend
+#     ``*.test.*`` / ``*.spec.ts(x)`` / the ``.env.example`` family) stay
+#     exempt here too — those fixtures construct FAKE tokens on purpose.
+#
+# Token VALUES are never printed: a finding names only ``file:line`` and the
+# field name.
+_APP_BEARER_FIELD_NAMES = (
+    "creatorAccessToken",
+    "playthroughAccessToken",
+    "anonymousSessionToken",
+)
+_APP_LOCALSTORAGE_TOKEN_KEY = "pd_playthrough_token"
+_APP_TOKEN_FIELD_ALT = "|".join(
+    (*_APP_BEARER_FIELD_NAMES, _APP_LOCALSTORAGE_TOKEN_KEY)
+)
+_APP_TOKEN_VALUE = r"[A-Za-z0-9_\-]{40,}"
+# A field/key name — optionally quoted / bracket-accessed, CASE-INSENSITIVE —
+# followed by an optional closing quote/bracket, a JSON/JS separator
+# (``:`` / ``=`` / ``,`` / ``=>``), optional whitespace (which may cross onto the
+# NEXT line — the pretty-printed/re-serialized JSON case) and an optional quote,
+# then a token-like ≥40-char urlsafe value. Only the ASSOCIATION of a field
+# name with a real-looking value triggers a finding, so a code reference or a
+# fixture that builds the value from a variable (``token``) is NOT flagged.
+_APP_BEARER_ASSOC_RE = re.compile(
+    r"[\"']?(?P<field>"
+    + _APP_TOKEN_FIELD_ALT
+    + r")[\"']?\s*\]?\s*(?::|=>|=|,)\s*[\"']?"
+    + _APP_TOKEN_VALUE
+    + r"[\"']?",
+    re.IGNORECASE,
+)
+
+
+def scan_app_bearer_tokens(repo_root: Path, tracked: list[str]) -> list[Finding]:
+    """Phase 46 §2 — fail on live application bearer-token values in tracked files.
+
+    Scans the SAME tracked textual release surface as ``scan_credentials`` (the
+    sanctioned test-vector / example trees stay exempt via ``_is_sanctioned``)
+    for the application's OWN bearer-token shapes: a field/key name
+
+      * ``creatorAccessToken`` / ``playthroughAccessToken`` /
+        ``anonymousSessionToken``; or
+      * the ``pd_playthrough_token`` localStorage key
+
+    associated with a real-looking ≥40-char urlsafe (``token_urlsafe``) value.
+    The association is deliberately broad so it cannot be trivially evaded:
+    case-insensitive field names, optional quotes, unquoted ``field=value`` /
+    ``field: value``, bracket access (``["pd_playthrough_token"]``), a value on
+    the NEXT line (pretty-printed / re-serialized JSON), and the ``setItem(key,
+    "value")`` comma form are all covered.
+
+    Only a field name ASSOCIATED with a LITERAL value is a finding — a code
+    reference or a fixture that builds the value from a variable
+    (``setItem("pd_playthrough_token", token)``) is not. Token VALUES are never
+    echoed; findings name only ``file:line`` and the field name.
+    """
+    if tracked is None:
+        return [
+            Finding(
+                "app-bearer-tokens", "fail",
+                "cannot enumerate tracked files (git ls-files failed) — "
+                "fail-closed: cannot prove the tree carries no application "
+                "bearer-token values",
+            )
+        ]
+    targets = _interface_scan_targets(repo_root, tracked)
+    findings: list[Finding] = []
+    for rel, path in targets:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        seen_lines: set[int] = set()
+        for match in _APP_BEARER_ASSOC_RE.finditer(text):
+            number = text.count("\n", 0, match.start()) + 1
+            if number in seen_lines:
+                continue
+            seen_lines.add(number)
+            findings.append(
+                Finding(
+                    "app-bearer-tokens", "fail",
+                    f"{rel}:{number}: field {match.group('field')!r} is "
+                    "associated with a live token value (Phase46 §2 token "
+                    "hygiene)",
+                )
+            )
+    if not findings:
+        findings.append(
+            Finding(
+                "app-bearer-tokens", "ok",
+                "no application bearer-token field/localStorage key carries a "
+                "live token value in the tracked release surface",
             )
         )
     return findings
@@ -2727,6 +2934,274 @@ def check_base_compose_config(
 
 
 # --------------------------------------------------------------------------- #
+# Phase 46 / ADR-007 — merged base+prod production Compose boundary guard
+# --------------------------------------------------------------------------- #
+
+# The EXACT disallowed production chain. Production is STANDALONE
+# (``docker-compose.prod.yml``); Compose concatenates ``ports``, so the merged
+# chain inherits the base dev ``8000:8000`` and would publish the private
+# backend to the host. The guard renders it and FAILS if that boundary is ever
+# breached — in particular if the PRODUCTION file itself introduces a backend
+# host port (the ``8000:8000`` regression).
+_PROD_MERGE_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.prod.yml")
+_PROD_COMPOSE_FILE_NAME = "docker-compose.prod.yml"
+# The documented DEV-only backend host port (the base profile's local-dev
+# mapping). It is the ONLY merged host port tolerated, and it is REPORTED as the
+# known unsupported-merge inheritance — production must use the standalone file.
+_DEV_BACKEND_HOST_PORT = "8000"
+_PUBLIC_EDGE_PORTS = frozenset({"80", "443"})
+
+
+def _rendered_published_ports(service: dict[str, object]) -> list[str]:
+    """The published (host) port strings of a rendered service.
+
+    ``docker compose config --format json`` renders ``ports`` as dicts with
+    ``target``/``published``; the string fallback covers a hand-built model.
+    """
+    raw = service.get("ports")
+    if not isinstance(raw, list):
+        return []
+    published: list[str] = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            value = entry.get("published")
+            if value is not None:
+                published.append(str(value))
+        else:
+            text = str(entry)
+            parts = text.split(":")
+            published.append(parts[-2] if len(parts) >= 2 else parts[0])
+    return published
+
+
+def _merge_boundary_problems(
+    rendered: dict[str, object],
+    *,
+    label: str,
+    allowed_ports_by_service: dict[str, frozenset[str]],
+) -> list[str]:
+    """Public host-port / host-network violations of a rendered model.
+
+    A service named in ``allowed_ports_by_service`` may publish ONLY those host
+    ports; any service NOT named must publish NOTHING. ANY service declaring
+    ``network_mode: host`` is always a violation. Sanitized messages only
+    (service names + labels; never a configured value).
+    """
+    problems: list[str] = []
+    services = rendered.get("services")
+    if not isinstance(services, dict):
+        return [f"{label}: no rendered services (fail closed, ADR-007)"]
+    for name, service in sorted(services.items()):
+        if not isinstance(service, dict):
+            continue
+        if service.get("network_mode") == "host":
+            problems.append(
+                f"{label}: service {name!r} declares network_mode: host — host "
+                "networking bypasses the compose bridge isolation and could "
+                "bind the host's interfaces directly (ADR-007)"
+            )
+        allowed = allowed_ports_by_service.get(name, frozenset())
+        for port in _rendered_published_ports(service):
+            if port not in allowed:
+                problems.append(
+                    f"{label}: service {name!r} publishes an unexpected host "
+                    "port — only the Caddy edge (80/443) may be public; "
+                    "production stays expose-only (ADR-007)"
+                )
+                break
+    return problems
+
+
+def check_prod_merge_effective_config(
+    repo_root: Path,
+    *,
+    compose_paths: tuple[Path, ...] | None = None,
+    compose_env_file: Path | None = None,
+    compose_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> list[Finding]:
+    """ADR-007 — the disallowed base+prod production merge must stay private.
+
+    Production is STANDALONE (``docker compose -f docker-compose.prod.yml``);
+    the base+prod merge is NOT a supported topology. Renders the EXACT chain
+    ``[docker-compose.yml, docker-compose.prod.yml]`` through Docker Compose
+    (client-side ``config`` only, like the other rendered gates) and asserts:
+
+      * Caddy publishes EXACTLY ``80`` and ``443`` (the only public edge) in
+        BOTH the merged and the standalone production renders;
+      * the backend ``expose``s ``8000`` (Docker-internal only);
+      * NO service publishes the Ollama port ``11434``;
+      * NO service other than Caddy publishes a host port, and no service
+        declares ``network_mode: host`` (ADV-46-03) — the same fail-closed
+        posture as ``check_prod_effective_config``; a NEW service publishing a
+        host port FAILS;
+      * the backend publishes NO host port from the PRODUCTION file — the
+        standalone ``docker-compose.prod.yml`` render FAILS if a backend
+        ``ports:`` entry appears (the exact ``8000:8000``-in-production
+        regression), and the merged render FAILS on any backend host port that
+        is NOT the documented base dev ``8000`` inheritance.
+
+    The base dev ``8000:8000`` inherited by concatenation is the documented
+    reason the merge is unsupported; it is REPORTED (never a silent OK) so the
+    operator sees that the merged topology must not be used for production.
+
+    Fail-closed on a render error (Compose is the sole authority). Skip when
+    the merged chain's files are absent (deployment artifact check, same
+    pattern as the other compose gates). Never prints a rendered value.
+    """
+    default_files = [
+        (repo_root / name).resolve() for name in _PROD_MERGE_COMPOSE_FILES
+    ]
+    files = list(compose_paths) if compose_paths else default_files
+    if not all(path.is_file() for path in files):
+        return [
+            Finding(
+                "prod-merge-config", "skip",
+                "merged production compose chain not present ("
+                + ", ".join(str(p) for p in files)
+                + ") — the base+prod merge guard applies only when both the "
+                "base and production compose files exist (deployment artifact "
+                "check)",
+            )
+        ]
+    prod_file = files[-1]
+
+    try:
+        merged = _render_compose_config(
+            repo_root.resolve(), files, env_file=compose_env_file,
+            runner=compose_runner,
+        )
+        prod = _render_compose_config(
+            repo_root.resolve(), [prod_file], env_file=compose_env_file,
+            runner=compose_runner,
+        )
+    except _ComposeRenderError as exc:
+        return [
+            Finding(
+                "prod-merge-config", "fail",
+                f"{exc}; the merged production network boundary was not "
+                "validated (fail closed, ADR-007)",
+            )
+        ]
+
+    backend = _rendered_service(merged, "procedural-detective")
+    caddy = _rendered_service(merged, "caddy")
+    prod_backend = _rendered_service(prod, "procedural-detective")
+    if backend is None or caddy is None or prod_backend is None:
+        return [
+            Finding(
+                "prod-merge-config", "fail",
+                "rendered production configuration is missing a required "
+                "service (backend / Caddy) — the network boundary cannot be "
+                "validated (fail closed, ADR-007)",
+            )
+        ]
+
+    findings: list[Finding] = []
+
+    # 1. Caddy publishes EXACTLY the public TLS edge — merged AND standalone.
+    for label, rendered in (("merged base+prod", merged), ("standalone prod", prod)):
+        caddy_service = _rendered_service(rendered, "caddy")
+        caddy_ports = (
+            set(_rendered_published_ports(caddy_service))
+            if caddy_service is not None
+            else set()
+        )
+        if caddy_ports != set(_PUBLIC_EDGE_PORTS):
+            findings.append(
+                Finding(
+                    "prod-merge-config", "fail",
+                    f"{label}: the rendered Caddy edge must publish exactly "
+                    f"80/443; got {len(caddy_ports)} public port(s) (the TLS "
+                    "edge is the only public surface, ADR-007)",
+                )
+            )
+
+    # 2. The backend exposes :8000 privately (Docker-internal only).
+    exposes = backend.get("expose")
+    if not isinstance(exposes, list) or "8000" not in {str(item) for item in exposes}:
+        findings.append(
+            Finding(
+                "prod-merge-config", "fail",
+                "the rendered backend service does not expose private port "
+                "8000 (it must remain Docker-internal, ADR-007)",
+            )
+        )
+
+    # 3. No service publishes the Ollama port 11434 — merged AND standalone.
+    for label, rendered in (("merged base+prod", merged), ("standalone prod", prod)):
+        services = rendered.get("services")
+        if not isinstance(services, dict):
+            continue
+        for service_name, service in services.items():
+            if isinstance(service, dict) and "11434" in _rendered_port_targets(
+                service
+            ):
+                findings.append(
+                    Finding(
+                        "prod-merge-config", "fail",
+                        f"{label}: the rendered service {service_name!r} "
+                        "publishes the Ollama port 11434; Ollama must stay "
+                        "private (ADR-007)",
+                    )
+                )
+                break
+
+    # 4. Host-port / host-network boundary (ADV-46-03). Only the Caddy edge may
+    #    publish on the standalone production file; the merged chain may ADDITIONALLY
+    #    carry the documented base dev backend :8000 inheritance. Any OTHER
+    #    service publishing a host port, any unexpected port, or any
+    #    `network_mode: host` FAILS — the same fail-closed posture as
+    #    `check_prod_effective_config`.
+    findings.extend(
+        Finding("prod-merge-config", "fail", problem)
+        for problem in _merge_boundary_problems(
+            merged,
+            label="merged base+prod",
+            allowed_ports_by_service={
+                "caddy": _PUBLIC_EDGE_PORTS,
+                "procedural-detective": frozenset({_DEV_BACKEND_HOST_PORT}),
+            },
+        )
+    )
+    findings.extend(
+        Finding("prod-merge-config", "fail", problem)
+        for problem in _merge_boundary_problems(
+            prod,
+            label="standalone production",
+            allowed_ports_by_service={"caddy": _PUBLIC_EDGE_PORTS},
+        )
+    )
+
+    merged_backend_host_ports = _rendered_published_ports(backend)
+
+    if findings:
+        return findings
+
+    if merged_backend_host_ports:
+        # The base dev :8000 is inherited by the UNSUPPORTED merge. Report it
+        # (never a silent OK) so it is clear this chain is NOT production.
+        return [
+            Finding(
+                "prod-merge-config", "report",
+                "the base+prod merge inherits the base dev backend :8000 host "
+                "mapping (Compose concatenates `ports`); this merged chain is "
+                "NOT a supported production topology — production MUST use "
+                "standalone `docker compose -f docker-compose.prod.yml` "
+                "(ADR-007). Edge/expose/11434 boundaries are intact.",
+            )
+        ]
+    return [
+        Finding(
+            "prod-merge-config", "ok",
+            "merged base+prod configuration keeps the production network "
+            "boundary: Caddy publishes exactly 80/443, backend expose-only "
+            ":8000, no published Ollama port, and the production file adds no "
+            "backend host port",
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # orchestration
 # --------------------------------------------------------------------------- #
 
@@ -2759,6 +3234,7 @@ def run_all(
     findings.extend(check_tracked_secrets(tracked))
     findings.extend(scan_private_endpoints(repo_root, tracked))
     findings.extend(scan_credentials(repo_root, tracked))
+    findings.extend(scan_app_bearer_tokens(repo_root, tracked))
     findings.extend(check_dockerignore(repo_root))
     findings.extend(check_compose_logging_bounds(repo_root))
     findings.extend(check_caddy_access_logging(repo_root))
@@ -2768,6 +3244,12 @@ def run_all(
         check_prod_effective_config(
             repo_root,
             allow_local=prod_allow_local,
+            compose_env_file=compose_env_file,
+        )
+    )
+    findings.extend(
+        check_prod_merge_effective_config(
+            repo_root,
             compose_env_file=compose_env_file,
         )
     )

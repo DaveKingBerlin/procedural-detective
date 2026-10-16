@@ -22,11 +22,24 @@ resolved versions at the time of writing are shown in parentheses.
 | SQLAlchemy | `>=2.0.30,<3.0` (2.0.52) | ORM / persistent case store (SQLite) | MIT |
 | Alembic | `>=1.13,<2.0` (1.19.2) | Database migrations (`alembic upgrade head`) | MIT |
 | uvicorn | `>=0.30,<1.0` ([standard], 0.52.4) | ASGI server | BSD-3-Clause (see upstream) |
-| httpx (dev) | `>=0.27,<1.0` (0.28.1) | HTTP client (live-provider adapter) | BSD-3-Clause |
+| httpx | `>=0.27,<1.0` (0.28.1) | HTTP client used at runtime by the live- and Ollama-provider adapters; ships in the runtime image via the backend `[runtime]` extra (also in `[dev]`) | BSD-3-Clause |
 | pytest (dev) | `>=8,<10` (9.1.1) | Backend test suite | MIT |
 
 Transitive dependencies are resolved by pip from the above; their licenses are
 governed by their own metadata and are not redistributed in this document.
+
+### 1.1 Bridge client (Python) dependencies
+
+Declared in `bridge/pyproject.toml` (`pd-ollama-bridge`). The bridge client runs
+on the visitor's / operator's own machine — it is **not** installed in the
+container image — and is the only Ollama client for a `remote_client`
+deployment. No lockfile is shipped; the declared requirement ranges are given.
+
+| Dependency | Version | Purpose | License |
+| --- | --- | --- | --- |
+| websockets | `>=13` | WebSocket transport to the deployment (bridge client) | BSD-3-Clause |
+| httpx | `>=0.24` | HTTP client to the local Ollama server and for model listing | BSD-3-Clause |
+| certifi | `>=2023.7.22` | CA bundle fallback for TLS trust when no usable system bundle exists (never a downgrade) | MPL-2.0 |
 
 ## 2. Frontend (JavaScript) dependencies
 
@@ -44,6 +57,7 @@ SPA; the dev-time packages build it.
 | typescript (dev) | 5.9.3 (locked) | Type checking and SPA compilation | Apache-2.0 |
 | vitest (dev) | 3.2.7 (locked) | Frontend unit tests | MIT |
 | jsdom (dev) | 26.1.0 (locked) | Browser DOM for tests | MIT |
+| @playwright/test (dev) | 1.63.0 (locked) | Browser end-to-end test runner (`e2e/`) | Apache-2.0 |
 | @vitejs/plugin-react (dev) | 4.7.0 (locked) | Vite React integration | MIT |
 | @types/node, @types/react, @types/react-dom (dev) | 24.13.4 / 19.3.0 / 19.3.0 (locked) | Typing stubs | MIT |
 

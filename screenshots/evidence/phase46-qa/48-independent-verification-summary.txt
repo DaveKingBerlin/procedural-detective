@@ -1,0 +1,71 @@
+Phase 46 independent QA - Task 7/8: suites, scans, context, acceptance
+=====================================================================
+Repo:   C:\Users\Fujitsu\coding\procedural-detective
+Branch: phase46/submission-hardening (HEAD 4c1cf02 == main; implementation uncommitted)
+Host:   Windows (win32), Python 3.12.10, Node 24.18.0/npm 11.16.0, Docker 29.6.1
+Date:   2026-10-16
+Owner:  independent QA
+No token value is printed. All runs used --basetemp under C:\Temp\pd-p46-qa.
+
+SUITE COUNTS (exact)
+--------------------
+- root `tests/` : 2 failed, 288 passed, 2 skipped  (basetemp C:\Temp\pd-p46-qa\root)
+    failures: test_phase24a_fp_docker_fixes.py::test_section12_base_and_ci_empty_env_render_no_ollama_vars
+              test_phase24a_fp_docker_fixes.py::test_section12_prod_remote_client_profile_never_given_ollama_vars
+- root `tests/test_phase46_release_guards.py` : 40 passed
+- backend `backend/tests` run 1 : 3 failed, 3427 passed, 1 skipped
+- backend `backend/tests` run 2 : 4 failed, 3426 passed, 1 skipped
+    deterministic failures (both runs):
+      test_phase18a_release.py::test_release_tool_dockerignore_check                     <- REAL REGRESSION (DEF-110)
+      test_phase18d_fixes.py::test_adv206_env_example_remains_sanctioned                 <- REAL REGRESSION (DEF-110)
+      test_phase21b_demo_truthfulness.py::test_ollama_probe_hang_dto_via_bounded_seam    <- PRE-EXISTING / NON-BLOCKING (timing-bound)
+    run-2-only flaky:
+      test_phase30_frontier_byok.py::test_timeout_fails_attempt_with_frontier_timeout    <- FLAKY (passes 4/4 in isolation)
+- backend Phase 44/45 playability + world-compose : 127 passed
+- bridge `bridge/tests` : 351 passed
+- frontend `npm test` : 91 files / 2009 tests passed
+- frontend `npm run typecheck` : exit 0
+- frontend `npm run build` : exit 0 (bundle scan: 37 files OK)
+
+RELEASE SCAN
+------------
+- python -m tools.release_check --allow-hosted-placeholders -> ALL 21 checks OK, exit 0
+- scan_app_bearer_tokens hostile fixture (value built at runtime) -> FAIL, value NOT echoed
+- tracked screenshots/evidence/ re-scan: 237 tracked files; unredacted live-value
+  hits = 0 (creatorAccessToken 0 / playthroughAccessToken 0 / anonymousSessionToken 0 /
+  pd_playthrough_token 0). Field-name mentions = creatorAccessToken 5 /
+  playthroughAccessToken 5 / anonymousSessionToken 1 - all references or `<redacted>`.
+
+DOCKER CONTEXT (git ignore engine)
+----------------------------------
+EXCLUDED : screenshots/**, htmlcov/**, coverage/**, .coverage, frontend/dist,
+           node_modules, logs/, *.db, tests/, backend/tests/
+INCLUDED : backend/app/**, assets/**, docker/entrypoint.sh, docker/Caddyfile,
+           frontend/src/**, compose/fake-worlds/**, Dockerfile
+
+DOCS
+----
+- README `r`n`r`n malformed literal: GONE (no match in README/SUBMISSION)
+- README "Generation modes" distinguishes fake/ollama/live: PRESENT
+- SUBMISSION hosted demo URL == README live demo URL (https://detective.daves-web.de/),
+  canonical, not invented: PASS
+- docs/PRIVACY.md §6 covers hosted-vs-local data flow, key used per request and
+  NOT stored, no automatic deletion, retention boundary: PASS
+- THIRD_PARTY.md direct deps websockets/httpx/certifi (bridge), httpx runtime
+  classification (backend[runtime]), @playwright/test (frontend+e2e): PASS
+- CREDITS_AND_DISCLOSURES.md includes certifi: PASS
+- docs/DEPLOYMENT.md release sequence forbids the merged command: PASS
+  (ADV-46-05: §2 references non-existent `docker/docker-compose.prod.yml` - LOW)
+
+REPRODUCED ADVERSARIAL FINDINGS
+-------------------------------
+- ADV-46-01 (MEDIUM): tests/test_phase46_release_guards.py::_runtime_token()
+  reconstructs one of the 7 ORIGINAL redacted token values via _fold(...)
+  (verified programmatically == True). Filed as DEF-111.
+- ADV-46-04 (LOW): `.coverage.*` and `coverage.xml` are NOT excluded by
+  `.dockerignore` (git-ignore simulation: INCLUDED), though `.gitignore` lists
+  them. Filed as DEF-113.
+- ADV-46-05 (LOW): docs/DEPLOYMENT.md §2 points at non-existent
+  `docker/docker-compose.prod.yml`. Filed as DEF-112.
+- ADV-46-02 / ADV-46-03: reported (scan evasion matrix; merge-guard non-backend
+  host port covered by check_prod_effective_config); left for orchestrator triage.

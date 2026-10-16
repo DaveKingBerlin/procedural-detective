@@ -1,0 +1,68 @@
+Phase 46 Workstream C — Task 2, family 4: operator .env compose-render tests
+===========================================================================
+File: tests/test_phase24a_fp_docker_fixes.py  ::  test_section12_*  (lines 438..521)
+Repo: C:\Users\Fujitsu\coding\procedural-detective
+HEAD: 4c1cf02... (== main). Target test module + backend unmodified vs HEAD; a
+parallel Phase 46 workstream landed tools/release_check.py changes + a new
+tests/ file during the QA run (no commits). The targeted section12 run and the
+full phase24a file were re-run after that landed — same result (2 failed / 33
+passed).
+Date: 2026-10-16
+
+ENVIRONMENT
+-----------
+Compose CLI: PRESENT -> $ docker compose version -> Docker Compose version v5.2.0
+
+TARGETED RUN (Compose CLI present)
+----------------------------------
+$ python -m pytest tests/test_phase24a_fp_docker_fixes.py -q -k "section12" -rs ...
+  2 failed, 1 passed, 32 deselected in 1.23s
+    PASS test_section12_prod_source_never_references_ollama_vars        (source-level, no daemon)
+    FAIL test_section12_base_and_ci_empty_env_render_no_ollama_vars
+         tests/test_phase24a_fp_docker_fixes.py:465: assert "OLLAMA_BASE_URL" not in raw  (label "base")
+    FAIL test_section12_prod_remote_client_profile_never_given_ollama_vars
+         tests/test_phase24a_fp_docker_fixes.py:495: assert "OLLAMA_BASE_URL" not in raw
+
+FULL FILE
+---------
+$ python -m pytest tests/test_phase24a_fp_docker_fixes.py -q -rs ...
+  2 failed, 33 passed in 15.28s
+  (only the two test_section12_* render tests fail)
+
+ROOT CAUSE (reproduced)
+-----------------------
+Both docker-compose.yml (lines 57-59) and docker-compose.prod.yml (lines 78-80)
+declare:
+    env_file:
+      - path: .env
+        required: false
+`--env-file <empty>` (as the tests pass) controls ONLY interpolation; it does NOT
+disable the SERVICE-LEVEL `env_file: .env`. A local, git-ignored operator `.env`
+exists in this working tree (git ls-files .env -> empty = untracked) and is
+injected into the rendered service environment (GENERATION_PROVIDER, OLLAMA_MODEL,
+OLLAMA_*, FRONTIER_*). Hence the rendered model legitimately contains the
+operator's provider values.
+
+CLEAN-CHECKOUT PROOF (no .env)
+------------------------------
+Copied docker-compose.yml / docker-compose.ci.yml / docker-compose.prod.yml to a
+temp dir (no .env) and rendered through the same Compose engine:
+  $ docker compose --project-directory <tmp> -f <tmp>\docker-compose.yml config --format json  -> exit 0
+  grep OLLAMA_BASE_URL|OLLAMA_MODEL|11434 -> (no hits)
+  $ docker compose --project-directory <tmp> -f <tmp>\docker-compose.prod.yml config --format json -> exit 0
+  grep OLLAMA_BASE_URL|OLLAMA_MODEL|11434 -> (no hits)
+=> On a CLEAN checkout (CI; no operator .env) the rendered model has no OLLAMA
+   vars and the two test_section12_* assertions would PASS.
+
+SKIP BEHAVIOR (Compose CLI absent)
+----------------------------------
+With docker removed from PATH, both tests SKIP (never fail):
+  SKIPPED tests/test_phase24a_fp_docker_fixes.py:443: Docker Compose CLI is unavailable
+  SKIPPED tests/test_phase24a_fp_docker_fixes.py:478: Docker Compose CLI is unavailable
+
+CLASSIFICATION: ENVIRONMENT-BLOCKED (local untracked operator `.env`)
+(pre-existing; non-blocking)
+The failure is caused solely by the developer-machine `.env`, not by product
+code; the tests are byte-identical to clean main/HEAD and pass on a clean
+checkout. Matches the earlier ledger note (Phase 30-fix) of "the 2 pre-existing
+docker-compose render env failures". No Phase 46 regression.

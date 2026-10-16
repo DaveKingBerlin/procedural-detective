@@ -70,7 +70,7 @@ create-case body: {
   "caseId": "CASE-f13S7rz952Yg",
   "generationId": "GEN-1",
   "generationAttemptId": "GA-WZtoIP5HND27",
-  "creatorAccessToken": "9iMNcE2uodNND2OT4BujM1pK26dSTcpsXQHm2wsEQgQ",
+  "creatorAccessToken": "<redacted>",
   "status": "FAILED",
   "failureCode": "PUBLICATION_FAILED"
 }

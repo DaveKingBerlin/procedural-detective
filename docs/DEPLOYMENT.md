@@ -31,9 +31,16 @@ the SPA + API from one container on `:8000` for local work. The production
 file (`docker-compose.prod.yml`) uses the **same image** but publishes no
 backend port at all.
 
+> **Production is STANDALONE.** The canonical production command is
+> `docker compose -f docker-compose.prod.yml ...`. Do **NOT** merge it with the
+> base file: `docker compose -f docker-compose.yml -f docker-compose.prod.yml
+> up` would inherit the base `8000:8000` host mapping (Compose concatenates
+> `ports`) and publish the private backend to the host/Internet. See §20 and
+> `docs/adr/ADR-007-production-compose-network-boundary.md`.
+
 ## 2. Production architecture (HTTPS-only, same-origin)
 
-- **TLS edge (shipped):** `docker/docker-compose.prod.yml` starts a minimal
+- **TLS edge (shipped):** `docker-compose.prod.yml` starts a minimal
   Caddy 2 container (`caddy:2-alpine`) that fronts the private backend:
   - automatic HTTPS (managed certificates via Let's Encrypt/ZeroSSL for a
     public `CADDY_DOMAIN`; Caddy's internal CA for `localhost` smoke tests);
@@ -586,3 +593,50 @@ workflow. Key contacts:
   validates the EFFECTIVE `.env`-interpolated configuration (production
   profile markers, P-02 timeout envelope, log bounds, private ports, real
   `CADDY_DOMAIN`) and fails closed on any deviation.
+
+## 20. Simple release sequence (Netcup / production)
+
+Production is **standalone**: the canonical production command is
+`docker compose -f docker-compose.prod.yml ...`. The base `docker-compose.yml`
+publishes backend `8000:8000` and Compose concatenates `ports`, so the merged
+invocation `docker compose -f docker-compose.yml -f docker-compose.prod.yml up`
+**must not be used** for production — it would publish the private backend to
+the host/Internet (ADR-007). Use the helper scripts, which wrap the standalone
+prod file for `netcup`/`prod` (targets: `dev | netcup | prod`).
+
+Typical release on the host:
+
+```bash
+git pull
+
+./build-docker.sh netcup
+./start-server.sh netcup
+```
+
+Then verify the deployment:
+
+```bash
+# Container state / health:
+docker compose -f docker-compose.prod.yml ps
+
+# Host port bindings — 80/443 public via Caddy, 8000 must NOT be publicly bound:
+sudo ss -tulpn | grep -E ':80|:443|:8000'
+
+# HTTPS health / readiness through the TLS edge:
+curl --fail https://<public-host>/api/v1/health
+curl --fail https://<public-host>/api/v1/readiness
+```
+
+Expected host bindings:
+
+```text
+:80    public  -> Caddy
+:443   public  -> Caddy
+:8000  none    -> Docker-internal only (no host/public binding)
+```
+
+If `:8000` shows up as a host/public binding, the merged base+prod
+configuration was used — stop the stack and start again with only
+`docker-compose.prod.yml` (`./start-server.sh netcup`). The direct equivalent
+of the scripts is `docker compose -f docker-compose.prod.yml build` followed by
+`docker compose -f docker-compose.prod.yml up -d`.

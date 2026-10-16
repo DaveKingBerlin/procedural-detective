@@ -63,6 +63,22 @@ genuinely different worlds, enable local-AI mode (`GENERATION_PROVIDER=ollama`)
 or live mode (`GENERATION_PROVIDER=live`), or use the documented showcase
 prompts in `backend/tests/fixtures/world_showcase.py`.
 
+## Generation modes
+
+Generation runs through three distinct, explicitly selected modes
+(`GENERATION_PROVIDER`) — the README does not conflate them:
+
+| Mode | `GENERATION_PROVIDER` | Where generation runs | Credentials |
+| --- | --- | --- | --- |
+| **Deterministic / fake / demo** (default) | `fake` | In-process, offline — replays the shipped, validation-locked golden case | none (zero network, zero cost) |
+| **Local Ollama** | `ollama` (or `remote_client` via the BYO-Ollama bridge) | A local/operator Ollama server (`OLLAMA_BASE_URL`, or the visitor's own machine via the bridge); generation stays on the configured local infrastructure | none beyond the local server |
+| **Cloud / hosted provider** | `live` (or browser BYOK Frontier) | A remote hosted provider reached over HTTPS — **by the backend only** | provider API key (used per request, not stored) |
+
+In every AI mode the model only **proposes** structured case data; deterministic
+validators and the deduction solver decide what is published. The browser never
+talks to a provider directly. See `docs/PRIVACY.md` for the hosted-vs-local
+data-flow disclosure.
+
 ## What to try first
 
 Shortest judge path, no install:
@@ -241,12 +257,29 @@ listeners are left behind.
 ## Docker setup
 
 ```bash
-docker compose up --build   # development — SPA + API on http://localhost:8000
+# Development — SPA + API on http://localhost:8000
+docker compose up --build
+# or the helper scripts (targets: dev | netcup | prod):
+./build-docker.sh dev && ./start-server.sh dev
 
-# Production is HTTPS-only: TLS edge (Caddy) + private backend, no public :8000
-CADDY_DOMAIN=detective.example.com CADDY_EMAIL=you@example.com \
-  docker compose -f docker-compose.prod.yml up --build -d
+# Production is HTTPS-only and STANDALONE: TLS edge (Caddy) + private backend,
+# no public :8000. Use ONLY the standalone prod file, and never merge it with
+# the base file (Compose concatenates `ports`, so the base :8000 mapping would
+# be inherited and publish the backend):
+docker compose -f docker-compose.prod.yml up -d
+# or the helper scripts (netcup/prod are aliases for the production config):
+./build-docker.sh netcup
+./start-server.sh netcup
 ```
+
+> **Do NOT use** `docker compose -f docker-compose.yml -f docker-compose.prod.yml up`
+> for production. The base `docker-compose.yml` publishes backend `8000:8000`
+> and Compose merges `ports` by concatenation, so the merged invocation leaks
+> the backend to the host (see `docs/adr/ADR-007-production-compose-network-boundary.md`).
+
+Windows equivalents: `build-docker.bat <target>` and
+`start-server.bat <target>`. The whole release sequence is in
+`docs/DEPLOYMENT.md` §20.
 
 The multi-stage image builds the frontend (Node 24) and the backend
 (Python 3.12), runs as a non-root user, persists SQLite to the `pd-data`
@@ -373,8 +406,9 @@ Repository: <https://github.com/DaveKingBerlin/procedural-detective>
 
 ## Hosted demo
 
-**Live demo:** <https://detective.daves-web.de/>`r`n`r`nThe deployment is a
-single container — see `docs/DEPLOYMENT.md` for the guide.
+**Live demo:** <https://detective.daves-web.de/>
+
+The deployment is a single container — see `docs/DEPLOYMENT.md` for the guide.
 
 ## Demo video
 
