@@ -1,0 +1,26 @@
+[QA2 DEF076] PD_ROOT=C:\Users\Fujitsu\coding\procedural-detective
+[QA2 DEF076] canonical object_ids sample=['apartment_door', 'apartment_lamp', 'apartment_laptop', 'apartment_table'] count=11
+[QA2 DEF076] canonical evidence_ids sample=['alibi_claim_thomas_01', 'body_found_01', 'cctv_anna_bar_01', 'cctv_emily_bar_01'] count=17
+[QA2 DEF076] returned=True
+[QA2 DEF076] events=['world_compose.started', 'world_compose.skipped']
+[QA2 DEF076] record.last_validation.outcome=ValidationOutcome.VALID
+[QA2 DEF076] published object_ids=['prov_obj_kitchen_knife', 'letter_opener', 'scissors', 'vase_01', 'apartment_laptop', 'apartment_table', 'apartment_door', 'apartment_lamp', 'victim_body_placeholder', 'motive_audit_file', 'cctv_hall_monitor']
+[QA2 DEF076] published evidence_ids=['last_seen_01', 'body_found_01', 'noise_heard_01', 'cctv_thomas_scene_01', 'alibi_claim_thomas_01', 'cctv_michael_office_01', 'cctv_anna_bar_01', 'cctv_emily_bar_01', 'motive_audit_01', 'motive_no_affair_01', 'motive_no_robbery_01', 'prov_ev_forensic_knife_match_01', 'fingerprint_knife_01', 'forensic_letter_opener_01', 'forensic_scissors_01', 'email_thomas_01', 'witness_statement_emily_01']
+[QA2 DEF076] FOREIGN object ids=[]
+[QA2 DEF076] FOREIGN evidence ids=[]
+[QA2 DEF076] attempt.draft FOREIGN object ids=[]
+[QA2 DEF076] attempt.draft FOREIGN evidence ids=[]
+[QA2 DEF076] late generation.validation.complete non-VALID=[]
+[QA2 DEF076] D1 guard present; violations on result=[]
+[QA2 DEF076] VERDICT: GREEN
+
+[QA2 DEF076-BYPASS] returned=True
+[QA2 DEF076-BYPASS] events=['world_compose.started', 'world_compose.skipped']
+[QA2 DEF076-BYPASS] reasonCode=COMPOSE_NAMESPACE_MISMATCH compositionOutcome=SKIPPED_NAMESPACE_MISMATCH
+[QA2 DEF076-BYPASS] leaked foreign ids=[]
+[QA2 DEF076-BYPASS] candidate validation events present=False
+[QA2 DEF076-BYPASS] VERDICT: PASS
+
+[QA2 ADV-45-02] returned=True reasonCode=PROVIDER_AUTHORED_WORLD compositionMode=PROVIDER_AUTHORED
+[QA2 ADV-45-02] scene.environment_id='apartment' version=1
+[QA2 ADV-45-02] VERDICT: PASS

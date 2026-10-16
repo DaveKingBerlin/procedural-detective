@@ -199,6 +199,23 @@ _SAFE_FIELDS = frozenset(
         "unreachableCriticalDimensions",
         "playabilityOutcome",
         "playabilityIssueCodes",
+        # Phase45 (ADR-005 D4) — bounded world-composition ownership
+        # observability (``world_compose.*``). A closed mode/outcome token,
+        # the resolved environment kit id and INTEGER namespace/placement
+        # counts ONLY. ``reasonCode`` (already allowlisted) carries the closed
+        # skip/fallback reason; ``validatorCodes`` / ``validationOutcome`` the
+        # composition-validation outcome. NEVER prompts, hidden truth, witness
+        # truthfulness, provider output or any foreign/secret id string.
+        "compositionMode",
+        "environmentKit",
+        "inputObjectCount",
+        "inputEvidenceCount",
+        "inputPlacementCount",
+        "outputPlacementCount",
+        "canonicalObjectNamespaceCount",
+        "canonicalEvidenceNamespaceCount",
+        "compositionOutcome",
+        "fallbackUsed",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

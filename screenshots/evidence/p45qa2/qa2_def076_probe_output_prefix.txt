@@ -1,0 +1,16 @@
+[QA2 DEF076] PD_ROOT=C:\Users\Fujitsu\AppData\Local\Temp\opencode\pd45-main
+[QA2 DEF076] canonical object_ids sample=['apartment_door', 'apartment_lamp', 'apartment_laptop', 'apartment_table'] count=11
+[QA2 DEF076] canonical evidence_ids sample=['alibi_claim_thomas_01', 'body_found_01', 'cctv_anna_bar_01', 'cctv_emily_bar_01'] count=17
+[QA2 DEF076] returned=False
+[QA2 DEF076] events=['asset.resolve.started', 'asset.resolve.complete', 'generation.validation.started', 'generation.validation.complete']
+[QA2 DEF076] record.last_validation.outcome=ValidationOutcome.RECOVERABLE_REPAIR
+[QA2 DEF076] published object_ids=['prov_obj_kitchen_knife', 'letter_opener', 'scissors', 'vase_01', 'apartment_laptop', 'apartment_table', 'apartment_door', 'apartment_lamp', 'victim_body_placeholder', 'motive_audit_file', 'cctv_hall_monitor']
+[QA2 DEF076] published evidence_ids=['last_seen_01', 'body_found_01', 'noise_heard_01', 'cctv_thomas_scene_01', 'alibi_claim_thomas_01', 'cctv_michael_office_01', 'cctv_anna_bar_01', 'cctv_emily_bar_01', 'motive_audit_01', 'motive_no_affair_01', 'motive_no_robbery_01', 'prov_ev_forensic_knife_match_01', 'fingerprint_knife_01', 'forensic_letter_opener_01', 'forensic_scissors_01', 'email_thomas_01', 'witness_statement_emily_01']
+[QA2 DEF076] FOREIGN object ids=[]
+[QA2 DEF076] FOREIGN evidence ids=[]
+[QA2 DEF076] attempt.draft FOREIGN object ids=['kitchen_knife']
+[QA2 DEF076] attempt.draft FOREIGN evidence ids=['forensic_knife_match_01']
+[QA2 DEF076] late generation.validation.complete non-VALID=['RECOVERABLE_REPAIR']
+[QA2 DEF076] D1 guard absent (ImportError)
+[QA2 DEF076] VERDICT: RED (foreign ids or late non-VALID generation.validation)
+[QA2 DEF076-BYPASS] skipped (guard absent: pre-fix checkout)

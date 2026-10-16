@@ -394,6 +394,46 @@ def _link_required_unknown_evidence(
     return placements, tuple(new_facts)
 
 
+def _world_graph_namespace_violations(draft: Any) -> tuple[str, ...]:
+    """ADR-005 D1 — every placement must reference the draft's declared namespace.
+
+    Returns a bounded, sanitized tuple of violation tokens (empty == clean) for
+    any placement whose ``object_id`` / ``location_id`` / ``evidence_id`` is
+    absent from the draft's declared canonical namespace. Never raises, never
+    mutates the draft. This is the defense-in-depth guard that prevents a
+    composed candidate from becoming authoritative while referencing foreign
+    (golden/kit) ids; the tokens carry NO id values (the frontend/log surface
+    never learns the mismatching identifiers).
+    """
+    if draft is None:
+        return ()
+    object_ids = {
+        str(getattr(o, "object_id", "")) for o in getattr(draft, "objects", ()) or ()
+    }
+    evidence_ids = {
+        str(getattr(e, "id", "")) for e in getattr(draft, "evidence", ()) or ()
+    }
+    world_graph = getattr(draft, "world_graph", None)
+    location_ids = {
+        str(getattr(location, "location_id", ""))
+        for location in (getattr(world_graph, "locations", ()) or ())
+    }
+    violations: list[str] = []
+    for index, placement in enumerate(
+        getattr(world_graph, "placements", ()) or ()
+    ):
+        object_id = getattr(placement, "object_id", None)
+        if object_id is not None and str(object_id) not in object_ids:
+            violations.append(f"placements[{index}]: unknown objectId")
+        location_id = getattr(placement, "location_id", None)
+        if location_id is not None and str(location_id) not in location_ids:
+            violations.append(f"placements[{index}]: unknown locationId")
+        evidence_id = getattr(placement, "evidence_id", None)
+        if evidence_id is not None and str(evidence_id) not in evidence_ids:
+            violations.append(f"placements[{index}]: unknown evidenceId")
+    return tuple(sorted(set(violations)))
+
+
 # --------------------------------------------------------------------------- #
 # Phase 11 — environment hint validation + kit composition (backend half)
 # --------------------------------------------------------------------------- #
@@ -1491,6 +1531,12 @@ class GenerationService:
             issues = validate_world_graph(world_graph, object_ids, evidence_ids)
             if issues:
                 # Degrade: keep the payload without the generated assets.
+                # ADR-005 D1 review (Phase45): this opt-in declarative-asset
+                # path composes ONLY over the draft's own placements + the
+                # explicitly requested generated objects, so its namespace guard
+                # (``validate_world_graph`` against the declared object/evidence
+                # ids) is equivalent to the world-compose guard; an undeclared
+                # reference degrades rather than being injected.
                 return False
             new_draft = dataclasses.replace(
                 draft, objects=tuple(new_objects), world_graph=world_graph
@@ -1507,31 +1553,42 @@ class GenerationService:
         world_reqs: Any,
         explicit_environment: str | None = None,
     ) -> bool:
-        """Phase 14 — compose the PUBLISHED draft for the resolved kit + prompt.
+        """Phase 14 / Phase45 (ADR-005) — compose the PUBLISHED draft for the kit.
 
-        Two deterministic paths:
+        Ownership model (ADR-005, Model B): the canonical provider ``world_graph``
+        is AUTHORITATIVE. Kit composition is OPTIONAL enrichment and applies ONLY
+        when the canonical draft declares the selected kit's base objects
+        (``KIT_BASE_OBJECT_IDS[environment_id] ⊆ declared object ids``).
+        Otherwise the world is provider-authored and the kit composer is
+        INAPPLICABLE: the attempt SKIPS composition explicitly (no ``compose_world``
+        call, no revalidation, no foreign IDs) and keeps the canonical aggregate.
 
-        - **Legacy byte-identity (apartment)**: when the resolved kit is the
-          default apartment AND the prompt produces no NEW object tokens and no
-          placement relations, the provider-golden world graph is kept VERBATIM
-          and only the scene gains its additive ``environment_id`` +
-          ``environment_version`` — the DEFAULT GOLDEN APARTMENT stays
-          byte-identical (the explicit Phase 11 ``environment`` body field
-          selecting apartment behaves identically to the default).
-        - **Prompt-to-world composer**: otherwise ``app.world.composer`` composes
-          the kit base + prompt objects (through the Asset Oracle with the
-          app-owned deterministic procedural fallback), the world graph is
-          rebuilt on the kit zones and the COMPLETE validation pipeline
-          (``pipeline.validate_draft``) runs again on the composed draft.
+        Deterministic paths:
 
-        WORld validation: a non-empty world issue bucket routes through the
-        configured ``world_repair_provider`` (bounded, deterministic; sanitized
-        diagnostics; locked constraints are NEVER passed to the provider). The
-        repaired composition runs the FULL validation again. A locked-constraint
-        violation is TERMINAL — the attempt FAILS and is never published. Any
-        other failure degrades exactly like Phase 11: the scene keeps its pin
-        and the previous (golden) world composition stays. Returns True when
-        the payload was composed (or there was nothing to add); False records
+        - **Legacy byte-identity (apartment)**: unchanged — the provider-golden
+          world graph is kept VERBATIM and only the scene gains its additive
+          ``environment_id`` + ``environment_version``.
+        - **Provider-authored skip**: the kit base set is not declared -> an
+          explicit non-error ``world_compose.skipped``; the canonical world
+          graph/objects/evidence are kept verbatim WITH the resolved kit scene
+          pin (scene-only injection) so the published scene carries a non-null
+          ``environment_id`` (never a misleading ``generation.validation``
+          failure).
+        - **Prompt-to-world composer**: only when the kit base set IS declared.
+          ``compose_world`` composes the kit base + prompt objects; a
+          defense-in-depth namespace guard rejects any composed placement that
+          references an undeclared object/location/evidence id (explicit skip);
+          the COMPLETE validation pipeline runs under the dedicated
+          ``world_compose.validation`` namespace; a Gate 3 check over the composed
+          candidate prevents a Phase44 playability regression.
+
+        On EVERY non-success path the attempt is restored to its canonical state
+        (ADR-005 D5: ``draft`` / ``last_validation`` / ``solver_proof`` /
+        ``_phase3_cache`` / ``published``) so the authoritative
+        ``generation.validation`` report is never clobbered by a discarded
+        composed candidate. A locked-constraint violation and an unresolvable
+        REQUIRED prompt object stay TERMINAL. Returns True when the payload was
+        composed, explicitly skipped, or there was nothing to add; False records
         ``compositionFailed`` in the environment diagnostics.
         """
         import dataclasses
@@ -1540,12 +1597,10 @@ class GenerationService:
         from app.assets.spec_provider import BoundedSpecProvider
         from app.environments.compose import scene_for_kit
         from app.environments.manifests import load_environment
-        from app.environments.placer import is_procedural_asset_id
         from app.generation import pipeline as pipeline_mod
+        from app.generation import playability as playability_mod
         from app.generation.publish import build_published_case_version
         from app.generation.schemas import (
-            EvidenceSpec,
-            PropSpec,
             WorldGraphLocationSpec,
             WorldGraphSpec,
         )
@@ -1554,17 +1609,51 @@ class GenerationService:
             ValidationOutcome,
         )
         from app.world.composer import (
+            KIT_BASE_OBJECT_IDS,
             KnownObjectSpecProvider,
             SPEC_PROVIDER_CALL_LIMIT,
             compose_world,
         )
         from app.world.extract import is_base_object_request
-        from app.world.requirements import CRITICALITY_REQUIRED, WorldRequirements
+        from app.world.requirements import WorldRequirements
 
         published = getattr(record, "published", None)
         if published is None or getattr(published, "draft", None) is None:
             return True
         draft = published.draft
+        # ADR-005 D5 — capture the CANONICAL state BEFORE any mutation so every
+        # non-success path restores it exactly. The composed candidate must never
+        # leak into the authoritative attempt.
+        canonical_draft = getattr(record, "draft", None) or draft
+        canonical_report = getattr(record, "last_validation", None)
+        canonical_proof = getattr(record, "solver_proof", None)
+        canonical_cache = getattr(record, "_phase3_cache", None)
+        canonical_published = published
+        declared_objects = {
+            str(o.object_id) for o in getattr(draft, "objects", ()) or ()
+        }
+        declared_evidence = {
+            str(e.id) for e in getattr(draft, "evidence", ()) or ()
+        }
+        scene: Any = None
+
+        def _restore_canonical(*, with_scene: bool, scene_spec: Any) -> None:
+            """Restore the captured canonical attempt state (ADR-005 D5)."""
+            record.draft = canonical_draft
+            record.last_validation = canonical_report
+            record.solver_proof = canonical_proof
+            record._phase3_cache = canonical_cache
+            if not with_scene or scene_spec is None:
+                record.published = canonical_published
+                return
+            try:
+                record.published = dataclasses.replace(
+                    canonical_published,
+                    draft=dataclasses.replace(canonical_draft, scene=scene_spec),
+                )
+            except Exception:  # noqa: BLE001 - never raise on degradation
+                record.published = canonical_published
+
         try:
             kit = load_environment(environment_id)
             scene = scene_for_kit(kit, draft.scene)
@@ -1576,17 +1665,97 @@ class GenerationService:
                 not is_base_object_request(request.requested_name)
                 for request in world_reqs.objects
             )
-            if (
+            # ADR-005 D2 + ADV-45-02 — classify the ownership mode from the
+            # REPRESENTATION first: the kit is applicable only when the draft
+            # declares the selected kit's base objects. The legacy apartment
+            # byte-identity path is a special case of an APPLICABLE kit, so it
+            # is only taken when the base IS declared (golden). A provider-authored
+            # apartment world (base NOT declared, even with no new object tokens)
+            # is reported accurately as PROVIDER_AUTHORED_WORLD.
+            kit_base = set(
+                KIT_BASE_OBJECT_IDS.get(
+                    environment_id, KIT_BASE_OBJECT_IDS["apartment"]
+                )
+            )
+            kit_base_declared = bool(kit_base) and kit_base <= declared_objects
+            is_legacy = (
                 environment_id == "apartment"
                 and not has_new_objects
                 and not world_reqs.relations
-            ):
+                and kit_base_declared
+            )
+            composition_mode = (
+                "APARTMENT_BYTE_IDENTITY"
+                if is_legacy
+                else "KIT_COMPOSE" if kit_base_declared else "PROVIDER_AUTHORED"
+            )
+            emit_event(
+                "world_compose.started",
+                caseId=getattr(record, "case_id", None),
+                generationAttemptId=getattr(record, "attempt_id", None),
+                compositionMode=composition_mode,
+                environmentKit=environment_id,
+                inputObjectCount=len(declared_objects),
+                inputEvidenceCount=len(declared_evidence),
+                inputPlacementCount=len(
+                    getattr(draft.world_graph, "placements", ()) or ()
+                ),
+                canonicalObjectNamespaceCount=len(declared_objects),
+                canonicalEvidenceNamespaceCount=len(declared_evidence),
+            )
+
+            if is_legacy:
                 # Legacy byte-identity path: scene-only injection.
                 new_draft = dataclasses.replace(draft, scene=scene)
                 # Phase44 (ADV-44-01) — ensure every required dimension has a
                 # reachable clue (no-op for the fully-linked golden default).
                 new_draft = _ensure_dimension_clues(new_draft, kit)
                 record.published = dataclasses.replace(published, draft=new_draft)
+                emit_event(
+                    "world_compose.skipped",
+                    caseId=getattr(record, "case_id", None),
+                    generationAttemptId=getattr(record, "attempt_id", None),
+                    compositionMode=composition_mode,
+                    environmentKit=environment_id,
+                    compositionOutcome="SKIPPED",
+                    reasonCode="APARTMENT_BYTE_IDENTITY",
+                    fallbackUsed=False,
+                )
+                return True
+
+            if not kit_base_declared:
+                # ADR-005 D2 — provider-authored world: the kit composer does not
+                # own the canonical namespace. Explicit, non-error skip; the
+                # canonical world graph/objects/evidence stay authoritative and NO
+                # revalidation / foreign id is ever produced.
+                #
+                # ADV-45-01 / DEF-109 — the canonical world is kept WITH the
+                # resolved kit scene pin (scene-only injection, exactly like the
+                # other non-success paths): the published scene must carry a
+                # non-null ``environment_id``/``environment_version`` so the
+                # frontend/savegame import contract holds. The canonical
+                # placements/objects/evidence are unchanged (no foreign IDs).
+                _restore_canonical(with_scene=True, scene_spec=scene)
+                emit_event(
+                    "world_compose.skipped",
+                    caseId=getattr(record, "case_id", None),
+                    generationAttemptId=getattr(record, "attempt_id", None),
+                    compositionMode=composition_mode,
+                    environmentKit=environment_id,
+                    compositionOutcome="SKIPPED_PROVIDER_AUTHORED_WORLD",
+                    reasonCode="PROVIDER_AUTHORED_WORLD",
+                    fallbackUsed=False,
+                    inputObjectCount=len(declared_objects),
+                    inputEvidenceCount=len(declared_evidence),
+                    inputPlacementCount=len(
+                        getattr(draft.world_graph, "placements", ()) or ()
+                    ),
+                    outputPlacementCount=len(
+                        getattr(draft.world_graph, "placements", ()) or ()
+                    ),
+                    canonicalObjectNamespaceCount=len(declared_objects),
+                    canonicalEvidenceNamespaceCount=len(declared_evidence),
+                )
                 return True
 
             spec_provider = (
@@ -1646,10 +1815,29 @@ class GenerationService:
                         "terminal world failure: a crime-critical required "
                         "prompt object could not be generated or placed"
                     )
+                    _restore_canonical(with_scene=True, scene_spec=scene)
+                    emit_event(
+                        "world_compose.failed",
+                        caseId=getattr(record, "case_id", None),
+                        generationAttemptId=getattr(record, "attempt_id", None),
+                        compositionMode=composition_mode,
+                        environmentKit=environment_id,
+                        compositionOutcome="FAILED",
+                        reasonCode="TERMINAL_REQUIRED_OBJECT_UNRESOLVED",
+                        fallbackUsed=False,
+                    )
                     return False
-                # Degrade (documented): pin the scene, keep the golden world.
-                record.published = dataclasses.replace(
-                    published, draft=dataclasses.replace(draft, scene=scene)
+                # Degrade (documented): keep the canonical world with the pin.
+                _restore_canonical(with_scene=True, scene_spec=scene)
+                emit_event(
+                    "world_compose.fallback",
+                    caseId=getattr(record, "case_id", None),
+                    generationAttemptId=getattr(record, "attempt_id", None),
+                    compositionMode=composition_mode,
+                    environmentKit=environment_id,
+                    compositionOutcome="FALLBACK_CANONICAL",
+                    reasonCode="COMPOSE_ISSUES",
+                    fallbackUsed=True,
                 )
                 return False
 
@@ -1688,12 +1876,41 @@ class GenerationService:
                 ),
             )
             # Phase44 (ADV-44-01) — ensure every required dimension has a
-            # reachable clue BEFORE the complete validation pipeline runs.
+            # reachable clue BEFORE the namespace guard + validation run.
             new_draft = _ensure_dimension_clues(new_draft, kit)
-            # COMPLETE validation pipeline over the composed draft.
+
+            # ADR-005 D1 (defense-in-depth) — a composed candidate may only
+            # reference the NEW draft's declared namespace. Any foreign
+            # object/location/evidence id -> explicit skip BEFORE any candidate
+            # could become authoritative (and before any validation event).
+            namespace_violations = _world_graph_namespace_violations(new_draft)
+            if namespace_violations:
+                # ADV-45-01 / DEF-109 — keep the canonical world (no foreign IDs)
+                # WITH the resolved kit scene pin so the published scene carries
+                # a non-null environment identity.
+                _restore_canonical(with_scene=True, scene_spec=scene)
+                emit_event(
+                    "world_compose.skipped",
+                    caseId=getattr(record, "case_id", None),
+                    generationAttemptId=getattr(record, "attempt_id", None),
+                    compositionMode=composition_mode,
+                    environmentKit=environment_id,
+                    compositionOutcome="SKIPPED_NAMESPACE_MISMATCH",
+                    reasonCode="COMPOSE_NAMESPACE_MISMATCH",
+                    fallbackUsed=False,
+                    validatorCodes=namespace_violations,
+                )
+                return True
+
+            # COMPLETE validation pipeline over the composed draft, under the
+            # dedicated NON-authoritative composition namespace (ADR-005 D4):
+            # a discarded composed candidate can never masquerade as an
+            # authoritative ``generation.validation`` failure.
             record.draft = new_draft
             record._phase3_cache = None
-            report = pipeline_mod.validate_draft(record)
+            report = pipeline_mod.validate_draft(
+                record, event_prefix="world_compose.validation"
+            )
             if report.locked_violations:
                 # A locked-constraint violation is TERMINAL (never repaired).
                 record.state = GenerationState.FAILED
@@ -1701,22 +1918,108 @@ class GenerationService:
                     "terminal validation failure: "
                     + "; ".join(report.locked_violations)
                 )
+                _restore_canonical(with_scene=True, scene_spec=scene)
+                emit_event(
+                    "world_compose.failed",
+                    caseId=getattr(record, "case_id", None),
+                    generationAttemptId=getattr(record, "attempt_id", None),
+                    compositionMode=composition_mode,
+                    environmentKit=environment_id,
+                    compositionOutcome="FAILED",
+                    reasonCode="COMPOSE_LOCKED_VIOLATION",
+                    validationOutcome=report.outcome.value,
+                    validatorCodes=report.locked_violations,
+                    fallbackUsed=False,
+                )
                 return False
             if report.outcome is not ValidationOutcome.VALID:
-                record.published = dataclasses.replace(
-                    published, draft=dataclasses.replace(draft, scene=scene)
+                _restore_canonical(with_scene=True, scene_spec=scene)
+                emit_event(
+                    "world_compose.fallback",
+                    caseId=getattr(record, "case_id", None),
+                    generationAttemptId=getattr(record, "attempt_id", None),
+                    compositionMode=composition_mode,
+                    environmentKit=environment_id,
+                    compositionOutcome="FALLBACK_CANONICAL",
+                    reasonCode=f"COMPOSE_VALIDATION_{report.outcome.value}",
+                    validationOutcome=report.outcome.value,
+                    fallbackUsed=True,
                 )
                 return False
+
+            # Phase45 §21/§22 (ADR-005 D3) — the composed candidate must not
+            # regress Phase44 Gate 3 (never orphan evidence, never drop below the
+            # difficulty minimum). Re-evaluate Gate 3 over the ACTUAL composed
+            # candidate; a regression falls back to the (already Gate-3-valid)
+            # canonical aggregate instead of failing publication. Fail-closed on
+            # any Gate 3 evaluation error (ADV-44-06).
+            gate3_regressed = False
+            try:
+                public, evidence, truth, _composed = pipeline_mod.assemble(record)
+                playability_report = playability_mod.validate_playability_quality(
+                    draft=new_draft,
+                    public=public,
+                    evidence=evidence,
+                    universes=None,
+                    truth=truth,
+                    difficulty=getattr(record, "difficulty", None),
+                )
+                gate3_regressed = not playability_report.valid
+            except Exception:  # noqa: BLE001 - ADV-44-06 fail-closed Gate 3
+                gate3_regressed = True
+            if gate3_regressed:
+                _restore_canonical(with_scene=True, scene_spec=scene)
+                emit_event(
+                    "world_compose.fallback",
+                    caseId=getattr(record, "case_id", None),
+                    generationAttemptId=getattr(record, "attempt_id", None),
+                    compositionMode=composition_mode,
+                    environmentKit=environment_id,
+                    compositionOutcome="FALLBACK_CANONICAL",
+                    reasonCode="COMPOSE_GATE3_REGRESSION",
+                    fallbackUsed=True,
+                    outputPlacementCount=len(
+                        getattr(new_draft.world_graph, "placements", ()) or ()
+                    ),
+                )
+                return False
+
             record.published = build_published_case_version(record)
+            emit_event(
+                "world_compose.completed",
+                caseId=getattr(record, "case_id", None),
+                generationAttemptId=getattr(record, "attempt_id", None),
+                compositionMode=composition_mode,
+                environmentKit=environment_id,
+                compositionOutcome="COMPOSED",
+                fallbackUsed=False,
+                inputObjectCount=len(declared_objects),
+                inputEvidenceCount=len(declared_evidence),
+                inputPlacementCount=len(
+                    getattr(draft.world_graph, "placements", ()) or ()
+                ),
+                outputPlacementCount=len(
+                    getattr(new_draft.world_graph, "placements", ()) or ()
+                ),
+                canonicalObjectNamespaceCount=len(declared_objects),
+                canonicalEvidenceNamespaceCount=len(declared_evidence),
+            )
             return True
         except Exception:  # noqa: BLE001 - degradation must never break publication
-            # Degrade: the scene + previous (golden) world composition stay.
+            # Degrade: the scene + canonical world composition stay.
             try:
-                record.published = dataclasses.replace(
-                    published, draft=dataclasses.replace(draft, scene=scene)
-                )
+                _restore_canonical(with_scene=True, scene_spec=scene)
             except Exception:  # noqa: BLE001 - never raise on degradation
                 pass
+            emit_event(
+                "world_compose.failed",
+                caseId=getattr(record, "case_id", None),
+                generationAttemptId=getattr(record, "attempt_id", None),
+                environmentKit=environment_id,
+                compositionOutcome="FAILED",
+                reasonCode="COMPOSE_EXCEPTION",
+                fallbackUsed=True,
+            )
             return False
 
     def start_case_version(
