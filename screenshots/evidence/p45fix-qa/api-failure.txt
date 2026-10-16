@@ -1,0 +1,78 @@
+﻿python : INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+In Zeile:1 Zeichen:533
++ ... antics.txt; python e2e\probes\qa-p45fix-api-failure.py C:\Users\Fujit ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (INFO  [alembic....mpl SQLiteImpl.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001, Phase 2 baseline migration ù intentionally empty.
+INFO  [alembic.runtime.migration] Running upgrade 0001 -> 0002, Phase 5 persistence model ù cases, auth stores, 
+attempts, playthroughs.
+INFO  [alembic.runtime.migration] Running upgrade 0002 -> 0003, Phase 6 persistence model ù player_knowledge 
+(PlayerKnowledge).
+INFO  [alembic.runtime.migration] Running upgrade 0003 -> 0004, Phase 7 persistence model ù accusations (Accusation).
+INFO  [alembic.runtime.migration] Running upgrade 0004 -> 0005, Phase 22 persistence model ù BYO-Ollama bridge pairing 
++ sessions.
+C:\Users\Fujitsu\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\testclient.py:1: 
+StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+INFO  [procedural-detective] generation.started
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"generation.started","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","configuredGenerationDeadlineMs":60000,"configuredProviderTimeoutMs":null,"provider":"fake","model":null,"providerCallCount":0,"repairCount":0,"regenerationCount":0,"frontierProvider":null,"providerCallBudget":620,"configuredGlobalProviderCallBudget":720,"configuredCoreProviderCallBudget":620,"deadlineRemainingMs":60000}
+INFO  [procedural-detective] provider.call.start
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"provider.call.start","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"case_truth","provider":"fake","model":null,"frontierProvider":null,"configuredGenerationDeadlineMs":60000,"deadlineRemainingMs":60000,"configuredProviderTimeoutMs":null,"effectiveProviderTimeoutMs":null,"providerCallCount":1,"repairCount":0,"regenerationCount":0,"globalCallCount":1,"coreCallCount":1,"assetCallCount":0,"remainingGlobalCalls":719}
+INFO  [procedural-detective] provider.call.complete
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"provider.call.complete","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"case_truth","provider":"fake","model":null,"success":true,"elapsedMs":0,"responseBytes":374,"structuredOutput":false,"structuredOutputRequested":false,"structuredOutputMode":null,"schemaId":null,"schemaFingerprint":null,"requestSchemaByteLength":null,"responseFormatType":null,"transportSchemaValid":null,"contentExtracted":null,"jsonDecoded":null,"strictRequested":null,"requireParametersRequested":null,"providerCapabilityMode":null,"configuredProviderTimeoutMs":null,"effectiveProviderTimeoutMs":null,"deadlineRemainingMs":60000,"providerCallCount":1,"repairCount":0,"regenerationCount":0}
+INFO  [procedural-detective] generation.stage.accepted
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"generation.stage.accepted","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"case_truth","stageAccepted":true,"canonicalParseValid":true,"semanticBreadthValid":null,"providerCallCount":1}
+INFO  [procedural-detective] provider.call.start
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"provider.call.start","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"public_world","provider":"fake","model":null,"frontierProvider":null,"configuredGenerationDeadlineMs":60000,"deadlineRemainingMs":60000,"configuredProviderTimeoutMs":null,"effectiveProviderTimeoutMs":null,"providerCallCount":2,"repairCount":0,"regenerationCount":0,"globalCallCount":2,"coreCallCount":2,"assetCallCount":0,"remainingGlobalCalls":718}
+INFO  [procedural-detective] provider.call.complete
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"provider.call.complete","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"public_world","provider":"fake","model":null,"success":true,"elapsedMs":1,"responseBytes":4990,"structuredOutput":false,"structuredOutputRequested":false,"structuredOutputMode":null,"schemaId":null,"schemaFingerprint":null,"requestSchemaByteLength":null,"responseFormatType":null,"transportSchemaValid":null,"contentExtracted":null,"jsonDecoded":null,"strictRequested":null,"requireParametersRequested":null,"providerCapabilityMode":null,"configuredProviderTimeoutMs":null,"effectiveProviderTimeoutMs":null,"deadlineRemainingMs":60000,"providerCallCount":2,"repairCount":0,"regenerationCount":0}
+INFO  [procedural-detective] generation.stage.accepted
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"generation.stage.accepted","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"public_world","stageAccepted":true,"canonicalParseValid":true,"semanticBreadthValid":true,"providerCallCount":2}
+INFO  [procedural-detective] provider.call.start
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"provider.call.start","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"evidence","provider":"fake","model":null,"frontierProvider":null,"configuredGenerationDeadlineMs":60000,"deadlineRemainingMs":60000,"configuredProviderTimeoutMs":null,"effectiveProviderTimeoutMs":null,"providerCallCount":3,"repairCount":0,"regenerationCount":0,"globalCallCount":3,"coreCallCount":3,"assetCallCount":0,"remainingGlobalCalls":717}
+INFO  [procedural-detective] provider.call.complete
+{"timestamp":"2026-10-16T16:06:07.765544+00:00","level":"INFO","logger":"procedural-detective","event":"provider.call.complete","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"evidence","provider":"fake","model":null,"success":true,"elapsedMs":1,"responseBytes":11302,"structuredOutput":false,"structuredOutputRequested":false,"structuredOutputMode":null,"schemaId":null,"schemaFingerprint":null,"requestSchemaByteLength":null,"responseFormatType":null,"transportSchemaValid":null,"contentExtracted":null,"jsonDecoded":null,"strictRequested":null,"requireParametersRequested":null,"providerCapabilityMode":null,"configuredProviderTimeoutMs":null,"effectiveProviderTimeoutMs":null,"deadlineRemainingMs":60000,"providerCallCount":3,"repairCount":0,"regenerationCount":0}
+INFO  [procedural-detective] generation.stage.accepted
+{"timestamp":"2026-10-16T16:06:07.781169+00:00","level":"INFO","logger":"procedural-detective","event":"generation.stage.accepted","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"evidence","stageAccepted":true,"canonicalParseValid":true,"semanticBreadthValid":null,"providerCallCount":3}
+INFO  [procedural-detective] evidence.completion.started
+{"timestamp":"2026-10-16T16:06:07.781169+00:00","level":"INFO","logger":"procedural-detective","event":"evidence.completion.started","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","providerCallCount":3,"repairCount":0,"regenerationCount":0}
+INFO  [procedural-detective] generation.validation.started
+{"timestamp":"2026-10-16T16:06:07.781169+00:00","level":"INFO","logger":"procedural-detective","event":"generation.validation.started","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","deadlineRemainingMs":59984}
+INFO  [procedural-detective] generation.validation.complete
+{"timestamp":"2026-10-16T16:06:07.796799+00:00","level":"INFO","logger":"procedural-detective","event":"generation.validation.complete","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","validationOutcome":"VALID","deadlineRemainingMs":59968}
+INFO  [procedural-detective] evidence.completion.skipped
+{"timestamp":"2026-10-16T16:06:07.796799+00:00","level":"INFO","logger":"procedural-detective","event":"evidence.completion.skipped","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","reasonCode":"NOT_AMBIGUOUS","factsAddedCount":0,"dimensionsBefore":[],"dimensionsAfter":[],"solverOutcomeBefore":"unique","solverOutcomeAfter":"unique","completionIdempotent":true,"completionOutcome":"NOT_AMBIGUOUS"}
+INFO  [procedural-detective] provider.call.start
+{"timestamp":"2026-10-16T16:06:07.796799+00:00","level":"INFO","logger":"procedural-detective","event":"provider.call.start","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"world_graph","provider":"fake","model":null,"frontierProvider":null,"configuredGenerationDeadlineMs":60000,"deadlineRemainingMs":59968,"configuredProviderTimeoutMs":null,"effectiveProviderTimeoutMs":null,"providerCallCount":4,"repairCount":0,"regenerationCount":0,"globalCallCount":4,"coreCallCount":4,"assetCallCount":0,"remainingGlobalCalls":716}
+INFO  [procedural-detective] provider.call.complete
+{"timestamp":"2026-10-16T16:06:07.796799+00:00","level":"INFO","logger":"procedural-detective","event":"provider.call.complete","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"world_graph","provider":"fake","model":null,"success":true,"elapsedMs":3,"responseBytes":520,"structuredOutput":false,"structuredOutputRequested":false,"structuredOutputMode":null,"schemaId":null,"schemaFingerprint":null,"requestSchemaByteLength":null,"responseFormatType":null,"transportSchemaValid":null,"contentExtracted":null,"jsonDecoded":null,"strictRequested":null,"requireParametersRequested":null,"providerCapabilityMode":null,"configuredProviderTimeoutMs":null,"effectiveProviderTimeoutMs":null,"deadlineRemainingMs":59968,"providerCallCount":4,"repairCount":0,"regenerationCount":0}
+INFO  [procedural-detective] generation.stage.rejected
+{"timestamp":"2026-10-16T16:06:07.796799+00:00","level":"INFO","logger":"procedural-detective","event":"generation.stage.rejected","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","stage":"world_graph","stageAccepted":false,"canonicalParseValid":true,"semanticBreadthValid":false,"providerCallCount":4}
+INFO  [procedural-detective] generation.validation.started
+{"timestamp":"2026-10-16T16:06:07.796799+00:00","level":"INFO","logger":"procedural-detective","event":"generation.validation.started","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","deadlineRemainingMs":59968}
+INFO  [procedural-detective] generation.validation.complete
+{"timestamp":"2026-10-16T16:06:07.810333+00:00","level":"INFO","logger":"procedural-detective","event":"generation.validation.complete","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","validationOutcome":"VALID","deadlineRemainingMs":59955}
+INFO  [procedural-detective] generation.published
+{"timestamp":"2026-10-16T16:06:07.810333+00:00","level":"INFO","logger":"procedural-detective","event":"generation.published","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","published":true,"failureCode":null,"deadlineRemainingMs":59955,"totalElapsedMs":47,"providerCallCount":4,"repairCount":0,"regenerationCount":0,"providerCallBudget":620,"configuredGlobalProviderCallBudget":720,"configuredCoreProviderCallBudget":620,"stageTimingSummary":[],"stageTimingCount":0,"stageTimingTruncated":null}
+INFO  [procedural-detective] world_compose.started
+{"timestamp":"2026-10-16T16:06:07.826618+00:00","level":"INFO","logger":"procedural-detective","event":"world_compose.started","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","compositionMode":"APARTMENT_BYTE_IDENTITY","environmentKit":"apartment","inputObjectCount":11,"inputEvidenceCount":17,"inputPlacementCount":0,"canonicalObjectNamespaceCount":11,"canonicalEvidenceNamespaceCount":17}
+INFO  [procedural-detective] world_compose.skipped
+{"timestamp":"2026-10-16T16:06:07.826618+00:00","level":"INFO","logger":"procedural-detective","event":"world_compose.skipped","caseId":"CASE-f13S7rz952Yg","generationAttemptId":"GA-WZtoIP5HND27","compositionMode":"APARTMENT_BYTE_IDENTITY","environmentKit":"apartment","compositionOutcome":"SKIPPED","reasonCode":"APARTMENT_BYTE_IDENTITY","fallbackUsed":false}
+INFO  [procedural-detective] playability.validation.started
+{"timestamp":"2026-10-16T16:06:07.826618+00:00","level":"INFO","logger":"procedural-detective","event":"playability.validation.started","caseId":"CASE-f13S7rz952Yg","caseVersion":1,"generationAttemptId":"GA-WZtoIP5HND27","difficulty":"medium"}
+INFO  [procedural-detective] playability.validation.failed
+{"timestamp":"2026-10-16T16:06:07.842251+00:00","level":"INFO","logger":"procedural-detective","event":"playability.validation.failed","caseId":"CASE-f13S7rz952Yg","caseVersion":1,"generationAttemptId":"GA-WZtoIP5HND27","difficulty":"medium","playabilityOutcome":"FAILED","inspectableCount":0,"meaningfulInspectableCount":0,"distinctMeaningfulSourceCount":1,"redHerringCount":0,"reachableCriticalDimensions":[],"unreachableCriticalDimensions":["WHO","WHY","WEAPON","WHEN"],"playabilityIssueCodes":["PLAYABILITY_CRITICAL_DIMENSION_UNREACHABLE","PLAYABILITY_DIFFICULTY_CONTRACT_UNMET","PLAYABILITY_EMPTY_WORLD","PLAYABILITY_EVIDENCE_OVERCONCENTRATED","PLAYABILITY_EVIDENCE_UNREACHABLE","PLAYABILITY_RED_HERRING_REQUIREMENT_UNMET","PLAYABILITY_TOO_FEW_INSPECTABLES","PLAYABILITY_TOO_FEW_MEANINGFUL_INSPECTABLES"]}
+create-case HTTP: 201
+create-case body: {
+  "caseId": "CASE-f13S7rz952Yg",
+  "generationId": "GEN-1",
+  "generationAttemptId": "GA-WZtoIP5HND27",
+  "creatorAccessToken": "9iMNcE2uodNND2OT4BujM1pK26dSTcpsXQHm2wsEQgQ",
+  "status": "FAILED",
+  "failureCode": "PUBLICATION_FAILED"
+}
+RESULT: status=FAILED failureCode=PUBLICATION_FAILED
+API-FAILURE PROBE: PASS

@@ -1,0 +1,92 @@
+{
+  "handshake": {
+    "caseId": "CASE-qSdE4uFS8Q4z",
+    "creatorAccessToken": "vuviszgQqpn34bhipsJRUF6CwotOQy56Utg18R25V2s",
+    "playthroughId": "PT-rQYR1MzDbBHh_HpY2u8yeQ",
+    "playthroughAccessToken": "l0U8FnZD3Rbo1ti7oHQ-YE5ZP5y7E2gN5bkfT7BUNNA",
+    "createdStatus": "PUBLISHED"
+  },
+  "difficulty": "medium",
+  "investigation": {
+    "caseVersion": 1,
+    "environmentId": "apartment",
+    "sceneName": null,
+    "worldObjectCount": 11,
+    "interactiveCount": 7,
+    "interactiveIds": [
+      "apartment_laptop",
+      "cctv_hall_monitor",
+      "kitchen_knife",
+      "letter_opener",
+      "motive_audit_file",
+      "scissors",
+      "victim_body_placeholder"
+    ],
+    "witnessIds": [
+      "emily_reed"
+    ]
+  },
+  "lazyAssets": [
+    "https://enshrouded-server/assets/index-CsM31o5C.js",
+    "https://enshrouded-server/assets/index-CsM31o5C.js",
+    "https://enshrouded-server/assets/default.vertex-QzOO2pdI.js",
+    "https://enshrouded-server/assets/logDepthDeclaration-BcvlWdA7.js",
+    "https://enshrouded-server/assets/default.fragment-Drlz_H7T.js",
+    "https://enshrouded-server/assets/vertexColorMixing-BPhDXVJV.js",
+    "https://enshrouded-server/assets/helperFunctions-CMf0dUcC.js",
+    "https://enshrouded-server/assets/fogFragment-CdDwE4t8.js",
+    "https://enshrouded-server/assets/index-CsM31o5C.js"
+  ],
+  "canvas": {
+    "width": 830,
+    "height": 497,
+    "distinctColors": 1215
+  },
+  "objectInteractions": {
+    "apartment_laptop": {
+      "discovery": true,
+      "panel": "Laptop — Re: the missing funds\nLaptop\nMessage\nFrom\nthomas_reed\nTo\nsarah_miller\nSubject\nWe need to talk tonight\nTimestamp\n21:04\nBody\nSarah, I reviewed the accounts again. I think we need to talk tonigh"
+    },
+    "cctv_hall_monitor": {
+      "discovery": true,
+      "panel": "Laptop — Kitchen CCTV shows Thomas at 22:16:40\nLaptop\nActivity log\nTime\tActivity\n21:31\tSystem resumed from sleep\n21:34\tUser session login recorded\n21:37\tMail client synchronized\n21:40\tBrowser tab open"
+    },
+    "kitchen_knife": {
+      "discovery": true,
+      "panel": "Kitchen knife — Blood on the kitchen knife matches the victim\nKitchen knife\nForensic comparison\n\nStructured evidence fact.\n\nClose"
+    },
+    "letter_opener": {
+      "discovery": true,
+      "panel": "Letter opener — Letter opener does not match the wound\nLetter opener\nForensic comparison\n\nStructured evidence fact.\n\nClose"
+    },
+    "motive_audit_file": {
+      "discovery": true,
+      "panel": "Letter opener — Audit report links Thomas to the missing €240,000\nLetter opener\nAudit report links Thomas to the missing €240,000\n\nStructured evidence fact.\n\nClose"
+    },
+    "scissors": {
+      "discovery": true,
+      "panel": "Scissors — Scissors do not match the wound\nScissors\nForensic comparison\n\nStructured evidence fact.\n\nClose"
+    },
+    "victim_body_placeholder": {
+      "discovery": true,
+      "panel": "Victim — Body found in the kitchen at 22:18\nVictim\nTimeline\nTime\tEvent\n22:18\tBody found in the kitchen at 22:18\nClose"
+    }
+  },
+  "meaningfulObjectSources": [
+    "apartment_laptop",
+    "cctv_hall_monitor",
+    "kitchen_knife",
+    "letter_opener",
+    "motive_audit_file",
+    "scissors",
+    "victim_body_placeholder"
+  ],
+  "witnessAnswer": {
+    "question": "OBSERVATION",
+    "length": 162,
+    "sample": "What did you see?\n\nNeighbour Emily Reed's account of the evening.\n\nI heard shouting from the apartment around 22:10 and saw Thomas leave the kitchen around 22:20."
+  },
+  "meaningfulSourceTotal": 8,
+  "healthStatus": 200,
+  "pageErrors": []
+}

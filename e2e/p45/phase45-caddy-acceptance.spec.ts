@@ -107,7 +107,7 @@ async function canvasPixelStats(page: Page): Promise<{
 async function runAcceptance(
   page: Page,
   request: APIRequestContext,
-  difficulty: "medium" | "hard",
+  difficulty: "easy" | "medium" | "hard",
   minInspectables: number,
   minMeaningfulSources: number,
 ) {
@@ -303,4 +303,8 @@ test("Phase45 §39 — Caddy production MEDIUM acceptance", async ({ page, reque
 
 test("Phase45 §39 — Caddy production HARD acceptance", async ({ page, request }) => {
   await runAcceptance(page, request, "hard", 7, 4);
+});
+
+test("Phase45 §39 — Caddy production EASY acceptance", async ({ page, request }) => {
+  await runAcceptance(page, request, "easy", 3, 2);
 });

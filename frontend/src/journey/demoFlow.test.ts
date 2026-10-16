@@ -1573,3 +1573,94 @@ describe("Phase 30 §23 — Frontier codes also map from a REAL run and from map
     });
   });
 });
+
+describe("Phase 45 Fix §User-facing error handling — PUBLICATION_FAILED (playability/Gate 3)", () => {
+  it("generationFailed maps PUBLICATION_FAILED to the non-prompt-blaming playability copy, never the generic prompt-blaming copy", () => {
+    const failure = generationFailed("PUBLICATION_FAILED");
+    expect(failure.kind).toBe("failed");
+    expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.publicationFailed);
+    expect(failure.message).toBe(
+      "The generated case did not meet the playability requirements. Please try again.",
+    );
+    // The whole point of the fix: the prompt-blaming generic copy must not be used.
+    expect(failure.message).not.toBe(DEMO_FAILURE_MESSAGES.failed);
+    expect(failure.message.toLowerCase()).not.toContain("prompt");
+    expect(failure.message.toLowerCase()).not.toContain("adjust");
+    // No raw internal code / concrete PLAYABILITY_* issue code ever surfaces.
+    expect(failure.message).not.toContain("PUBLICATION_FAILED");
+    expect(failure.message).not.toContain("PLAYABILITY");
+  });
+
+  it("a real run whose createCase reports FAILED/PUBLICATION_FAILED surfaces the playability copy", async () => {
+    const services = makeServices({
+      createCase: vi.fn(async () => ({
+        caseId: "CASE-demo-01",
+        generationId: "GEN-demo-01",
+        generationAttemptId: "ATT-demo-01",
+        creatorAccessToken: CREATOR,
+        status: "FAILED",
+        failureCode: "PUBLICATION_FAILED",
+      })),
+    });
+    const result = await runDemo("prompt", { services, wait: NO_WAIT });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected publication failure");
+    expect(result.failure.kind).toBe("failed");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.publicationFailed);
+    expect(result.failure.message).not.toBe(DEMO_FAILURE_MESSAGES.failed);
+    expect(services.createPlaythrough).not.toHaveBeenCalled();
+  });
+
+  it("a real run whose poll reports FAILED/PUBLICATION_FAILED surfaces the playability copy", async () => {
+    const services = makeServices({
+      createCase: vi.fn(() => runningCase()),
+      pollGeneration: vi.fn(async () => ({
+        caseId: "CASE-demo-01",
+        generationId: "GEN-demo-01",
+        status: "FAILED",
+        progress: 100,
+        stage: null,
+        failureCode: "PUBLICATION_FAILED",
+      })),
+    });
+    const result = await runDemo("prompt", { services, wait: NO_WAIT });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected publication failure");
+    expect(result.failure.kind).toBe("failed");
+    expect(result.failure.message).toBe(DEMO_FAILURE_MESSAGES.publicationFailed);
+    expect(services.createPlaythrough).not.toHaveBeenCalled();
+  });
+
+  it("other failure codes keep their existing copy (no regression)", () => {
+    expect(generationFailed("PROVIDER_TIMEOUT").message).toBe(
+      DEMO_FAILURE_MESSAGES.providerTimeout,
+    );
+    expect(generationFailed("GENERATION_DEADLINE_EXCEEDED").message).toBe(
+      DEMO_FAILURE_MESSAGES.deadline,
+    );
+    expect(generationFailed("CORE_PROVIDER_CALL_BUDGET_EXHAUSTED").message).toBe(
+      DEMO_FAILURE_MESSAGES.safetyLimit,
+    );
+    expect(generationFailed("VALIDATION_FAILED").message).toBe(DEMO_FAILURE_MESSAGES.failed);
+    expect(generationFailed("SOLVER_AMBIGUOUS").message).toBe(DEMO_FAILURE_MESSAGES.failed);
+    expect(generationFailed("MAX_PROCEDURAL_ASSETS_EXCEEDED").message).toBe(
+      DEMO_FAILURE_MESSAGES.failed,
+    );
+  });
+
+  it("unknown codes and hostile PUBLICATION_FAILED variants keep the generic fallback, never the playability copy", () => {
+    for (const failureCode of [
+      null,
+      undefined,
+      "SOME_FUTURE_CODE",
+      "PUBLICATION_FAILED_EXTRA",
+      "X_PUBLICATION_FAILED",
+      "publication_failed",
+    ]) {
+      const failure = generationFailed(failureCode);
+      expect(failure.kind).toBe("failed");
+      expect(failure.message).toBe(DEMO_FAILURE_MESSAGES.failed);
+      expect(failure.message).not.toBe(DEMO_FAILURE_MESSAGES.publicationFailed);
+    }
+  });
+});

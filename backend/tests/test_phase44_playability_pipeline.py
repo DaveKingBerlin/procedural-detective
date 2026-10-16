@@ -345,10 +345,16 @@ def test_gate3_only_failure_marks_attempt_failed_not_published():
     assert record.state is not GenerationState.PUBLISHED
 
 
-def test_adv44_01_zero_evidence_links_never_publishes():
+def test_adv44_01_zero_evidence_links_never_publishes_unrepaired():
     """ADV-44-01 — with EVERY placement's evidenceId removed, Gate 3 must reject
-    the candidate (no entity-surface shortcut) and the real service path must NOT
-    publish it."""
+    the raw candidate (no entity-surface shortcut).
+
+    Phase45 Fix: the authoritative publication guard now performs a
+    deterministic, provider-free reachability repair first — the EXTRA
+    invariant is that whatever gets published is Gate 3 VALID with NO
+    unreachable critical dimension. The raw (unrepaired) candidate is still
+    rejected by Gate 3 and would fail closed if the repair could not fix it.
+    """
     controller, handle, record = _run(_zero_link_script(), "medium")
     # The WORLD_GRAPH stage gate rejected the (structurally valid) world.
     assert GenerationStage.WORLD_GRAPH not in record.stage_done
@@ -359,20 +365,32 @@ def test_adv44_01_zero_evidence_links_never_publishes():
     assert result.success and result.published is not None
     record.published = result.published
 
+    # The RAW frozen candidate is rejected by Gate 3.
     gate3 = playability.validate_published_candidate(record.published, "medium")
     assert not gate3.valid
     assert playability.PLAYABILITY_EVIDENCE_UNREACHABLE in gate3.issue_codes
     assert playability.PLAYABILITY_CRITICAL_DIMENSION_UNREACHABLE in gate3.issue_codes
 
     stub = _make_guard_stub()
-    assert _publish_via_guard(stub, record, "medium") is None
-    assert stub._publication.calls == 0
-    assert record.state is GenerationState.FAILED
+    status = _publish_via_guard(stub, record, "medium")
+    # The guard repairs -> revalidates -> publishes a Gate 3 VALID candidate.
+    assert status == GenerationState.PUBLISHED.value
+    assert stub._publication.calls == 1
+    published_gate3 = playability.validate_published_candidate(
+        stub._publication.published, "medium"
+    )
+    assert published_gate3.valid, published_gate3.issue_codes
+    assert published_gate3.unreachable_critical_dimensions == ()
 
 
-def test_adv44_07_decoy_why_never_publishes():
+def test_adv44_07_decoy_why_never_publishes_unrepaired():
     """ADV-44-07 — a reachable DECOY WHY fact does not satisfy Gate 3 while the
-    winning motive support is unreachable; the publication guard refuses."""
+    winning motive support is unreachable (the raw candidate is rejected).
+
+    Phase45 Fix: the authoritative publication guard repairs the candidate so
+    the WINNING motive clue becomes reachable; only a Gate 3 VALID candidate is
+    published (never one with unreachable critical dimensions).
+    """
     controller, handle, record = _run(_decoy_why_script(), "medium")
     # Structurally/canonically valid (Gate 1/2), but Gate 3 rejects WHY.
     assert pipeline.validate_draft(record).outcome is ValidationOutcome.VALID
@@ -386,9 +404,14 @@ def test_adv44_07_decoy_why_never_publishes():
     assert playability.PLAYABILITY_CRITICAL_DIMENSION_UNREACHABLE in gate3.issue_codes
 
     stub = _make_guard_stub()
-    assert _publish_via_guard(stub, record, "medium") is None
-    assert stub._publication.calls == 0
-    assert record.state is GenerationState.FAILED
+    status = _publish_via_guard(stub, record, "medium")
+    assert status == GenerationState.PUBLISHED.value
+    assert stub._publication.calls == 1
+    published_gate3 = playability.validate_published_candidate(
+        stub._publication.published, "medium"
+    )
+    assert published_gate3.valid, published_gate3.issue_codes
+    assert playability.DIMENSION_WHY in published_gate3.reachable_critical_dimensions
 
 
 def test_publication_guard_metrics_events_are_emitted(caplog):
