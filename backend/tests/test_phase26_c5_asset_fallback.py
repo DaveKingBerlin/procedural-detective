@@ -388,7 +388,7 @@ def test_demo_fake_path_unchanged(generation_service):
     assert started.status == "PUBLISHED"
     provenance = generation_service._last_publish_provenance
     assert provenance is not None
-    assert len(provenance) == 9
+    assert len(provenance) == 11
     assert all(value == "CATALOG_EXACT" for value in provenance.values())
 
 

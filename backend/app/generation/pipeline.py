@@ -44,8 +44,10 @@ from app.domain.solver import solve_case
 from app.domain.truth import CaseTruth, Crime, CrimeTime
 from app.generation import (
     case_quality,
+    difficulty_policy,
     evidence_algebra,
     parser,
+    playability,
     prompt as prompt_mod,
     prompts,
     safety,
@@ -115,6 +117,10 @@ class AttemptRecord:
     session_id: str
     state: GenerationState = GenerationState.DRAFT
     seed: int | None = None
+    # Phase44 (ADR-004 D1) — the NORMALIZED difficulty contract for this attempt
+    # (``easy|medium|hard``). Never serialized into the draft; drives the Gate 3
+    # playability thresholds + the provider difficulty-guidance block.
+    difficulty: str = difficulty_policy.DEFAULT_DIFFICULTY
     prompt: str = ""
     prompt_note: str = ""
     locked: LockedConstraints = field(default_factory=LockedConstraints)
@@ -540,6 +546,16 @@ Phase35 §37: the REPAIR stage additionally receives the bounded safe
         if stage is GenerationStage.REPAIR:
             scope += "\n\n" + case_quality_repair_context(attempt)
         text = f"{text}\n\n{scope}"
+    # Phase44 (AC-13/AC-14) — the difficulty targets the provider must aim for,
+    # rendered from the ONE authoritative policy module (guidance only; the
+    # deterministic Gate 3 stays authoritative). Injected into the content-
+    # bearing world stages so richness targets are visible where placements and
+    # meaningful objects are authored.
+    if stage in (GenerationStage.PUBLIC_WORLD, GenerationStage.WORLD_GRAPH):
+        text = (
+            f"{text}\n\n"
+            f"{difficulty_policy.difficulty_requirements_block(attempt.difficulty)}"
+        )
     return text
 
 
@@ -1181,8 +1197,11 @@ def _authoritative_world_graph_block(attempt: AttemptRecord) -> str:
         "above) — never invent a new object or asset;\n"
         "- each objectId appears AT MOST ONCE across ALL placements — never "
         "emit two placements for the same objectId;\n"
-        "- keep placements MINIMAL: the single crime weapon plus ONLY the "
-        "objects an evidence item links to;\n"
+        "- keep placements MINIMAL WHILE STILL SATISFYING the selected "
+        "difficulty's playability targets: place the single crime weapon, every "
+        "object an evidence item links to, and enough additional meaningful "
+        "interactive objects to meet the difficulty minimums (never decorative "
+        "filler merely to raise a count);\n"
         "- NEVER duplicate an objectId — a duplicate placement is a safety "
         "defect and blocks the world."
     )
@@ -1547,6 +1566,25 @@ def apply_stage_output(
     attempt.stage_outputs[stage] = spec
     attempt.draft = None
     attempt._phase3_cache = None
+    if stage is GenerationStage.WORLD_GRAPH:
+        # Phase44 (ADR-004 D5) — the stage-local Gate 3 playability gate. It is
+        # evaluated AFTER the parsed WORLD_GRAPH spec is installed (it assembles
+        # the current draft) and mirrors the PUBLIC_WORLD breadth-gate contract
+        # EXACTLY: a structurally valid but playability-sparse world (including
+        # ``placements: []``) is installed as staging material but NOT trusted,
+        # so the existing bounded VALIDATING recovery classification owns it.
+        # No new ValidationReport bucket is introduced (Gate 1/2 semantics
+        # unchanged). Fail-open (``()``) when the draft cannot be assembled —
+        # shape errors stay owned by the strict parser / structural bucket.
+        if playability.world_graph_playability_issues(attempt):
+            _emit_stage_boundary(
+                attempt,
+                stage,
+                canonical_parse_valid=True,
+                semantic_breadth_valid=False,
+                accepted=False,
+            )
+            return False
     if semantic_issues:
         # Structurally valid but semantically empty breadth -> NOT trusted. The
         # deterministic full validation re-derives the universe/quality issues
@@ -1565,7 +1603,9 @@ def apply_stage_output(
         stage,
         canonical_parse_valid=True,
         semantic_breadth_valid=(
-            True if stage is GenerationStage.PUBLIC_WORLD else None
+            True
+            if stage in (GenerationStage.PUBLIC_WORLD, GenerationStage.WORLD_GRAPH)
+            else None
         ),
         accepted=True,
     )

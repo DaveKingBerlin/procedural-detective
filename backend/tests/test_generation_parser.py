@@ -225,7 +225,7 @@ def test_golden_public_world_parses():
     assert spec is not None
     assert len(spec.persons) == 6
     assert len(spec.motives) == 4
-    assert len(spec.objects) == 9
+    assert len(spec.objects) == 11
     assert len(spec.locations) == 3
     assert len(spec.travel_rules) == 2
     assert spec.scene is not None
@@ -242,7 +242,7 @@ def test_golden_world_graph_parses():
     spec = parse_stage(WORLD_GRAPH, GOLDEN_STAGE_PAYLOADS[WORLD_GRAPH])
     assert spec is not None
     assert len(spec.locations) == 3
-    assert len(spec.placements) == 9
+    assert len(spec.placements) == 11
 
 
 def _clean_world_graph_doc(**overrides):
@@ -594,7 +594,7 @@ def test_full_draft_golden_parses():
     assert draft is not None
     assert len(draft.persons) == 6
     assert len(draft.evidence) == 17
-    assert len(draft.world_graph.placements) == 9
+    assert len(draft.world_graph.placements) == 11
 
 
 def test_full_draft_unknown_top_level_key_rejected():

@@ -346,6 +346,12 @@ ANCHOR_ALLOWLIST: tuple[str, ...] = (
     "hotel_generic_01",
     "hotel_bathroom_01",
     "hotel_spawn_01",
+    # Phase44 additive evidence-capable anchors (so the composed hotel_suite
+    # world can host every solver-critical evidence object; ADR-004 D7 / §16).
+    "hotel_floor_02",
+    "hotel_generic_02",
+    "hotel_generic_03",
+    "hotel_table_01",
     # Phase 11 warehouse kit
     "warehouse_desk_01",
     "warehouse_workbench_01",
@@ -363,6 +369,11 @@ ANCHOR_ALLOWLIST: tuple[str, ...] = (
     "warehouse_access_01",
     "warehouse_generic_01",
     "warehouse_spawn_01",
+    # Phase44 additive evidence-capable anchors (warehouse).
+    "warehouse_floor_03",
+    "warehouse_generic_02",
+    "warehouse_generic_03",
+    "warehouse_table_01",
     # Phase 11 mansion kit
     "mansion_desk_01",
     "mansion_desk_02",
@@ -381,6 +392,15 @@ ANCHOR_ALLOWLIST: tuple[str, ...] = (
     "mansion_generic_01",
     "mansion_spawn_01",
     "mansion_corridor_01",
+    # Phase44 (ADV-44-01) — additive evidence-capable record anchors (apartment /
+    # mansion) so the composer can host the WHY motive-record object without
+    # dropping a prompt object.
+    "apartment_record_01",
+    "apartment_record_02",
+    "mansion_record_01",
+    "mansion_record_02",
+    "office_record_01",
+    "office_record_02",
 )
 
 

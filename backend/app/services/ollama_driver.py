@@ -3977,6 +3977,18 @@ class OllamaStageDriver:
         objects = [*objects, *contradiction_objects]
         placements.extend(contradiction_placements)
 
+        # Phase44 (ADV-44-01) — bind a discoverable MOTIVE clue to an
+        # INSPECTABLE object so the WHY dimension has a player-facing
+        # interaction path in the driver world.
+        motive_objects, motive_placements = _motive_world_placements(
+            evidence_spec,
+            kit,
+            motive_id=getattr(crime, "motive_id", None),
+            used_anchors={p.anchor for p in placements if getattr(p, "anchor", None)},
+        )
+        objects = [*objects, *motive_objects]
+        placements.extend(motive_placements)
+
         scene: SceneSpec | None = None
         world_graph = WorldGraphSpec()
         if kit is not None:
@@ -4243,6 +4255,143 @@ def _contradiction_anchor(kit: Any) -> tuple[str, str] | None:
                 str(getattr(anchor, "zone_id", "")),
             )
     return None
+
+
+def _motive_anchor(kit: Any) -> tuple[str, str] | None:
+    """``(anchor_id, zone_id)`` of a free evidence-capable kit anchor for the
+    motive record (Phase44 ADV-44-01). Deterministic; distinct from the
+    contradiction-camera anchor so the two evidence objects never share a
+    position."""
+    if kit is None:
+        return None
+    contradiction = _contradiction_anchor(kit)
+    contradiction_id = contradiction[0] if contradiction else None
+    for anchor_type in (
+        "TABLE_PROP",
+        "DESK_EVIDENCE",
+        "FLOOR_EVIDENCE",
+        "STORAGE",
+        "GENERIC_PROP",
+    ):
+        candidates = sorted(
+            (
+                a
+                for a in getattr(kit, "anchors", ()) or ()
+                if getattr(a, "type", "") == anchor_type
+                and not getattr(a, "exclusive", False)
+                and str(getattr(a, "anchor_id", "")) != contradiction_id
+            ),
+            key=lambda a: str(getattr(a, "anchor_id", "") or ""),
+        )
+        if candidates:
+            anchor = candidates[0]
+            return (
+                str(getattr(anchor, "anchor_id", "")),
+                str(getattr(anchor, "zone_id", "")),
+            )
+    return None
+
+
+def _motive_world_placements(
+    evidence_spec: Any, kit: Any, motive_id: Any = None, used_anchors: Any = ()
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    """Phase44 (ADV-44-01/07) — bind the WINNING motive clue to a world object.
+
+    The driver's canonical evidence carries no object_id reference for motive
+    facts (they reference a person/motive), so without this the WHY dimension
+    would have no player-facing interaction path. This app-owned, deterministic
+    binding exposes the winning ``MOTIVE_LINKED_TO_PERSON`` fact (for
+    ``motive_id``) on an INSPECTABLE kit object — never a decoy. The canonical
+    fact is unchanged (solver/truth semantics untouched); only placement linkage
+    is added.
+    """
+    from app.generation.schemas import ObjectSpec, PlacementSpec
+
+    items = [
+        item
+        for item in (getattr(evidence_spec, "evidence", ()) or ())
+        if getattr(item, "id", None)
+        and getattr(item, "discoverable", True) is not False
+    ]
+
+    def _has(item: Any, ptype: str, **match: Any) -> bool:
+        for prop in getattr(item, "propositions", ()) or ():
+            if str(getattr(prop, "type", "")) != ptype:
+                continue
+            if all(
+                str(getattr(prop, key, "")) == str(value)
+                for key, value in match.items()
+            ):
+                return True
+        return False
+
+    chosen = None
+    if motive_id:
+        for item in items:
+            if _has(item, "MOTIVE_LINKED_TO_PERSON", motive_id=motive_id):
+                chosen = item
+                break
+    if chosen is None:
+        for item in items:
+            if _has(item, "MOTIVE_LINKED_TO_PERSON"):
+                chosen = item
+                break
+    if chosen is None:
+        for item in items:
+            if _has(item, "MOTIVE_FACT_CONTRADICTED"):
+                chosen = item
+                break
+    if chosen is None:
+        return (), ()
+    anchor = _motive_anchor(kit)
+    if anchor is None:
+        return (), ()
+    anchor_id, zone_id = anchor
+    used = set(used_anchors or ())
+    if anchor_id in used:
+        # Deterministically pick another free evidence-capable anchor.
+        for candidate_type in (
+            "DESK_EVIDENCE",
+            "TABLE_PROP",
+            "FLOOR_EVIDENCE",
+            "STORAGE",
+            "GENERIC_PROP",
+        ):
+            for a in sorted(
+                (x for x in getattr(kit, "anchors", ()) or ()
+                 if getattr(x, "type", "") == candidate_type
+                 and not getattr(x, "exclusive", False)
+                 and str(getattr(x, "anchor_id", "")) not in used),
+                key=lambda x: str(getattr(x, "anchor_id", "")),
+            ):
+                anchor_id = str(getattr(a, "anchor_id", ""))
+                zone_id = str(getattr(a, "zone_id", ""))
+                break
+            else:
+                continue
+            break
+    evidence_id = str(getattr(chosen, "id", ""))
+    object_id = "motive_record"
+    return (
+        (
+            ObjectSpec(
+                object_id=object_id,
+                asset_id="PROP_VASE_01",
+                affordances=("INSPECTABLE",),
+                subtype="document",
+            ),
+        ),
+        (
+            PlacementSpec(
+                object_id=object_id,
+                asset_id="PROP_VASE_01",
+                location_id=zone_id,
+                anchor=anchor_id,
+                interaction="read",
+                evidence_id=evidence_id,
+            ),
+        ),
+    )
 
 
 def _contradiction_world_placements(

@@ -180,6 +180,25 @@ OBJECTS: tuple[PublicObject, ...] = (
         public_affordances=frozenset({"INSPECTABLE"}),
         subtype="victim_body",
     ),
+    # Phase44 (ADV-44-01) — a WHY-reachable clue: the motive audit record is
+    # linked to the embezzlement motive so the WHY dimension has a player-facing
+    # interaction path. INSPECTABLE-only; the solver result is unchanged.
+    PublicObject(
+        object_id="motive_audit_file",
+        asset_id="PROP_LETTER_OPENER_01",
+        public_affordances=frozenset({"INSPECTABLE"}),
+        subtype="document",
+    ),
+    # Phase44 (DEF-105) — one further inspectable winner clue so the built-in
+    # fake/dev golden satisfies the HARD difficulty contract (>=7 inspectables).
+    # Links the existing canonical WHO-winner observation (cctv_thomas_scene_01);
+    # INSPECTABLE-only, so the solver result is unchanged.
+    PublicObject(
+        object_id="cctv_hall_monitor",
+        asset_id="PROP_LAPTOP_01",
+        public_affordances=frozenset({"INSPECTABLE"}),
+        subtype="monitor",
+    ),
 )
 
 LOCATIONS: tuple[PublicLocation, ...] = (

@@ -42,6 +42,8 @@ GOLDEN_OBJECT_IDS = (
     "apartment_door",
     "apartment_lamp",
     "victim_body_placeholder",
+    "motive_audit_file",
+    "cctv_hall_monitor",
 )
 
 GOLDEN_PROMPT = "Victim: sarah_miller\nMurderer: thomas_reed\n"
@@ -248,7 +250,7 @@ def test_office_case_publishes_office_kit_placed_on_office_anchors(
     assert scene["location_id"] == "miller_apartment_kitchen"
 
     wg = payload["draft"]["world_graph"]
-    assert len(wg["placements"]) == 9
+    assert len(wg["placements"]) == 11
     assert len(wg["locations"]) == len(office.zones)
     for location in wg["locations"]:
         assert location["location_id"] in office_zones
@@ -326,7 +328,7 @@ def test_mansion_case_publishes_mansion_kit(phase5_migrated_client):
     assert scene["environment_id"] == "mansion"
     assert scene["location_id"] == "miller_apartment_kitchen"
     wg = payload["draft"]["world_graph"]
-    assert len(wg["placements"]) == 9
+    assert len(wg["placements"]) == 11
     for placement in wg["placements"]:
         assert placement["anchor"] in mansion_anchors
     boot = _bootstrap(phase5_migrated_client, client, case_id, creator)

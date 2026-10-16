@@ -43,6 +43,7 @@ from app.generation.admission import (
     AdmissionReasonCode,
 )
 from app.generation.controller import GenerationController
+from app.generation import difficulty_policy, playability
 from app.generation.failure_codes import (
     GenerationFailureCode,
     infer_failure_code,
@@ -649,6 +650,256 @@ def _pre_publish_snapshot(record: Any) -> tuple[str, str, str, int, str | None]:
     )
 
 
+def _pick_free_evidence_anchor(kit: Any, used_anchors: set) -> tuple[str, str] | None:
+    """Deterministic free evidence-capable kit anchor ``(anchor_id, zone_id)``."""
+    for anchor_type in (
+        "TABLE_PROP",
+        "DESK_EVIDENCE",
+        "FLOOR_EVIDENCE",
+        "STORAGE",
+        "GENERIC_PROP",
+    ):
+        for anchor in sorted(
+            (
+                a
+                for a in getattr(kit, "anchors", ()) or ()
+                if getattr(a, "type", "") == anchor_type
+                and not getattr(a, "exclusive", False)
+                and str(getattr(a, "anchor_id", "")) not in used_anchors
+            ),
+            key=lambda a: str(getattr(a, "anchor_id", "")),
+        ):
+            return (
+                str(getattr(anchor, "anchor_id", "")),
+                str(getattr(anchor, "zone_id", "")),
+            )
+    return None
+
+
+def _winning_fact_for_dimension(dim: str, discoverable: Any, crime: Any) -> Any:
+    """Phase44 (ADV-44-07) — the WINNING supporting evidence fact for a dim.
+
+    Selected deterministically from the draft's crime ids so supplementation
+    binds the winning clue (never a decoy): WHO -> a proposition referencing the
+    murderer; WHY -> MOTIVE_LINKED_TO_PERSON for the crime motive; WEAPON -> a
+    positive weapon fact on the crime weapon; WHEN -> a time-bearing fact.
+    """
+    if crime is None:
+        return None
+    facts = tuple(discoverable or ())
+
+    def _props(fact: Any) -> tuple:
+        return tuple(getattr(fact, "propositions", ()) or ())
+
+    if dim == "WHO":
+        murderer = str(getattr(crime, "murderer_id", "") or "")
+        if not murderer:
+            return None
+        for fact in facts:
+            if any(
+                str(getattr(p, "person_id", "")) == murderer for p in _props(fact)
+            ):
+                return fact
+        return None
+    if dim == "WHY":
+        motive = str(getattr(crime, "motive_id", "") or "")
+        if not motive:
+            return None
+        for fact in facts:
+            if any(
+                str(getattr(p, "type", "")) == "MOTIVE_LINKED_TO_PERSON"
+                and str(getattr(p, "motive_id", "")) == motive
+                for p in _props(fact)
+            ):
+                return fact
+        return None
+    if dim == "WEAPON":
+        weapon = str(getattr(crime, "weapon_id", "") or "")
+        if not weapon:
+            return None
+        for fact in facts:
+            for p in _props(fact):
+                if str(getattr(p, "object_id", "")) != weapon:
+                    continue
+                ptype = str(getattr(p, "type", ""))
+                if ptype == "FORENSIC_WEAPON_MATCH":
+                    structured = getattr(p, "structured", None) or {}
+                    if isinstance(structured, Mapping) and structured.get("match") is True:
+                        return fact
+                elif ptype in (
+                    "OBJECT_CONTAINS_BLOOD",
+                    "OBJECT_CONTAINS_FINGERPRINT",
+                ):
+                    return fact
+        return None
+    if dim == "WHEN":
+        time_types = {
+            "VICTIM_LAST_SEEN_ALIVE_AT",
+            "BODY_FIRST_FOUND_AT",
+            "NOISE_HEARD_AT",
+            "CRIME_SCENE_OBSERVATION_AT",
+            "TIME_WINDOW_EXCLUSION",
+            "CAN_REACH_CRIME_SCENE_IN_TIME",
+        }
+        for fact in facts:
+            if any(str(getattr(p, "type", "")) in time_types for p in _props(fact)):
+                return fact
+        return None
+    return None
+
+
+def _ensure_dimension_clues(draft: Any, kit: Any) -> Any:
+    """Phase44 (ADV-44-01) — bind a reachable clue for every required dimension
+    the candidate lacks, so the frozen publication candidate satisfies Gate 3.
+
+    The canonical evidence / solver / CaseTruth are NEVER modified: only an
+    INSPECTABLE, placement-linked object is added for a discoverable fact whose
+    proposition maps to the missing dimension. A no-op when every required
+    dimension already has a placement/witness-reachable clue (so the golden
+    default world stays byte-identical).
+    """
+    if kit is None or draft is None:
+        return draft
+    import dataclasses
+
+    from app.generation import playability as _play
+    from app.generation import safety as _safety
+    from app.generation.schemas import ObjectSpec, PlacementSpec
+
+    placements = tuple(getattr(draft.world_graph, "placements", ()) or ())
+    interactive = [
+        p
+        for p in placements
+        if getattr(p, "interaction", "")
+        and p.interaction in _safety.INTERACTION_ALLOWLIST
+    ]
+    linked = {
+        str(getattr(p, "evidence_id"))
+        for p in interactive
+        if getattr(p, "evidence_id", None) is not None
+    }
+    discoverable = [
+        e
+        for e in (getattr(draft, "evidence", ()) or ())
+        if getattr(e, "discoverable", True) is not False
+    ]
+    # Mirror Gate 3 reachability EXACTLY: placement-linked OR usable-witness.
+    _public = None
+    _facts: tuple = ()
+    _usable_witnesses: frozenset = frozenset()
+    usable_fact_ids: set = set()
+    try:
+        from app.generation import pipeline as _pipeline
+
+        _public, _facts, _truth = _pipeline._draft_to_phase3(
+            draft, case_id="CASE-CLUE", title="T"
+        )
+        _usable_witnesses, _usable_facts, _all = _play._witness_reachability(
+            _public, _facts
+        )
+        usable_fact_ids = set(_usable_facts)
+    except Exception:  # noqa: BLE001 - completion degrades; Gate 3 stays authoritative
+        usable_fact_ids = set()
+    reachable_fact_ids = linked | usable_fact_ids
+    reachable_facts = tuple(
+        f for f in _facts if str(getattr(f, "id", "")) in reachable_fact_ids
+    )
+    proof = None
+    try:
+        from app.domain.solver import solve_case as _solve
+
+        proof = _solve(_public, _facts)
+    except Exception:  # noqa: BLE001 - no proof -> Gate 1/2 owns it
+        proof = None
+    resolution = getattr(getattr(draft, "crime", None), "resolution_type", None)
+    is_suicide = str(getattr(resolution, "value", resolution)) == "SUICIDE"
+    required = (
+        (_play.DIMENSION_WHY, _play.DIMENSION_WEAPON, _play.DIMENSION_WHEN)
+        if is_suicide
+        else _play._ALL_DIMENSIONS
+    )
+    # ADV-44-07 — supplement only when the WINNING supporting clue is missing
+    # (a reachable decoy of the same type does not count).
+    missing = [
+        dim
+        for dim in required
+        if not _play._winner_dimension_supported(
+            dim, reachable_facts, proof, _usable_witnesses
+        )
+    ]
+    if not missing:
+        return draft
+
+    # ADV-44-08 — the injected placement's location MUST be a DECLARED
+    # world-graph location (never a raw kit zone id). If none exists, skip
+    # supplementation so Gate 3 rejects the invalid graph instead of publishing.
+    declared_locations = [
+        str(getattr(l, "location_id", ""))
+        for l in (getattr(draft.world_graph, "locations", ()) or ())
+        if getattr(l, "location_id", None)
+    ]
+    crime_location = str(
+        getattr(getattr(draft, "crime", None), "location_id", "") or ""
+    )
+    if crime_location and crime_location in declared_locations:
+        chosen_location = crime_location
+    elif declared_locations:
+        chosen_location = declared_locations[0]
+    else:
+        return draft
+
+    crime = getattr(draft, "crime", None)
+    new_objects = list(getattr(draft, "objects", ()) or ())
+    spec_ids = {str(getattr(o, "object_id", "")) for o in new_objects}
+    new_placements = list(placements)
+    used_anchors = {str(getattr(p, "anchor", "")) for p in placements}
+    changed = False
+    for dim in missing:
+        fact = _winning_fact_for_dimension(dim, discoverable, crime)
+        if fact is None:
+            continue
+        anchor = _pick_free_evidence_anchor(kit, used_anchors)
+        if anchor is None:
+            continue
+        anchor_id = anchor[0]
+        used_anchors.add(anchor_id)
+        object_id = f"dim_clue_{dim.lower()}"
+        suffix = 1
+        while object_id in spec_ids:
+            suffix += 1
+            object_id = f"dim_clue_{dim.lower()}_{suffix}"
+        spec_ids.add(object_id)
+        new_objects.append(
+            ObjectSpec(
+                object_id=object_id,
+                asset_id="PROP_VASE_01",
+                affordances=("INSPECTABLE",),
+                subtype="document",
+            )
+        )
+        new_placements.append(
+            PlacementSpec(
+                object_id=object_id,
+                asset_id="PROP_VASE_01",
+                location_id=chosen_location,
+                anchor=anchor_id,
+                interaction="read",
+                evidence_id=str(getattr(fact, "id", "")),
+            )
+        )
+        linked.add(str(getattr(fact, "id", "")))
+        changed = True
+    if not changed:
+        return draft
+    return dataclasses.replace(
+        draft,
+        objects=tuple(new_objects),
+        world_graph=dataclasses.replace(
+            draft.world_graph, placements=tuple(new_placements)
+        ),
+    )
+
+
 class GenerationService:
     """Durable case generation + session/quota orchestration."""
 
@@ -1023,6 +1274,7 @@ class GenerationService:
             creator_token=creator_token,
             resolved=resolved,
             demo_case_id=demo_case_id,
+            difficulty=difficulty,
         )
         case_id = handle.case_id
         attempt_id = handle.attempt_id
@@ -1089,7 +1341,8 @@ class GenerationService:
                     )
                 )
         status = self._publish_if_ready(
-            record, title, settings, now, case_id, version, model=resolved.model
+            record, title, settings, now, case_id, version, model=resolved.model,
+            difficulty=difficulty,
         ) or record.state.value
         if _PD_DEV_TRACE:
             _dev_trace(
@@ -1330,6 +1583,9 @@ class GenerationService:
             ):
                 # Legacy byte-identity path: scene-only injection.
                 new_draft = dataclasses.replace(draft, scene=scene)
+                # Phase44 (ADV-44-01) — ensure every required dimension has a
+                # reachable clue (no-op for the fully-linked golden default).
+                new_draft = _ensure_dimension_clues(new_draft, kit)
                 record.published = dataclasses.replace(published, draft=new_draft)
                 return True
 
@@ -1431,6 +1687,9 @@ class GenerationService:
                     ),
                 ),
             )
+            # Phase44 (ADV-44-01) — ensure every required dimension has a
+            # reachable clue BEFORE the complete validation pipeline runs.
+            new_draft = _ensure_dimension_clues(new_draft, kit)
             # COMPLETE validation pipeline over the composed draft.
             record.draft = new_draft
             record._phase3_cache = None
@@ -1548,6 +1807,7 @@ class GenerationService:
             creator_token=creator_token,
             ids=_CasePinnedIdSource(self._ids, case_id),
             resolved=resolved,
+            difficulty=difficulty,
         )
         attempt_id = handle.attempt_id
         creator_token_value = issue_creator_access_token()
@@ -1585,7 +1845,8 @@ class GenerationService:
             create_case_row=False,
         )
         status = self._publish_if_ready(
-            record, title, settings, now, case_id, version, model=resolved.model
+            record, title, settings, now, case_id, version, model=resolved.model,
+            difficulty=difficulty,
         ) or record.state.value
         self._sync_generations(anonymous_quota_session_id)
         return CaseStarted(
@@ -1612,6 +1873,7 @@ class GenerationService:
         ids: Any | None = None,
         resolved: ResolvedGeneration | None = None,
         demo_case_id: str | None = None,
+        difficulty: str | None = None,
     ) -> tuple[Any, Any, float]:
         """Fresh per-request controller; admission inside; synchronous run.
 
@@ -1690,6 +1952,10 @@ class GenerationService:
             # Phase 28 — the FROZEN per-attempt demo fixture id (sanitized
             # ``demo.started`` observability only; None for non-demo attempts).
             demo_case_id=demo_case_id,
+            # Phase44 (ADR-004 D1) — the normalized difficulty contract (Gate 3
+            # thresholds + the provider difficulty-guidance block). Unknown/None
+            # defaults to medium; never a downgrade.
+            difficulty=difficulty_policy.normalize_difficulty(difficulty),
         )
         _t0 = time.perf_counter()
         try:
@@ -1738,12 +2004,19 @@ class GenerationService:
         case_id: str,
         version: int,
         model: str | None = None,
+        difficulty: str | None = None,
     ) -> str | None:
         """Atomic publication when the run reached PUBLISHED.
 
         ``model`` (Phase 25) is the FROZEN per-attempt model recorded in the
         publication (never re-read from the mutable global settings between
         stages).
+
+        Phase44 (ADR-004 D4) — Gate 3 runs over the FROZEN ``PublishedCaseVersion``
+        (the exact candidate that would be persisted) immediately before
+        ``publish_transactionally``. A failed Gate 3 NEVER persists the payload:
+        the case version + generation attempt are marked FAILED and ``None`` is
+        returned (AC-29).
 
         Returns the final status when published (PUBLISHED); None otherwise.
         """
@@ -1766,6 +2039,60 @@ class GenerationService:
                 raise GenerationServiceError(
                     "cannot align the published aggregate version"
                 ) from None
+        # Phase44 (ADR-004 D4, AC-05/AC-29) — Gate 3 runs over the FROZEN
+        # aggregate (the actual candidate). A failure NEVER reaches
+        # ``publish_transactionally``: the attempt + case version are marked
+        # FAILED and ``None`` is returned.
+        difficulty_name = difficulty_policy.normalize_difficulty(difficulty)
+        emit_event(
+            "playability.validation.started",
+            caseId=case_id,
+            caseVersion=version,
+            generationAttemptId=getattr(record, "attempt_id", None),
+            difficulty=difficulty_name,
+        )
+        try:
+            playability_report = playability.validate_published_candidate(
+                published, difficulty_name
+            )
+        except Exception:  # noqa: BLE001 - ADV-44-06 fail-closed publication guard
+            # ANY unexpected Gate 3 evaluation error is treated as a Gate 3
+            # FAILURE: the candidate is never published (AC-29). Emit the same
+            # bounded failure path with a synthetic closed-code report.
+            playability_report = playability.PlayabilityReport(
+                difficulty=difficulty_name,
+                inspectable_count=0,
+                meaningful_inspectable_count=0,
+                distinct_meaningful_source_count=0,
+                red_herring_count=0,
+                reachable_critical_dimensions=(),
+                unreachable_critical_dimensions=(),
+                issue_codes=(playability.PLAYABILITY_DIFFICULTY_CONTRACT_UNMET,),
+            )
+        if not playability_report.valid:
+            self._fail_playability(record, case_id, version, now, playability_report)
+            return None
+        emit_event(
+            "playability.validation.complete",
+            caseId=case_id,
+            caseVersion=version,
+            generationAttemptId=getattr(record, "attempt_id", None),
+            difficulty=playability_report.difficulty,
+            playabilityOutcome="VALID",
+            inspectableCount=playability_report.inspectable_count,
+            meaningfulInspectableCount=playability_report.meaningful_inspectable_count,
+            distinctMeaningfulSourceCount=(
+                playability_report.distinct_meaningful_source_count
+            ),
+            redHerringCount=playability_report.red_herring_count,
+            reachableCriticalDimensions=(
+                playability_report.reachable_critical_dimensions
+            ),
+            unreachableCriticalDimensions=(
+                playability_report.unreachable_critical_dimensions
+            ),
+            playabilityIssueCodes=playability_report.issue_codes,
+        )
         emit_event(
             "publication.started",
             caseId=case_id,
@@ -1837,6 +2164,63 @@ class GenerationService:
             ),
         )
         return GenerationState.PUBLISHED.value
+
+    def _fail_playability(
+        self,
+        record: Any,
+        case_id: str,
+        version: int,
+        now: float,
+        report: Any,
+    ) -> None:
+        """Phase44 (ADR-004 D4) — terminal Gate 3 failure (no payload persisted).
+
+        Marks the in-memory attempt FAILED and durably marks the case version +
+        generation attempt FAILED exactly like the existing ``publication.failed``
+        branch. ``publish_transactionally`` is NEVER called for this candidate
+        (AC-29). Emits the bounded ``playability.validation.failed`` event with
+        only allowlisted, non-secret metrics.
+        """
+        failure_code = GenerationFailureCode.PUBLICATION_FAILED.value
+        record.state = GenerationState.FAILED
+        record.failure_code = failure_code
+        record.reason = "playability gate failed: " + ", ".join(report.issue_codes)
+        try:
+            self._store.update_case_version_state(
+                case_id,
+                int(version),
+                GenerationState.FAILED.value,
+                state_reason=failure_code,
+            )
+            self._store.upsert_generation_attempt(
+                attempt_id=record.attempt_id,
+                case_id=case_id,
+                case_version=int(version),
+                status=GenerationState.FAILED.value,
+                stage="failed",
+                progress=100,
+                created_at=float(now),
+                updated_at=float(now),
+            )
+        except Exception:
+            # Defensive: an unavailable/failed durable snapshot must not mask
+            # the Gate 3 failure (no payload is persisted regardless).
+            pass
+        emit_event(
+            "playability.validation.failed",
+            caseId=case_id,
+            caseVersion=version,
+            generationAttemptId=getattr(record, "attempt_id", None),
+            difficulty=report.difficulty,
+            playabilityOutcome="FAILED",
+            inspectableCount=report.inspectable_count,
+            meaningfulInspectableCount=report.meaningful_inspectable_count,
+            distinctMeaningfulSourceCount=report.distinct_meaningful_source_count,
+            redHerringCount=report.red_herring_count,
+            reachableCriticalDimensions=report.reachable_critical_dimensions,
+            unreachableCriticalDimensions=report.unreachable_critical_dimensions,
+            playabilityIssueCodes=report.issue_codes,
+        )
 
     def _persist_creation(
         self,

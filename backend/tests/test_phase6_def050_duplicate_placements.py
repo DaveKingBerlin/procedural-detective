@@ -352,8 +352,8 @@ def test_c_golden_v1_unique_object_ids_unchanged():
     draft = parse_full_draft(GOLDEN_FULL_DRAFT)
     assert draft is not None
     ids = [p.object_id for p in draft.world_graph.placements]
-    assert len(ids) == 9
-    assert len(set(ids)) == 9
+    assert len(ids) == 11
+    assert len(set(ids)) == 11
     object_ids = {o.object_id for o in draft.objects}
     evidence_ids = {e.id for e in draft.evidence}
     assert validate_world_graph(draft.world_graph, object_ids, evidence_ids) == ()

@@ -271,6 +271,24 @@ _WORLD_GRAPH_DOC: dict[str, Any] = {
                 "interaction": "inspect",
                 "evidenceId": "body_found_01",
             },
+            # Phase44 (ADV-44-01) — WHY-reachable clue: the motive audit record.
+            {
+                "objectId": "motive_audit_file",
+                "assetId": "PROP_LETTER_OPENER_01",
+                "locationId": SCENE_LOCATION,
+                "anchor": "kitchen_counter",
+                "interaction": "read",
+                "evidenceId": "motive_audit_01",
+            },
+            # Phase44 (DEF-105) — extra inspectable winner clue for HARD.
+            {
+                "objectId": "cctv_hall_monitor",
+                "assetId": "PROP_LAPTOP_01",
+                "locationId": SCENE_LOCATION,
+                "anchor": "shelf_01",
+                "interaction": "view_record",
+                "evidenceId": "cctv_thomas_scene_01",
+            },
         ],
     }
 }

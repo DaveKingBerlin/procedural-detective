@@ -560,7 +560,13 @@ def test_09b_route_level_per_ip_counts_failed_attempts(database_url, tmp_path):
 def test_11_legitimate_easy_medium_hard_flow_remains_usable(database_url):
     """§8.2 #11 — a normal Easy/Medium/Hard flow still publishes under the
     shipped default limits (per-session, per-IP, global concurrency, rolling
-    global quota all generous enough for the demo)."""
+    global quota all generous enough for the demo).
+
+    Phase44 (DEF-105 / §18) update: the built-in fake/dev demo fixture is now
+    HARD-capable (7 inspectable objects, 7 meaningful, 8 distinct sources, 2 red
+    herrings, every required dimension reachable), so all three difficulties
+    publish — the original §8.2 intent.
+    """
     from fastapi.testclient import TestClient
 
     app = _build_path(database_url)

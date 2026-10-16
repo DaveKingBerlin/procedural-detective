@@ -51,6 +51,8 @@ GOLDEN_OBJECT_IDS = (
     "apartment_door",
     "apartment_lamp",
     "victim_body_placeholder",
+    "motive_audit_file",
+    "cctv_hall_monitor",
 )
 
 

@@ -186,6 +186,19 @@ _SAFE_FIELDS = frozenset(
         "solverOutcomeAfter",
         "completionIdempotent",
         "completionOutcome",
+        # Phase44 (ADR-004 D6) — bounded Gate 3 playability observability. The
+        # difficulty token, integer counts, closed dimension-name tuples, a
+        # closed outcome token and the closed playability issue-code tuple ONLY.
+        # NEVER prompts, hidden truth, witness truthfulness or provider output.
+        "difficulty",
+        "inspectableCount",
+        "meaningfulInspectableCount",
+        "distinctMeaningfulSourceCount",
+        "redHerringCount",
+        "reachableCriticalDimensions",
+        "unreachableCriticalDimensions",
+        "playabilityOutcome",
+        "playabilityIssueCodes",
     }
 )
 _DEBUG_FIELDS = frozenset({"issueCodes", "validatorIssueCodes", "geometryIssueCodes", "templateVersion", "fieldNames"})

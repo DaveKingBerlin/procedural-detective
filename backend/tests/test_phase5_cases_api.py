@@ -115,7 +115,7 @@ def test_10_case_generation_api_uses_phase4_pipeline(phase5_app):
     person_ids = {p["personId"] for p in body["persons"]}
     assert {"sarah_miller", "thomas_reed", "emily_reed"} <= person_ids
     assert len(body["evidence"]) == 17
-    assert len(body["worldGraph"]["placements"]) == 9
+    assert len(body["worldGraph"]["placements"]) == 11
     assert "murdererId" not in res.text
     assert_no_hidden_leaks(body)
     assert_sanitized_error(res.text)
