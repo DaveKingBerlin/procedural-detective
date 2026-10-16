@@ -203,7 +203,40 @@ re-run, so it cannot repair manually removed immutability triggers.
   retention they actually guarantee instead of relying on automatic expiry
   (there is none).
 
-## 6. Privacy notice location
+## 6. AI provider data flow — hosted vs local
+
+Generation mode is the operator/player-selected `GENERATION_PROVIDER`. The
+data-flow boundary differs by mode:
+
+- **Hosted / cloud provider generation** (`GENERATION_PROVIDER=live`, or the
+  opt-in browser BYOK Frontier path). Selecting a hosted AI provider transmits
+  the **generation request and the context required for generation** (the
+  prompt plus the structured context the provider needs to propose a case) to
+  that selected provider over HTTPS. The **provider API key is used per request
+  by the backend provider adapter** — only the backend ever contacts the
+  provider (the browser never does) — and the application does **not** store
+  the key: it is never written to SQLite, logs, events or API responses (see
+  `docs/DEPLOYMENT.md` §17b). The provider then handles that request under its
+  own terms and privacy policy, which are outside this build's control.
+- **Local Ollama generation** (`GENERATION_PROVIDER=ollama`, or the visitor's
+  own machine via the `remote_client` bridge). The model runtime is the
+  operator's / visitor's own Ollama server (`OLLAMA_BASE_URL`, or the bridge
+  client on the visitor's machine). Generation **stays within the configured
+  local infrastructure** unless the operator's or visitor's own network
+  configuration routes the traffic elsewhere; this build does not send it to
+  any project-operated hosted service.
+- **Deterministic / fake / demo generation** (`GENERATION_PROVIDER=fake`, the
+  default). No provider is contacted at all — the shipped golden case is
+  replayed offline with zero network and zero credentials.
+
+Regardless of provider mode, the **generated case data** (raw prompt, public
+case, hidden truth, generation metadata and player state) is stored in the
+private SQLite `/data` volume as described in §1, with the retention boundary
+in §2 (operator-bounded; **no automatic deletion**). For hosted-provider mode,
+the copy transmitted to the provider is additionally subject to that provider's
+own handling.
+
+## 7. Privacy notice location
 
 - The operator note pointing here lives in ``.env.example`` and the production
   profile example ``.env.production.example`` (PD-SEC-05), and this policy is

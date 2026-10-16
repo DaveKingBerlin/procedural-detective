@@ -252,20 +252,9 @@ def test_release_tool_dockerignore_check(tmp_path, hermetic_env):
     assert missing == [f for f in missing if f.severity == "fail"]
     assert any("missing" in f.message for f in missing)
 
-    # Valid .dockerignore -> ok.
+    # Valid .dockerignore -> ok (the canonical required pattern set).
     (tmp_path / ".dockerignore").write_text(
-        ".env\n"
-        ".env.*\n"
-        "!.env.example\n"
-        "\n"
-        "logs/\n"
-        "*.log\n"
-        "*.db\n"
-        "*.sqlite\n"
-        "*.sqlite3\n"
-        "tmp/\n"
-        "temp/\n"
-        ".ollama/\n",
+        release_check.required_dockerignore_text(),
         encoding="utf-8",
     )
     good = release_check.check_dockerignore(tmp_path)
@@ -273,11 +262,22 @@ def test_release_tool_dockerignore_check(tmp_path, hermetic_env):
 
     # Dropping the .env.* variant -> fail naming the missing pattern.
     (tmp_path / ".dockerignore").write_text(
-        ".env\n!.env.example\nlogs/\n*.db\n", encoding="utf-8"
+        release_check.required_dockerignore_text().replace(".env.*\n", ""),
+        encoding="utf-8",
     )
     bad = release_check.check_dockerignore(tmp_path)
     assert [f for f in bad if f.severity == "fail"] == bad, [f.message for f in bad]
     assert any(".env.*" in f.message for f in bad)
+
+    # Dropping a Phase 46 coverage exclusion -> fail: the new required patterns
+    # are genuinely enforced (the gate is not vacuous).
+    (tmp_path / ".dockerignore").write_text(
+        release_check.required_dockerignore_text().replace("coverage.xml\n", ""),
+        encoding="utf-8",
+    )
+    coverage_bad = release_check.check_dockerignore(tmp_path)
+    assert [f for f in coverage_bad if f.severity == "fail"] == coverage_bad
+    assert any("coverage.xml" in f.message for f in coverage_bad)
 
     # The actual repo .dockerignore must satisfy every required exclusion.
     repo = release_check.check_dockerignore(_REPO_ROOT)

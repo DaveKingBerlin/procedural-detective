@@ -298,8 +298,7 @@ def _configure_scratch_repo(repo: Path) -> None:
     )
     (repo / "THIRD_PARTY.md").write_text("none\n", encoding="utf-8")
     (repo / ".dockerignore").write_text(
-        ".env\n.env.*\n!.env.example\nlogs/\n*.log\n*.db\n*.sqlite\n"
-        "*.sqlite3\ntmp/\ntemp/\n.ollama/\n",
+        release_check.required_dockerignore_text(),
         encoding="utf-8",
     )
 

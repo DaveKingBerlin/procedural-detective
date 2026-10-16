@@ -1,0 +1,78 @@
+Phase 46 independent QA - Task 6: live Docker smoke (STANDALONE production stack)
+================================================================================
+Repo:   C:\Users\Fujitsu\coding\procedural-detective
+Branch: phase46/submission-hardening (HEAD 4c1cf02 == main; implementation uncommitted)
+Host:   Windows (win32); Docker 29.6.1 / Docker Compose v5.2.0 (linux containers)
+Date:   2026-10-16
+Owner:  independent QA
+
+No credential/token value is recorded anywhere in this file.
+The production database/volume was NOT deleted.
+
+TOPOLOGY USED (documented)
+--------------------------
+Standalone production compose ONLY:
+  docker compose -f docker-compose.prod.yml ...
+No base merge, no lan/debug overlay. CADDY_DOMAIN is unset -> default
+`localhost` -> Caddy serves `localhost` from its INTERNAL CA (self-signed);
+HTTPS was therefore verified with `curl -k`. Public DNS / ACME issuance is
+NOT exercised against a real FQDN (localhost only) - documented, not a defect.
+Compose project name = directory basename `procedural-detective`, so the
+EXISTING `procedural-detective_pd-data` volume is reused (no data destroyed).
+
+EXACT COMMANDS + OBSERVED RESULTS
+---------------------------------
+docker compose -f docker-compose.prod.yml build
+  -> exit 0; image procedural-detective:latest (manifest sha256:ea7697f8...)
+docker compose -f docker-compose.prod.yml up -d
+  -> exit 0; backend + caddy recreated (config drift from the previous
+     lan/debug-overlay stack reconciled to prod-only)
+docker compose -f docker-compose.prod.yml ps
+  -> procedural-detective Up (healthy) `8000/tcp`            (NOT published)
+  -> caddy Up `0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp`
+docker port procedural-detective-procedural-detective-1
+  -> (empty output) = no host port mapping
+docker inspect procedural-detective-procedural-detective-1 --format '{{json .NetworkSettings.Ports}}'
+  -> {"8000/tcp":null}
+docker port procedural-detective-caddy-1
+  -> 80/tcp -> 0.0.0.0:80 ; 443/tcp -> 0.0.0.0:443
+netstat -ano | findstr ":8000"
+  -> (no host listener on :8000)
+netstat -ano | findstr ":80|:443"
+  -> 0.0.0.0:80 / 0.0.0.0:443 LISTENING (docker-proxy)
+curl -k https://localhost/api/v1/health
+  -> HTTP 200 {"status":"ok","service":"procedural-detective","version":"0.1.0"}
+curl -k https://localhost/api/v1/readiness
+  -> HTTP 200 {"status":"ready","database":"ok","migrations":"ok"}
+curl -s -o NUL http://localhost/
+  -> HTTP 301 Location: https://localhost/            (HTTP->HTTPS redirect)
+curl -k https://localhost/
+  -> HTTP 200 text/html; charset=utf-8 (SPA index)
+curl --max-time 5 http://localhost:8000/api/v1/health
+  -> curl exit 7 (connection refused) = backend :8000 NOT publicly bound
+docker logs procedural-detective-caddy-1 --since=3m   (structured JSON access log)
+  -> GET /api/v1/health status 200, "Server":["uvicorn"]  => Caddy reached the backend
+  -> GET /api/v1/readiness status 200
+  -> GET / status 200
+  -> response headers carry Strict-Transport-Security + CSP + Via: 1.1 Caddy
+
+PERSISTENCE ACROSS REBUILD/RECREATE (volume preserved)
+------------------------------------------------------
+BEFORE (running container, before the rebuild/recreate):
+  counts = {"cases":151,"playthroughs":74,"accusations":40,
+            "case_versions":151,"creator_credentials":151}
+  sha256 = 9f589c229f8014bc91a72b74751e72831bbb455c32868a6e62e01b831b3f402a
+  size   = 2056192
+AFTER (rebuilt image + recreated container, same project/volume):
+  counts = {"cases":151,"playthroughs":74,"accusations":40,
+            "case_versions":151,"creator_credentials":151}
+  sha256 = 9f589c229f8014bc91a72b74751e72831bbb455c32868a6e62e01b831b3f402a
+  size   = 2056192
+docker volume ls -> procedural-detective_pd-data present (never removed/never `down -v`).
+
+CONCLUSION
+----------
+- /health 200 over HTTPS through Caddy: PASS
+- Caddy reaches the private backend (access log Server: uvicorn): PASS
+- backend :8000 not publicly bound (no host port, no host listener, refused): PASS
+- existing SQLite data survives rebuild/recreate (identical hash): PASS

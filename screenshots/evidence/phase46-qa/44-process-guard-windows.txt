@@ -1,0 +1,47 @@
+Phase 46 Workstream C — Task 2, family 3: Windows process-guard cleanup tests
+============================================================================
+File: tests/test_process_guard.py
+Repo: C:\Users\Fujitsu\coding\procedural-detective
+HEAD: 4c1cf02... (== main). Target test module + backend unmodified vs HEAD; a
+parallel Phase 46 workstream landed tools/scripts + a new tests/ file during the
+QA run (no commits) — none touches tests/test_process_guard.py.
+Host: Windows (win32), Python 3.12.10
+Date: 2026-10-16
+
+COMMANDS / RESULTS
+------------------
+Full module (run 1):
+$ python -m pytest tests/test_process_guard.py -q -rs -p no:cacheprovider --basetemp=C:\Temp\pd-p46qa\pg
+  28 passed in 12.20s
+
+Full module (run 2):
+$ python -m pytest tests/test_process_guard.py -q -p no:cacheprovider --basetemp=C:\Temp\pd-p46qa\pg2
+  28 passed in 12.08s
+
+Known flaky target repeated as a single test
+(test_failed_termination_retains_metadata_then_clean_shutdown):
+  Batch A (10 sequential single-test runs): pass=9, fail=1
+  Batch B (15 sequential single-test runs): no failure
+  Batch C (20 sequential single-test runs): no failure
+  => 1 failure in 45 sequential single-test runs; module-level runs green (28/28 x2).
+
+MECHANISM (source: tests/test_process_guard.py lines 348-358)
+  terminate_process(child_pid)      # Windows termination is ASYNCHRONOUS
+  result2 = shutdown_process(meta_path)
+  assert result2["status"] == "SHUTDOWN_OK"   # line 354
+When the just-terminated child is still observable, the immediate shutdown
+classifies CLEANUP_INCOMPLETE instead of SHUTDOWN_OK. This is exactly the
+signature recorded in the ledger as DEF-017
+(`AssertionError: assert 'CLEANUP_INCOMPLETE' == 'SHUTDOWN_OK'` at line 354),
+an OPEN LOW, pre-existing Windows timing race in `tests/` (untouched by Phase 46).
+
+INDEPENDENCE FROM PHASE 46
+--------------------------
+$ git status --porcelain -- tests/test_process_guard.py -> (empty)
+=> The target test file is byte-identical to clean main/HEAD. The module was
+   re-run (28 passed) after the parallel workstream's files landed.
+
+CLASSIFICATION: PRE-EXISTING / NON-BLOCKING (DEF-017, UPSTREAM).
+Windows-only timing flake; the module passes on a normal run; a rare run loses
+the race between asynchronous process termination and the immediate shutdown
+assertion. No Phase 46 regression.

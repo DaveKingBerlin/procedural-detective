@@ -1,0 +1,58 @@
+Phase 46 Workstream C — Task 2, family 1: Ollama capability-probe timing-bound test
+===================================================================================
+Test: backend/tests/test_phase21b_demo_truthfulness.py
+      ::test_ollama_probe_hang_dto_via_bounded_seam
+Repo: C:\Users\Fujitsu\coding\procedural-detective
+Branch: phase46/submission-hardening
+HEAD: 4c1cf02d7ff19de340e21b0fb6f655970e07a5f1  (== main; backend/ unmodified)
+Date: 2026-10-16
+
+COMMANDS / RESULTS
+------------------
+$ python -m pytest "backend/tests/test_phase21b_demo_truthfulness.py::test_ollama_probe_hang_dto_via_bounded_seam" -q -p no:cacheprovider --basetemp=C:\Temp\pd-p46qa\b1
+  1 failed, 2 warnings in 5.87s
+  AssertionError: assert 2.8439999999827705 < 1.0   (test line 230)
+
+Repeat single-test runs:
+  run 1: 1 failed -> assert 2.875 < 1.0
+  run 2: 1 failed -> assert 2.8280000000086147 < 1.0
+  run 3: 1 failed -> assert 2.8280000000086147 < 1.0
+
+Whole file:
+$ python -m pytest backend/tests/test_phase21b_demo_truthfulness.py -q -p no:cacheprovider --basetemp=...\b1full
+  1 failed, 7 passed in 13.36s
+  (only test_ollama_probe_hang_dto_via_bounded_seam fails; all other 7 pass)
+
+TIMING BREAKDOWN (independent inline probe, recipe mirrored from the test)
+  migrate (alembic upgrade head) : 0.625 s
+  create_app(Settings(...))      : 2.875 s   <-- dominant cost
+  TestClient(...).__enter__      : 0.047 s
+  GET /generation-capabilities cold: 0.218 s (includes the 0.15 s probe sleep)
+  GET /generation-capabilities warm: 0.031 s
+  status                          : 200
+
+The test starts its stopwatch BEFORE create_app() and stops after the response;
+the ~2.8 s elapsed is application construction on this Windows host, NOT the
+bounded probe. The probe seam itself is correct: the endpoint returns 200, the
+DTO reports configuredProvider="ollama", demo.available=false, local.available=false,
+and the GET completes in ~0.22 s cold / ~0.03 s warm.
+
+INDEPENDENCE FROM PHASE 46
+--------------------------
+$ git rev-parse HEAD -> 4c1cf02...  (Phase 46 branch)
+$ git rev-parse main -> 4c1cf02...  (same commit)
+$ git status --porcelain -- backend -> (empty)
+$ git status --porcelain -- backend/tests/test_phase21b_demo_truthfulness.py -> (empty)
+=> The backend product source and the target test file are byte-identical to
+   clean main/HEAD.
+NOTE: a parallel Phase 46 workstream landed changes under tools/, the
+   build/start scripts and a new tests/ file in this working tree DURING the QA
+   run (no new commits). None touches backend/ or this test; the failure was
+   re-confirmed (assert 2.844 < 1.0) after those files landed.
+
+CLASSIFICATION: PRE-EXISTING / NON-BLOCKING
+Reason: environment/timing-bound assertion (elapsed < 1.0 s) over app
+construction; reproduces on clean main/HEAD; the product behavior under test
+(bounded, fail-closed capability seam + truthful DTO) is correct. Reporter
+observation matches the prior audit's "Ollama capability-probe timing-bound
+failure". Severity LOW. No Phase 46 regression.

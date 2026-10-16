@@ -1,0 +1,56 @@
+Phase 46 Workstream C — Task 2, family 2: Docker-health monitoring behavior
+==========================================================================
+Files:
+  tools/monitoring_report.py  ::  health_summary()
+  tests/test_phase29_monitoring.py  (skip guards via _compose_cli_available())
+Repo: C:\Users\Fujitsu\coding\procedural-detective
+HEAD: 4c1cf02... (== main). Target test module + backend unmodified vs HEAD; a
+parallel Phase 46 workstream landed tools/scripts + a new tests/ file during the
+QA run (no commits). NOTE: release_check.py gained an additive production-boundary
+check; the monitoring suite was re-run and re-passed (59/0) after that landed.
+Date: 2026-10-16
+
+ENVIRONMENT
+-----------
+Compose CLI present:  $ docker compose version -> Docker Compose version v5.2.0
+Docker daemon present: yes (containers running).
+
+1) FULL MONITORING SUITE (Compose CLI present)
+----------------------------------------------
+$ python -m pytest tests/test_phase29_monitoring.py -q -rs -p no:cacheprovider --basetemp=C:\Temp\pd-p46qa\mon
+  59 passed in 15.31s
+  0 failed, 0 skipped.
+=> All Phase 29 monitoring tests, including the compose-render checks
+   (test_mon06_prod_compose_config_stays_valid, line 529) and the health-summary
+   parsers (test_mon11_health_summary_*, lines 1303/1330), PASS.
+
+2) health_summary() WITH DOCKER ABSENT FROM PATH (graceful degradation)
+-----------------------------------------------------------------------
+Inline probe: import tools.monitoring_report with os.environ["PATH"]="".
+Result (first two lines):
+  Health summary (MON-11)
+  -------------------------
+  contains_graceful_msg: True   ("could not run docker compose ps ...")
+  contains_checklist   : True
+=> No exception; the function returns the sanitized operator-aid message plus
+   the health checklist. Never mounts the Docker socket, never needs root.
+
+3) SKIP BEHAVIOR WHEN THE COMPOSE CLI IS UNAVAILABLE
+----------------------------------------------------
+_compose_cli_available() (test_phase29_monitoring.py:629, test_phase24a...:328)
+returns False when shutil.which("docker") is None. Demonstrated by running with
+docker removed from PATH:
+$ <python> -m pytest "tests/test_phase29_monitoring.py::test_mon06_prod_compose_config_stays_valid" "tests/test_phase24a_fp_docker_fixes.py::test_section12_base_and_ci_empty_env_render_no_ollama_vars" "tests/test_phase24a_fp_docker_fixes.py::test_section12_prod_remote_client_profile_never_given_ollama_vars" -q -rs
+  3 skipped in 0.14s
+  SKIPPED tests/test_phase29_monitoring.py:533: Docker Compose CLI is unavailable
+  SKIPPED tests/test_phase24a_fp_docker_fixes.py:443: Docker Compose CLI is unavailable
+  SKIPPED tests/test_phase24a_fp_docker_fixes.py:478: Docker Compose CLI is unavailable
+=> Compose-dependent tests SKIP cleanly (never fail) when the CLI is absent.
+
+CLASSIFICATION
+--------------
+The prior audit's "Docker-health monitoring test blocked/failing without Docker"
+is ENVIRONMENT-BLOCKED (no Docker CLI/daemon in that session). In the correct
+supported environment (Docker + Compose present) the entire monitoring suite is
+GREEN (59 passed / 0 skipped), and health_summary() degrades gracefully when the
+daemon/CLI is unavailable. No Phase 46 regression.

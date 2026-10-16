@@ -67,7 +67,18 @@ procedural_detective.db
 # QA / audit artifacts
 e2e/artifacts
 tests/__pycache__
-screenshots/generated
+# Phase 46 §2/§3: QA evidence (incl. redacted token-bearing acceptance
+# artifacts) and the whole screenshots tree are execution-time material only —
+# never runtime inputs. No Dockerfile COPY path resolves under screenshots/.
+screenshots/
+screenshots/evidence/
+
+# Phase 46 §2/§3: coverage output is never a runtime input.
+htmlcov/
+coverage/
+.coverage
+.coverage.*
+coverage.xml
 
 # ---- Phase 24 §47: test/probe trees never ship in the runtime image -------
 # The runtime image serves the API + SPA from the backend source tree; test
