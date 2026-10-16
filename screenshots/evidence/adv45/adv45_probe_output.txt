@@ -1,0 +1,271 @@
+﻿===== probe1 scenarios 1-5 + forced composer =====
+python : Traceback (most recent call last):
+In Zeile:3 Zeichen:1
++ python screenshots/evidence/adv45/probe1_scenarios.py *>&1 | Out-File ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\adv45\harness.py", line 58, in run
+    return fn()
+           ^^^^
+  File "C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\adv45\probe1_scenarios.py", line 74, in s3
+    ctrl, record = held(script_from_docs(docs), "medium", prompt=T.PROVIDER_PROMPT)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Fujitsu\coding\procedural-detective\backend\tests\test_phase45_world_compose_ownership.py", line 229, 
+in _held
+    assert result.success, result.reason
+           ^^^^^^^^^^^^^^
+AssertionError: attempt state is FAILED; publication requires the VALIDATING state
+
+==============================================================================
+SCENARIOS 1-5 + FORCED-COMPOSER BYPASS
+==============================================================================
+
+--- s1 disjoint ---
+[s1 env=apartment] ok=True events=['world_compose.started', 'world_compose.skipped']
+   reason: PROVIDER_AUTHORED_WORLD
+[s1 env=office] ok=True events=['world_compose.started', 'world_compose.skipped']
+   reason: PROVIDER_AUTHORED_WORLD
+
+--- s2 one overlap ---
+[s2] vase_01 declared: True | kit_base subset: False
+[s2] ok=True events=['world_compose.started', 'world_compose.skipped'] reason= PROVIDER_AUTHORED_WORLD
+
+--- s3 conflicting semantics ---
+EXCEPTION: AssertionError: attempt state is FAILED; publication requires the VALIDATING state
+
+--- s4 unknown evidence ---
+[s4a evidence-renamed-only] ok=True events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.completed']
+[s4b] declared evidence: ['prov_ev_alibi_claim_thomas_01', 'prov_ev_body_found_01', 'prov_ev_cctv_anna_bar_01', 'prov_ev_cctv_emily_bar_01', 'prov_ev_cctv_michael_office_01', 'prov_ev_cctv_thomas_scene_01', 'prov_ev_email_thomas_01', 'prov_ev_fingerprint_knife_01', 'prov_ev_forensic_knife_match_01', 'prov_ev_forensic_letter_opener_01', 'prov_ev_forensic_scissors_01', 'prov_ev_last_seen_01', 'prov_ev_motive_audit_01', 'prov_ev_motive_no_affair_01', 'prov_ev_motive_no_robbery_01', 'prov_ev_noise_heard_01', 'prov_ev_witness_statement_emily_01']
+[s4b drop-letter_opener] ok=True events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.skipped']
+   skip fields: {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'compositionMode': 'KIT_COMPOSE', 'environmentKit': 'apartment', 'compositionOutcome': 'SKIPPED_NAMESPACE_MISMATCH', 'reasonCode': 'COMPOSE_NAMESPACE_MISMATCH', 'fallbackUsed': False, 'validatorCodes': ['placements[6]: unknown evidenceId']}
+
+--- s5 duplicate objects ---
+[s5] ok=True events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.completed']
+    world_compose.started {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'compositionMode': 'KIT_COMPOSE', 'environmentKit': 'apartment', 'inputObjectCount': 11, 'inputEvidenceCount': 17, 'inputPlacementCount': 13, 'canonicalObjectNamespaceCount': 11, 'canonicalEvidenceNamespaceCount': 17}
+    asset.resolve.started {'semanticObjectId': 'mystery gadget', 'stage': 'world_compose', 'elapsedMs': 0}
+    asset.resolve.complete {'semanticObjectId': 'mystery gadget', 'stage': 'world_compose', 'assetId': None, 'provenance': 'FALLBACK', 'resolved': False, 'elapsedMs': 1}
+    world_compose.validation.started {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'deadlineRemainingMs': 60000}
+    world_compose.validation.complete {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'validationOutcome': 'VALID', 'deadlineRemainingMs': 60000}
+    world_compose.completed {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'compositionMode': 'KIT_COMPOSE', 'environmentKit': 'apartment', 'compositionOutcome': 'COMPOSED', 'fallbackUsed': False, 'inputObjectCount': 11, 'inputEvidenceCount': 17, 'inputPlacementCount': 13, 'outputPlacementCount': 11, 'canonicalObjectNamespaceCount': 11, 'canonicalEvidenceNamespaceCount': 17}
+
+--- bypass declare-all ---
+[bypass] kit_base subset declared: True
+[bypass] ok=True events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.skipped']
+    world_compose.started {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'compositionMode': 'KIT_COMPOSE', 'environmentKit': 'apartment', 'inputObjectCount': 11, 'inputEvidenceCount': 17, 'inputPlacementCount': 10, 'canonicalObjectNamespaceCount': 11, 'canonicalEvidenceNamespaceCount': 17}
+    asset.resolve.started {'semanticObjectId': 'mystery gadget', 'stage': 'world_compose', 'elapsedMs': 0}
+    asset.resolve.complete {'semanticObjectId': 'mystery gadget', 'stage': 'world_compose', 'assetId': None, 'provenance': 'FALLBACK', 'resolved': False, 'elapsedMs': 1}
+    world_compose.skipped {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'compositionMode': 'KIT_COMPOSE', 'environmentKit': 'apartment', 'compositionOutcome': 'SKIPPED_NAMESPACE_MISMATCH', 'reasonCode': 'COMPOSE_NAMESPACE_MISMATCH', 'fallbackUsed': False, 'validatorCodes': ['placements[6]: unknown evidenceId']}
+
+===== probe2 scene/legacy/decoration/idempotence =====
+
+==============================================================================
+SCENE / ENVIRONMENT / LEGACY / DECORATION / IDEMPOTENCE
+==============================================================================
+
+--- scene probe ---
+[scene] provider draft scene: SceneSpec(location_id='miller_apartment_kitchen', name='Miller Apartment - Kitchen', environment_id=None, environment_version=None)
+[scene] provider published scene: SceneSpec(location_id='miller_apartment_kitchen', name='Miller Apartment - Kitchen', environment_id=None, environment_version=None)
+[scene env=apartment] ok=True events=['world_compose.started', 'world_compose.skipped']
+    before.environment_id=None after.environment_id=None
+    before.name='Miller Apartment - Kitchen' after.name='Miller Apartment - Kitchen'
+[scene env=office] ok=True events=['world_compose.started', 'world_compose.skipped']
+    before.environment_id=None after.environment_id=None
+    before.name='Miller Apartment - Kitchen' after.name='Miller Apartment - Kitchen'
+[scene env=warehouse] ok=True events=['world_compose.started', 'world_compose.skipped']
+    before.environment_id=None after.environment_id=None
+    before.name='Miller Apartment - Kitchen' after.name='Miller Apartment - Kitchen'
+
+--- legacy probe ---
+[legacy] kit_base subset: False
+[legacy] ok=True events=['world_compose.started', 'world_compose.skipped']
+   skip reason: APARTMENT_BYTE_IDENTITY outcome: SKIPPED
+[legacy] foreign refs after composition: []
+
+--- idempotence skip ---
+[idem-skip] first==second: True n= 11
+
+--- empty decoration ---
+[empty-decor office] ok=True events=['world_compose.started', 'world_compose.skipped']
+    world_compose.started {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'compositionMode': 'PROVIDER_AUTHORED', 'environmentKit': 'office', 'inputObjectCount': 11, 'inputEvidenceCount': 17, 'inputPlacementCount': 11, 'canonicalObjectNamespaceCount': 11, 'canonicalEvidenceNamespaceCount': 17}
+    world_compose.skipped {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'compositionMode': 'PROVIDER_AUTHORED', 'environmentKit': 'office', 'compositionOutcome': 'SKIPPED_PROVIDER_AUTHORED_WORLD', 'reasonCode': 'PROVIDER_AUTHORED_WORLD', 'fallbackUsed': False, 'inputObjectCount': 11, 'inputEvidenceCount': 17, 'inputPlacementCount': 11, 'outputPlacementCount': 11, 'canonicalObjectNamespaceCount': 11, 'canonicalEvidenceNamespaceCount': 17}
+
+--- anchors already valid ---
+[anchors] kit_base subset=False ok=True events=['world_compose.started', 'world_compose.skipped']
+
+--- red herrings ---
+[red-herrings] before n= 11 after n= 11
+  before: [('kitchen_knife', 'forensic_knife_match_01', 'inspect'), ('letter_opener', 'forensic_letter_opener_01', 'inspect'), ('scissors', 'forensic_scissors_01', 'inspect'), ('vase_01', None, ''), ('apartment_laptop', 'email_thomas_01', 'read'), ('apartment_table', None, ''), ('apartment_door', None, ''), ('apartment_lamp', None, ''), ('victim_body_placeholder', 'body_found_01', 'inspect'), ('motive_audit_file', 'motive_audit_01', 'read'), ('cctv_hall_monitor', 'cctv_thomas_scene_01', 'view_record')]
+  after : [('apartment_door', None, ''), ('victim_body_placeholder', 'body_found_01', 'inspect'), ('kitchen_knife', 'forensic_knife_match_01', 'inspect'), ('apartment_lamp', None, ''), ('apartment_laptop', 'email_thomas_01', 'read'), ('cctv_hall_monitor', 'cctv_thomas_scene_01', 'view_record'), ('letter_opener', 'forensic_letter_opener_01', 'inspect'), ('motive_audit_file', 'motive_audit_01', 'read'), ('scissors', 'forensic_scissors_01', 'inspect'), ('apartment_table', None, ''), ('vase_01', None, '')]
+
+===== probe3 scenarios 6-20 =====
+
+--- s6/7 remove clue ---
+[s6/7 remove-all] ok=False events=['world_compose.started', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.fallback']
+   fallback: COMPOSE_GATE3_REGRESSION
+   published is canonical: False
+   gate3 valid: True ()
+   late gen-validation: []
+
+--- s8 duplicate placements ---
+[s8 dup] ok=True events=['world_compose.started', 'world_compose.skipped']
+   duplicate object ids: []
+   foreign: []
+   late gen-validation: []
+
+--- s9 asset fallback ---
+[s9] issues: ()
+   semantic: bronze_ceremonial_ice_pick asset: PROP_KITCHEN_KNIFE_01
+   semantics kept (asset != object): True
+
+--- s11 witness-murderer ---
+[s11 witness-murderer] ok=False events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.failed']
+   foreign: []
+
+--- s12 suicide ---
+[s12 suicide] ok=False events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.failed']
+   foreign: []
+
+--- s13 failure fallback ---
+[s13] ok=False events=['world_compose.started', 'world_compose.fallback']
+   published canonical (objects equal): True
+   late gen-validation: []
+
+--- s14 malformed anchor ---
+[s14] ok=False events=['world_compose.failed']
+   failed reason: COMPOSE_EXCEPTION
+   published restored: True
+   late gen-validation: []
+
+--- s15 unsupported kit ---
+[s15 unsupported kit] ok=False events=['world_compose.failed']
+    world_compose.failed {'caseId': 'CASE-1', 'generationAttemptId': 'GA-1', 'environmentKit': 'planet_mars', 'compositionOutcome': 'FAILED', 'reasonCode': 'COMPOSE_EXCEPTION', 'fallbackUsed': True}
+   published restored: True
+   attempt state: GenerationState.PUBLISHED
+
+--- s16 repeated compose ---
+[s16 composer idempotent] first==second: True n=11 events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.completed']
+
+--- s18 empty decoration ---
+[s18 env=apartment empty] ok=True mode=['APARTMENT_BYTE_IDENTITY'] reason=['APARTMENT_BYTE_IDENTITY'] events=['world_compose.started', 'world_compose.skipped']
+[s18 env=warehouse empty] ok=True mode=['KIT_COMPOSE'] reason=[] events=['world_compose.started', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.completed']
+
+--- s20 critical dims ---
+[s20] gate3 valid=True reach=None unreach=None issues=()
+
+===== probe4 advanced + scene-env skip =====
+python : Traceback (most recent call last):
+In Zeile:9 Zeichen:1
++ python screenshots/evidence/adv45/probe4_advanced.py *>&1 | Out-File  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\adv45\harness.py", line 58, in run
+    return fn()
+           ^^^^
+  File "C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\adv45\probe4_advanced.py", line 91, in 
+partial_declaration
+    ctrl, record = held(script_from_docs(docs), "medium", prompt=T.PROVIDER_PROMPT)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Fujitsu\coding\procedural-detective\backend\tests\test_phase45_world_compose_ownership.py", line 229, 
+in _held
+    assert result.success, result.reason
+           ^^^^^^^^^^^^^^
+AssertionError: attempt state is FAILED; publication requires the VALIDATING state
+Traceback (most recent call last):
+  File "C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\adv45\harness.py", line 58, in run
+    return fn()
+           ^^^^
+  File "C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\adv45\probe4_advanced.py", line 122, in 
+scene_locations_differ
+    ctrl, record = held(script_from_docs(docs), "medium", prompt=T.PROVIDER_PROMPT)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Fujitsu\coding\procedural-detective\backend\tests\test_phase45_world_compose_ownership.py", line 229, 
+in _held
+    assert result.success, result.reason
+           ^^^^^^^^^^^^^^
+AssertionError: attempt state is FAILED; publication requires the VALIDATING state
+
+--- s11 witness-murderer ---
+[s11 witness-murderer] ok=False events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.fallback']
+    world_compose.fallback COMPOSE_VALIDATION_RECOVERABLE_REPAIR
+   foreign: []
+
+--- s12 suicide ---
+[s12 suicide] ok=True events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.completed']
+   foreign: []
+
+--- partial declaration ---
+EXCEPTION: AssertionError: attempt state is FAILED; publication requires the VALIDATING state
+
+--- scene/locations differ ---
+EXCEPTION: AssertionError: attempt state is FAILED; publication requires the VALIDATING state
+
+--- scene env skip non-apartment ---
+[env-skip] provider scene env: None
+[env-skip office] ok=True events=['world_compose.started', 'world_compose.skipped'] scene.environment_id=None name='Miller Apartment - Kitchen'
+[env-skip warehouse] ok=True events=['world_compose.started', 'world_compose.skipped'] scene.environment_id=None name='Miller Apartment - Kitchen'
+[env-skip hotel_suite] ok=True events=['world_compose.started', 'world_compose.skipped'] scene.environment_id=None name='Miller Apartment - Kitchen'
+[env-skip mansion] ok=True events=['world_compose.started', 'world_compose.skipped'] scene.environment_id=None name='Miller Apartment - Kitchen'
+
+===== probe5 partial + scene/loc + last-validation =====
+
+--- partial declaration ---
+[partial] declared base: ['apartment_door', 'apartment_lamp', 'apartment_laptop', 'apartment_table', 'letter_opener', 'scissors', 'vase_01', 'victim_body_placeholder']
+[partial] kit_base subset: False
+[partial] ok=True events=['world_compose.started', 'world_compose.skipped'] reason= PROVIDER_AUTHORED_WORLD
+   foreign: [] late: []
+
+--- scene/locations differ ---
+[scene/loc] kit_base subset: True
+   provider locations: ['provzone_miller_apartment_kitchen', 'provzone_miller_consulting_office', 'provzone_harbor_view_bar']
+   provider scene env: None
+[scene/loc] ok=True events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.completed']
+   foreign after: []
+   after locations: ['apartment_kitchen', 'apartment_living', 'apartment_bedroom', 'apartment_hallway', 'apartment_office']
+   after scene env: apartment
+   late: []
+
+--- last validation restored ---
+[last-validation] ok=False events=['world_compose.started', 'asset.resolve.started', 'asset.resolve.complete', 'world_compose.validation.started', 'world_compose.validation.complete', 'world_compose.failed']
+   canonical outcome: ValidationOutcome.VALID -> ValidationOutcome.TERMINAL_FAILURE | restored is canonical: True
+   late: []
+
+===== probe6 savegame/skipped =====
+
+--- scenario10 composed apartment ---
+[scenario10 composed apartment] scene: {'location_id': 'miller_apartment_kitchen', 'name': 'Miller Apartment - Kitchen', 'environment_id': 'apartment', 'environment_version': 1}
+   savegame case.metadata.environmentId: apartment
+   savegame case.scene.environmentId: apartment
+   savegame worldObjects: 11
+   object ids (first 5): ['apartment_door', 'apartment_lamp', 'apartment_laptop', 'apartment_table', 'cctv_hall_monitor']
+
+--- scenario10 skipped office ---
+[scenario10 skipped office] events: ['world_compose.started', 'world_compose.skipped']
+   scene: {'location_id': 'miller_apartment_kitchen', 'name': 'Miller Apartment - Kitchen', 'environment_id': None, 'environment_version': None}
+   savegame case.metadata.environmentId: None
+   savegame case.scene.environmentId: None
+   -> frontend requireEnvironmentId defaults null to: 'apartment'
+
+===== probe7 backend savegame projection =====
+[adv] events: ['world_compose.started', 'world_compose.skipped']
+[adv] draft.scene: {'environment_id': None, 'environment_version': None, 'location_id': 'miller_apartment_kitchen', 'name': 'Miller Apartment - Kitchen'}
+[adv] savegame.case.publicCase.scene: {
+  "locationId": "miller_apartment_kitchen",
+  "name": "Miller Apartment - Kitchen",
+  "environmentId": null,
+  "environmentVersion": null
+}
+[adv] savegame.case.scene.environmentId: None
+[adv] savegame.case.metadata.environmentId: None
+[adv] wrote evidence: C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\adv45\savegame_skipped_office.pdcase.json
+[adv] control(apartment composed? see events) publicCase.scene: {'locationId': 'miller_apartment_kitchen', 'name': 'Miller Apartment - Kitchen', 'environmentId': None, 'environmentVersion': None}
+
+===== frontend savegame parser probe (vite-node) =====
+control unmodified: PARSED OK publicCase.scene={"locationId":"miller_apartment_kitchen","name":"Miller Apartment - Kitchen","environmentId":"apartment","environmentVersion":1}
+publicCase.scene env null: REJECTED -> savegame.case.publicCase.scene.environmentId: must be a non-empty string
+publicCase.scene environmentId null only: REJECTED -> savegame.case.publicCase.scene.environmentId: must be a non-empty string
+case.scene env null (bootstrap shape): PARSED OK publicCase.scene={"locationId":"miller_apartment_kitchen","name":"Miller Apartment - Kitchen","environmentId":"apartment","environmentVersion":1}
+ACTUAL backend savegame (provider-authored skip): REJECTED -> savegame.case.publicCase.scene.environmentId: must be a non-empty string

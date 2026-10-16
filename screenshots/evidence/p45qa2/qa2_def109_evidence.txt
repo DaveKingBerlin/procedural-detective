@@ -1,0 +1,72 @@
+[QA-2 DEF-109] PD_ROOT=C:\Users\Fujitsu\coding\procedural-detective
+[QA-2 DEF-109] python=3.12.10
+
+==============================================================================
+[QA-2 DEF-109] provider-authored SKIP with requested kit = 'apartment'
+==============================================================================
+  apply_kit_composition returned: True
+  PUBLISHED draft.scene.environment_id='apartment' environment_version=1 name='Miller Apartment - Kitchen'
+  PUBLISHED payload draft.scene={"environment_id": "apartment", "environment_version": 1, "name": "Miller Apartment - Kitchen"}
+  SAVEGAME publicCase.scene={"environmentId": "apartment", "environmentVersion": 1, "locationId": "miller_apartment_kitchen", "name": "Miller Apartment - Kitchen"}
+  SAVEGAME case.scene.environmentId='apartment' environmentVersion=1
+  SAVEGAME case.metadata.environmentId='apartment'
+  wrote savegame evidence: C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\p45qa2\qa2_skipped_apartment.pdcase.json
+  RESULT env=apartment: PASS
+
+==============================================================================
+[QA-2 DEF-109] provider-authored SKIP with requested kit = 'office'
+==============================================================================
+  apply_kit_composition returned: True
+  PUBLISHED draft.scene.environment_id='office' environment_version=1 name='Office - Reception'
+  PUBLISHED payload draft.scene={"environment_id": "office", "environment_version": 1, "name": "Office - Reception"}
+  SAVEGAME publicCase.scene={"environmentId": "office", "environmentVersion": 1, "locationId": "miller_apartment_kitchen", "name": "Office - Reception"}
+  SAVEGAME case.scene.environmentId='office' environmentVersion=1
+  SAVEGAME case.metadata.environmentId='office'
+  wrote savegame evidence: C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\p45qa2\qa2_skipped_office.pdcase.json
+  RESULT env=office: PASS
+
+==============================================================================
+[QA-2 DEF-109] provider-authored SKIP with requested kit = 'mansion'
+==============================================================================
+  apply_kit_composition returned: True
+  PUBLISHED draft.scene.environment_id='mansion' environment_version=1 name='Mansion - Foyer'
+  PUBLISHED payload draft.scene={"environment_id": "mansion", "environment_version": 1, "name": "Mansion - Foyer"}
+  SAVEGAME publicCase.scene={"environmentId": "mansion", "environmentVersion": 1, "locationId": "miller_apartment_kitchen", "name": "Mansion - Foyer"}
+  SAVEGAME case.scene.environmentId='mansion' environmentVersion=1
+  SAVEGAME case.metadata.environmentId='mansion'
+  wrote savegame evidence: C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\p45qa2\qa2_skipped_mansion.pdcase.json
+  RESULT env=mansion: PASS
+
+==============================================================================
+[QA-2 DEF-109] provider-authored SKIP with requested kit = 'warehouse'
+==============================================================================
+  apply_kit_composition returned: True
+  PUBLISHED draft.scene.environment_id='warehouse' environment_version=1 name='Warehouse - Main Floor'
+  PUBLISHED payload draft.scene={"environment_id": "warehouse", "environment_version": 1, "name": "Warehouse - Main Floor"}
+  SAVEGAME publicCase.scene={"environmentId": "warehouse", "environmentVersion": 1, "locationId": "miller_apartment_kitchen", "name": "Warehouse - Main Floor"}
+  SAVEGAME case.scene.environmentId='warehouse' environmentVersion=1
+  SAVEGAME case.metadata.environmentId='warehouse'
+  wrote savegame evidence: C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\p45qa2\qa2_skipped_warehouse.pdcase.json
+  RESULT env=warehouse: PASS
+
+==============================================================================
+[QA-2 DEF-109] provider-authored SKIP with requested kit = 'hotel_suite'
+==============================================================================
+  apply_kit_composition returned: True
+  PUBLISHED draft.scene.environment_id='hotel_suite' environment_version=1 name='Hotel Suite - Entrance'
+  PUBLISHED payload draft.scene={"environment_id": "hotel_suite", "environment_version": 1, "name": "Hotel Suite - Entrance"}
+  SAVEGAME publicCase.scene={"environmentId": "hotel_suite", "environmentVersion": 1, "locationId": "miller_apartment_kitchen", "name": "Hotel Suite - Entrance"}
+  SAVEGAME case.scene.environmentId='hotel_suite' environmentVersion=1
+  SAVEGAME case.metadata.environmentId='hotel_suite'
+  wrote savegame evidence: C:\Users\Fujitsu\coding\procedural-detective\screenshots\evidence\p45qa2\qa2_skipped_hotel_suite.pdcase.json
+  RESULT env=hotel_suite: PASS
+
+==============================================================================
+[QA-2 DEF-109] SUMMARY
+==============================================================================
+  apartment   : PASS
+  office      : PASS
+  mansion     : PASS
+  warehouse   : PASS
+  hotel_suite : PASS
+[QA-2 DEF-109] OVERALL: PASS

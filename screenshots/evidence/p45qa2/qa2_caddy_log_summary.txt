@@ -1,0 +1,13 @@
+﻿Phase45 FINAL retest (QA-2) - Caddy acceptance log summary
+Stack: docker-compose.prod.yml + docker-compose.lan.yml + docker-compose.debug.yml (CADDY_DOMAIN=Enshrouded-Server, GENERATION_PROVIDER=fake)
+Image rebuilt from the Phase45 working tree; in-image fix markers verified: _restore_canonical x9, SKIPPED_PROVIDER_AUTHORED_WORLD x1, event_prefix x5, DEF-109 comments present.
+Playwright: 2 passed (33.7s) - MEDIUM + HARD
+
+MEDIUM evidence: environmentId=apartment, 11 world objects, 7 interactive, canvas 830x497 distinctColors 1215, meaningfulSourceTotal 8, witnessAnswer 162 chars, health 200, pageErrors []
+HARD evidence:   environmentId=apartment, 11 world objects, 7 interactive, canvas 830x497 distinctColors 1215, meaningfulSourceTotal 8, witnessAnswer 162 chars, health 200, pageErrors []
+
+Log counts: RECOVERABLE_REPAIR=0, level=ERROR=0, world_compose.failed=0, world_compose.fallback=0
+
+MEDIUM event order: generation.validation.complete VALID -> generation.published -> world_compose.started (APARTMENT_BYTE_IDENTITY, environmentKit=apartment) -> world_compose.skipped (SKIPPED / APARTMENT_BYTE_IDENTITY) -> playability.validation.complete VALID (inspectable 7, meaningful 7, distinct 8) -> publication.started -> publication.complete
+HARD   event order: same shape, difficulty=hard, playability VALID.
+NO late generation.validation.* failure after generation.published on either case.

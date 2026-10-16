@@ -1,0 +1,16 @@
+﻿=== PRE-FIX red control (adversary-captured artifact) ===
+RED  savegame_skipped_office.pdcase.json: REJECTED -> savegame.case.publicCase.scene.environmentId: must be a non-empty string
+=== POST-FIX green (QA-2 exported savegames) ===
+GREEN qa2_skipped_apartment.pdcase.json: PARSED OK publicCase.scene={"locationId":"miller_apartment_kitchen","name":"Miller Apartment - Kitchen","environmentId":"apartment","environmentVersion":1}
+GREEN qa2_skipped_office.pdcase.json: PARSED OK publicCase.scene={"locationId":"miller_apartment_kitchen","name":"Office - Reception","environmentId":"office","environmentVersion":1}
+GREEN qa2_skipped_mansion.pdcase.json: PARSED OK publicCase.scene={"locationId":"miller_apartment_kitchen","name":"Mansion - Foyer","environmentId":"mansion","environmentVersion":1}
+GREEN qa2_skipped_warehouse.pdcase.json: PARSED OK publicCase.scene={"locationId":"miller_apartment_kitchen","name":"Warehouse - Main Floor","environmentId":"warehouse","environmentVersion":1}
+GREEN qa2_skipped_hotel_suite.pdcase.json: PARSED OK publicCase.scene={"locationId":"miller_apartment_kitchen","name":"Hotel Suite - Entrance","environmentId":"hotel_suite","environmentVersion":1}
+=== SUMMARY ===
+RED control rejected as expected: true
+GREEN apartment: PARSED OK
+GREEN office: PARSED OK
+GREEN mansion: PARSED OK
+GREEN warehouse: PARSED OK
+GREEN hotel_suite: PARSED OK
+OVERALL: PASS

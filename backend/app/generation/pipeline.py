@@ -1747,17 +1747,27 @@ def _incomplete_draft_report(deferred: tuple[str, ...] = ()) -> ValidationReport
     return ValidationReport(structural_issues=structural)
 
 
-def validate_draft(attempt: AttemptRecord) -> ValidationReport:
+def validate_draft(
+    attempt: AttemptRecord,
+    *,
+    event_prefix: str = "generation.validation",
+) -> ValidationReport:
     """Run the COMPLETE deterministic validation suite over the current draft.
 
     Never calls the provider. May safely be rerun after every repair or
     regeneration. EVERY exit path stores the report on ``attempt`` so the
     controller's observability (``attempt.last_validation``) and the FAILED
     reason string are always consistent with what validation decided.
+
+    ``event_prefix`` (Phase45 / ADR-005 D4) lets a NON-authoritative
+    composition candidate validate under its own ``world_compose.validation``
+    lifecycle namespace so it can never be confused with the authoritative
+    ``generation.validation`` channel. The default keeps the byte-identical
+    legacy event names.
     """
     draft = current_draft(attempt)
     emit_event(
-        "generation.validation.started",
+        f"{event_prefix}.started",
         caseId=attempt.case_id,
         generationAttemptId=attempt.attempt_id,
         deadlineRemainingMs=(
@@ -1770,7 +1780,7 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
         attempt.solver_proof = None
         attempt.last_validation = report
         emit_event(
-            "generation.validation.complete",
+            f"{event_prefix}.complete",
             caseId=attempt.case_id,
             generationAttemptId=attempt.attempt_id,
             validationOutcome=report.outcome.value,
@@ -1898,7 +1908,7 @@ def validate_draft(attempt: AttemptRecord) -> ValidationReport:
     attempt.solver_proof = solver_result
     attempt.last_validation = report
     emit_event(
-        "generation.validation.complete",
+        f"{event_prefix}.complete",
         caseId=attempt.case_id,
         generationAttemptId=attempt.attempt_id,
         validationOutcome=report.outcome.value,
