@@ -1,0 +1,30 @@
+﻿[PASS] raw-candidate-gate3-rejected :: issues=['PLAYABILITY_CRITICAL_DIMENSION_UNREACHABLE', 'PLAYABILITY_DIFFICULTY_CONTRACT_UNMET', 'PLAYABILITY_EVIDENCE_UNREACHABLE', 'PLAYABILITY_RED_HERRING_REQUIREMENT_UNMET']
+[PASS] raw-reachable-dims-empty :: reachable=[]
+[PASS] namespace-clean-easy :: violations=[]
+[PASS] all-placement-ids-declared-easy :: object/location/evidence declared
+[PASS] namespace-clean-medium :: violations=[]
+[PASS] all-placement-ids-declared-medium :: object/location/evidence declared
+[PASS] namespace-clean-hard :: violations=[]
+[PASS] all-placement-ids-declared-hard :: object/location/evidence declared
+[PASS] completion-fact-placement-linked :: sample=['d_ev_motive_link', 'd_ev_opp_annakarlsson', 'd_ev_opp_emilyreed', 'd_ev_presence']
+[PASS] repair-returns-new-draft-not-in-place :: repaired draft shares unmodified crime/evidence refs
+[PASS] published-aggregate-object-unchanged :: published truth/evidence identity + content unchanged
+[PASS] draft-crime-unchanged-after-repair :: draft crime equal
+[PASS] draft-evidence-unchanged-after-repair :: facts=17 (same object as input draft)
+[PASS] evidence-propositions-not-mutated :: facts=17
+[PASS] solver-winners-unchanged-after-repair :: who=thomas_reed why=cover_up_embezzlement weapon=prov_obj_kitchen_knife
+[PASS] hard-red-herrings-reachable :: count=2 min=2
+[PASS] red-herrings-not-winners :: herrings=2
+[PASS] herrings-keep-solution-unique :: solver still unique
+[PASS] meaningful-record-based-not-object-count :: base=8 dup=8
+[PASS] repair-idempotent-identity-or-equal :: placements=16
+[PASS] no-duplicate-object-ids :: objects=16
+[PASS] no-duplicate-placement-object-ids :: placements=16
+[PASS] completion-idempotent :: first-added=17 second-added=0
+[PASS] bounded-easy :: added=4 bound<=4+minRed(4)
+[PASS] bounded-medium :: added=5 bound<=4+minRed(5)
+[PASS] bounded-hard :: added=6 bound<=4+minRed(6)
+[PASS] empty-placements-not-conjured :: placement-less candidate returned unchanged
+
+=== SEMANTICS SUMMARY ===
+checks: 27 failed: []

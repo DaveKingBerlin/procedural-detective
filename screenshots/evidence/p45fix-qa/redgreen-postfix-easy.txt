@@ -1,0 +1,20 @@
+﻿=== QA PROBE backend=C:\Users\Fujitsu\coding\procedural-detective\backend difficulty=easy ===
+FIX_PRESENT: True
+gate12_outcome: VALID
+solver_proof_present: True
+solver_who_unique: True winner: thomas_reed
+solver_why_unique: True winner: cover_up_embezzlement
+solver_weapon_unique: True
+solver_when_ambiguous: False
+evidence_completed: True
+d_ev_facts_count: 17
+d_ev_facts_sample: ['d_ev_when_last_seen', 'd_ev_when_body', 'd_ev_when_obs', 'd_ev_opp_annakarlsson', 'd_ev_opp_emilyreed', 'd_ev_opp_michaelcarter']
+world_graph_stage_done: False
+controller_publish_success: True
+state_after_controller_publish: PUBLISHED
+RAW_GATE3_BEFORE: {"distinctMeaningfulSourceCount": 4, "inspectableCount": 11, "issueCodes": ["PLAYABILITY_CRITICAL_DIMENSION_UNREACHABLE", "PLAYABILITY_DIFFICULTY_CONTRACT_UNMET", "PLAYABILITY_EVIDENCE_UNREACHABLE"], "meaningfulInspectableCount": 3, "reachableCriticalDimensions": [], "redHerringCount": 0, "unreachableCriticalDimensions": ["WHO", "WHY", "WEAPON", "WHEN"], "valid": false}
+guard_status: PUBLISHED
+publication_calls: 1
+record_state_after_guard: PUBLISHED
+guard_events: ['playability.validation.started', 'generation.validation.started', 'generation.validation.complete', 'playability.validation.repaired', 'playability.validation.complete', 'publication.started', 'publication.complete']
+PUBLISHED_GATE3_AFTER: {"distinctMeaningfulSourceCount": 8, "inspectableCount": 15, "issueCodes": [], "meaningfulInspectableCount": 7, "reachableCriticalDimensions": ["WHO", "WHY", "WEAPON", "WHEN"], "redHerringCount": 0, "unreachableCriticalDimensions": [], "valid": true}

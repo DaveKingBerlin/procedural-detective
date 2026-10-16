@@ -6,7 +6,7 @@ import {
   resolveJourneyMode,
   stageFromProgress,
 } from "./generating";
-import { mapAdmissionReason, mapDemoError } from "../journey/demoFlow";
+import { mapAdmissionReason, mapDemoError, generationFailed, DEMO_FAILURE_MESSAGES } from "../journey/demoFlow";
 import { ApiError } from "../api/client";
 import type { DemoProgress } from "../journey/demoFlow";
 import type { GenerationCapabilitiesResponse } from "../api/types";
@@ -302,5 +302,49 @@ describe("resolveJourneyMode — ADV-212 the journey mode is validated against L
     expect(await resolveJourneyMode(demoOnly, "demo")).toBe("demo");
     expect(await resolveJourneyMode(localReady, "live")).toBe("live");
     expect(await resolveJourneyMode(localReady, null)).toBeNull();
+  });
+});
+
+describe("generation route — Phase 45 Fix PUBLICATION_FAILED (playability) surface", () => {
+  it("renders the non-prompt-blaming playability copy, never the prompt-blaming generic copy", () => {
+    const failure = generationFailed("PUBLICATION_FAILED");
+    const html = render({ status: "error", kind: failure.kind, message: failure.message });
+    expect(html).toContain('data-testid="generation-failed"');
+    expect(html).toContain(
+      "The generated case did not meet the playability requirements. Please try again.",
+    );
+    // The misleading prompt-blaming copy must be gone.
+    expect(html).not.toContain("Adjust the prompt");
+    expect(html).not.toContain("solvable case");
+    // No internal code / issue code is ever rendered.
+    expect(html).not.toContain("PUBLICATION_FAILED");
+    expect(html).not.toContain("PLAYABILITY");
+    // Recovery affordances stay intact.
+    expect(html).toContain("Try again");
+    expect(html).toContain('data-testid="generation-back-to-start"');
+  });
+
+  it("keeps other failure codes' copy unchanged and unknown codes on the generic fallback", () => {
+    const validation = generationFailed("VALIDATION_FAILED");
+    const validationHtml = render({
+      status: "error",
+      kind: validation.kind,
+      message: validation.message,
+    });
+    expect(validationHtml).toContain(
+      "This prompt could not be turned into a solvable case. Adjust the prompt, then try again.",
+    );
+
+    const unknown = generationFailed("SOME_FUTURE_CODE");
+    const unknownHtml = render({
+      status: "error",
+      kind: unknown.kind,
+      message: unknown.message,
+    });
+    // generationFailed's unknown-code fallback is the generic `failed` copy —
+    // never the new playability copy.
+    expect(unknownHtml).toContain(DEMO_FAILURE_MESSAGES.failed);
+    expect(unknownHtml).not.toContain(DEMO_FAILURE_MESSAGES.publicationFailed);
+    expect(unknownHtml).not.toContain("playability");
   });
 });

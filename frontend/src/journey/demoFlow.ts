@@ -379,6 +379,14 @@ export const DEMO_FAILURE_MESSAGES = Object.freeze({
   // internal budget number or pipeline topology is ever revealed.
   safetyLimit:
     "This case could not be completed within the generation safety limits. Please try again.",
+  // Phase 45 Fix §User-facing error handling — a case that generated and
+  // validated successfully but FAILED the post-generation playability/Gate 3
+  // check (`PUBLICATION_FAILED`, services/generation.py::_fail_playability).
+  // The user's prompt is NOT to blame (the internal solver may already have a
+  // unique solution), so this copy never tells the player to adjust the prompt
+  // and never blames their input. Distinct from the generic `failed` copy.
+  publicationFailed:
+    "The generated case did not meet the playability requirements. Please try again.",
   // Phase 30 §23 — BYOK Frontier provider failures, each mapped to frozen safe
   // copy. The raw provider response/body/code is NEVER surfaced (and the
   // client never included a provider URL, so no endpoint text can leak).
@@ -695,6 +703,13 @@ export async function runDemo(prompt: string, options: RunDemoOptions): Promise<
  * INVALID_FRONTIER_CONFIG validation code map to frozen safe copy through
  * {@link frontierFailureMessage} (exact strings only). The provider's raw
  * response body/endpoint/credentials are never echoed back to the browser.
+ *
+ * Phase 45 Fix §User-facing error handling — `PUBLICATION_FAILED` (the
+ * post-generation playability/Gate 3 failure) maps to a NON-prompt-blaming
+ * "did not meet the playability requirements" message instead of the generic
+ * prompt-blaming copy. The prompt may have produced a uniquely-solvable case;
+ * this failure is internal. Exact-string only; unknown/hostile codes keep the
+ * generic fallback.
  */
 export function generationFailed(failureCode?: string | null): DemoFlowFailure {
   if (failureCode === "GENERATION_DEADLINE_EXCEEDED") {
@@ -732,6 +747,18 @@ export function generationFailed(failureCode?: string | null): DemoFlowFailure {
     failureCode === "MAX_FAILED_ASSETS_EXCEEDED"
   ) {
     return { kind: "failed", message: DEMO_FAILURE_MESSAGES.failed };
+  }
+  if (
+    // Phase 45 Fix §User-facing error handling — `PUBLICATION_FAILED` is the
+    // post-generation playability/Gate 3 failure (the case was generated and
+    // internally validated but is not playable). It must NOT borrow the
+    // prompt-blaming generic copy: the user's prompt is not the problem.
+    // Exact-string equality only (the project's established rule), so a
+    // hostile/legacy prefix or substring variant still falls to the generic
+    // failed fallback. No internal issue code (PLAYABILITY_*) is surfaced.
+    failureCode === "PUBLICATION_FAILED"
+  ) {
+    return { kind: "failed", message: DEMO_FAILURE_MESSAGES.publicationFailed };
   }
   // Phase 22 — BYO-Ollama bridge typed failures (§21): exact-string matches
   // only, each mapped to frozen safe copy — the raw code (or a hostile

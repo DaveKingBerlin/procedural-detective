@@ -691,7 +691,17 @@ def _pre_publish_snapshot(record: Any) -> tuple[str, str, str, int, str | None]:
 
 
 def _pick_free_evidence_anchor(kit: Any, used_anchors: set) -> tuple[str, str] | None:
-    """Deterministic free evidence-capable kit anchor ``(anchor_id, zone_id)``."""
+    """Deterministic free evidence-capable kit anchor ``(anchor_id, zone_id)``.
+
+    Prefers the selected kit's own evidence-capable anchors (Phase44 behavior).
+    When those are exhausted, falls back to ANY anchor from the GLOBAL
+    ``safety.ANCHOR_ALLOWLIST`` that is still free: ``validate_world_graph``
+    checks the global allowlist, so a declared-location placement at any
+    allowlisted anchor is namespace-safe. This lets the bounded playability
+    repair add the required clues/red-herrings even to a world that already
+    occupies the kit's few non-exclusive evidence anchors (golden/provider
+    worlds).
+    """
     for anchor_type in (
         "TABLE_PROP",
         "DESK_EVIDENCE",
@@ -713,6 +723,11 @@ def _pick_free_evidence_anchor(kit: Any, used_anchors: set) -> tuple[str, str] |
                 str(getattr(anchor, "anchor_id", "")),
                 str(getattr(anchor, "zone_id", "")),
             )
+    from app.generation import safety as _safety
+
+    for anchor_id in _safety.ANCHOR_ALLOWLIST:
+        if anchor_id not in used_anchors:
+            return (anchor_id, "")
     return None
 
 
@@ -788,25 +803,97 @@ def _winning_fact_for_dimension(dim: str, discoverable: Any, crime: Any) -> Any:
     return None
 
 
-def _ensure_dimension_clues(draft: Any, kit: Any) -> Any:
-    """Phase44 (ADV-44-01) — bind a reachable clue for every required dimension
-    the candidate lacks, so the frozen publication candidate satisfies Gate 3.
+def _invalid_playability_report(difficulty_name: str) -> Any:
+    """Closed-code Gate 3 report used when Gate 3 evaluation itself raises.
 
-    The canonical evidence / solver / CaseTruth are NEVER modified: only an
-    INSPECTABLE, placement-linked object is added for a discoverable fact whose
-    proposition maps to the missing dimension. A no-op when every required
-    dimension already has a placement/witness-reachable clue (so the golden
-    default world stays byte-identical).
+    ADV-44-06 fail-closed semantics: an unevaluable candidate is treated as a
+    Gate 3 FAILURE (never published), carrying only the closed difficulty-
+    contract code.
+    """
+    return playability.PlayabilityReport(
+        difficulty=difficulty_name,
+        inspectable_count=0,
+        meaningful_inspectable_count=0,
+        distinct_meaningful_source_count=0,
+        red_herring_count=0,
+        reachable_critical_dimensions=(),
+        unreachable_critical_dimensions=(),
+        issue_codes=(playability.PLAYABILITY_DIFFICULTY_CONTRACT_UNMET,),
+    )
+
+
+def _red_herring_candidates(discoverable: Any, proof: Any) -> list:
+    """Deterministic red-herring facts (Phase44 ADR-004 D7 / ADR-006 D2).
+
+    A red herring is an existing discoverable fact whose subject
+    (object/person/motive referenced by one of its propositions) is an
+    evidence-backed EXCLUDED solver candidate that is NOT a winner. Only
+    existing facts are returned (never synthesised) and the draft evidence
+    order is preserved so the candidate list is deterministic.
+    """
+    from app.generation import playability as _play
+
+    excluded = _play._excluded_candidate_ids(proof)
+    winners = _play._winner_ids(proof)
+    if not excluded:
+        return []
+    out: list = []
+    for fact in (discoverable or ()):
+        subjects: set = set()
+        for prop in (getattr(fact, "propositions", ()) or ()):
+            for attr in ("object_id", "person_id", "motive_id"):
+                value = getattr(prop, attr, None)
+                if isinstance(value, str) and value:
+                    subjects.add(value)
+        if any(subject in excluded and subject not in winners for subject in subjects):
+            out.append(fact)
+    return out
+
+
+def _ensure_playability_clues(
+    draft: Any, kit: Any, difficulty: str | None = None
+) -> Any:
+    """Phase44/Phase45 Fix (ADR-004 D7 / ADR-006 D2) — deterministic,
+    provider-free Gate 3 reachability repair.
+
+    Using ONLY the case's declared objects/locations and canonical evidence ids
+    (no kit/golden id injection — ADR-005 Model B), it makes a candidate that is
+    solver-unique but player-unreachable satisfy Gate 3 by adding declared
+    ``INSPECTABLE`` objects + ``PlacementSpec`` entries that link EXISTING
+    discoverable facts:
+
+    - the WINNING supporting fact for every missing required dimension
+      (WHO/WHY/WEAPON/WHEN; suicide WHY/WEAPON/WHEN) — never a decoy;
+    - enough reachable red-herring facts (evidence-backed EXCLUDED solver
+      candidates) to meet the difficulty's ``min_red_herrings``;
+    - enough additional record links to meet the difficulty's meaningful/source
+      and inspectable minima (each added evidence-linked INSPECTABLE counts as
+      one meaningful inspectable / distinct source).
+
+    It NEVER mutates ``CaseTruth`` / the solver / the canonical evidence
+    propositions: the evidence collection is untouched; only objects+placements
+    are appended. It is IDEMPOTENT (a strict no-op when the candidate already
+    satisfies Gate 3; no duplicate ``dim_clue_*``/``decoy_clue_*``) and BOUNDED
+    (at most the missing dimensions + the red-herring shortfall, plus the small
+    bounded coverage need). It preserves the Phase 45 namespace guard: every
+    added placement references a declared object/location/evidence id.
     """
     if kit is None or draft is None:
         return draft
     import dataclasses
 
+    from app.generation import difficulty_policy as _difficulty
     from app.generation import playability as _play
     from app.generation import safety as _safety
     from app.generation.schemas import ObjectSpec, PlacementSpec
 
     placements = tuple(getattr(draft.world_graph, "placements", ()) or ())
+    # A DEGENERATE empty world graph is NOT a reachability defect: this repair
+    # adds player-reachable clues to a world that already exists, it never
+    # conjures one. An empty (or placement-less) candidate keeps the fail-closed
+    # publication contract (its OWN gate owns the defect).
+    if not placements:
+        return draft
     interactive = [
         p
         for p in placements
@@ -844,6 +931,22 @@ def _ensure_dimension_clues(draft: Any, kit: Any) -> Any:
     reachable_facts = tuple(
         f for f in _facts if str(getattr(f, "id", "")) in reachable_fact_ids
     )
+    # A candidate that ALREADY satisfies Gate 3 is a strict no-op: the golden
+    # default world stays byte-identical and repeated calls never duplicate.
+    try:
+        _gate3 = _play.validate_playability_quality(
+            draft=draft,
+            public=_public,
+            evidence=_facts,
+            universes=None,
+            truth=_truth,
+            difficulty=difficulty,
+        )
+    except Exception:  # noqa: BLE001 - Gate 1/2 owns an unevaluable candidate
+        return draft
+    if _gate3.valid:
+        return draft
+    _policy = _difficulty.policy_for(difficulty)
     proof = None
     try:
         from app.domain.solver import solve_case as _solve
@@ -867,8 +970,9 @@ def _ensure_dimension_clues(draft: Any, kit: Any) -> Any:
             dim, reachable_facts, proof, _usable_witnesses
         )
     ]
-    if not missing:
-        return draft
+    _red_shortfall = max(
+        0, int(_policy.min_red_herrings) - int(_gate3.red_herring_count)
+    )
 
     # ADV-44-08 — the injected placement's location MUST be a DECLARED
     # world-graph location (never a raw kit zone id). If none exists, skip
@@ -893,21 +997,28 @@ def _ensure_dimension_clues(draft: Any, kit: Any) -> Any:
     spec_ids = {str(getattr(o, "object_id", "")) for o in new_objects}
     new_placements = list(placements)
     used_anchors = {str(getattr(p, "anchor", "")) for p in placements}
+    already_linked = set(linked)
     changed = False
-    for dim in missing:
-        fact = _winning_fact_for_dimension(dim, discoverable, crime)
+    added = 0
+
+    def _bind_clue(fact: Any, prefix: str) -> bool:
+        """Append ONE declared INSPECTABLE object + placement linking ``fact``."""
+        nonlocal changed, added
         if fact is None:
-            continue
+            return False
+        fact_id = str(getattr(fact, "id", "") or "")
+        if not fact_id or fact_id in already_linked:
+            return False
         anchor = _pick_free_evidence_anchor(kit, used_anchors)
         if anchor is None:
-            continue
+            return False
         anchor_id = anchor[0]
         used_anchors.add(anchor_id)
-        object_id = f"dim_clue_{dim.lower()}"
+        object_id = prefix
         suffix = 1
         while object_id in spec_ids:
             suffix += 1
-            object_id = f"dim_clue_{dim.lower()}_{suffix}"
+            object_id = f"{prefix}_{suffix}"
         spec_ids.add(object_id)
         new_objects.append(
             ObjectSpec(
@@ -924,11 +1035,51 @@ def _ensure_dimension_clues(draft: Any, kit: Any) -> Any:
                 location_id=chosen_location,
                 anchor=anchor_id,
                 interaction="read",
-                evidence_id=str(getattr(fact, "id", "")),
+                evidence_id=fact_id,
             )
         )
-        linked.add(str(getattr(fact, "id", "")))
+        already_linked.add(fact_id)
+        added += 1
         changed = True
+        return True
+
+    # 1) one WINNING clue per missing required dimension.
+    for dim in missing:
+        _bind_clue(
+            _winning_fact_for_dimension(dim, discoverable, crime),
+            f"dim_clue_{dim.lower()}",
+        )
+
+    # 2) reachable red herrings up to the difficulty minimum (distinct facts).
+    if _red_shortfall > 0:
+        for index, fact in enumerate(_red_herring_candidates(discoverable, proof)):
+            if _red_shortfall <= 0:
+                break
+            if _bind_clue(fact, f"decoy_clue_{index + 1}"):
+                _red_shortfall -= 1
+
+    # 3) meaningful/source/inspectable coverage. Each added evidence-linked
+    #    INSPECTABLE contributes exactly one meaningful inspectable, one
+    #    distinct source and one inspectable, so the need can be planned
+    #    deterministically from the pre-repair Gate 3 metrics + additions.
+    coverage_need = max(
+        0,
+        int(_policy.min_meaningful_inspectables)
+        - (int(_gate3.meaningful_inspectable_count) + added),
+        0,
+        int(_policy.min_distinct_meaningful_sources)
+        - (int(_gate3.distinct_meaningful_source_count) + added),
+        0,
+        int(_policy.min_inspectable_objects)
+        - (int(_gate3.inspectable_count) + added),
+    )
+    if coverage_need > 0:
+        for fact in discoverable:
+            if coverage_need <= 0:
+                break
+            if _bind_clue(fact, "coverage_clue"):
+                coverage_need -= 1
+
     if not changed:
         return draft
     return dataclasses.replace(
@@ -938,6 +1089,15 @@ def _ensure_dimension_clues(draft: Any, kit: Any) -> Any:
             draft.world_graph, placements=tuple(new_placements)
         ),
     )
+
+
+def _ensure_dimension_clues(draft: Any, kit: Any) -> Any:
+    """Backwards-compatible Phase44 alias (dimension + difficulty repair).
+
+    Retained for existing callers/tests; the default difficulty (medium) is used
+    for the red-herring/coverage minima.
+    """
+    return _ensure_playability_clues(draft, kit, None)
 
 
 class GenerationService:
@@ -1709,7 +1869,9 @@ class GenerationService:
                 new_draft = dataclasses.replace(draft, scene=scene)
                 # Phase44 (ADV-44-01) — ensure every required dimension has a
                 # reachable clue (no-op for the fully-linked golden default).
-                new_draft = _ensure_dimension_clues(new_draft, kit)
+                new_draft = _ensure_playability_clues(
+                    new_draft, kit, getattr(record, "difficulty", None)
+                )
                 record.published = dataclasses.replace(published, draft=new_draft)
                 emit_event(
                     "world_compose.skipped",
@@ -1735,6 +1897,67 @@ class GenerationService:
                 # non-null ``environment_id``/``environment_version`` so the
                 # frontend/savegame import contract holds. The canonical
                 # placements/objects/evidence are unchanged (no foreign IDs).
+                _restore_canonical(with_scene=True, scene_spec=scene)
+                # Phase 45 Fix (ADR-006 D3.1) — the canonical provider-authored
+                # world is kept, but when it is solver-unique yet player-
+                # unreachable (the completion-added ``d_ev_*`` facts carry no
+                # placement link) a deterministic, provider-free repair binds the
+                # winning clues to DECLARED inspectables. The supplemented
+                # candidate is re-validated (Gate 1/2) and re-scored (Gate 3);
+                # only if BOTH pass does it become authoritative (no kit world
+                # graph rebuild, no foreign id). Otherwise the canonical
+                # aggregate is kept and the publication guard fails closed.
+                repaired_published = None
+                try:
+                    canonical_with_scene = dataclasses.replace(
+                        canonical_draft, scene=scene
+                    )
+                    repaired_draft = _ensure_playability_clues(
+                        canonical_with_scene,
+                        kit,
+                        getattr(record, "difficulty", None),
+                    )
+                    if repaired_draft is not canonical_with_scene and (
+                        repaired_draft != canonical_with_scene
+                    ):
+                        record.draft = repaired_draft
+                        record._phase3_cache = None
+                        repaired_report = pipeline_mod.validate_draft(record)
+                        if repaired_report.outcome is ValidationOutcome.VALID:
+                            candidate = build_published_case_version(record)
+                            gate3 = playability_mod.validate_published_candidate(
+                                candidate, getattr(record, "difficulty", None)
+                            )
+                            if gate3.valid:
+                                repaired_published = candidate
+                except Exception:  # noqa: BLE001 - degradation must never raise
+                    repaired_published = None
+                if repaired_published is not None:
+                    record.published = repaired_published
+                    emit_event(
+                        "world_compose.completed",
+                        caseId=getattr(record, "case_id", None),
+                        generationAttemptId=getattr(record, "attempt_id", None),
+                        compositionMode=composition_mode,
+                        environmentKit=environment_id,
+                        compositionOutcome="REPAIRED_PLAYABILITY",
+                        fallbackUsed=False,
+                        inputObjectCount=len(declared_objects),
+                        inputEvidenceCount=len(declared_evidence),
+                        inputPlacementCount=len(
+                            getattr(draft.world_graph, "placements", ()) or ()
+                        ),
+                        outputPlacementCount=len(
+                            getattr(
+                                repaired_published.draft.world_graph, "placements", ()
+                            )
+                            or ()
+                        ),
+                        canonicalObjectNamespaceCount=len(declared_objects),
+                        canonicalEvidenceNamespaceCount=len(declared_evidence),
+                    )
+                    return True
+                # Unchanged or unrepairable: keep the canonical world (scene pin).
                 _restore_canonical(with_scene=True, scene_spec=scene)
                 emit_event(
                     "world_compose.skipped",
@@ -1877,7 +2100,9 @@ class GenerationService:
             )
             # Phase44 (ADV-44-01) — ensure every required dimension has a
             # reachable clue BEFORE the namespace guard + validation run.
-            new_draft = _ensure_dimension_clues(new_draft, kit)
+            new_draft = _ensure_playability_clues(
+                new_draft, kit, getattr(record, "difficulty", None)
+            )
 
             # ADR-005 D1 (defense-in-depth) — a composed candidate may only
             # reference the NEW draft's declared namespace. Any foreign
@@ -2362,16 +2587,58 @@ class GenerationService:
             # ANY unexpected Gate 3 evaluation error is treated as a Gate 3
             # FAILURE: the candidate is never published (AC-29). Emit the same
             # bounded failure path with a synthetic closed-code report.
-            playability_report = playability.PlayabilityReport(
-                difficulty=difficulty_name,
-                inspectable_count=0,
-                meaningful_inspectable_count=0,
-                distinct_meaningful_source_count=0,
-                red_herring_count=0,
-                reachable_critical_dimensions=(),
-                unreachable_critical_dimensions=(),
-                issue_codes=(playability.PLAYABILITY_DIFFICULTY_CONTRACT_UNMET,),
+            playability_report = _invalid_playability_report(difficulty_name)
+        if not playability_report.valid:
+            # Phase45 Fix (ADR-006 D3.2) — authoritative provider-neutral safety
+            # net. When the FROZEN candidate fails Gate 3 (e.g. a driver / remote
+            # client world whose completion-added ``d_ev_*`` facts are not
+            # placement-reachable), attempt the deterministic, provider-free
+            # reachability repair. The repaired candidate is re-validated
+            # (authoritative Gate 1/2) and re-scored (Gate 3); only then does it
+            # become authoritative. Otherwise the existing fail-closed
+            # ``_fail_playability`` path runs (no payload, no silent published).
+            repaired = self._repair_playability_candidate(
+                record, published, difficulty_name
             )
+            if repaired is not None:
+                published = repaired
+                if getattr(published, "case_version", None) != int(version):
+                    try:
+                        object.__setattr__(published, "case_version", int(version))
+                    except (AttributeError, TypeError):
+                        repaired = None
+                if repaired is not None:
+                    try:
+                        playability_report = playability.validate_published_candidate(
+                            published, difficulty_name
+                        )
+                    except Exception:  # noqa: BLE001
+                        playability_report = _invalid_playability_report(
+                            difficulty_name
+                        )
+                if repaired is not None and playability_report.valid:
+                    emit_event(
+                        "playability.validation.repaired",
+                        caseId=case_id,
+                        caseVersion=version,
+                        generationAttemptId=getattr(record, "attempt_id", None),
+                        difficulty=playability_report.difficulty,
+                        playabilityOutcome="REPAIRED",
+                        inspectableCount=playability_report.inspectable_count,
+                        meaningfulInspectableCount=(
+                            playability_report.meaningful_inspectable_count
+                        ),
+                        distinctMeaningfulSourceCount=(
+                            playability_report.distinct_meaningful_source_count
+                        ),
+                        redHerringCount=playability_report.red_herring_count,
+                        reachableCriticalDimensions=(
+                            playability_report.reachable_critical_dimensions
+                        ),
+                        unreachableCriticalDimensions=(
+                            playability_report.unreachable_critical_dimensions
+                        ),
+                    )
         if not playability_report.valid:
             self._fail_playability(record, case_id, version, now, playability_report)
             return None
@@ -2467,6 +2734,116 @@ class GenerationService:
             ),
         )
         return GenerationState.PUBLISHED.value
+
+    def _resolve_playability_kit(self, draft: Any, loader: Any) -> Any:
+        """Best-effort allowed kit for deterministic anchor selection.
+
+        Prefers the draft's own scene kit, then the last environment resolution,
+        then the documented fallback kit. ANY allowed kit's anchors suffice
+        because ``safety.validate_world_graph`` checks the GLOBAL anchor
+        allowlist (not the kit-specific anchor set).
+        """
+        env_id = None
+        scene = getattr(draft, "scene", None)
+        if scene is not None:
+            env_id = getattr(scene, "environment_id", None)
+        if not env_id:
+            resolution = getattr(self, "_last_environment_resolution", None)
+            if isinstance(resolution, Mapping):
+                env_id = resolution.get("environmentId")
+        for candidate in (env_id, "apartment"):
+            if not candidate:
+                continue
+            try:
+                return loader(candidate)
+            except Exception:  # noqa: BLE001 - fall through to the next candidate
+                continue
+        return None
+
+    def _repair_playability_candidate(
+        self,
+        record: Any,
+        published: Any,
+        difficulty_name: str,
+    ) -> Any:
+        """Phase45 Fix (ADR-006 D3.2) — authoritative provider-neutral repair.
+
+        Applied at the publication boundary when the FROZEN candidate fails
+        Gate 3. Applies the deterministic ``_ensure_playability_clues`` repair to
+        the frozen draft, re-runs the CANONICAL ``pipeline.validate_draft``
+        (authoritative Gate 1/2) and Gate 3, and returns the rebuilt frozen
+        aggregate only when BOTH pass. Any failure/refusal restores the original
+        attempt state and returns ``None`` so the caller keeps the fail-closed
+        Gate 3 path (no payload, no silent ``published=true``). Consumes ZERO
+        provider calls / repair passes / regenerations.
+
+        ADV-45FIX-01 — the repaired candidate is scene-pinned (``scene_for_kit``,
+        scene-only, exactly like the other canonical-keeping paths) so a frozen
+        candidate reaching this seam with a null ``scene.environmentId`` can
+        NEVER publish a savegame-invalid payload. An unpinnable scene FAILS
+        CLOSED.
+
+        ADV-45FIX-02 — the repair-path revalidation runs under the dedicated
+        NON-authoritative ``playability.repair.validation`` prefix (ADR-005 D4),
+        so a discarded repaired candidate can never masquerade as an
+        authoritative ``generation.validation`` failure.
+        """
+        import dataclasses
+
+        from app.environments.compose import scene_for_kit
+        from app.environments.manifests import load_environment
+        from app.generation import pipeline as pipeline_mod
+        from app.generation.publish import build_published_case_version
+        from app.generation.state_machine import ValidationOutcome
+
+        draft = getattr(published, "draft", None)
+        if draft is None:
+            return None
+        kit = self._resolve_playability_kit(draft, load_environment)
+        if kit is None:
+            return None
+        saved_draft = getattr(record, "draft", None)
+        saved_published = getattr(record, "published", None)
+        saved_report = getattr(record, "last_validation", None)
+        saved_proof = getattr(record, "solver_proof", None)
+        saved_cache = getattr(record, "_phase3_cache", None)
+        try:
+            # ADV-45FIX-01 — pin the resolved kit scene BEFORE the repair so the
+            # authoritative aggregate carries a non-null environmentId/version.
+            # ``scene_for_kit`` is the same scene-only helper the canonical-keeping
+            # composition paths use (never a kit world-graph rebuild).
+            pinned_scene = scene_for_kit(kit, getattr(draft, "scene", None))
+            if (
+                getattr(pinned_scene, "environment_id", None) is None
+                or getattr(pinned_scene, "environment_version", None) is None
+            ):
+                raise ValueError("playability repair could not pin the kit scene")
+            pinned_draft = dataclasses.replace(draft, scene=pinned_scene)
+            repaired_draft = _ensure_playability_clues(
+                pinned_draft, kit, difficulty_name
+            )
+            if repaired_draft is pinned_draft or repaired_draft == pinned_draft:
+                return None
+            record.draft = repaired_draft
+            record._phase3_cache = None
+            report = pipeline_mod.validate_draft(
+                record, event_prefix="playability.repair.validation"
+            )
+            if report.outcome is not ValidationOutcome.VALID:
+                raise ValueError("repaired candidate failed canonical validation")
+            candidate = build_published_case_version(record)
+            gate3 = playability.validate_published_candidate(candidate, difficulty_name)
+            if not gate3.valid:
+                raise ValueError("repaired candidate still fails Gate 3")
+        except Exception:  # noqa: BLE001 - restore + fail closed (never raise)
+            record.draft = saved_draft
+            record.published = saved_published
+            record.last_validation = saved_report
+            record.solver_proof = saved_proof
+            record._phase3_cache = saved_cache
+            return None
+        record.published = candidate
+        return candidate
 
     def _fail_playability(
         self,

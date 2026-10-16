@@ -1,0 +1,1101 @@
+{
+  "case": {
+    "candidates": {
+      "finalTargets": [
+        {
+          "id": "anna_karlsson",
+          "name": "Anna Karlsson",
+          "role": "suspect"
+        },
+        {
+          "id": "emily_reed",
+          "name": "Emily Reed",
+          "role": "witness"
+        },
+        {
+          "id": "michael_carter",
+          "name": "Michael Carter",
+          "role": "suspect"
+        },
+        {
+          "id": "thomas_reed",
+          "name": "Thomas Reed",
+          "role": "suspect"
+        }
+      ],
+      "hasSuicideOption": true,
+      "motives": [
+        {
+          "id": "cover_up_embezzlement",
+          "label": "Cover up the \u20ac240,000 embezzlement"
+        },
+        {
+          "id": "revenge_for_affair",
+          "label": "Revenge for a suspected affair"
+        },
+        {
+          "id": "robbery_gone_wrong",
+          "label": "Robbery gone wrong"
+        }
+      ],
+      "suspects": [
+        {
+          "id": "anna_karlsson",
+          "name": "Anna Karlsson"
+        },
+        {
+          "id": "michael_carter",
+          "name": "Michael Carter"
+        },
+        {
+          "id": "thomas_reed",
+          "name": "Thomas Reed"
+        }
+      ],
+      "weapons": [
+        {
+          "assetId": "PROP_KITCHEN_KNIFE_01",
+          "id": "prov_obj_kitchen_knife",
+          "name": "Prov Obj Kitchen Knife"
+        },
+        {
+          "assetId": "PROP_LETTER_OPENER_01",
+          "id": "prov_obj_letter_opener",
+          "name": "Prov Obj Letter Opener"
+        },
+        {
+          "assetId": "PROP_SCISSORS_01",
+          "id": "prov_obj_scissors",
+          "name": "Prov Obj Scissors"
+        }
+      ]
+    },
+    "evidence": [
+      {
+        "content": {
+          "entries": [
+            {
+              "text": "Victim last seen",
+              "time": "2026-09-11T22:15:10+02:00"
+            }
+          ],
+          "renderType": "TIMELINE",
+          "summary": "The victim was seen alive at the scene shortly before the incident."
+        },
+        "description": "The victim was seen alive at the scene shortly before the incident.",
+        "evidenceId": "d_ev_when_last_seen",
+        "kind": "witness_observation",
+        "reliability": "high",
+        "title": "Victim last seen"
+      },
+      {
+        "content": {
+          "entries": [
+            {
+              "text": "Body discovered",
+              "time": "2026-09-11T22:18:31+02:00"
+            }
+          ],
+          "renderType": "TIMELINE",
+          "summary": "The body was found at the scene shortly after the incident."
+        },
+        "description": "The body was found at the scene shortly after the incident.",
+        "evidenceId": "d_ev_when_body",
+        "kind": "witness_observation",
+        "reliability": "high",
+        "title": "Body discovered"
+      },
+      {
+        "content": {
+          "entries": [
+            {
+              "text": "Activity logged at the scene",
+              "time": "2026-09-11T22:16:50+02:00"
+            }
+          ],
+          "renderType": "ACTIVITY_LOG",
+          "summary": "A monitoring log records activity at the scene around the locked time."
+        },
+        "description": "A monitoring log records activity at the scene around the locked time.",
+        "evidenceId": "d_ev_when_obs",
+        "kind": "cctv",
+        "reliability": "high",
+        "title": "Activity logged at the scene"
+      },
+      {
+        "content": {
+          "entries": [
+            {
+              "text": "Person logged away from the scene",
+              "time": "2026-09-11T22:15:00+02:00"
+            }
+          ],
+          "renderType": "ACTIVITY_LOG",
+          "summary": "A monitoring log places Anna Karlsson at a location away from the scene at the crime time."
+        },
+        "description": "A monitoring log places Anna Karlsson at a location away from the scene at the crime time.",
+        "evidenceId": "d_ev_opp_annakarlsson",
+        "kind": "cctv",
+        "reliability": "high",
+        "title": "Person logged away from the scene"
+      },
+      {
+        "content": {
+          "entries": [
+            {
+              "text": "Person logged away from the scene",
+              "time": "2026-09-11T22:15:00+02:00"
+            }
+          ],
+          "renderType": "ACTIVITY_LOG",
+          "summary": "A monitoring log places Emily Reed at a location away from the scene at the crime time."
+        },
+        "description": "A monitoring log places Emily Reed at a location away from the scene at the crime time.",
+        "evidenceId": "d_ev_opp_emilyreed",
+        "kind": "cctv",
+        "reliability": "high",
+        "title": "Person logged away from the scene"
+      },
+      {
+        "content": {
+          "entries": [
+            {
+              "text": "Person logged away from the scene",
+              "time": "2026-09-11T22:15:00+02:00"
+            }
+          ],
+          "renderType": "ACTIVITY_LOG",
+          "summary": "A monitoring log places Michael Carter at a location away from the scene at the crime time."
+        },
+        "description": "A monitoring log places Michael Carter at a location away from the scene at the crime time.",
+        "evidenceId": "d_ev_opp_michaelcarter",
+        "kind": "cctv",
+        "reliability": "high",
+        "title": "Person logged away from the scene"
+      },
+      {
+        "content": {
+          "entries": [
+            {
+              "text": "Person logged at the scene",
+              "time": "2026-09-11T22:16:40+02:00"
+            }
+          ],
+          "renderType": "ACTIVITY_LOG",
+          "summary": "A monitoring log places Thomas Reed at the scene around the locked time."
+        },
+        "description": "A monitoring log places Thomas Reed at the scene around the locked time.",
+        "evidenceId": "d_ev_presence",
+        "kind": "cctv",
+        "reliability": "high",
+        "title": "Person logged at the scene"
+      },
+      {
+        "content": {
+          "renderType": "BODY_OBSERVATION",
+          "summary": "A statement claims the person had left before the locked time."
+        },
+        "description": "A statement claims the person had left before the locked time.",
+        "evidenceId": "d_ev_alibi",
+        "kind": "testimonial",
+        "reliability": "high",
+        "title": "Alibi statement"
+      },
+      {
+        "content": {
+          "renderType": "MESSAGE",
+          "summary": "A record connects Thomas Reed to the locked motive."
+        },
+        "description": "A record connects Thomas Reed to the locked motive.",
+        "evidenceId": "d_ev_motive_link",
+        "kind": "email",
+        "reliability": "high",
+        "title": "Recorded statement"
+      },
+      {
+        "content": {
+          "renderType": "MESSAGE",
+          "summary": "A record contradicts the candidate motive."
+        },
+        "description": "A record contradicts the candidate motive.",
+        "evidenceId": "d_ev_motive_x_inheritanceearly",
+        "kind": "email",
+        "reliability": "high",
+        "title": "Recorded statement"
+      },
+      {
+        "content": {
+          "renderType": "MESSAGE",
+          "summary": "A record contradicts the candidate motive."
+        },
+        "description": "A record contradicts the candidate motive.",
+        "evidenceId": "d_ev_motive_x_revengeforaffair",
+        "kind": "email",
+        "reliability": "high",
+        "title": "Recorded statement"
+      },
+      {
+        "content": {
+          "renderType": "MESSAGE",
+          "summary": "A record contradicts the candidate motive."
+        },
+        "description": "A record contradicts the candidate motive.",
+        "evidenceId": "d_ev_motive_x_robberygonewrong",
+        "kind": "email",
+        "reliability": "high",
+        "title": "Recorded statement"
+      },
+      {
+        "content": {
+          "comparison": "Forensic comparison excludes this object as the source.",
+          "renderType": "FORENSIC_COMPARISON",
+          "summary": "Forensic comparison excludes this object as the source."
+        },
+        "description": "Forensic comparison excludes this object as the source.",
+        "evidenceId": "d_ev_weapon_false_provobjletteropener",
+        "kind": "forensic",
+        "reliability": "high",
+        "title": "Forensic comparison"
+      },
+      {
+        "content": {
+          "comparison": "Forensic comparison excludes this object as the source.",
+          "renderType": "FORENSIC_COMPARISON",
+          "summary": "Forensic comparison excludes this object as the source."
+        },
+        "description": "Forensic comparison excludes this object as the source.",
+        "evidenceId": "d_ev_weapon_false_provobjscissors",
+        "kind": "forensic",
+        "reliability": "high",
+        "title": "Forensic comparison"
+      },
+      {
+        "content": {
+          "comparison": "Forensic comparison identifies the locked object as the source.",
+          "renderType": "FORENSIC_COMPARISON",
+          "summary": "Forensic comparison identifies the locked object as the source."
+        },
+        "description": "Forensic comparison identifies the locked object as the source.",
+        "evidenceId": "d_ev_weapon_true",
+        "kind": "forensic",
+        "reliability": "high",
+        "title": "Forensic comparison"
+      },
+      {
+        "content": {
+          "comparison": "A latent fingerprint was lifted from the locked object.",
+          "renderType": "FORENSIC_COMPARISON",
+          "summary": "A latent fingerprint was lifted from the locked object."
+        },
+        "description": "A latent fingerprint was lifted from the locked object.",
+        "evidenceId": "d_ev_fp",
+        "kind": "forensic",
+        "reliability": "high",
+        "title": "Latent fingerprint"
+      },
+      {
+        "content": {
+          "questionType": "OBSERVATION",
+          "renderType": "BODY_OBSERVATION",
+          "speakerName": "Emily Reed",
+          "statement": "As Emily Reed, I was at the Harbor View Bar around 22:17 and noticed a few things from there.",
+          "summary": "Emily Reed was at the Harbor View Bar around 22:17.",
+          "witnessId": "emily_reed"
+        },
+        "description": "Emily Reed was at the Harbor View Bar around 22:17.",
+        "evidenceId": "d_ev_witness_emilyreed",
+        "kind": "witness_statement",
+        "reliability": "high",
+        "title": "Witness statement"
+      }
+    ],
+    "metadata": {
+      "difficulty": "hard",
+      "environmentId": "apartment",
+      "source": "demo",
+      "sourceCaseId": "CASE-1",
+      "title": "T"
+    },
+    "publicCase": {
+      "caseId": "CASE-1",
+      "caseVersion": 1,
+      "compositionNotes": [],
+      "evidence": [
+        {
+          "description": "The victim was seen alive at the scene shortly before the incident.",
+          "id": "d_ev_when_last_seen",
+          "kind": "witness_observation",
+          "reliability": "high",
+          "title": "Victim last seen"
+        },
+        {
+          "description": "The body was found at the scene shortly after the incident.",
+          "id": "d_ev_when_body",
+          "kind": "witness_observation",
+          "reliability": "high",
+          "title": "Body discovered"
+        },
+        {
+          "description": "A monitoring log records activity at the scene around the locked time.",
+          "id": "d_ev_when_obs",
+          "kind": "cctv",
+          "reliability": "high",
+          "title": "Activity logged at the scene"
+        },
+        {
+          "description": "A monitoring log places Anna Karlsson at a location away from the scene at the crime time.",
+          "id": "d_ev_opp_annakarlsson",
+          "kind": "cctv",
+          "reliability": "high",
+          "title": "Person logged away from the scene"
+        },
+        {
+          "description": "A monitoring log places Emily Reed at a location away from the scene at the crime time.",
+          "id": "d_ev_opp_emilyreed",
+          "kind": "cctv",
+          "reliability": "high",
+          "title": "Person logged away from the scene"
+        },
+        {
+          "description": "A monitoring log places Michael Carter at a location away from the scene at the crime time.",
+          "id": "d_ev_opp_michaelcarter",
+          "kind": "cctv",
+          "reliability": "high",
+          "title": "Person logged away from the scene"
+        },
+        {
+          "description": "A monitoring log places Thomas Reed at the scene around the locked time.",
+          "id": "d_ev_presence",
+          "kind": "cctv",
+          "reliability": "high",
+          "title": "Person logged at the scene"
+        },
+        {
+          "description": "A statement claims the person had left before the locked time.",
+          "id": "d_ev_alibi",
+          "kind": "testimonial",
+          "reliability": "high",
+          "title": "Alibi statement"
+        },
+        {
+          "description": "A record connects Thomas Reed to the locked motive.",
+          "id": "d_ev_motive_link",
+          "kind": "email",
+          "reliability": "high",
+          "title": "Recorded statement"
+        },
+        {
+          "description": "A record contradicts the candidate motive.",
+          "id": "d_ev_motive_x_inheritanceearly",
+          "kind": "email",
+          "reliability": "high",
+          "title": "Recorded statement"
+        },
+        {
+          "description": "A record contradicts the candidate motive.",
+          "id": "d_ev_motive_x_revengeforaffair",
+          "kind": "email",
+          "reliability": "high",
+          "title": "Recorded statement"
+        },
+        {
+          "description": "A record contradicts the candidate motive.",
+          "id": "d_ev_motive_x_robberygonewrong",
+          "kind": "email",
+          "reliability": "high",
+          "title": "Recorded statement"
+        },
+        {
+          "description": "Forensic comparison excludes this object as the source.",
+          "id": "d_ev_weapon_false_provobjletteropener",
+          "kind": "forensic",
+          "reliability": "high",
+          "title": "Forensic comparison"
+        },
+        {
+          "description": "Forensic comparison excludes this object as the source.",
+          "id": "d_ev_weapon_false_provobjscissors",
+          "kind": "forensic",
+          "reliability": "high",
+          "title": "Forensic comparison"
+        },
+        {
+          "description": "Forensic comparison identifies the locked object as the source.",
+          "id": "d_ev_weapon_true",
+          "kind": "forensic",
+          "reliability": "high",
+          "title": "Forensic comparison"
+        },
+        {
+          "description": "A latent fingerprint was lifted from the locked object.",
+          "id": "d_ev_fp",
+          "kind": "forensic",
+          "reliability": "high",
+          "title": "Latent fingerprint"
+        },
+        {
+          "description": "Emily Reed was at the Harbor View Bar around 22:17.",
+          "id": "d_ev_witness_emilyreed",
+          "kind": "witness_statement",
+          "reliability": "high",
+          "title": "Witness statement"
+        }
+      ],
+      "locations": [
+        {
+          "locationId": "miller_apartment_kitchen",
+          "name": "Miller Apartment - Kitchen"
+        },
+        {
+          "locationId": "miller_consulting_office",
+          "name": "Miller Consulting Office"
+        },
+        {
+          "locationId": "harbor_view_bar",
+          "name": "Harbor View Bar"
+        }
+      ],
+      "motives": [
+        {
+          "affordances": [
+            "MOTIVE_CANDIDATE"
+          ],
+          "label": "Cover up the \u20ac240,000 embezzlement",
+          "motiveId": "cover_up_embezzlement"
+        },
+        {
+          "affordances": [
+            "MOTIVE_CANDIDATE"
+          ],
+          "label": "Revenge for a suspected affair",
+          "motiveId": "revenge_for_affair"
+        },
+        {
+          "affordances": [
+            "MOTIVE_CANDIDATE"
+          ],
+          "label": "Robbery gone wrong",
+          "motiveId": "robbery_gone_wrong"
+        },
+        {
+          "affordances": [],
+          "label": "Early inheritance",
+          "motiveId": "inheritance_early"
+        }
+      ],
+      "objects": [
+        {
+          "affordances": [
+            "INSPECTABLE",
+            "POTENTIAL_SHARP_WEAPON",
+            "POTENTIAL_WEAPON"
+          ],
+          "assetId": "PROP_KITCHEN_KNIFE_01",
+          "objectId": "prov_obj_kitchen_knife",
+          "subtype": "sharp_weapon"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE",
+            "POTENTIAL_SHARP_WEAPON",
+            "POTENTIAL_WEAPON"
+          ],
+          "assetId": "PROP_LETTER_OPENER_01",
+          "objectId": "prov_obj_letter_opener",
+          "subtype": "sharp_weapon"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE",
+            "POTENTIAL_SHARP_WEAPON",
+            "POTENTIAL_WEAPON"
+          ],
+          "assetId": "PROP_SCISSORS_01",
+          "objectId": "prov_obj_scissors",
+          "subtype": "sharp_weapon"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_VASE_01",
+          "objectId": "prov_obj_vase_01"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_LAPTOP_01",
+          "objectId": "prov_obj_apartment_laptop",
+          "subtype": "electronics"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_TABLE_01",
+          "objectId": "prov_obj_apartment_table",
+          "subtype": "furniture"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "DOOR_APARTMENT_01",
+          "objectId": "prov_obj_apartment_door",
+          "subtype": "door"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_LAMP_01",
+          "objectId": "prov_obj_apartment_lamp",
+          "subtype": "light"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_BODY_PLACEHOLDER_01",
+          "objectId": "prov_obj_victim_body_placeholder",
+          "subtype": "victim_body"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_LETTER_OPENER_01",
+          "objectId": "prov_obj_motive_audit_file",
+          "subtype": "document"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_LAPTOP_01",
+          "objectId": "prov_obj_cctv_hall_monitor",
+          "subtype": "monitor"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_VASE_01",
+          "objectId": "dim_clue_who",
+          "subtype": "document"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_VASE_01",
+          "objectId": "dim_clue_why",
+          "subtype": "document"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_VASE_01",
+          "objectId": "dim_clue_weapon",
+          "subtype": "document"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_VASE_01",
+          "objectId": "dim_clue_when",
+          "subtype": "document"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_VASE_01",
+          "objectId": "decoy_clue_1",
+          "subtype": "document"
+        },
+        {
+          "affordances": [
+            "INSPECTABLE"
+          ],
+          "assetId": "PROP_VASE_01",
+          "objectId": "decoy_clue_2",
+          "subtype": "document"
+        }
+      ],
+      "persons": [
+        {
+          "affordances": [
+            "VISIBLE_CHARACTER"
+          ],
+          "name": "Sarah Miller",
+          "personId": "sarah_miller",
+          "role": "victim"
+        },
+        {
+          "affordances": [
+            "SUSPECT_ELIGIBLE",
+            "VISIBLE_CHARACTER"
+          ],
+          "name": "Thomas Reed",
+          "personId": "thomas_reed",
+          "role": "suspect"
+        },
+        {
+          "affordances": [
+            "SUSPECT_ELIGIBLE",
+            "VISIBLE_CHARACTER"
+          ],
+          "name": "Michael Carter",
+          "personId": "michael_carter",
+          "role": "suspect"
+        },
+        {
+          "affordances": [
+            "SUSPECT_ELIGIBLE",
+            "VISIBLE_CHARACTER"
+          ],
+          "name": "Anna Karlsson",
+          "personId": "anna_karlsson",
+          "role": "suspect"
+        },
+        {
+          "affordances": [
+            "VISIBLE_CHARACTER"
+          ],
+          "name": "Emily Reed",
+          "personId": "emily_reed",
+          "role": "witness"
+        },
+        {
+          "affordances": [
+            "VISIBLE_CHARACTER"
+          ],
+          "name": "David Kim",
+          "personId": "david_kim",
+          "role": "family"
+        }
+      ],
+      "scene": {
+        "environmentId": "apartment",
+        "environmentVersion": 1,
+        "locationId": "miller_apartment_kitchen",
+        "name": "Miller Apartment - Kitchen"
+      },
+      "title": "T",
+      "travelRules": [
+        {
+          "fromLocationId": "miller_consulting_office",
+          "toLocationId": "miller_apartment_kitchen",
+          "travelTimeSeconds": 1200
+        },
+        {
+          "fromLocationId": "harbor_view_bar",
+          "toLocationId": "miller_apartment_kitchen",
+          "travelTimeSeconds": 2700
+        }
+      ],
+      "worldGraph": {
+        "locations": [
+          {
+            "locationId": "miller_apartment_kitchen",
+            "rooms": [
+              "kitchen"
+            ],
+            "template": "kitchen_template"
+          },
+          {
+            "locationId": "miller_consulting_office",
+            "rooms": [
+              "office"
+            ],
+            "template": "office_template"
+          },
+          {
+            "locationId": "harbor_view_bar",
+            "rooms": [
+              "bar"
+            ],
+            "template": "bar_template"
+          }
+        ],
+        "placements": [
+          {
+            "anchor": "kitchen_counter",
+            "assetId": "PROP_KITCHEN_KNIFE_01",
+            "evidenceId": null,
+            "interaction": "inspect",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_kitchen_knife"
+          },
+          {
+            "anchor": "office_desk_01",
+            "assetId": "PROP_LETTER_OPENER_01",
+            "evidenceId": null,
+            "interaction": "inspect",
+            "locationId": "miller_consulting_office",
+            "objectId": "prov_obj_letter_opener"
+          },
+          {
+            "anchor": "bedside_table",
+            "assetId": "PROP_SCISSORS_01",
+            "evidenceId": null,
+            "interaction": "inspect",
+            "locationId": "miller_consulting_office",
+            "objectId": "prov_obj_scissors"
+          },
+          {
+            "anchor": "dining_table",
+            "assetId": "PROP_VASE_01",
+            "evidenceId": null,
+            "interaction": "inspect",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_vase_01"
+          },
+          {
+            "anchor": "desk_main",
+            "assetId": "PROP_LAPTOP_01",
+            "evidenceId": null,
+            "interaction": "read",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_apartment_laptop"
+          },
+          {
+            "anchor": "dining_table",
+            "assetId": "PROP_TABLE_01",
+            "evidenceId": null,
+            "interaction": "inspect",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_apartment_table"
+          },
+          {
+            "anchor": "hall_wall_01",
+            "assetId": "DOOR_APARTMENT_01",
+            "evidenceId": null,
+            "interaction": "inspect",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_apartment_door"
+          },
+          {
+            "anchor": "shelf_01",
+            "assetId": "PROP_LAMP_01",
+            "evidenceId": null,
+            "interaction": "inspect",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_apartment_lamp"
+          },
+          {
+            "anchor": "floor_body_position",
+            "assetId": "PROP_BODY_PLACEHOLDER_01",
+            "evidenceId": null,
+            "interaction": "inspect",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_victim_body_placeholder"
+          },
+          {
+            "anchor": "kitchen_counter",
+            "assetId": "PROP_LETTER_OPENER_01",
+            "evidenceId": null,
+            "interaction": "read",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_motive_audit_file"
+          },
+          {
+            "anchor": "shelf_01",
+            "assetId": "PROP_LAPTOP_01",
+            "evidenceId": null,
+            "interaction": "view_record",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "prov_obj_cctv_hall_monitor"
+          },
+          {
+            "anchor": "floor_evidence_01",
+            "assetId": "PROP_VASE_01",
+            "evidenceId": "d_ev_presence",
+            "interaction": "read",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "dim_clue_who"
+          },
+          {
+            "anchor": "apartment_record_01",
+            "assetId": "PROP_VASE_01",
+            "evidenceId": "d_ev_motive_link",
+            "interaction": "read",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "dim_clue_why"
+          },
+          {
+            "anchor": "apartment_record_02",
+            "assetId": "PROP_VASE_01",
+            "evidenceId": "d_ev_weapon_true",
+            "interaction": "read",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "dim_clue_weapon"
+          },
+          {
+            "anchor": "generic_prop_01",
+            "assetId": "PROP_VASE_01",
+            "evidenceId": "d_ev_when_last_seen",
+            "interaction": "read",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "dim_clue_when"
+          },
+          {
+            "anchor": "spawn",
+            "assetId": "PROP_VASE_01",
+            "evidenceId": "d_ev_opp_annakarlsson",
+            "interaction": "read",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "decoy_clue_1"
+          },
+          {
+            "anchor": "window_main",
+            "assetId": "PROP_VASE_01",
+            "evidenceId": "d_ev_opp_emilyreed",
+            "interaction": "read",
+            "locationId": "miller_apartment_kitchen",
+            "objectId": "decoy_clue_2"
+          }
+        ]
+      }
+    },
+    "replayTruth": {
+      "accusationToleranceSeconds": 300,
+      "crimeTime": "2026-09-11T22:17:00+02:00",
+      "motiveId": "cover_up_embezzlement",
+      "motiveLabel": "Cover up the \u20ac240,000 embezzlement",
+      "murdererId": "thomas_reed",
+      "murdererName": "Thomas Reed",
+      "weaponId": "prov_obj_kitchen_knife",
+      "weaponName": "Prov Obj Kitchen Knife"
+    },
+    "scene": {
+      "environmentId": "apartment",
+      "environmentVersion": 1,
+      "location": {
+        "locationId": "miller_apartment_kitchen",
+        "name": "Miller Apartment - Kitchen"
+      },
+      "worldObjects": [
+        {
+          "anchor": "spawn",
+          "assetId": "PROP_VASE_01",
+          "assetType": "document",
+          "discovered": true,
+          "evidenceId": "d_ev_opp_annakarlsson",
+          "interaction": "read",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "decoy_clue_1",
+          "read": true,
+          "subtype": "document"
+        },
+        {
+          "anchor": "window_main",
+          "assetId": "PROP_VASE_01",
+          "assetType": "document",
+          "discovered": true,
+          "evidenceId": "d_ev_opp_emilyreed",
+          "interaction": "read",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "decoy_clue_2",
+          "read": true,
+          "subtype": "document"
+        },
+        {
+          "anchor": "apartment_record_02",
+          "assetId": "PROP_VASE_01",
+          "assetType": "document",
+          "discovered": true,
+          "evidenceId": "d_ev_weapon_true",
+          "interaction": "read",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "dim_clue_weapon",
+          "read": true,
+          "subtype": "document"
+        },
+        {
+          "anchor": "generic_prop_01",
+          "assetId": "PROP_VASE_01",
+          "assetType": "document",
+          "discovered": true,
+          "evidenceId": "d_ev_when_last_seen",
+          "interaction": "read",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "dim_clue_when",
+          "read": true,
+          "subtype": "document"
+        },
+        {
+          "anchor": "floor_evidence_01",
+          "assetId": "PROP_VASE_01",
+          "assetType": "document",
+          "discovered": true,
+          "evidenceId": "d_ev_presence",
+          "interaction": "read",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "dim_clue_who",
+          "read": true,
+          "subtype": "document"
+        },
+        {
+          "anchor": "apartment_record_01",
+          "assetId": "PROP_VASE_01",
+          "assetType": "document",
+          "discovered": true,
+          "evidenceId": "d_ev_motive_link",
+          "interaction": "read",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "dim_clue_why",
+          "read": true,
+          "subtype": "document"
+        },
+        {
+          "anchor": "hall_wall_01",
+          "assetId": "DOOR_APARTMENT_01",
+          "assetType": "door",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "inspect",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_apartment_door",
+          "read": false,
+          "subtype": "door"
+        },
+        {
+          "anchor": "shelf_01",
+          "assetId": "PROP_LAMP_01",
+          "assetType": "light",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "inspect",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_apartment_lamp",
+          "read": false,
+          "subtype": "light"
+        },
+        {
+          "anchor": "desk_main",
+          "assetId": "PROP_LAPTOP_01",
+          "assetType": "electronics",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "read",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_apartment_laptop",
+          "read": false,
+          "subtype": "electronics"
+        },
+        {
+          "anchor": "dining_table",
+          "assetId": "PROP_TABLE_01",
+          "assetType": "furniture",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "inspect",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_apartment_table",
+          "read": false,
+          "subtype": "furniture"
+        },
+        {
+          "anchor": "shelf_01",
+          "assetId": "PROP_LAPTOP_01",
+          "assetType": "monitor",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "view_record",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_cctv_hall_monitor",
+          "read": false,
+          "subtype": "monitor"
+        },
+        {
+          "anchor": "kitchen_counter",
+          "assetId": "PROP_KITCHEN_KNIFE_01",
+          "assetType": "sharp_weapon",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "inspect",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_kitchen_knife",
+          "read": false,
+          "subtype": "sharp_weapon"
+        },
+        {
+          "anchor": "office_desk_01",
+          "assetId": "PROP_LETTER_OPENER_01",
+          "assetType": "sharp_weapon",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "inspect",
+          "locationId": "miller_consulting_office",
+          "objectId": "prov_obj_letter_opener",
+          "read": false,
+          "subtype": "sharp_weapon"
+        },
+        {
+          "anchor": "kitchen_counter",
+          "assetId": "PROP_LETTER_OPENER_01",
+          "assetType": "document",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "read",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_motive_audit_file",
+          "read": false,
+          "subtype": "document"
+        },
+        {
+          "anchor": "bedside_table",
+          "assetId": "PROP_SCISSORS_01",
+          "assetType": "sharp_weapon",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "inspect",
+          "locationId": "miller_consulting_office",
+          "objectId": "prov_obj_scissors",
+          "read": false,
+          "subtype": "sharp_weapon"
+        },
+        {
+          "anchor": "dining_table",
+          "assetId": "PROP_VASE_01",
+          "assetType": "prop",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "inspect",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_vase_01",
+          "read": false,
+          "subtype": null
+        },
+        {
+          "anchor": "floor_body_position",
+          "assetId": "PROP_BODY_PLACEHOLDER_01",
+          "assetType": "victim_body",
+          "discovered": false,
+          "evidenceId": null,
+          "interaction": "inspect",
+          "locationId": "miller_apartment_kitchen",
+          "objectId": "prov_obj_victim_body_placeholder",
+          "read": false,
+          "subtype": "victim_body"
+        }
+      ]
+    },
+    "witnesses": [
+      {
+        "displayName": "Emily Reed",
+        "presence": "REMOTE_STATEMENT",
+        "sceneObjectId": null,
+        "witnessId": "emily_reed"
+      }
+    ]
+  },
+  "exportedAt": "2026-10-16T00:00:00Z",
+  "format": "procedural-detective-case",
+  "formatVersion": 1
+}

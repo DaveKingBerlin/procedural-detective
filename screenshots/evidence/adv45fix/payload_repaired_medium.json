@@ -1,0 +1,1091 @@
+{
+  "caseId": "CASE-1",
+  "caseVersion": 1,
+  "draft": {
+    "composition_notes": [],
+    "crime": {
+      "crime_time": {
+        "accusation_tolerance_seconds": 300,
+        "canonical": "2026-09-11T22:17:00+02:00"
+      },
+      "location_id": "miller_apartment_kitchen",
+      "motive_id": "cover_up_embezzlement",
+      "murderer_id": "thomas_reed",
+      "resolution_type": "HOMICIDE",
+      "type": "murder",
+      "victim_id": "sarah_miller",
+      "weapon_id": "prov_obj_kitchen_knife"
+    },
+    "evidence": [
+      {
+        "discoverable": true,
+        "id": "d_ev_when_last_seen",
+        "kind": "witness_observation",
+        "presentation": {
+          "description": "The victim was seen alive at the scene shortly before the incident.",
+          "title": "Victim last seen"
+        },
+        "propositions": [
+          {
+            "location_id": "miller_apartment_kitchen",
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": "2026-09-11T22:15:10+02:00",
+            "person_id": "sarah_miller",
+            "structured": {},
+            "type": "VICTIM_LAST_SEEN_ALIVE_AT",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_when_last_seen"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_when_body",
+        "kind": "witness_observation",
+        "presentation": {
+          "description": "The body was found at the scene shortly after the incident.",
+          "title": "Body discovered"
+        },
+        "propositions": [
+          {
+            "location_id": "miller_apartment_kitchen",
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": "2026-09-11T22:18:31+02:00",
+            "person_id": null,
+            "structured": {},
+            "type": "BODY_FIRST_FOUND_AT",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_when_body"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_when_obs",
+        "kind": "cctv",
+        "presentation": {
+          "description": "A monitoring log records activity at the scene around the locked time.",
+          "title": "Activity logged at the scene"
+        },
+        "propositions": [
+          {
+            "location_id": "miller_apartment_kitchen",
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": "2026-09-11T22:16:50+02:00",
+            "person_id": null,
+            "structured": {},
+            "type": "CRIME_SCENE_OBSERVATION_AT",
+            "uncertainty_seconds": 90
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_when_obs"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_opp_annakarlsson",
+        "kind": "cctv",
+        "presentation": {
+          "description": "A monitoring log places Anna Karlsson at a location away from the scene at the crime time.",
+          "title": "Person logged away from the scene"
+        },
+        "propositions": [
+          {
+            "location_id": "harbor_view_bar",
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": "2026-09-11T22:15:00+02:00",
+            "person_id": "anna_karlsson",
+            "structured": {},
+            "type": "PERSON_OBSERVED_AT_LOCATION",
+            "uncertainty_seconds": 30
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_opp_annakarlsson"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_opp_emilyreed",
+        "kind": "cctv",
+        "presentation": {
+          "description": "A monitoring log places Emily Reed at a location away from the scene at the crime time.",
+          "title": "Person logged away from the scene"
+        },
+        "propositions": [
+          {
+            "location_id": "harbor_view_bar",
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": "2026-09-11T22:15:00+02:00",
+            "person_id": "emily_reed",
+            "structured": {},
+            "type": "PERSON_OBSERVED_AT_LOCATION",
+            "uncertainty_seconds": 30
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_opp_emilyreed"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_opp_michaelcarter",
+        "kind": "cctv",
+        "presentation": {
+          "description": "A monitoring log places Michael Carter at a location away from the scene at the crime time.",
+          "title": "Person logged away from the scene"
+        },
+        "propositions": [
+          {
+            "location_id": "harbor_view_bar",
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": "2026-09-11T22:15:00+02:00",
+            "person_id": "michael_carter",
+            "structured": {},
+            "type": "PERSON_OBSERVED_AT_LOCATION",
+            "uncertainty_seconds": 30
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_opp_michaelcarter"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_presence",
+        "kind": "cctv",
+        "presentation": {
+          "description": "A monitoring log places Thomas Reed at the scene around the locked time.",
+          "title": "Person logged at the scene"
+        },
+        "propositions": [
+          {
+            "location_id": "miller_apartment_kitchen",
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": "2026-09-11T22:16:40+02:00",
+            "person_id": "thomas_reed",
+            "structured": {},
+            "type": "PERSON_OBSERVED_AT_LOCATION",
+            "uncertainty_seconds": 60
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_presence"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_alibi",
+        "kind": "testimonial",
+        "presentation": {
+          "description": "A statement claims the person had left before the locked time.",
+          "title": "Alibi statement"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": null,
+            "person_id": "thomas_reed",
+            "structured": {
+              "claimedDeparture": "2026-09-11T21:45:00+02:00"
+            },
+            "type": "ALIBI_TIME_CLAIM",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_alibi"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_motive_link",
+        "kind": "email",
+        "presentation": {
+          "description": "A record connects Thomas Reed to the locked motive.",
+          "title": "Recorded statement"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": "cover_up_embezzlement",
+            "object_id": null,
+            "observed_at": null,
+            "person_id": "thomas_reed",
+            "structured": {},
+            "type": "MOTIVE_LINKED_TO_PERSON",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_motive_link"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_motive_x_inheritanceearly",
+        "kind": "email",
+        "presentation": {
+          "description": "A record contradicts the candidate motive.",
+          "title": "Recorded statement"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": "inheritance_early",
+            "object_id": null,
+            "observed_at": null,
+            "person_id": null,
+            "structured": {},
+            "type": "MOTIVE_FACT_CONTRADICTED",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_motive_x_inheritanceearly"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_motive_x_revengeforaffair",
+        "kind": "email",
+        "presentation": {
+          "description": "A record contradicts the candidate motive.",
+          "title": "Recorded statement"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": "revenge_for_affair",
+            "object_id": null,
+            "observed_at": null,
+            "person_id": null,
+            "structured": {},
+            "type": "MOTIVE_FACT_CONTRADICTED",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_motive_x_revengeforaffair"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_motive_x_robberygonewrong",
+        "kind": "email",
+        "presentation": {
+          "description": "A record contradicts the candidate motive.",
+          "title": "Recorded statement"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": "robbery_gone_wrong",
+            "object_id": null,
+            "observed_at": null,
+            "person_id": null,
+            "structured": {},
+            "type": "MOTIVE_FACT_CONTRADICTED",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_motive_x_robberygonewrong"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_weapon_false_provobjletteropener",
+        "kind": "forensic",
+        "presentation": {
+          "description": "Forensic comparison excludes this object as the source.",
+          "title": "Forensic comparison"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": null,
+            "object_id": "prov_obj_letter_opener",
+            "observed_at": null,
+            "person_id": null,
+            "structured": {
+              "match": false
+            },
+            "type": "FORENSIC_WEAPON_MATCH",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_weapon_false_provobjletteropener"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_weapon_false_provobjscissors",
+        "kind": "forensic",
+        "presentation": {
+          "description": "Forensic comparison excludes this object as the source.",
+          "title": "Forensic comparison"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": null,
+            "object_id": "prov_obj_scissors",
+            "observed_at": null,
+            "person_id": null,
+            "structured": {
+              "match": false
+            },
+            "type": "FORENSIC_WEAPON_MATCH",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_weapon_false_provobjscissors"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_weapon_true",
+        "kind": "forensic",
+        "presentation": {
+          "description": "Forensic comparison identifies the locked object as the source.",
+          "title": "Forensic comparison"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": null,
+            "object_id": "prov_obj_kitchen_knife",
+            "observed_at": null,
+            "person_id": null,
+            "structured": {
+              "match": true
+            },
+            "type": "FORENSIC_WEAPON_MATCH",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_weapon_true"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_fp",
+        "kind": "forensic",
+        "presentation": {
+          "description": "A latent fingerprint was lifted from the locked object.",
+          "title": "Latent fingerprint"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": null,
+            "object_id": "prov_obj_kitchen_knife",
+            "observed_at": null,
+            "person_id": "thomas_reed",
+            "structured": {},
+            "type": "OBJECT_CONTAINS_FINGERPRINT",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_fp"
+        }
+      },
+      {
+        "discoverable": true,
+        "id": "d_ev_witness_emilyreed",
+        "kind": "witness_statement",
+        "presentation": {
+          "description": "Emily Reed was at the Harbor View Bar around 22:17.",
+          "speakerName": "Emily Reed",
+          "statement": "As Emily Reed, I was at the Harbor View Bar around 22:17 and noticed a few things from there.",
+          "title": "Witness statement"
+        },
+        "propositions": [
+          {
+            "location_id": null,
+            "motive_id": null,
+            "object_id": null,
+            "observed_at": null,
+            "person_id": "emily_reed",
+            "structured": {},
+            "type": "WITNESS_CLAIMS",
+            "uncertainty_seconds": 0
+          }
+        ],
+        "reliability": "high",
+        "source_ref": {
+          "kind": "record",
+          "sourceId": "record_d_ev_witness_emilyreed"
+        }
+      }
+    ],
+    "locations": [
+      {
+        "location_id": "miller_apartment_kitchen",
+        "name": "Miller Apartment - Kitchen"
+      },
+      {
+        "location_id": "miller_consulting_office",
+        "name": "Miller Consulting Office"
+      },
+      {
+        "location_id": "harbor_view_bar",
+        "name": "Harbor View Bar"
+      }
+    ],
+    "motives": [
+      {
+        "affordances": [
+          "MOTIVE_CANDIDATE"
+        ],
+        "label": "Cover up the \u20ac240,000 embezzlement",
+        "motive_id": "cover_up_embezzlement"
+      },
+      {
+        "affordances": [
+          "MOTIVE_CANDIDATE"
+        ],
+        "label": "Revenge for a suspected affair",
+        "motive_id": "revenge_for_affair"
+      },
+      {
+        "affordances": [
+          "MOTIVE_CANDIDATE"
+        ],
+        "label": "Robbery gone wrong",
+        "motive_id": "robbery_gone_wrong"
+      },
+      {
+        "affordances": [],
+        "label": "Early inheritance",
+        "motive_id": "inheritance_early"
+      }
+    ],
+    "objects": [
+      {
+        "affordances": [
+          "INSPECTABLE",
+          "POTENTIAL_SHARP_WEAPON",
+          "POTENTIAL_WEAPON"
+        ],
+        "asset_id": "PROP_KITCHEN_KNIFE_01",
+        "object_id": "prov_obj_kitchen_knife",
+        "subtype": "sharp_weapon"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE",
+          "POTENTIAL_SHARP_WEAPON",
+          "POTENTIAL_WEAPON"
+        ],
+        "asset_id": "PROP_LETTER_OPENER_01",
+        "object_id": "prov_obj_letter_opener",
+        "subtype": "sharp_weapon"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE",
+          "POTENTIAL_SHARP_WEAPON",
+          "POTENTIAL_WEAPON"
+        ],
+        "asset_id": "PROP_SCISSORS_01",
+        "object_id": "prov_obj_scissors",
+        "subtype": "sharp_weapon"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_VASE_01",
+        "object_id": "prov_obj_vase_01",
+        "subtype": null
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_LAPTOP_01",
+        "object_id": "prov_obj_apartment_laptop",
+        "subtype": "electronics"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_TABLE_01",
+        "object_id": "prov_obj_apartment_table",
+        "subtype": "furniture"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "DOOR_APARTMENT_01",
+        "object_id": "prov_obj_apartment_door",
+        "subtype": "door"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_LAMP_01",
+        "object_id": "prov_obj_apartment_lamp",
+        "subtype": "light"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_BODY_PLACEHOLDER_01",
+        "object_id": "prov_obj_victim_body_placeholder",
+        "subtype": "victim_body"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_LETTER_OPENER_01",
+        "object_id": "prov_obj_motive_audit_file",
+        "subtype": "document"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_LAPTOP_01",
+        "object_id": "prov_obj_cctv_hall_monitor",
+        "subtype": "monitor"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_VASE_01",
+        "object_id": "dim_clue_who",
+        "subtype": "document"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_VASE_01",
+        "object_id": "dim_clue_why",
+        "subtype": "document"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_VASE_01",
+        "object_id": "dim_clue_weapon",
+        "subtype": "document"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_VASE_01",
+        "object_id": "dim_clue_when",
+        "subtype": "document"
+      },
+      {
+        "affordances": [
+          "INSPECTABLE"
+        ],
+        "asset_id": "PROP_VASE_01",
+        "object_id": "decoy_clue_1",
+        "subtype": "document"
+      }
+    ],
+    "persons": [
+      {
+        "affordances": [
+          "VISIBLE_CHARACTER"
+        ],
+        "name": "Sarah Miller",
+        "person_id": "sarah_miller",
+        "presented_data": {
+          "age": 39,
+          "occupation": "CEO, Miller Consulting"
+        },
+        "role": "victim"
+      },
+      {
+        "affordances": [
+          "SUSPECT_ELIGIBLE",
+          "VISIBLE_CHARACTER"
+        ],
+        "name": "Thomas Reed",
+        "person_id": "thomas_reed",
+        "presented_data": {
+          "age": 42,
+          "occupation": "Finance Director"
+        },
+        "role": "suspect"
+      },
+      {
+        "affordances": [
+          "SUSPECT_ELIGIBLE",
+          "VISIBLE_CHARACTER"
+        ],
+        "name": "Michael Carter",
+        "person_id": "michael_carter",
+        "presented_data": {
+          "age": 45,
+          "occupation": "Accountant"
+        },
+        "role": "suspect"
+      },
+      {
+        "affordances": [
+          "SUSPECT_ELIGIBLE",
+          "VISIBLE_CHARACTER"
+        ],
+        "name": "Anna Karlsson",
+        "person_id": "anna_karlsson",
+        "presented_data": {
+          "age": 38,
+          "occupation": "Auditor"
+        },
+        "role": "suspect"
+      },
+      {
+        "affordances": [
+          "VISIBLE_CHARACTER"
+        ],
+        "name": "Emily Reed",
+        "person_id": "emily_reed",
+        "presented_data": {
+          "age": 36,
+          "occupation": "Neighbour"
+        },
+        "role": "witness"
+      },
+      {
+        "affordances": [
+          "VISIBLE_CHARACTER"
+        ],
+        "name": "David Kim",
+        "person_id": "david_kim",
+        "presented_data": {
+          "age": 51,
+          "occupation": "Brother of Sarah"
+        },
+        "role": "family"
+      }
+    ],
+    "scene": {
+      "environment_id": "apartment",
+      "environment_version": 1,
+      "location_id": "miller_apartment_kitchen",
+      "name": "Miller Apartment - Kitchen"
+    },
+    "travel_rules": [
+      {
+        "from_location_id": "miller_consulting_office",
+        "to_location_id": "miller_apartment_kitchen",
+        "travel_time_seconds": 1200
+      },
+      {
+        "from_location_id": "harbor_view_bar",
+        "to_location_id": "miller_apartment_kitchen",
+        "travel_time_seconds": 2700
+      }
+    ],
+    "world_graph": {
+      "locations": [
+        {
+          "location_id": "miller_apartment_kitchen",
+          "rooms": [
+            "kitchen"
+          ],
+          "template": "kitchen_template"
+        },
+        {
+          "location_id": "miller_consulting_office",
+          "rooms": [
+            "office"
+          ],
+          "template": "office_template"
+        },
+        {
+          "location_id": "harbor_view_bar",
+          "rooms": [
+            "bar"
+          ],
+          "template": "bar_template"
+        }
+      ],
+      "placements": [
+        {
+          "anchor": "kitchen_counter",
+          "asset_id": "PROP_KITCHEN_KNIFE_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "inspect",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_kitchen_knife",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "office_desk_01",
+          "asset_id": "PROP_LETTER_OPENER_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "inspect",
+          "location_id": "miller_consulting_office",
+          "object_id": "prov_obj_letter_opener",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "bedside_table",
+          "asset_id": "PROP_SCISSORS_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "inspect",
+          "location_id": "miller_consulting_office",
+          "object_id": "prov_obj_scissors",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "dining_table",
+          "asset_id": "PROP_VASE_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "inspect",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_vase_01",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "desk_main",
+          "asset_id": "PROP_LAPTOP_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "read",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_apartment_laptop",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "dining_table",
+          "asset_id": "PROP_TABLE_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "inspect",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_apartment_table",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "hall_wall_01",
+          "asset_id": "DOOR_APARTMENT_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "inspect",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_apartment_door",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "shelf_01",
+          "asset_id": "PROP_LAMP_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "inspect",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_apartment_lamp",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "floor_body_position",
+          "asset_id": "PROP_BODY_PLACEHOLDER_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "inspect",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_victim_body_placeholder",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "kitchen_counter",
+          "asset_id": "PROP_LETTER_OPENER_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "read",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_motive_audit_file",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "shelf_01",
+          "asset_id": "PROP_LAPTOP_01",
+          "evidence_id": null,
+          "generated_definition": null,
+          "interaction": "view_record",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "prov_obj_cctv_hall_monitor",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "floor_evidence_01",
+          "asset_id": "PROP_VASE_01",
+          "evidence_id": "d_ev_presence",
+          "generated_definition": null,
+          "interaction": "read",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "dim_clue_who",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "apartment_record_01",
+          "asset_id": "PROP_VASE_01",
+          "evidence_id": "d_ev_motive_link",
+          "generated_definition": null,
+          "interaction": "read",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "dim_clue_why",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "apartment_record_02",
+          "asset_id": "PROP_VASE_01",
+          "evidence_id": "d_ev_weapon_true",
+          "generated_definition": null,
+          "interaction": "read",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "dim_clue_weapon",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "generic_prop_01",
+          "asset_id": "PROP_VASE_01",
+          "evidence_id": "d_ev_when_last_seen",
+          "generated_definition": null,
+          "interaction": "read",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "dim_clue_when",
+          "resolution_provenance": null
+        },
+        {
+          "anchor": "spawn",
+          "asset_id": "PROP_VASE_01",
+          "evidence_id": "d_ev_opp_annakarlsson",
+          "generated_definition": null,
+          "interaction": "read",
+          "location_id": "miller_apartment_kitchen",
+          "object_id": "decoy_clue_1",
+          "resolution_provenance": null
+        }
+      ]
+    }
+  },
+  "generationAttemptId": "GA-1",
+  "locked": {
+    "crime_time": "2026-09-11T22:17:00+02:00",
+    "location": null,
+    "motive": "cover_up_embezzlement",
+    "murderer": "thomas_reed",
+    "victim": "sarah_miller",
+    "weapon": null,
+    "witness": "emily_reed"
+  },
+  "model": null,
+  "prompt": "p",
+  "publishedAt": 1000.0,
+  "report": {
+    "lockedViolationCount": 0,
+    "outcome": "VALID",
+    "safetyIssueCount": 0,
+    "structuralIssueCount": 0,
+    "universeIssueCount": 0,
+    "valid": true
+  },
+  "schemaVersion": 1,
+  "seed": 11,
+  "solverProof": {
+    "case_id": "CASE-1",
+    "case_version": 1,
+    "evidence_ids_used": [
+      "d_ev_alibi",
+      "d_ev_fp",
+      "d_ev_motive_link",
+      "d_ev_motive_x_revengeforaffair",
+      "d_ev_motive_x_robberygonewrong",
+      "d_ev_opp_annakarlsson",
+      "d_ev_opp_emilyreed",
+      "d_ev_opp_michaelcarter",
+      "d_ev_presence",
+      "d_ev_weapon_false_provobjletteropener",
+      "d_ev_weapon_false_provobjscissors",
+      "d_ev_weapon_true",
+      "d_ev_when_body",
+      "d_ev_when_last_seen",
+      "d_ev_when_obs"
+    ],
+    "solver_proof_version": "1.0",
+    "time": {
+      "accepted_scoring": {
+        "canonical": "2026-09-11T22:17:00+02:00",
+        "end_exclusive": "2026-09-11T22:22:01+02:00",
+        "start_inclusive": "2026-09-11T22:12:00+02:00"
+      },
+      "ambiguous": false,
+      "canonical": "2026-09-11T22:17:00+02:00",
+      "connected_count": 1,
+      "critical_evidence_ids": [
+        "d_ev_when_body",
+        "d_ev_when_last_seen",
+        "d_ev_when_obs"
+      ],
+      "feasible_intervals": [
+        [
+          "2026-09-11T22:15:20+02:00",
+          "2026-09-11T22:18:21+02:00"
+        ]
+      ],
+      "overconstrained": false
+    },
+    "validation": {
+      "all_true": true,
+      "canonical_in_feasible": true,
+      "canonical_motive": "cover_up_embezzlement",
+      "canonical_murderer": "thomas_reed",
+      "canonical_weapon": "prov_obj_kitchen_knife",
+      "deducted_motive": "cover_up_embezzlement",
+      "deducted_murderer": "thomas_reed",
+      "deducted_weapon": "prov_obj_kitchen_knife",
+      "motive_true": true,
+      "murderer_true": true,
+      "resolution_type": "HOMICIDE",
+      "time_accepted": true,
+      "time_overconstrained": false,
+      "time_unique_single_interval": true,
+      "time_within_scoring": true,
+      "weapon_true": true
+    },
+    "weapon_evidence_ids": [
+      "d_ev_fp",
+      "d_ev_weapon_false_provobjletteropener",
+      "d_ev_weapon_false_provobjscissors",
+      "d_ev_weapon_true"
+    ],
+    "who_evidence_ids": [
+      "d_ev_alibi",
+      "d_ev_motive_link",
+      "d_ev_opp_annakarlsson",
+      "d_ev_opp_emilyreed",
+      "d_ev_opp_michaelcarter",
+      "d_ev_presence"
+    ],
+    "why_evidence_ids": [
+      "d_ev_motive_link",
+      "d_ev_motive_x_revengeforaffair",
+      "d_ev_motive_x_robberygonewrong"
+    ],
+    "winners": [
+      "thomas_reed",
+      "cover_up_embezzlement",
+      "prov_obj_kitchen_knife"
+    ]
+  },
+  "title": "T",
+  "truth": {
+    "case_id": "CASE-1",
+    "case_version": 1,
+    "crime": {
+      "crime_time": {
+        "accusation_tolerance_seconds": 300,
+        "canonical": "2026-09-11T22:17:00+02:00"
+      },
+      "location_id": "miller_apartment_kitchen",
+      "motive_id": "cover_up_embezzlement",
+      "murderer_id": "thomas_reed",
+      "resolution_type": "HOMICIDE",
+      "type": "murder",
+      "victim_id": "sarah_miller",
+      "weapon_id": "prov_obj_kitchen_knife"
+    },
+    "facts": [],
+    "persons": [],
+    "relationships": [],
+    "timeline": [],
+    "title": "Victim: sarah_miller",
+    "witness_truthfulness": []
+  },
+  "universes": {
+    "eligibility_version": "1.0",
+    "homicide_target_ids": [
+      "anna_karlsson",
+      "emily_reed",
+      "michael_carter",
+      "thomas_reed"
+    ],
+    "motive_ids": [
+      "cover_up_embezzlement",
+      "revenge_for_affair",
+      "robbery_gone_wrong"
+    ],
+    "suspect_ids": [
+      "anna_karlsson",
+      "michael_carter",
+      "thomas_reed"
+    ],
+    "weapon_ids": [
+      "prov_obj_kitchen_knife",
+      "prov_obj_letter_opener",
+      "prov_obj_scissors"
+    ]
+  }
+}
