@@ -258,4 +258,4 @@ def test_golden_default_prompt_never_triggers_world_repair(database_url):
     assert ok is True
     # the legacy byte-identity path never consults the world repair provider
     assert service._world_repair_provider.calls == []
-    assert len(record.published.draft.world_graph.placements) == 9
+    assert len(record.published.draft.world_graph.placements) == 11

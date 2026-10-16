@@ -1,0 +1,164 @@
+{
+  "part_a_def107_pure": {
+    "added_dim_clue_placements": [
+      [
+        "dim_clue_why",
+        "miller_apartment_kitchen",
+        "motive_audit_01"
+      ]
+    ],
+    "all_added_locations_declared": true,
+    "declared_locations": [
+      "harbor_view_bar",
+      "miller_apartment_kitchen",
+      "miller_consulting_office"
+    ],
+    "resolution_issues": [],
+    "safety_issues": [],
+    "winning_why_bound": true
+  },
+  "part_c_adv4407_pure": {
+    "decoy_issues": [
+      "PLAYABILITY_CRITICAL_DIMENSION_UNREACHABLE",
+      "PLAYABILITY_DIFFICULTY_CONTRACT_UNMET",
+      "PLAYABILITY_EVIDENCE_UNREACHABLE"
+    ],
+    "decoy_unreachable": [
+      "WHY"
+    ],
+    "decoy_valid": false,
+    "golden_issues": [],
+    "golden_reachable": [
+      "WHO",
+      "WHY",
+      "WEAPON",
+      "WHEN"
+    ],
+    "golden_valid": true
+  },
+  "part_d_adv4407_guard": {
+    "frozen_gate3_unreachable": [
+      "WHY"
+    ],
+    "frozen_gate3_valid": false,
+    "guard_status": null,
+    "publication_calls": 0,
+    "record_state": "FAILED",
+    "world_graph_stage_trusted": false
+  },
+  "part_f_adv4403": {
+    "base_mean": 3,
+    "base_src": 4,
+    "one_obj_mean": 4,
+    "one_obj_src": 5,
+    "record_shared": "last_seen_01",
+    "second_object_mean_inflation": 0,
+    "second_object_src_inflation": 0,
+    "two_obj_mean": 4,
+    "two_obj_src": 5
+  },
+  "real_service": [
+    {
+      "declared_locations": [
+        "harbor_view_bar",
+        "miller_apartment_kitchen",
+        "miller_consulting_office"
+      ],
+      "decoy_why_reachable": false,
+      "difficulty": "medium",
+      "dim_clue_placements": [
+        [
+          "dim_clue_why",
+          "miller_apartment_kitchen",
+          "motive_audit_01"
+        ]
+      ],
+      "failure_code": null,
+      "label": "DEF-107 strip winning-WHY link (legacy supplementation)",
+      "published_row_present": true,
+      "reachable_evidence_ids": [
+        "body_found_01",
+        "cctv_thomas_scene_01",
+        "email_thomas_01",
+        "forensic_knife_match_01",
+        "forensic_letter_opener_01",
+        "forensic_scissors_01",
+        "motive_audit_01"
+      ],
+      "status": "PUBLISHED",
+      "undeclared_placement_locations": [],
+      "winning_why_reachable": true
+    },
+    {
+      "difficulty": "medium",
+      "failure_code": "PUBLICATION_FAILED",
+      "label": "ADV-44-01 zero evidence links",
+      "published_row_present": false,
+      "status": "FAILED"
+    },
+    {
+      "declared_locations": [
+        "harbor_view_bar",
+        "miller_apartment_kitchen",
+        "miller_consulting_office"
+      ],
+      "decoy_why_reachable": false,
+      "difficulty": "medium",
+      "dim_clue_placements": [],
+      "failure_code": null,
+      "label": "ADV-44-01 golden control",
+      "published_row_present": true,
+      "reachable_evidence_ids": [
+        "body_found_01",
+        "cctv_thomas_scene_01",
+        "email_thomas_01",
+        "forensic_knife_match_01",
+        "forensic_letter_opener_01",
+        "forensic_scissors_01",
+        "motive_audit_01"
+      ],
+      "status": "PUBLISHED",
+      "undeclared_placement_locations": [],
+      "winning_why_reachable": true
+    },
+    {
+      "declared_locations": [
+        "harbor_view_bar",
+        "miller_apartment_kitchen",
+        "miller_consulting_office"
+      ],
+      "decoy_why_reachable": true,
+      "difficulty": "medium",
+      "dim_clue_placements": [
+        [
+          "dim_clue_why",
+          "miller_apartment_kitchen",
+          "motive_audit_01"
+        ]
+      ],
+      "failure_code": null,
+      "label": "ADV-44-07 decoy WHY, winner present",
+      "published_row_present": true,
+      "reachable_evidence_ids": [
+        "body_found_01",
+        "cctv_thomas_scene_01",
+        "email_thomas_01",
+        "forensic_knife_match_01",
+        "forensic_letter_opener_01",
+        "forensic_scissors_01",
+        "motive_audit_01",
+        "motive_no_affair_01"
+      ],
+      "status": "PUBLISHED",
+      "undeclared_placement_locations": [],
+      "winning_why_reachable": true
+    },
+    {
+      "difficulty": "medium",
+      "failure_code": "PROVIDER_UNAVAILABLE",
+      "label": "ADV-44-07 decoy WHY, winner non-discoverable (unsupplementable)",
+      "published_row_present": false,
+      "status": "FAILED"
+    }
+  ]
+}

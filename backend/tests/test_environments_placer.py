@@ -298,7 +298,7 @@ def test_composed_world_graph_passes_pipeline_validation(kits, catalog, kit_id):
     kit = next(k for k in kits if k.environment_id == kit_id)
     golden = _golden_placements()
     composed = compose_world_graph_for_kit(kit, golden, catalog=catalog)
-    assert len(composed.placements) == 9
+    assert len(composed.placements) == 11
     assert validate_placement(kit, composed.placements, catalog=catalog) == ()
     object_ids = {golden[i].object_id for i in range(len(golden))}
     evidence_ids = {

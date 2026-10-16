@@ -983,7 +983,25 @@ def compose_world(
 
     # 1. base placements (golden facts verbatim, per-kit selection).
     facts = _placement_facts(evidence_placements)
-    base_ids = KIT_BASE_OBJECT_IDS.get(environment_id, tuple(KIT_BASE_OBJECT_IDS["apartment"]))
+    base_ids = list(
+        KIT_BASE_OBJECT_IDS.get(environment_id, tuple(KIT_BASE_OBJECT_IDS["apartment"]))
+    )
+    # Phase44 (ADR-004 D7 / Phase44 §16) — PRESERVE PLACEMENT LINKAGE for every
+    # meaningful evidence fact the caller keeps. Any source placement carrying a
+    # non-null ``evidenceId`` is treated as a base plan (never dropped), even
+    # when the static per-kit base set does not list it. Without this, a kit
+    # whose static base omits a golden evidence object (e.g. hotel_suite /
+    # warehouse historically omitted ``letter_opener``/``scissors``) silently
+    # dropped the solver-critical exclusion facts from the composed world,
+    # producing an unplayable/sparse investigation. The extras are appended in a
+    # deterministic sorted order so the composition stays reproducible.
+    base_id_set = set(base_ids)
+    evidence_object_ids = sorted(
+        object_id
+        for object_id, fact in facts.items()
+        if fact[2] is not None and object_id not in base_id_set
+    )
+    base_ids.extend(evidence_object_ids)
     base_plans: list[dict[str, Any]] = []
     for object_id in base_ids:
         fact = facts.get(object_id, _GOLDEN_OBJECT_FACTS.get(object_id))

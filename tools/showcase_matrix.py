@@ -285,13 +285,19 @@ def _draft_from_payload(payload: dict):
     )
 
 
-def recompute_composition(prompt: str, environment_id: str):
+def recompute_composition(prompt: str, environment_id: str, evidence_placements=()):
     """Deterministically recompute the DEV world composition of one prompt.
 
     Mirrors ``GenerationService._apply_kit_composition`` inputs (builtin
-    procedural spec provider, FRESH generated-asset cache). The returned
-    ``WorldComposition`` is used ONLY to record the Asset Oracle provenance —
-    diagnostics never serialized into any payload/DTO.
+    procedural spec provider, FRESH generated-asset cache, and the SOURCE
+    draft's evidence-linked placements). The returned ``WorldComposition`` is
+    used ONLY to record the Asset Oracle provenance — diagnostics never
+    serialized into any payload/DTO.
+
+    ``evidence_placements`` (Phase44) is the source stage draft's world-graph
+    placement tuple: the composer preserves placement linkage for every
+    evidence-bearing object, so the recomputation MUST receive the same source
+    placements as the service to stay byte-identical for the fidelity check.
     """
     from app.assets.catalog import load_catalog_from_repo
     from app.assets.generated_cache import GeneratedAssetCache
@@ -308,10 +314,35 @@ def recompute_composition(prompt: str, environment_id: str):
         env_resolver=None,
         spec_provider=KnownObjectSpecProvider(),
         cache=GeneratedAssetCache(),
-        evidence_placements=(),
+        evidence_placements=evidence_placements,
         catalog=load_catalog_from_repo(),
         kit=kit,
     )
+
+
+def source_evidence_placements(service) -> tuple:
+    """The source stage draft's world-graph placements (the composer input).
+
+    Reads the SAME builtin fake/demo stage script the service composes from and
+    parses its ``world_graph`` document, so the harness recomposition uses the
+    exact evidence-placement input the service does (Phase44 §16).
+    """
+    from app.generation import parser as generation_parser
+    from app.generation.provider import GenerationStage
+
+    try:
+        script = service._load_fake_script()
+    except Exception:  # noqa: BLE001 - diagnostics degrade to the empty input
+        return ()
+    entries = (script or {}).get(GenerationStage.WORLD_GRAPH) or ()
+    if not entries:
+        return ()
+    spec = generation_parser.parse_stage(
+        GenerationStage.WORLD_GRAPH, str(entries[0]), non_throwing=True
+    )
+    if spec is None:
+        return ()
+    return tuple(spec.placements)
 
 
 def evidence_reachability(environment_id: str, payload: dict):
@@ -426,7 +457,9 @@ def run_row(row_id: str, store, service, clock) -> dict:
     )
 
     # ---- deterministic composition provenance (diagnostics only) ------------
-    composition = recompute_composition(prompt, actual_env)
+    composition = recompute_composition(
+        prompt, actual_env, source_evidence_placements(service)
+    )
     row["compositionIssueCount"] = len(composition.issues)
     row["validationRepairCount"] = 0
     row["validationRepairSteps"] = []

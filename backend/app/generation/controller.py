@@ -26,6 +26,7 @@ from typing import Any
 
 from app.generation import pipeline
 from app.generation.admission import AdmissionController, AdmissionDenied
+from app.generation import difficulty_policy
 from app.generation.budgets import (
     PROVIDER_CALL_SAFETY_MARGIN_SECONDS,
     BudgetTracker,
@@ -167,6 +168,7 @@ class GenerationController:
         provider_model: str | None = None,
         provider_sub_id: str | None = None,
         demo_case_id: str | None = None,
+        difficulty: str | None = None,
     ) -> None:
         self._provider = provider
         self._admission = admission
@@ -220,6 +222,9 @@ class GenerationController:
         # Never truth, never a prompt, never internal fixture material; it is
         # only carried into the sanitized ``generation.started`` observability.
         self._demo_case_id = demo_case_id
+        # Phase44 (ADR-004 D1) — the NORMALIZED difficulty contract threaded to
+        # every attempt (Gate 3 thresholds + provider difficulty guidance).
+        self._difficulty = difficulty_policy.normalize_difficulty(difficulty)
         if isinstance(max_retained_attempts, bool) or not isinstance(
             max_retained_attempts, int
         ):
@@ -305,6 +310,7 @@ class GenerationController:
             prompt_note=note,
             locked=locked,
             budget=budget,
+            difficulty=self._difficulty,
         )
         self._attempts[attempt_id] = attempt
         self._wall_started[attempt_id] = time.perf_counter()

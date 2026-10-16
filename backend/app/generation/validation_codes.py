@@ -77,6 +77,25 @@ QUALITY_VALIDATOR_CODES: frozenset[str] = frozenset(
     }
 )
 
+# Phase44 (ADR-004 D2) — the closed Gate 3 playability issue codes. They are
+# registered in the shared validator-code vocabulary so the closed-token scan
+# and the repair-owner table (``repair_owners`` maps every vocabulary member)
+# stay total. Gate 3 failures are NOT part of a ``ValidationReport``; these
+# tokens are emitted only on the dedicated ``playability.validation.*`` events.
+PLAYABILITY_VALIDATOR_CODES: frozenset[str] = frozenset(
+    {
+        "PLAYABILITY_EMPTY_WORLD",
+        "PLAYABILITY_TOO_FEW_INSPECTABLES",
+        "PLAYABILITY_TOO_FEW_MEANINGFUL_INSPECTABLES",
+        "PLAYABILITY_EVIDENCE_UNREACHABLE",
+        "PLAYABILITY_CRITICAL_DIMENSION_UNREACHABLE",
+        "PLAYABILITY_EVIDENCE_OVERCONCENTRATED",
+        "PLAYABILITY_RED_HERRING_REQUIREMENT_UNMET",
+        "PLAYABILITY_WITNESS_CONTENT_UNREACHABLE",
+        "PLAYABILITY_DIFFICULTY_CONTRACT_UNMET",
+    }
+)
+
 VALIDATOR_CODE_VOCABULARY: frozenset[str] = frozenset(
     {
         "STRUCTURED_OUTPUT_INVALID",
@@ -94,7 +113,7 @@ VALIDATOR_CODE_VOCABULARY: frozenset[str] = frozenset(
         "ACTIVITY_LOG_DIRECT_TRUTH_LEAK",
         "ACTIVITY_LOG_ENTITY_LEAK",
     }
-) | QUALITY_VALIDATOR_CODES
+) | QUALITY_VALIDATOR_CODES | PLAYABILITY_VALIDATOR_CODES
 
 # Ordered severity (low -> high). The documented ordering in the module
 # docstring; every closed code has a value so ``repair_effectiveness`` is a
@@ -139,6 +158,18 @@ _VALIDATOR_CODE_SEVERITY: Mapping[str, int] = {
     "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET": 5,
     "DECEPTIVE_CLAIM_UNCONTRADICTED": 5,
     "PUBLIC_ROLE_TRUTH_LEAK": 7,
+    # Phase44 — Gate 3 playability codes are REPAIR/REGENERATE-class richness
+    # defects (same tier as the Phase35/41 content defects). They are emitted on
+    # the dedicated playability events, never inside a ValidationReport.
+    "PLAYABILITY_EMPTY_WORLD": 5,
+    "PLAYABILITY_TOO_FEW_INSPECTABLES": 5,
+    "PLAYABILITY_TOO_FEW_MEANINGFUL_INSPECTABLES": 5,
+    "PLAYABILITY_EVIDENCE_UNREACHABLE": 5,
+    "PLAYABILITY_CRITICAL_DIMENSION_UNREACHABLE": 5,
+    "PLAYABILITY_EVIDENCE_OVERCONCENTRATED": 5,
+    "PLAYABILITY_RED_HERRING_REQUIREMENT_UNMET": 5,
+    "PLAYABILITY_WITNESS_CONTENT_UNREACHABLE": 5,
+    "PLAYABILITY_DIFFICULTY_CONTRACT_UNMET": 5,
 }
 
 _DEFAULT_SEVERITY = 0  # unknown/foreign codes: lowest possible severity

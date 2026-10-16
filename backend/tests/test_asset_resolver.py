@@ -255,8 +255,10 @@ def test_resolve_placements_provenance_golden_mapping():
         "apartment_door": "CATALOG_EXACT",
         "apartment_lamp": "CATALOG_EXACT",
         "victim_body_placeholder": "CATALOG_EXACT",
+        "motive_audit_file": "CATALOG_EXACT",
+        "cctv_hall_monitor": "CATALOG_EXACT",
     }
-    assert len(placements) == 9
+    assert len(placements) == 11
     assert resolve_placements_provenance(placements) == expected
 
 
@@ -291,7 +293,7 @@ def test_published_golden_provenance_via_service_wiring(generation_service):
     assert started.status == "PUBLISHED"
     provenance = generation_service._last_publish_provenance
     assert provenance is not None
-    assert len(provenance) == 9
+    assert len(provenance) == 11
     assert all(value == "CATALOG_EXACT" for value in provenance.values())
     assert set(provenance) == {
         "kitchen_knife",
@@ -303,6 +305,8 @@ def test_published_golden_provenance_via_service_wiring(generation_service):
         "apartment_door",
         "apartment_lamp",
         "victim_body_placeholder",
+        "motive_audit_file",
+        "cctv_hall_monitor",
     }
 
 

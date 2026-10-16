@@ -133,7 +133,7 @@ def test_1b_case_scoped_dossier_keeps_41_2_evidence_list(phase5_app):
     case_id, creator = case_for(phase5_app)
     body = _case_public_case(phase5_app, case_id, creator)
     assert len(body["evidence"]) == 17, "case-scoped dossier keeps the full list (Phase41A witness opportunity)"
-    assert len(body["worldGraph"]["placements"]) == 9
+    assert len(body["worldGraph"]["placements"]) == 11
     for placement in body["worldGraph"]["placements"]:
         if placement["evidenceId"] is not None:
             assert placement["evidenceId"] in {e["id"] for e in body["evidence"]}
