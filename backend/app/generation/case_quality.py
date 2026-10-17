@@ -78,6 +78,8 @@ from app.domain.eligibility import (
     has_public_victim,
 )
 from app.domain.resolution import ResolutionType
+from app.domain.time_interval import parse_iso8601
+from app.domain.victim_profile import normalize_age, normalize_gender
 from app.generation.constraints import normalize_identity
 from app.generation.evidence_facts import mechanical_contradiction_fact_ids
 
@@ -117,6 +119,32 @@ HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET = "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET"
 # Phase41 — a materially deceptive claim with NO discoverable contradiction
 # path (the player would have to guess hidden truthfulness) is rejected.
 DECEPTIVE_CLAIM_UNCONTRADICTED = "DECEPTIVE_CLAIM_UNCONTRADICTED"
+
+# --------------------------------------------------------------------------- #
+# Phase 47 — victim-profile integrity codes (closed)
+# --------------------------------------------------------------------------- #
+#
+# BLOCKING / fail-closed (a broken victim reference breaks solvability and must
+# never reach publication): a victim-less public case, a dangling
+# ``crime.victim_id``, an empty victim name, or a ``BODY_FIRST_FOUND_AT``
+# record whose discovery location/time reference is invalid.
+VICTIM_MISSING = "VICTIM_MISSING"
+VICTIM_REFERENCE_DANGLING = "VICTIM_REFERENCE_DANGLING"
+VICTIM_NAME_EMPTY = "VICTIM_NAME_EMPTY"
+VICTIM_DISCOVERY_LOCATION_INVALID = "VICTIM_DISCOVERY_LOCATION_INVALID"
+VICTIM_DISCOVERY_TIME_INVALID = "VICTIM_DISCOVERY_TIME_INVALID"
+# DEF-118 — more than one public role=="victim" person (live/replay divergence).
+MULTIPLE_VICTIM_PERSONS = "MULTIPLE_VICTIM_PERSONS"
+
+# REPAIRABLE (deterministic default or bounded provider repair): an
+# INCOMPLETE identity profile. DEF-115: emitted for a RESOLVED victim person
+# whether ``presented_data`` is absent, empty or partial — an absent profile is
+# no longer a legacy escape hatch. A non-discoverable body-found record is also
+# repairable (it can never reach the player) — DEF-117.
+VICTIM_OCCUPATION_MISSING = "VICTIM_OCCUPATION_MISSING"
+VICTIM_AGE_INVALID = "VICTIM_AGE_INVALID"
+VICTIM_GENDER_INVALID = "VICTIM_GENDER_INVALID"
+VICTIM_DISCOVERY_NOT_DISCOVERABLE = "VICTIM_DISCOVERY_NOT_DISCOVERABLE"
 
 
 # --------------------------------------------------------------------------- #
@@ -488,6 +516,125 @@ def _deceptive_claim_issues(
     return ()
 
 
+def _victim_person_of(public: Any, victim_id: str | None) -> Any:
+    """The public victim person: the resolved ``crime.victim_id`` when known,
+    else the FIRST public ``role == "victim"`` person."""
+    persons = tuple(getattr(public, "persons", ()) or ())
+    if victim_id:
+        for person in persons:
+            if str(getattr(person, "person_id", "")) == victim_id:
+                return person
+        return None
+    for person in persons:
+        if str(getattr(person, "role", "")) == "victim":
+            return person
+    return None
+
+
+def _victim_profile_issues(
+    public: Any, truth: Any, evidence: Iterable[Any]
+) -> tuple[str, ...]:
+    """Phase 47 — victim-reference / victim-profile integrity (closed codes).
+
+    BLOCKING: victim-less public case, dangling ``crime.victim_id``, empty
+    victim name, MULTIPLE victim-role persons, invalid ``BODY_FIRST_FOUND_AT``
+    discovery location/time.
+
+    REPAIRABLE: an INCOMPLETE victim identity profile — emitted whenever a
+    RESOLVED victim person omits or mis-types a required public field (age /
+    gender / occupation), regardless of whether ``presented_data`` is present,
+    empty (``{}``) or absent (DEF-115). A non-discoverable body-found record is
+    also repairable (it can never reach the player). ``gender="unknown"`` is a
+    valid closed value and never flagged.
+
+    Pure and provider-free; never reads hidden ``truth`` fields other than the
+    canonical ``crime.victim_id`` (needed to resolve the victim person).
+    """
+    if public is None:
+        return ()
+    codes: set[str] = set()
+    crime = getattr(truth, "crime", None) if truth is not None else None
+    victim_id = getattr(crime, "victim_id", None) if crime is not None else None
+    if not isinstance(victim_id, str) or not victim_id:
+        victim_id = None
+
+    victims = _id_by_role(public, "victim")
+    if not victims:
+        codes.add(VICTIM_MISSING)
+    elif len(victims) > 1:
+        # DEF-118: more than one public victim-role person is a live/replay
+        # divergence (the replay resolves a single canonical victim) and can
+        # never render a coherent victim record.
+        codes.add(MULTIPLE_VICTIM_PERSONS)
+    victim_person = _victim_person_of(public, victim_id)
+    if victim_id is not None and victim_person is None:
+        codes.add(VICTIM_REFERENCE_DANGLING)
+
+    if victim_person is not None:
+        name = getattr(victim_person, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            codes.add(VICTIM_NAME_EMPTY)
+        presented = getattr(victim_person, "presented_data", None)
+        presented_map = presented if isinstance(presented, Mapping) else {}
+        # DEF-115: the identity gate applies whether or not presented_data is
+        # present — an absent/empty mapping is an INCOMPLETE profile, not a
+        # legacy escape hatch.
+        occupation = presented_map.get("occupation")
+        if not (isinstance(occupation, str) and occupation.strip()):
+            codes.add(VICTIM_OCCUPATION_MISSING)
+        if normalize_age(presented_map.get("age")) is None:
+            codes.add(VICTIM_AGE_INVALID)
+        gender = presented_map.get("gender")
+        if gender is None or not isinstance(gender, str):
+            codes.add(VICTIM_GENDER_INVALID)
+        elif (
+            normalize_gender(gender) == "unknown"
+            and gender.strip().casefold() != "unknown"
+        ):
+            codes.add(VICTIM_GENDER_INVALID)
+
+    # Discovery reference: validate ONLY a DISCOVERABLE body-found record (a
+    # case without one is not a discovery defect). DEF-117: a NON-discoverable
+    # body record is repairable — it can never reach the player.
+    found = False
+    found_nondiscoverable = False
+    valid_location = True
+    valid_time = True
+    resolver = getattr(public, "location", None)
+    for fact in evidence:
+        for prop in getattr(fact, "propositions", ()) or ():
+            if str(getattr(prop, "type", "")) != "BODY_FIRST_FOUND_AT":
+                continue
+            if not bool(getattr(fact, "discoverable", True)):
+                found_nondiscoverable = True
+                continue
+            found = True
+            location_id = getattr(prop, "location_id", None)
+            if (
+                not isinstance(location_id, str)
+                or not location_id
+                or not callable(resolver)
+                or resolver(location_id) is None
+            ):
+                valid_location = False
+            observed_at = getattr(prop, "observed_at", None)
+            if not isinstance(observed_at, str) or not observed_at:
+                valid_time = False
+            else:
+                try:
+                    parse_iso8601(observed_at)
+                except (ValueError, TypeError):
+                    valid_time = False
+    if found:
+        if not valid_location:
+            codes.add(VICTIM_DISCOVERY_LOCATION_INVALID)
+        if not valid_time:
+            codes.add(VICTIM_DISCOVERY_TIME_INVALID)
+    if found_nondiscoverable:
+        codes.add(VICTIM_DISCOVERY_NOT_DISCOVERABLE)
+    return tuple(codes)
+
+
 # --------------------------------------------------------------------------- #
 # single deterministic entry point
 # --------------------------------------------------------------------------- #
@@ -524,6 +671,7 @@ def validate_case_quality(
     view = _payload_view(public, evidence_tuple)
     codes.update(_witness_complete_issues(public, evidence_tuple, view))
     codes.update(_deceptive_claim_issues(truth, evidence_tuple, draft))
+    codes.update(_victim_profile_issues(public, truth, evidence_tuple))
     return tuple(sorted(codes))
 
 
@@ -534,11 +682,21 @@ __all__ = [
     "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET",
     "HOMICIDE_VICTIM_AS_MURDERER",
     "MURDERER_NOT_SUSPECT_CANDIDATE",
+    "MULTIPLE_VICTIM_PERSONS",
     "PUBLIC_ROLE_TRUTH_LEAK",
     "PUBLIC_ROLE_VOCABULARY",
     "SUICIDE_MURDERER_PRESENT",
     "SUICIDE_OPTION_MISSING",
+    "VICTIM_AGE_INVALID",
+    "VICTIM_DISCOVERY_LOCATION_INVALID",
+    "VICTIM_DISCOVERY_NOT_DISCOVERABLE",
+    "VICTIM_DISCOVERY_TIME_INVALID",
+    "VICTIM_GENDER_INVALID",
     "VICTIM_IN_SUSPECT_CANDIDATES",
+    "VICTIM_MISSING",
+    "VICTIM_NAME_EMPTY",
+    "VICTIM_OCCUPATION_MISSING",
+    "VICTIM_REFERENCE_DANGLING",
     "WITNESS_IN_SUSPECT_CANDIDATES",
     "WITNESS_STATEMENT_EMPTY",
     "WITNESS_STATEMENT_MISSING",

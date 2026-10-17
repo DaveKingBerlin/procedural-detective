@@ -58,6 +58,9 @@ BOOTSTRAP_KEYS = {
     # present — an empty list for a case without a witness person — so the
     # frontend witness contract is stable.
     "witnesses",
+    # Phase 47 frozen addition: the player-safe victim identity + body-discovery
+    # profile (OMITTED entirely for a victim-less pinned version).
+    "victim",
 }
 WORLD_OBJECT_KEYS = {
     "objectId",
@@ -144,7 +147,22 @@ def test_13_bootstrap_contains_no_undiscovered_evidence_content(phase5_app):
         and person.get("name")
     }
     forbidden_strings = []
+    # Phase 47: the bootstrap ``victim.discovery`` block legitimately exposes the
+    # PUBLIC body-found record (its location/time/title) — that record is the
+    # canonical "body was found" player-visible event, not an undiscovered
+    # evidence leak. Only that ONE BODY_FIRST_FOUND_AT record is exempted from
+    # the otherwise-deep undiscovered-evidence scan.
+    victim_discovery_fact_ids = {
+        str(fact.get("id"))
+        for fact in payload["draft"]["evidence"]
+        if any(
+            str((prop or {}).get("type")) == "BODY_FIRST_FOUND_AT"
+            for prop in fact.get("propositions") or ()
+        )
+    }
     for fact in payload["draft"]["evidence"]:
+        if str(fact.get("id")) in victim_discovery_fact_ids:
+            continue
         presentation = fact.get("presentation") or {}
         for value in presentation.values():
             if isinstance(value, str) and value:

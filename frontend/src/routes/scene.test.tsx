@@ -670,3 +670,46 @@ describe("Phase 32 DEF-045 — replay notebook/pin restore uses the PER-FILE nam
     expect(Object.keys(window.localStorage).sort()).toEqual(["pd_hypothesis_v1:PT-test-0001"]);
   });
 });
+
+/**
+ * Phase 47 Test 10 — save -> restore -> inspect victim. A loaded `.pdcase`
+ * replay must derive the optional `victim` block from the SAVED definition
+ * (no network; replay is browser-local) so the scene route renders the
+ * VictimProfilePanel and progressively discloses the body record.
+ */
+describe("Phase 47 — a saved-case replay renders the victim profile", () => {
+  let mounted: Mounted | null = null;
+
+  beforeEach(() => {
+    holders.bootstrap = makeSceneBootstrap();
+  });
+
+  afterEach(() => {
+    const root = mounted?.root;
+    mounted = null;
+    if (root) act(() => root.unmount());
+    clearReplay();
+    window.localStorage.clear();
+  });
+
+  it("derives the victim block from the loaded file and renders/reveals the body record", async () => {
+    const definition = parseSavegameV1(CANONICAL_TEXT, utf8ByteLength(CANONICAL_TEXT));
+    startReplay(definition);
+    mounted = mountScene();
+    await flushAsync();
+    await waitForReady(mounted.container);
+
+    clickObject(mounted.container, "victim_body_placeholder");
+    await flushAsync();
+
+    // The victim surface (not the generic evidence panel) is shown.
+    expect(mounted.container.querySelector('[data-testid="victim-panel"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-testid="victim-identity-name"]')?.textContent,
+    ).toContain("Sarah Miller");
+    // The body record was discovered+read through the replay and is now
+    // progressively disclosed as the discovery timeline.
+    expect(mounted.container.querySelector('[data-testid="victim-timeline"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-testid="evidence-panel"]')).toBeNull();
+  });
+});

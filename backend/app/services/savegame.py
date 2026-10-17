@@ -363,6 +363,11 @@ def _evidence_records_of(
         if not evidence_id:
             continue
         content = pub.project_read_content(payload, evidence_id)
+        # DEF-116: the public-safe ``victimRelated`` progressive-disclosure
+        # marker is KEPT in the exported record content. The savegame archive is
+        # player-known post-reveal, so the marker reveals nothing new; the
+        # browser replay runtime uses it to rebuild the victim's progressive
+        # sections after restore. No other serialization changes.
         tags = pub.witness_statement_content_tags(payload, evidence_id)
         if tags:
             content = {**content, **tags}

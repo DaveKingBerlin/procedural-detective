@@ -10,15 +10,24 @@ import type {
   PlayerKnowledgeDTO,
   RevealResponse,
   SubmittedAccusationDTO,
+  VictimDiscoveryDTO,
+  VictimProfileDTO,
   WitnessInterviewResponse,
   WitnessListEntryDTO,
   WitnessQuestionType,
   WitnessStatementDTO,
   WorldObjectDTO,
 } from "../api/types";
+import { parseVictimProfile } from "../scene/validation";
 import { REPLAY_CASE_VERSION, buildReplayReveal } from "./replayTruth";
 import { isValidAccusationTime } from "./savegameTime";
-import type { ReplayTruthV1, SavedCaseDefinition, SavegameEvidenceRecordV1 } from "./savegameV1";
+import type {
+  ReplayTruthV1,
+  SavedCaseDefinition,
+  SavegameEvidenceRecordV1,
+  SavegamePublicCaseV1,
+  SavegameWorldGraphPlacementV1,
+} from "./savegameV1";
 import { REPLAY_CASE_ID, REPLAY_PLAYTHROUGH_ID } from "./savegameV1";
 import type { AskedWitnessStatement } from "../witness/witnessModel";
 import { witnessQuestionKey } from "../witness/witnessModel";
@@ -67,6 +76,39 @@ export const REPLAY_WITNESS_KINDS: readonly string[] = Object.freeze([
   "suspect_statement",
 ]);
 
+/**
+ * Phase 47 — the canonical id of the victim-body world object/placement
+ * (`victim_body_placeholder`, mirroring the published scene). Used as a
+ * deterministic fallback when the saved scene does not carry the semantic
+ * `victim_body` asset identity.
+ */
+export const REPLAY_VICTIM_BODY_OBJECT_ID = "victim_body_placeholder";
+
+/**
+ * Phase 47 — the first resolvable time of a saved evidence record's TIMELINE
+ * content (entries first — the canonical shape — then events), or null. Pure,
+ * deterministic and player-safe: it reads only the record's public content.
+ */
+function firstEvidenceTime(record: SavegameEvidenceRecordV1): string | null {
+  const entries = record.content.entries;
+  if (Array.isArray(entries)) {
+    for (const entry of entries) {
+      if (entry !== null && typeof entry === "object" && typeof entry.time === "string" && entry.time !== "") {
+        return entry.time;
+      }
+    }
+  }
+  const events = record.content.events;
+  if (Array.isArray(events)) {
+    for (const event of events) {
+      if (event !== null && typeof event === "object" && typeof event.time === "string" && event.time !== "") {
+        return event.time;
+      }
+    }
+  }
+  return null;
+}
+
 export type ReplayPhase = "PLAYING" | "ACCUSED" | "REVEALED";
 
 export class FreshReplayState {
@@ -79,6 +121,20 @@ export class FreshReplayState {
   private readonly location: { locationId: string; name: string };
   private readonly replayTruth: ReplayTruthV1;
   private readonly witnessStatements: ReadonlyMap<string, ReadonlyMap<WitnessQuestionType, string>>;
+  /**
+   * Phase 47 — the SAVED public dossier. The replay derives its player-safe
+   * `victim` block from THIS (persons/locations/worldGraph) plus `evidence`
+   * ONLY — never from `replayTruth` or any hidden field. Player-safe by
+   * construction (the public case is what the player already sees).
+   */
+  private readonly publicCase: SavegamePublicCaseV1;
+  /**
+   * Phase 47 — the derived player-safe victim profile, computed ONCE from the
+   * saved definition (deterministic; no network). Null when the saved case
+   * publishes no victim person, so `freshBootstrap()` omits the block exactly
+   * like a pre-47/ victim-less case.
+   */
+  private readonly victimProfile: VictimProfileDTO | null;
 
   // ---------------- fresh replay state (per-loaded-file) ----------------
   private readonly discovered = new Set<string>();
@@ -107,12 +163,18 @@ export class FreshReplayState {
     this.environmentId = definition.scene.environmentId;
     this.location = { ...definition.scene.location };
     this.replayTruth = definition.replayTruth;
+    this.publicCase = definition.publicCase;
 
     const records = new Map<string, SavegameEvidenceRecordV1>();
     for (const record of definition.evidence) {
       records.set(record.evidenceId, record);
     }
     this.recordById = records;
+
+    // Phase 47 — derive the player-safe victim block from the SAVED public
+    // dossier + evidence (browser-local, no network). Computed once; the
+    // definition is immutable, so the profile is stable for this replay.
+    this.victimProfile = this.deriveVictimProfile();
 
     // Index the recorded interview statements (witnessId -> question -> record).
     const statements = new Map<string, Map<WitnessQuestionType, string>>();
@@ -199,6 +261,10 @@ export class FreshReplayState {
       },
       candidates: this.candidates,
       witnesses: this.witnesses.length > 0 ? [...this.witnesses] : [],
+      // Phase 47 — the derived player-safe victim block. OMITTED when the
+      // saved case publishes no victim (matches the frozen optional contract);
+      // it carries only public identity + discovery, never replay truth.
+      ...(this.victimProfile !== null ? { victim: this.victimProfile } : {}),
     };
   }
 
@@ -440,6 +506,122 @@ export class FreshReplayState {
       return this.candidates.finalTargets.map((target) => target.id);
     }
     return this.candidates.suspects.map((suspect) => suspect.id);
+  }
+
+  /* ------------------------- Phase 47 victim profile -------------------- */
+
+  /**
+   * Phase 47 — the player-safe victim profile of THIS saved case, derived
+   * ENTIRELY from the saved PUBLIC dossier (`publicCase.persons` +
+   * `worldGraph.placements` + `locations`) and the saved `evidence`. It never
+   * reads `replayTruth` or any hidden field, makes no network call, and is
+   * deterministic per definition.
+   *
+   * Returns null when no person has `role === "victim"`. The result is
+   * normalized through the SAME lenient trust-boundary parser the live
+   * bootstrap uses (`parseVictimProfile`), so absent identity fields become
+   * the frozen null shape and no `undefined`/`NaN` can leak into the profile.
+   */
+  private deriveVictimProfile(): VictimProfileDTO | null {
+    const victimPerson = this.publicCase.persons.find((person) => person.role === "victim");
+    if (victimPerson === undefined) return null;
+
+    const bodyPlacement = this.findVictimBodyPlacement();
+    const discovery = this.deriveVictimDiscovery(bodyPlacement);
+
+    // Build the raw candidate, OMITTING every absent identity value (the
+    // parser fills the frozen null shape); never emit undefined/null/NaN.
+    const raw: Record<string, unknown> = {
+      personId: victimPerson.personId,
+      name: victimPerson.name,
+    };
+    if (typeof victimPerson.age === "number" && Number.isFinite(victimPerson.age)) {
+      raw.age = victimPerson.age;
+    }
+    if (typeof victimPerson.gender === "string" && victimPerson.gender !== "") {
+      raw.gender = victimPerson.gender;
+    }
+    if (typeof victimPerson.occupation === "string" && victimPerson.occupation !== "") {
+      raw.occupation = victimPerson.occupation;
+    }
+    if (typeof victimPerson.background === "string" && victimPerson.background !== "") {
+      raw.background = victimPerson.background;
+    }
+    if (bodyPlacement !== null) {
+      raw.sceneObjectId = bodyPlacement.objectId;
+    }
+    if (discovery !== null) {
+      raw.discovery = discovery;
+    }
+    return parseVictimProfile(raw);
+  }
+
+  /**
+   * Phase 47 — the saved world-graph placement that represents the victim
+   * body. Deterministic, first-wins detection over the SAVED public case:
+   *   1. the placement whose scene world object is semantically the body
+   *      (`assetType`/`subtype === "victim_body"`) — the strongest public
+   *      signal;
+   *   2. the canonical `victim_body_placeholder` object id;
+   *   3. a `…BODY_PLACEHOLDER…` asset-id convention fallback.
+   * Returns null when no placement identifies a body (discovery omitted).
+   */
+  private findVictimBodyPlacement(): SavegameWorldGraphPlacementV1 | null {
+    const placements = this.publicCase.worldGraph.placements;
+    const isVictimBodyObject = (objectId: string): boolean => {
+      const object = this.worldObjects.find((entry) => entry.objectId === objectId);
+      return object !== undefined && (object.assetType === "victim_body" || object.subtype === "victim_body");
+    };
+    for (const placement of placements) {
+      if (isVictimBodyObject(placement.objectId)) return placement;
+    }
+    for (const placement of placements) {
+      if (placement.objectId === REPLAY_VICTIM_BODY_OBJECT_ID) return placement;
+    }
+    for (const placement of placements) {
+      if (placement.assetId.toUpperCase().includes("BODY_PLACEHOLDER")) return placement;
+    }
+    return null;
+  }
+
+  /**
+   * Phase 47 — the discovery reference of the victim body, best-effort and
+   * deterministic. Requires a resolved body placement WITH an evidence link
+   * that resolves to a saved record, a published location name and a first
+   * timeline time; otherwise the discovery is omitted (null) — the identity
+   * still renders.
+   */
+  private deriveVictimDiscovery(
+    placement: SavegameWorldGraphPlacementV1 | null,
+  ): VictimDiscoveryDTO | null {
+    if (placement === null) return null;
+    const evidenceId = placement.evidenceId;
+    if (typeof evidenceId !== "string" || evidenceId === "") return null;
+    const record = this.recordById.get(evidenceId);
+    if (record === undefined) return null;
+    const locationName = this.resolveLocationName(placement.locationId);
+    if (locationName === null) return null;
+    const observedAt = firstEvidenceTime(record);
+    if (observedAt === null) return null;
+    return {
+      evidenceId: record.evidenceId,
+      locationId: placement.locationId,
+      locationName,
+      observedAt,
+      title: record.title,
+    };
+  }
+
+  /** Phase 47 — a saved location display name for `locationId`, resolved from
+   *  the published `publicCase.locations`, then the scene location; null when
+   *  it cannot be resolved. */
+  private resolveLocationName(locationId: string): string | null {
+    const published = this.publicCase.locations.find((entry) => entry.locationId === locationId);
+    if (published !== undefined && published.name !== "") return published.name;
+    if (this.location.locationId === locationId && this.location.name !== "") {
+      return this.location.name;
+    }
+    return null;
   }
 
   private toReadDto(record: SavegameEvidenceRecordV1): EvidenceReadResultDTO {

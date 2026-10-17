@@ -422,6 +422,39 @@ a {
 }
 
 /* ======================================================================
+ * Phase 47 — victim inspection record.
+ *
+ * Reuses the existing `.evidence-panel` shell + design-system classes; only a
+ * few compact spacing classes are added for the profile sections/lists.
+ * ==================================================================== */
+
+.victim-panel .victim-section {
+  margin-top: 0.7rem;
+}
+
+.victim-panel .victim-section .evidence-block-title {
+  margin: 0 0 0.3rem;
+}
+
+.victim-facts {
+  margin: 0.3rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.victim-fact {
+  margin: 0.25rem 0;
+  overflow-wrap: anywhere;
+}
+
+.victim-fact-title {
+  font-weight: 600;
+}
+
+.victim-empty {
+  color: var(--muted);
+}
+
+/* ======================================================================
  * Phase 23 / Phase 26 (FixUI-A) — witness interviews.
  *
  * Two surfaces:

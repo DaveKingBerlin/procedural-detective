@@ -254,6 +254,11 @@ _PRE_REVEAL_FORBIDDEN_KEYS = frozenset(
         "correctDimensions", "totalDimensions", "overall", "isCorrect",
         "winner", "winning", "winners", "isWinner", "designated",
         "designation", "rank", "selected", "murderer", "victim",
+        # NOTE (Phase 47 / DEF-119): the top-level bootstrap ``victim`` block is
+        # a player-safe identity + body-discovery projection. It is exempted by
+        # an EXACT top-level path in ``assert_no_pre_reveal_material`` ONLY; a
+        # nested/truth-designating ``victim`` key (or ``victimId``) is still
+        # forbidden at any other path.
         # raw payload / solver / provider internals
         "universe", "universes", "solution", "solutionProof", "solverProof",
         "proof", "prompt", "providerOutput", "diagnostics", "seed", "model",
@@ -319,7 +324,14 @@ def assert_no_pre_reveal_material(
     for path, value in iter_key_paths(payload):
         leaf_key = path.rsplit(".", 1)[-1]
         if leaf_key in forbidden:
-            violations.append(f"forbidden key {path!r}")
+            # DEF-119: the ONLY allowed ``victim`` key is the exact top-level
+            # bootstrap victim block (the frozen Phase 47 player-safe identity +
+            # discovery projection). A nested ``victim`` (e.g. ``truth.victim``)
+            # or any other path stays forbidden.
+            if leaf_key == "victim" and path == "victim":
+                pass
+            else:
+                violations.append(f"forbidden key {path!r}")
         if isinstance(value, str):
             if known_tokens and value in known_tokens:
                 violations.append(f"known token value leaked at {path!r}")

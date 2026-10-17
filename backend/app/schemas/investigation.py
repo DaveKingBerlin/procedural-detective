@@ -258,6 +258,61 @@ class AccusationCandidatesDTO(BaseModel):
     hasSuicideOption: bool = False
 
 
+class VictimDiscoveryDTO(BaseModel):
+    """Phase 47 — the PUBLIC body-discovery block of the victim profile.
+
+    Derived from the discoverable evidence whose proposition type is
+    ``BODY_FIRST_FOUND_AT``: ``locationId`` / ``observedAt`` come from that
+    proposition (the location name resolves via the published locations and the
+    title from the record presentation). This is public body-found info — NEVER
+    the hidden crime time or any CaseTruth material.
+    """
+
+    evidenceId: str
+    locationId: str | None = None
+    locationName: str | None = None
+    observedAt: str | None = None
+    title: str | None = None
+
+
+class VictimProfileDTO(BaseModel):
+    """Phase 47 — the player-safe victim identity + discovery profile.
+
+    The victim IS the public person whose ``person_id`` equals
+    ``draft.crime.victim_id`` (no duplicate identity object). Identity fields
+    come from that person's ``presented_data`` normalization; every optional
+    sub-field (``age`` / ``gender`` / ``occupation`` / ``background`` /
+    ``discovery``) is OMITTED when absent (never ``null``/``undefined``), while
+    ``sceneObjectId`` stays present-or-null per the frozen shape.
+    """
+
+    personId: str
+    name: str
+    age: int | None = None
+    gender: str | None = None
+    occupation: str | None = None
+    background: str | None = None
+    sceneObjectId: str | None = None
+    discovery: VictimDiscoveryDTO | None = None
+
+    @model_serializer
+    def _serialize(self) -> dict[str, Any]:
+        """OMIT the optional identity sub-fields when absent (additive)."""
+        result: dict[str, Any] = {}
+        for field_name in type(self).model_fields:
+            value = getattr(self, field_name)
+            if field_name in (
+                "age",
+                "gender",
+                "occupation",
+                "background",
+                "discovery",
+            ) and value is None:
+                continue
+            result[field_name] = value
+        return result
+
+
 class InvestigationBootstrapResponse(BaseModel):
     """GET /api/v1/playthroughs/{playthrough_id}/investigation -> 200."""
 
@@ -284,6 +339,32 @@ class InvestigationBootstrapResponse(BaseModel):
             "witness person (absent only on pre-23 servers)."
         ),
     )
+    victim: VictimProfileDTO | None = Field(
+        default=None,
+        description=(
+            "Phase 47 addition: the player-safe victim identity + body-discovery "
+            "profile projected from the public payload (victim person + the "
+            "BODY_FIRST_FOUND_AT record). OMITTED entirely when the pinned "
+            "version has no resolvable victim (preserving byte-identical "
+            "bootstrap responses for victim-less cases)."
+        ),
+    )
+
+    @model_serializer
+    def _serialize(self) -> dict[str, Any]:
+        """OMIT the ``victim`` key entirely when there is no victim (Phase 47).
+
+        Mirrors the ``WorldObjectDTO.generated`` omit-when-absent pattern: a
+        victim-less pinned version serializes byte-identically to the pre-Phase
+        47 bootstrap, while a case with a victim carries the additive block.
+        """
+        result: dict[str, Any] = {}
+        for field_name in type(self).model_fields:
+            value = getattr(self, field_name)
+            if field_name == "victim" and value is None:
+                continue
+            result[field_name] = value
+        return result
 
 
 class DiscoveryResultDTO(BaseModel):

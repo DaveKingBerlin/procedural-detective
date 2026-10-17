@@ -60,7 +60,7 @@ PERSONS: tuple[PublicPerson, ...] = (
         name="Sarah Miller",
         role="victim",
         public_affordances=frozenset({"VISIBLE_CHARACTER"}),
-        presented_data={"age": 39, "occupation": "CEO, Miller Consulting"},
+        presented_data={"age": 39, "gender": "female", "occupation": "CEO, Miller Consulting"},
     ),
     PublicPerson(
         person_id="thomas_reed",

@@ -118,6 +118,11 @@ _CASE_TRUTH_QUALITY_CODES: frozenset[str] = frozenset(
         "SUICIDE_MURDERER_PRESENT",
         "HOMICIDE_VICTIM_AS_MURDERER",
         "SUICIDE_OPTION_MISSING",
+        # Phase47 — the victim-reference shape itself (no public victim person
+        # or a dangling trusted ``crime.victim_id``) is owned by CASE_TRUTH: the
+        # trusted crime shape must change to name a resolvable victim.
+        "VICTIM_MISSING",
+        "VICTIM_REFERENCE_DANGLING",
     }
 )
 
@@ -135,6 +140,18 @@ _CASE_PEOPLE_QUALITY_CODES: frozenset[str] = frozenset(
         # the deterministic projection (and its CASE_PEOPLE provider fallback)
         # own the public-person membership fix.
         "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET",
+        # Phase47 — victim-profile integrity owned by the public persons /
+        # discovery projection (name + incomplete identity + discovery
+        # reference). A CASE_PEOPLE rerun also invalidates evidence/world via
+        # the §11 dependency closure, so a discovery-reference fix is reachable.
+        "VICTIM_NAME_EMPTY",
+        "VICTIM_DISCOVERY_LOCATION_INVALID",
+        "VICTIM_DISCOVERY_TIME_INVALID",
+        "VICTIM_DISCOVERY_NOT_DISCOVERABLE",
+        "MULTIPLE_VICTIM_PERSONS",
+        "VICTIM_OCCUPATION_MISSING",
+        "VICTIM_AGE_INVALID",
+        "VICTIM_GENDER_INVALID",
     }
 )
 

@@ -326,20 +326,29 @@ def test_candidate_only_plan_from_report_keeps_evidence_drops_world():
 def test_declined_projection_falls_back_to_case_people_provider_repair():
     """The murderer person record has a protected public role — the projection
     CANNOT fix it deterministically (no role rewrite) and must DECLINE. The
-    controller's candidate-only plan then falls back to the canonical
-    CASE_PEOPLE provider repair which rewrites the role; the case publishes."""
+    controller then falls back to the canonical CASE_PEOPLE provider repair
+    which rewrites the role; the case publishes.
+
+    Phase 47 / DEF-118: the poisoned record (murderer role -> victim) now also
+    carries the BLOCKING ``MULTIPLE_VICTIM_PERSONS`` code, so the repair is the
+    FULL CASE_PEOPLE closure (case + evidence + logs + world + asset spec) —
+    the post list provides the whole closure.
+    """
     posts = [
         _murderer_role_victim_case(),
         _j(_evidence()),
         *_alog_posts(_CRIME_CANONICAL),
         _j(_world()),
         ICEPICK_SPEC,
-        # repair pass — the DRIVER falls back to the provider CASE repair.
+        # repair pass — the DRIVER falls back to the provider CASE repair (full
+        # CASE_PEOPLE closure: case + evidence + logs + world + asset spec).
         _j(_case_people()),
         _j(_evidence()),
         *_alog_posts(_CRIME_CANONICAL),
+        _j(_world()),
+        ICEPICK_SPEC,
     ]
-    record, transport = _run(posts, max_llm_calls_per_generation=14)
+    record, transport = _run(posts, max_llm_calls_per_generation=24)
 
     assert record.state is GenerationState.PUBLISHED
     assert record.budget.repair_passes == 1, "one targeted CASE repair pass"

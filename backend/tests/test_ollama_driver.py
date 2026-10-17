@@ -76,7 +76,7 @@ def _case_people(weapon="bronze_ceremonial_ice_pick"):
             "crimeTime": {"canonical": "2026-09-11T23:42:00+02:00", "accusationToleranceSeconds": 300},
         },
         "persons": [
-            {"personId": "anna_weiss", "name": "Dr. Anna Weiss", "role": "victim", "affordances": ["VISIBLE_CHARACTER"]},
+            {"personId": "anna_weiss", "name": "Dr. Anna Weiss", "role": "victim", "affordances": ["VISIBLE_CHARACTER"], "presentedData": {"age": 44, "gender": "female", "occupation": "Research Scientist"}},
             {"personId": "paul_becker", "name": "Paul Becker", "role": "suspect", "affordances": ["SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER"]},
             {"personId": "marcus_fischer", "name": "Marcus Fischer", "role": "suspect", "affordances": ["SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER"]},
             {"personId": "sophie_hoffmann", "name": "Sophie Hoffmann", "role": "suspect", "affordances": ["SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER"]},

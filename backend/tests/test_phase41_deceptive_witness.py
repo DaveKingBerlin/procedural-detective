@@ -133,6 +133,11 @@ def _witness_murderer_draft(suicide: bool = False) -> tuple:
                 "name": "Sarah Miller",
                 "role": "victim",
                 "affordances": ["VISIBLE_CHARACTER"],
+                "presentedData": {
+                    "age": 39,
+                    "gender": "female",
+                    "occupation": "CEO, Miller Consulting",
+                },
             },
             {
                 "personId": "thomas_reed",
@@ -478,7 +483,17 @@ def test_fix3c_driver_injects_camera_placement_for_contradiction():
     )
     public = PublicWorldSpec(
         persons=(
-            PersonSpec(person_id="sarah_miller", name="Sarah Miller", role="victim", affordances=("VISIBLE_CHARACTER",)),
+            PersonSpec(
+                person_id="sarah_miller",
+                name="Sarah Miller",
+                role="victim",
+                affordances=("VISIBLE_CHARACTER",),
+                presented_data={
+                    "age": 39,
+                    "gender": "female",
+                    "occupation": "CEO, Miller Consulting",
+                },
+            ),
             PersonSpec(person_id="thomas_reed", name="Thomas Reed", role="suspect", affordances=("SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER")),
             PersonSpec(person_id="michael_carter", name="Michael Carter", role="suspect", affordances=("SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER")),
             PersonSpec(person_id="emily_reed", name="Emily Reed", role="witness", affordances=("VISIBLE_CHARACTER",)),

@@ -39,6 +39,7 @@ from app.domain.public import (  # noqa: E402
     PublicTravelRule,
 )
 from app.domain.truth import CaseTruth, Crime, CrimeTime  # noqa: E402
+from app.domain.victim_profile import DEFAULT_VICTIM_AGE  # noqa: E402
 from app.generation.case_quality import (  # noqa: E402
     PUBLIC_ROLE_TRUTH_LEAK,
     VICTIM_IN_SUSPECT_CANDIDATES,
@@ -118,12 +119,41 @@ def canonical_inputs(document: dict):
     replay = case["replayTruth"]
     scene = case["scene"]["location"]
 
+    victim_id = next(
+        (p["personId"] for p in public_case["persons"] if p["role"] == "victim"),
+        None,
+    )
+
+    def _presented_data(p: dict) -> dict:
+        """The victim identity of one savegame publicCase person.
+
+        Phase 47 / DEF-115: the savegame ``publicCase`` persons carry the
+        projected identity fields directly (``age``/``gender``/``occupation``/
+        ``background``). Legacy (pre-Phase-47) reference documents have none —
+        the reconstruction applies the SAME documented deterministic victim
+        fallbacks the product's read projection uses (gender ``"unknown"``,
+        occupation ``"Unknown"``, the neutral in-range age constant) so those
+        frozen replay documents still validate against the now-mandatory victim
+        identity contract without touching their committed bytes.
+        """
+        identity = {
+            key: p[key]
+            for key in ("age", "gender", "occupation", "background")
+            if p.get(key) is not None
+        }
+        if victim_id is not None and p.get("personId") == victim_id:
+            identity.setdefault("gender", "unknown")
+            identity.setdefault("occupation", "Unknown")
+            identity.setdefault("age", DEFAULT_VICTIM_AGE)
+        return identity
+
     persons = [
         PublicPerson(
             person_id=p["personId"],
             name=p["name"],
             role=p["role"],
             public_affordances=frozenset(p["affordances"]),
+            presented_data=_presented_data(p),
         )
         for p in public_case["persons"]
     ]

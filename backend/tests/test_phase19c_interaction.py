@@ -291,7 +291,20 @@ def test_4_undiscovered_evidence_absent_from_bootstrap_and_interact(phase5_app):
         and person.get("name")
     }
     forbidden_strings = []
+    # Phase 47: the PUBLIC body-discovery record is legitimately exposed by the
+    # bootstrap victim profile (its location/time/title) — exempt it from the
+    # otherwise-deep undiscovered-evidence scan.
+    victim_discovery_fact_ids = {
+        str(fact.get("id"))
+        for fact in payload["draft"]["evidence"]
+        if any(
+            str((prop or {}).get("type")) == "BODY_FIRST_FOUND_AT"
+            for prop in fact.get("propositions") or ()
+        )
+    }
     for fact in payload["draft"]["evidence"]:
+        if str(fact.get("id")) in victim_discovery_fact_ids:
+            continue
         presentation = fact.get("presentation") or {}
         for value in presentation.values():
             if isinstance(value, str) and value:
@@ -308,7 +321,11 @@ def test_4_undiscovered_evidence_absent_from_bootstrap_and_interact(phase5_app):
         assert needle not in boot_text, f"undiscovered evidence content leaked in bootstrap: {needle!r}"
     assert "propositions" not in boot_text
     assert "sourceRef" not in boot_text
-    assert "observedAt" not in boot_text
+    # Phase 47: ``observedAt`` is permitted ONLY as the public victim-discovery
+    # timestamp; every other ``observedAt`` occurrence stays forbidden.
+    assert "observedAt" not in json.dumps(
+        {k: v for k, v in boot.items() if k != "victim"}, sort_keys=True
+    )
 
     # PublicCase: the existing leak scanner (Phase 5 INVARIANT 5) — no hidden
     # truth keys, no canonical designation, no propositions anywhere.
