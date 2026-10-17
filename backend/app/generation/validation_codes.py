@@ -74,6 +74,17 @@ QUALITY_VALIDATOR_CODES: frozenset[str] = frozenset(
         "FINAL_TARGET_UNIVERSE_EMPTY",
         "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET",
         "DECEPTIVE_CLAIM_UNCONTRADICTED",
+        # Phase47 — victim-profile integrity codes.
+        "VICTIM_MISSING",
+        "VICTIM_REFERENCE_DANGLING",
+        "VICTIM_NAME_EMPTY",
+        "VICTIM_DISCOVERY_LOCATION_INVALID",
+        "VICTIM_DISCOVERY_TIME_INVALID",
+        "VICTIM_OCCUPATION_MISSING",
+        "VICTIM_AGE_INVALID",
+        "VICTIM_GENDER_INVALID",
+        "VICTIM_DISCOVERY_NOT_DISCOVERABLE",
+        "MULTIPLE_VICTIM_PERSONS",
     }
 )
 
@@ -158,6 +169,19 @@ _VALIDATOR_CODE_SEVERITY: Mapping[str, int] = {
     "HOMICIDE_PERPETRATOR_NOT_FINAL_TARGET": 5,
     "DECEPTIVE_CLAIM_UNCONTRADICTED": 5,
     "PUBLIC_ROLE_TRUTH_LEAK": 7,
+    # Phase47 — victim-profile integrity. The BLOCKING victim-reference codes
+    # (a broken victim breaks solvability, fail-closed) sit on the high tier;
+    # the REPAIRABLE incomplete-identity codes sit with the content defects.
+    "VICTIM_MISSING": 7,
+    "VICTIM_REFERENCE_DANGLING": 7,
+    "VICTIM_NAME_EMPTY": 7,
+    "VICTIM_DISCOVERY_LOCATION_INVALID": 7,
+    "VICTIM_DISCOVERY_TIME_INVALID": 7,
+    "VICTIM_OCCUPATION_MISSING": 5,
+    "VICTIM_AGE_INVALID": 5,
+    "VICTIM_GENDER_INVALID": 5,
+    "VICTIM_DISCOVERY_NOT_DISCOVERABLE": 5,
+    "MULTIPLE_VICTIM_PERSONS": 7,
     # Phase44 — Gate 3 playability codes are REPAIR/REGENERATE-class richness
     # defects (same tier as the Phase35/41 content defects). They are emitted on
     # the dedicated playability events, never inside a ValidationReport.

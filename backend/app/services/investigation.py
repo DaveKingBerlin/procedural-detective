@@ -185,7 +185,7 @@ class InvestigationService:
         )
         snapshot = self._store.snapshot_player_knowledge(playthrough.playthrough_id)
         scene = pub.scene_spec_of(payload)
-        return {
+        result: dict[str, Any] = {
             "playthroughId": playthrough.playthrough_id,
             "caseId": playthrough.case_id,
             "caseVersion": playthrough.case_version,
@@ -218,6 +218,14 @@ class InvestigationService:
             # list when the case publishes no witness person. Sorted by id.
             "witnesses": pub.project_witnesses(payload),
         }
+        # Phase 47 additive: the player-safe victim identity + discovery
+        # profile. OMITTED entirely when the pinned version has no resolvable
+        # victim (the DTO serializer drops the key), preserving byte-identical
+        # bootstrap responses for victim-less cases.
+        victim = pub.victim_profile_of(payload)
+        if victim is not None:
+            result["victim"] = victim
+        return result
 
     # ------------------------------------------------------------------ #
     # discovery

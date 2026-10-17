@@ -296,14 +296,21 @@ def public_case_dict_from_payload(
                     "refusing to project a truth-bearing public role",
                     role,
                 )
-            out.append(
-                {
-                    "personId": person.get("person_id"),
-                    "name": person.get("name"),
-                    "role": role,
-                    "affordances": sorted(person.get("affordances") or ()),
-                }
-            )
+            item: dict[str, Any] = {
+                "personId": person.get("person_id"),
+                "name": person.get("name"),
+                "role": role,
+                "affordances": sorted(person.get("affordances") or ()),
+            }
+            # Phase 47 additive identity: the structured public identity keys of
+            # the person's ``presented_data`` mapping (snake_case in the stored
+            # payload) are normalized and projected with the SAME names as the
+            # PersonDTO fields. Absent/invalid values are OMITTED (never null),
+            # so a person without published identity stays byte-identical.
+            from app.domain.victim_profile import identity_of
+
+            item.update(identity_of(person.get("presented_data")))
+            out.append(item)
         return out
 
     def _motives() -> list[dict[str, Any]]:
@@ -1084,7 +1091,13 @@ def project_read_content(payload: Mapping[str, Any], evidence_id: str) -> dict[s
       concrete times come from the ALLOWLISTED events/observed-at anchors, so a
       WHEN record never renders as only "around the locked time"; ``comparison``
       for FORENSIC_COMPARISON);
-    - the kind-allowlisted public keys (Phase 6 exact allowlist, no more).
+    - the kind-allowlisted public keys (Phase 6 exact allowlist, no more);
+    - Phase 47 additive: ``victimRelated: true`` ONLY when the DISCOVERED record
+      is linked to the victim (a proposition ``person_id`` equals
+      ``crime.victim_id``; ``VICTIM_LAST_SEEN_ALIVE_AT`` with that person counts)
+      — OMITTED (never ``false``) for every other record so existing record
+      content stays byte-identical. It reveals NOTHING new: only the fact that
+      an already-discovered record mentions the already-public victim.
 
     Only the public presentation fields + parsed ``observed_at`` strings of the
     published payload are read; the hidden sections (truth / solverProof /
@@ -1097,7 +1110,174 @@ def project_read_content(payload: Mapping[str, Any], evidence_id: str) -> dict[s
         return {}
     from app.domain.render import render_payload_of
 
-    return render_payload_of(fact, content=_allowlisted_content_of(fact))
+    content = _allowlisted_content_of(fact)
+    if _record_is_victim_related(payload, fact):
+        content["victimRelated"] = True
+    return render_payload_of(fact, content=content)
+
+
+def _record_is_victim_related(
+    payload: Mapping[str, Any], fact: Mapping[str, Any]
+) -> bool:
+    """True when a published evidence record is linked to the victim.
+
+    "Linked" means any proposition ``person_id`` equals ``crime.victim_id``
+    (the ``VICTIM_LAST_SEEN_ALIVE_AT`` type carrying that person is the
+    canonical case and is included explicitly). Reads ONLY the public
+    ``draft.crime.victim_id`` + the proposition ``person_id`` references — never
+    truth / solverProof / universes. Never raises on a malformed payload.
+    """
+    try:
+        draft = _draft_of(payload)
+    except ValueError:
+        return False
+    crime = draft.get("crime")
+    if not isinstance(crime, Mapping):
+        return False
+    victim_id = crime.get("victim_id")
+    if not isinstance(victim_id, str) or not victim_id:
+        return False
+    for prop in fact.get("propositions") or ():
+        if not isinstance(prop, Mapping):
+            continue
+        if prop.get("person_id") == victim_id:
+            # Any victim-linked proposition counts; a VICTIM_LAST_SEEN_ALIVE_AT
+            # carrying the victim person is the canonical example.
+            return True
+    return False
+
+
+def _crime_victim_person_of(
+    payload: Mapping[str, Any],
+) -> tuple[str | None, Mapping[str, Any] | None]:
+    """The resolved ``(victim_id, person)`` of the pinned payload, or (None, None).
+
+    The victim IS the public person whose ``person_id`` equals
+    ``draft.crime.victim_id`` (never a separate identity object). Returns
+    ``(None, None)`` when the crime/victim id is absent or does not resolve.
+    """
+    draft = _draft_of(payload)
+    crime = draft.get("crime")
+    if not isinstance(crime, Mapping):
+        return None, None
+    victim_id = crime.get("victim_id")
+    if not isinstance(victim_id, str) or not victim_id:
+        return None, None
+    for person in draft.get("persons") or ():
+        if isinstance(person, Mapping) and str(person.get("person_id")) == victim_id:
+            return victim_id, person
+    return None, None
+
+
+def _location_name_of(draft: Mapping[str, Any], location_id: Any) -> str | None:
+    """Resolve a public location name from ``draft.locations`` (or None)."""
+    if not isinstance(location_id, str) or not location_id:
+        return None
+    for location in draft.get("locations") or ():
+        if not isinstance(location, Mapping):
+            continue
+        if str(location.get("location_id")) == location_id:
+            name = location.get("name")
+            if isinstance(name, str) and name:
+                return name
+            return None
+    return None
+
+
+def _body_found_of(
+    draft: Mapping[str, Any],
+) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]:
+    """The DISCOVERABLE ``BODY_FIRST_FOUND_AT`` evidence + proposition, or (None, None).
+
+    Scans the published evidence for the FIRST fact carrying a
+    ``BODY_FIRST_FOUND_AT`` proposition (the canonical body-discovery record).
+    DEF-117: a NON-discoverable body record is skipped — it can never reach the
+    player, so it must not back the public discovery block.
+    """
+    for fact in draft.get("evidence") or ():
+        if not isinstance(fact, Mapping):
+            continue
+        if not bool(fact.get("discoverable", True)):
+            continue
+        for prop in fact.get("propositions") or ():
+            if isinstance(prop, Mapping) and str(prop.get("type")) == "BODY_FIRST_FOUND_AT":
+                return fact, prop
+    return None, None
+
+
+def victim_profile_of(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Phase 47 — the player-safe victim identity + discovery projection.
+
+    Built EXCLUSIVELY from public payload sections:
+
+    - identity from ``draft.crime.victim_id -> draft.persons[]`` (the victim IS
+      that person) + its ``presented_data`` mapping
+      (``app.domain.victim_profile.identity_of`` normalization);
+    - discovery from the discoverable evidence carrying a ``BODY_FIRST_FOUND_AT``
+      proposition: ``locationId`` / ``observedAt`` from that proposition,
+      ``locationName`` resolved via ``draft.locations`` and ``title`` from the
+      record's ``presentation`` — PUBLIC body-found info, never the hidden
+      crime time;
+    - ``sceneObjectId`` = the ``object_id`` of the world-graph placement whose
+      ``evidence_id`` equals the discovery evidence id (else omitted).
+
+    Returns ``None`` when no resolvable victim exists (the bootstrap then OMITS
+    the ``victim`` key entirely). Never reads ``truth`` / ``solverProof`` /
+    ``universes`` / ``crime.crimeTime``.
+    """
+    from app.domain.victim_profile import (
+        DEFAULT_VICTIM_AGE,
+        DEFAULT_VICTIM_OCCUPATION,
+        GENDER_UNKNOWN,
+        identity_of,
+    )
+
+    draft = _draft_of(payload)
+    victim_id, person = _crime_victim_person_of(payload)
+    if victim_id is None or person is None:
+        return None
+    name = person.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    profile: dict[str, Any] = {"personId": victim_id, "name": name}
+    identity = identity_of(person.get("presented_data"))
+    # DEF-115 — DOCUMENTED deterministic fallbacks so a PUBLISHED case always
+    # renders a COMPLETE victim identity (name + age + gender + occupation).
+    # These are neutral presentation defaults only; they NEVER fabricate a
+    # solution-critical fact (no motive/weapon/killer/crime time):
+    #   gender missing/invalid -> "unknown"
+    #   occupation missing     -> "Unknown"
+    #   age missing/invalid    -> DEFAULT_VICTIM_AGE (a neutral in-range constant)
+    identity.setdefault("gender", GENDER_UNKNOWN)
+    identity.setdefault("occupation", DEFAULT_VICTIM_OCCUPATION)
+    identity.setdefault("age", DEFAULT_VICTIM_AGE)
+    profile.update(identity)
+
+    fact, prop = _body_found_of(draft)
+    if fact is None or prop is None:
+        return profile
+    evidence_id = str(fact.get("id"))
+    discovery: dict[str, Any] = {"evidenceId": evidence_id}
+    location_id = prop.get("location_id")
+    if isinstance(location_id, str) and location_id:
+        discovery["locationId"] = location_id
+        location_name = _location_name_of(draft, location_id)
+        if location_name is not None:
+            discovery["locationName"] = location_name
+    observed_at = prop.get("observed_at")
+    if isinstance(observed_at, str) and observed_at:
+        discovery["observedAt"] = observed_at
+    title = _presentation_of(fact).get("title")
+    if isinstance(title, str) and title:
+        discovery["title"] = title
+    profile["discovery"] = discovery
+    placements = _sort_placements_for_evidence(_placements_of(payload), evidence_id)
+    for placement in placements:
+        object_id = placement.get("object_id")
+        if object_id is not None:
+            profile["sceneObjectId"] = str(object_id)
+            break
+    return profile
 
 
 def player_knowledge_snapshot(snapshot: Any) -> dict[str, list[str]]:
@@ -1228,6 +1408,7 @@ __all__ = [
     "read_dto_title",
     "scene_spec_of",
     "serialize_published_payload",
+    "victim_profile_of",
     "visible_placement_for_object",
     "witness_statement_content_tags",
 ]

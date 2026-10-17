@@ -139,6 +139,13 @@ def assert_no_hidden_leaks(
         if leaf_key in _FORBIDDEN_ANYWHERE:
             if leaf_key == "generationAttemptId":
                 continue  # public creation-time label (POST /cases contract)
+            # Phase 47 — the bootstrap ``victim.discovery`` block legitimately
+            # exposes the PUBLIC body-found timestamp under ``observedAt`` (the
+            # frozen victim-profile contract). It is NOT the hidden crime time:
+            # the value scan below still forbids the canonical crime time, and
+            # no other ``observedAt`` path is exempted.
+            if leaf_key == "observedAt" and path == "victim.discovery.observedAt":
+                continue
             violations.append(f"forbidden key {path!r}")
         if leaf_key == "motiveId" and not _MOTIVE_PATH_RE.match(path):
             violations.append(f"motiveId outside the public motives collection at {path!r}")

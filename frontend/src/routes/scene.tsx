@@ -37,6 +37,8 @@ import { focusCloseKey } from "../scene/focusCamera";
 import { evidenceLabelFor, focusBadgesFor } from "../scene/objectLabel";
 import FocusInspection from "../scene/FocusInspection";
 import { tooltipForHover, type ObjectTooltipModel } from "../scene/objectTooltip";
+import VictimProfilePanel from "../scene/VictimProfilePanel";
+import { isVictimSceneObject } from "../scene/victimModel";
 import { createInvestigationScene } from "../scene/renderInvestigation";
 import type { InvestigationSceneHandle } from "../scene/renderInvestigation";
 import { loadHypothesis, saveHypothesis, type HypothesisPins } from "../notebook/hypothesisStore";
@@ -73,6 +75,19 @@ export default function ScenePage() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sessionRef = useRef<InvestigationSession | null>(null);
   const sceneHandleRef = useRef<InvestigationSceneHandle | null>(null);
+  /**
+   * DEF-114 — per-interaction request bookkeeping so a Close/ESC issued WHILE
+   * an object's interaction is in flight stays durable (the late response must
+   * NOT re-open the panel the player already dismissed). `interactionSeqRef` is
+   * a monotonic request token; `inFlightSeqRef` maps the latest token per
+   * objectId; `dismissedSeqRef` holds the tokens the player dismissed after
+   * their request started. `selectedObjectIdRef` mirrors the selected object
+   * for the (effect-bound) ESC handler without re-subscribing every render.
+   */
+  const interactionSeqRef = useRef(0);
+  const inFlightSeqRef = useRef<Map<string, number>>(new Map());
+  const dismissedSeqRef = useRef<Set<number>>(new Set());
+  const selectedObjectIdRef = useRef<string | null>(null);
   const [status, setStatus] = useState<PageStatus>(() =>
     hasStoredCredential() ? { status: "loading" } : { status: "no-token" },
   );
@@ -124,6 +139,11 @@ export default function ScenePage() {
   /** Phase 32 — the active saved replay (null during a live playthrough). */
   const replay = activeReplay() ?? undefined;
 
+  // DEF-114 — keep the selected-object mirror fresh for the close handler.
+  useEffect(() => {
+    selectedObjectIdRef.current = selectedObjectId;
+  }, [selectedObjectId]);
+
   const retry = () => {
     setRunId((n) => n + 1);
   };
@@ -145,7 +165,19 @@ export default function ScenePage() {
     setStatus({ status: "no-token" });
   };
 
-  const applyFeedback = (feedback: InteractionFeedback) => {
+  /**
+   * DEF-114 — begin ONE object interaction and return its monotonic request
+   * token. The matching `applyFeedback(feedback, token)` consumes the token so
+   * a Close/ESC issued DURING the round-trip is durable: the late response
+   * still applies its toast/knowledge updates but never re-opens the panel.
+   */
+  const beginInteraction = (objectId: string): number => {
+    const token = (interactionSeqRef.current += 1);
+    inFlightSeqRef.current.set(objectId, token);
+    return token;
+  };
+
+  const applyFeedback = (feedback: InteractionFeedback, token: number) => {
     if (feedback.toast !== null && feedback.error === null) {
       setHasInteracted(true);
     }
@@ -175,8 +207,18 @@ export default function ScenePage() {
       );
     }
     setToast(feedback.toast);
-    setRecordPanel(feedback.record);
     setInteractionError(feedback.error?.message ?? null);
+    // DEF-114 — consume this request's token. If the player CLOSED this object
+    // after its interaction started, keep it closed: the discovery toast and
+    // knowledge updates above already applied, but the panel is NOT re-opened.
+    const wasDismissed = dismissedSeqRef.current.delete(token);
+    if (inFlightSeqRef.current.get(feedback.objectId) === token) {
+      inFlightSeqRef.current.delete(feedback.objectId);
+    }
+    if (wasDismissed) {
+      return;
+    }
+    setRecordPanel(feedback.record);
     // Phase 42 §15/§17 — EVERY inspectable result (an evidence record OR a
     // NEUTRAL inspection) becomes an inspection target: the object is selected
     // + focused and the panel context is derived from the (possibly
@@ -195,10 +237,37 @@ export default function ScenePage() {
 
   /** Close the evidence panel and release the selected-object focus. */
   const closeRecordPanel = () => {
+    // DEF-114 — record that the player dismissed the currently selected object
+    // AFTER its interaction started, so the late response cannot re-open it.
+    const dismissedObjectId = selectedObjectIdRef.current;
+    if (dismissedObjectId !== null) {
+      const seq = inFlightSeqRef.current.get(dismissedObjectId);
+      if (seq !== undefined) dismissedSeqRef.current.add(seq);
+    }
     setRecordPanel(null);
     setPanelContext(null);
     setSelectedObjectId(null);
     sceneHandleRef.current?.setObjectSelected(null);
+  };
+
+  /**
+   * Phase 47 — the victim body selects its profile surface IMMEDIATELY
+   * (identity visible before any network round-trip); the normal inspect
+   * interaction STILL runs afterwards to discover/read the body record. Every
+   * non-victim object is untouched.
+   */
+  const selectVictimImmediately = (objectId: string) => {
+    const session = sessionRef.current;
+    if (!session) return;
+    const victim = session.victimSnapshot();
+    if (victim === null) return;
+    const model = session.sceneModel;
+    const worldObject = model?.worldObjects.find((o) => o.objectId === objectId) ?? null;
+    if (worldObject === null || !isVictimSceneObject(worldObject, victim)) return;
+    setInteractionError(null);
+    setPanelContext(evidencePreviewFor(model, objectId) ?? null);
+    setSelectedObjectId(objectId);
+    sceneHandleRef.current?.setObjectSelected(objectId);
   };
 
   /** Open the interview panel for a witness (3D pick / list button / section). */
@@ -225,7 +294,10 @@ export default function ScenePage() {
       openWitnessPanel(witness);
       return;
     }
-    void session.interact(objectId).then((feedback) => applyFeedback(feedback));
+    // Phase 47 — the victim opens its investigation record immediately.
+    selectVictimImmediately(objectId);
+    const token = beginInteraction(objectId);
+    void session.interact(objectId).then((feedback) => applyFeedback(feedback, token));
   };
 
   /**
@@ -381,8 +453,12 @@ export default function ScenePage() {
               openWitnessPanel(witness);
               return;
             }
+            // Phase 47 — the victim opens its investigation record immediately
+            // (identity visible before the interaction round-trip resolves).
+            selectVictimImmediately(objectId);
+            const token = beginInteraction(objectId);
             void session.interact(objectId).then((feedback) => {
-              if (!cancelled) applyFeedback(feedback);
+              if (!cancelled) applyFeedback(feedback, token);
             });
           },
           onHoverStart: (objectId, origin) => {
@@ -614,6 +690,17 @@ export default function ScenePage() {
     selectedObjectId === null || status.status !== "ready"
       ? null
       : status.model.worldObjects.find((o) => o.objectId === selectedObjectId) ?? null;
+
+  // Phase 47 — the victim body is a PROFILE surface, not a generic evidence
+  // record: when the selected object resolves to the published victim body the
+  // route renders the VictimProfilePanel and suppresses the duplicate generic
+  // EvidencePanel for the same body record. Identity/Discovery come from the
+  // public `victim` block (visible immediately); Known facts / Forensic /
+  // Timeline derive from the session's READ-record cache only (progressive
+  // disclosure — server-authoritative, no hidden truth).
+  const victimProfile = session?.victimSnapshot() ?? null;
+  const victimSelected =
+    focusedWorldObject !== null && isVictimSceneObject(focusedWorldObject, victimProfile);
 
   // Forensic focus follows the selection. The glue's setObjectFocus is
   // idempotent (same id = no-op) and presentation-only: it never re-dispatches
@@ -1001,7 +1088,19 @@ export default function ScenePage() {
         </div>
       )}
 
-      {recordPanel && (
+      {/* Phase 47 — the victim investigation record. Shown INSTEAD of the
+          generic evidence panel for the victim body (no duplicate surface);
+          re-derives from the session's READ-record cache on every render, so
+          a body discovery/read lands here progressively. */}
+      {victimSelected && victimProfile !== null && (
+        <VictimProfilePanel
+          victim={victimProfile}
+          records={sessionRef.current?.recordCacheSnapshot() ?? []}
+          onClose={closeRecordPanel}
+        />
+      )}
+
+      {!victimSelected && recordPanel && (
         <EvidencePanel
           record={recordPanel}
           onClose={closeRecordPanel}

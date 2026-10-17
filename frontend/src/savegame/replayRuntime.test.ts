@@ -4,6 +4,7 @@ import canonical from "./fixtures/v1_demo_apartment.pdcase.json";
 import suicideFixture from "./fixtures/v1_suicide_case.pdcase.json";
 import witnessMurdererFixture from "./fixtures/v1_witness_murderer.pdcase.json";
 import { FreshReplayState } from "./replayRuntime";
+import { buildVictimProfileView } from "../scene/victimModel";
 import { parseSavegameV1, utf8ByteLength } from "./savegameV1";
 
 /**
@@ -417,5 +418,123 @@ describe("replay — repeated replay (Phase32 §2/§30)", () => {
     const state = makeState();
     const bootstrap = state.freshBootstrap();
     expect(Object.keys(bootstrap.scene)).toContain("worldObjects");
+  });
+});
+
+/**
+ * Phase 47 — the saved-case replay must preserve the visible VICTIM record
+ * across save -> restore -> inspect (Test 10). The optional `victim` block is
+ * derived from the SAVED public dossier (`persons` + `worldGraph.placements`
+ * + `locations`) and the saved `evidence` ONLY — never the replay truth.
+ */
+describe("Phase 47 replay — derived victim profile (freshBootstrap)", () => {
+  /** Clone the canonical file with the victim person's public identity set. */
+  function withVictimIdentity(fields: Record<string, unknown>): ReturnType<typeof parseSavegameV1> {
+    const doc = JSON.parse(CANONICAL_TEXT);
+    const victim = doc.case.publicCase.persons.find((p: { role: string }) => p.role === "victim");
+    Object.assign(victim, fields);
+    const text = JSON.stringify(doc);
+    return parseSavegameV1(text, utf8ByteLength(text));
+  }
+
+  /** Clone the canonical file with NO person carrying `role === "victim"`. */
+  function withoutVictimPerson(): ReturnType<typeof parseSavegameV1> {
+    const doc = JSON.parse(CANONICAL_TEXT);
+    const victim = doc.case.publicCase.persons.find((p: { role: string }) => p.role === "victim");
+    victim.role = "family";
+    const text = JSON.stringify(doc);
+    return parseSavegameV1(text, utf8ByteLength(text));
+  }
+
+  it("derives the victim identity + body discovery from the saved public dossier", () => {
+    const bootstrap = new FreshReplayState(load()).freshBootstrap();
+    const victim = bootstrap.victim;
+    expect(victim).toBeDefined();
+    expect(victim?.personId).toBe("sarah_miller");
+    expect(victim?.name).toBe("Sarah Miller");
+    expect(victim?.sceneObjectId).toBe("victim_body_placeholder");
+    expect(victim?.discovery).toEqual({
+      evidenceId: "body_found_01",
+      locationId: "miller_apartment_kitchen",
+      locationName: "Miller Apartment - Kitchen",
+      observedAt: "2026-09-11T22:18:31+02:00",
+      title: "Body found in the kitchen at 22:18",
+    });
+  });
+
+  it("carries the optional public identity fields when the save publishes them", () => {
+    const definition = withVictimIdentity({
+      age: 41,
+      gender: "female",
+      occupation: "Architect",
+      background: "Respected local architect, recently returned from abroad.",
+    });
+    const victim = new FreshReplayState(definition).freshBootstrap().victim;
+    expect(victim?.age).toBe(41);
+    expect(victim?.gender).toBe("female");
+    expect(victim?.occupation).toBe("Architect");
+    expect(victim?.background).toBe("Respected local architect, recently returned from abroad.");
+  });
+
+  it("degrades an absent/legacy identity to the frozen null shape (never undefined/NaN)", () => {
+    const victim = new FreshReplayState(load()).freshBootstrap().victim;
+    expect(victim?.age).toBeNull();
+    expect(victim?.gender).toBeNull();
+    expect(victim?.occupation).toBeNull();
+    expect(victim?.background).toBeNull();
+  });
+
+  it("omits the victim block when the saved case publishes no victim person", () => {
+    const bootstrap = new FreshReplayState(withoutVictimPerson()).freshBootstrap();
+    expect(bootstrap.victim ?? null).toBeNull();
+  });
+
+  it("the serialized bootstrap never contains replay truth or hidden fields", () => {
+    const serialized = JSON.stringify(new FreshReplayState(load()).freshBootstrap());
+    expect(serialized).not.toContain("replayTruth");
+    expect(serialized).not.toContain("accusationToleranceSeconds");
+    expect(serialized).not.toContain("murdererName");
+    expect(serialized).not.toContain("motiveLabel");
+    expect(serialized).not.toContain("weaponName");
+  });
+
+  it("DEF-116 — preserves `victimRelated` content and discloses it in the replayed victim profile", () => {
+    // Author a save whose body + forensic records carry the public
+    // `victimRelated` marker the backend now preserves.
+    const doc = JSON.parse(CANONICAL_TEXT);
+    const mark = (evidenceId: string): void => {
+      const record = doc.case.evidence.find((entry: { evidenceId: string }) => entry.evidenceId === evidenceId);
+      record.content.victimRelated = true;
+    };
+    mark("body_found_01");
+    mark("forensic_knife_match_01");
+    const text = JSON.stringify(doc);
+    const definition = parseSavegameV1(text, utf8ByteLength(text));
+
+    // The optional field parses and survives validation.
+    expect(
+      definition.evidence.find((record) => record.evidenceId === "body_found_01")?.content.victimRelated,
+    ).toBe(true);
+
+    // It replays through discovery/read into the victim profile's Known facts.
+    const state = new FreshReplayState(definition);
+    state.interactObject("victim_body_placeholder", "inspect");
+    state.interactObject("kitchen_knife", "inspect");
+    const records = [state.readRecord("body_found_01"), state.readRecord("forensic_knife_match_01")];
+    const victim = state.freshBootstrap().victim;
+    expect(victim).not.toBeNull();
+    if (victim === undefined || victim === null) return;
+    const view = buildVictimProfileView(victim, records);
+    expect(view.knownFacts.map((fact) => fact.evidenceId)).toContain("body_found_01");
+    expect(view.forensicFindings.map((finding) => finding.evidenceId)).toContain(
+      "forensic_knife_match_01",
+    );
+  });
+
+  it("DEF-116 — a legacy record without `victimRelated` still parses (field stays absent)", () => {
+    const definition = parseSavegameV1(CANONICAL_TEXT, utf8ByteLength(CANONICAL_TEXT));
+    expect(
+      definition.evidence.find((record) => record.evidenceId === "body_found_01")?.content.victimRelated,
+    ).toBeUndefined();
   });
 });

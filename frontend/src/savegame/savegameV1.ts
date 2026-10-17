@@ -104,6 +104,8 @@ export const MAX_CONTENT_ENTRIES = 128;
 export const MAX_CONTENT_EVENTS = 64;
 export const MAX_CONTENT_ROWS = 64;
 export const MAX_PERSON_IDS = 16;
+/** Phase 47 — max accepted victim/person age (defensive bound). */
+export const MAX_PERSON_AGE = 150;
 
 /** The closed evidence render-type universe (mirror of evidenceContent.ts). */
 export const SAVEGAME_RENDER_TYPES: readonly string[] = Object.freeze([
@@ -232,6 +234,16 @@ export interface SavegamePersonV1 {
   name: string;
   role: string;
   affordances: string[];
+  /**
+   * Phase 47 — OPTIONAL public victim/person identity fields. The backend
+   * emits each key ONLY when non-null; legacy exports omit them entirely and
+   * MUST stay byte-identical through a re-export (so these are `?` and the
+   * validator preserves "absent stays absent").
+   */
+  age?: number | null;
+  gender?: string | null;
+  occupation?: string | null;
+  background?: string | null;
 }
 
 export interface SavegameMotiveV1 {
@@ -335,6 +347,14 @@ export interface SavegameEvidenceContentV1 {
   events?: { time: string; personId?: string | null; action: string }[];
   rows?: { date?: string; from?: string; to?: string; amount?: string; currency?: string; description?: string }[];
   suspicious?: boolean;
+  /**
+   * Phase 47 (DEF-116) — OPTIONAL player-safe marker linking a record to the
+   * victim. The backend preserves it in exported record content; the client
+   * uses it ONLY to progressively disclose the victim profile's Known facts /
+   * Forensic findings. It is public-safe (never hidden CaseTruth) and ABSENT on
+   * legacy exports (which stay byte-identical through a re-export).
+   */
+  victimRelated?: boolean;
   toPersonIds?: string[];
   fromPersonId?: string;
   subject?: string;
@@ -808,13 +828,47 @@ function validatePublicCaseLocation(raw: unknown, where: string): SavegameLocati
 
 function validatePublicPerson(raw: unknown, where: string): SavegamePersonV1 {
   const record = requireRecord(raw, where);
-  assertOnlyKeys(record, ["personId", "name", "role", "affordances"], where);
-  return {
+  assertOnlyKeys(
+    record,
+    ["personId", "name", "role", "affordances", "age", "gender", "occupation", "background"],
+    where,
+  );
+  const person: SavegamePersonV1 = {
     personId: requireBoundedString(record, "personId", where, MAX_ID_LENGTH),
     name: requireBoundedString(record, "name", where, MAX_SHORT_TEXT_LENGTH),
     role: requireBoundedString(record, "role", where, MAX_SHORT_TEXT_LENGTH),
     affordances: requireStringArray(record, "affordances", where, 16),
   };
+  // Phase 47 — OPTIONAL public identity fields. An ABSENT key stays absent so
+  // a legacy export re-exports byte-identically; a PRESENT value is strictly
+  // typed/bounded (never silently coerced). Age accepts null or a bounded
+  // non-negative integer; gender/occupation/background accept null or a bounded
+  // non-empty string.
+  if (record.age !== undefined) {
+    const value = record.age;
+    if (value === null) {
+      person.age = null;
+    } else if (
+      typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= 0 &&
+      value <= MAX_PERSON_AGE
+    ) {
+      person.age = value;
+    } else {
+      invalid(`${where}.age`, `must be an integer within [0, ${MAX_PERSON_AGE}] or null`, value, "integer|null");
+    }
+  }
+  if (record.gender !== undefined) {
+    person.gender = requireBoundedNullableNonEmptyString(record, "gender", where, MAX_SHORT_TEXT_LENGTH);
+  }
+  if (record.occupation !== undefined) {
+    person.occupation = requireBoundedNullableNonEmptyString(record, "occupation", where, MAX_SHORT_TEXT_LENGTH);
+  }
+  if (record.background !== undefined) {
+    person.background = requireBoundedNullableNonEmptyString(record, "background", where, MAX_LONG_TEXT_LENGTH);
+  }
+  return person;
 }
 
 function validatePublicMotive(raw: unknown, where: string): SavegameMotiveV1 {
@@ -1290,6 +1344,7 @@ function validateEvidenceContent(raw: unknown, where: string): SavegameEvidenceC
     "events",
     "rows",
     "suspicious",
+    "victimRelated",
     "toPersonIds",
     "fromPersonId",
     "subject",
@@ -1356,6 +1411,16 @@ function validateEvidenceContent(raw: unknown, where: string): SavegameEvidenceC
       invalid(`${where}.suspicious`, "must be a boolean");
     }
     content.suspicious = record.suspicious;
+  }
+
+  // Phase 47 (DEF-116) — OPTIONAL player-safe `victimRelated` marker. Preserved
+  // from the backend export; strictly boolean when present. Absent stays absent
+  // so a legacy record re-exports byte-identically.
+  if (record.victimRelated !== undefined) {
+    if (typeof record.victimRelated !== "boolean") {
+      invalid(`${where}.victimRelated`, "must be a boolean");
+    }
+    content.victimRelated = record.victimRelated;
   }
 
   if (record.entries !== undefined) {

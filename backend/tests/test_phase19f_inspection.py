@@ -780,7 +780,19 @@ def test_bootstrap_and_inspection_add_no_evidence_metadata_or_leak_surface(phase
         and person.get("name")
     }
     forbidden_strings = []
+    # Phase 47: the PUBLIC body-discovery record is legitimately exposed by the
+    # bootstrap victim profile — exempt it from the undiscovered-evidence scan.
+    victim_discovery_fact_ids = {
+        str(fact.get("id"))
+        for fact in payload["draft"]["evidence"]
+        if any(
+            str((prop or {}).get("type")) == "BODY_FIRST_FOUND_AT"
+            for prop in fact.get("propositions") or ()
+        )
+    }
     for fact in payload["draft"]["evidence"]:
+        if str(fact.get("id")) in victim_discovery_fact_ids:
+            continue
         presentation = fact.get("presentation") or {}
         for value in presentation.values():
             if isinstance(value, str) and value:
@@ -797,8 +809,13 @@ def test_bootstrap_and_inspection_add_no_evidence_metadata_or_leak_surface(phase
     boot_text = json.dumps(boot, sort_keys=True)
     for needle in forbidden_strings:
         assert needle not in boot_text, f"undiscovered evidence leaked: {needle!r}"
-    for marker in ("propositions", "sourceRef", "observedAt"):
+    for marker in ("propositions", "sourceRef"):
         assert marker not in boot_text
+    # Phase 47: ``observedAt`` is permitted ONLY inside the public victim
+    # discovery block.
+    assert "observedAt" not in json.dumps(
+        {k: v for k, v in boot.items() if k != "victim"}, sort_keys=True
+    )
 
     # inspect every decoration: the DTO is lean, sanitized and leak-free.
     dto_bodies = []

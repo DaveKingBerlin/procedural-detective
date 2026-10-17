@@ -230,6 +230,9 @@ def _public_of(payload: dict):
                 name=p["name"],
                 role=p["role"],
                 public_affordances=frozenset(p["affordances"]),
+                # DEF-115: carry the projected identity so the victim identity
+                # gate sees the generated profile.
+                presented_data=dict(p.get("presented_data") or {}),
             )
             for p in draft["persons"]
         ),

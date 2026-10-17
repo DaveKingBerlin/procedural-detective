@@ -11,6 +11,8 @@ import type {
   PlaythroughLifecycleState,
   PlayerKnowledgeDTO,
   SuspectCandidateDTO,
+  VictimDiscoveryDTO,
+  VictimProfileDTO,
   WeaponCandidateDTO,
   WitnessListEntryDTO,
   WitnessPresence,
@@ -437,6 +439,94 @@ export const validateAccusationCandidates: Validator<AccusationCandidatesDTO> = 
   },
 };
 
+/* ======================================================================
+ * Phase 47 — victim profile validation (DEFENSIVE trust boundary).
+ *
+ * Unlike the strict scene/candidate parsers, the OPTIONAL victim block is
+ * parsed LENIENTLY: the page must never crash or show broken values because
+ * a legacy/hostile backend omitted a field or sent the wrong type. Rules:
+ *  - a missing/null block => null (the client renders no victim profile);
+ *  - a block without a non-empty `name` is IGNORED (=> null);
+ *  - every malformed sub-value degrades to null (age/gender/occupation/...)
+ *    so the UI can omit the row — it never receives undefined/NaN;
+ *  - `discovery` is parsed independently (null when malformed/absent);
+ *  - NO hidden truth field is ever read or copied;
+ *  - every text value is bounded (a hostile payload cannot force unbounded
+ *    DOM work; values are truncated, never trusted for size).
+ * ==================================================================== */
+
+/** Max rendered victim text length (mirrors the witness/long-text bounds). */
+export const MAX_VICTIM_TEXT_LENGTH = 8000;
+/**
+ * DEF-120 — victim age bound, aligned with the backend `[1, 120]` contract.
+ * The backend only authors a plausible adult age here; the frontend rejects a
+ * 0 / negative / over-120 value to `null` (the UI then omits the row) so a
+ * malformed value can never render as a broken "0-year-old" victim.
+ */
+export const MIN_VICTIM_AGE = 1;
+export const MAX_VICTIM_AGE = 120;
+/** The closed gender vocabulary the backend publishes (Phase 47 §2A). */
+export const VICTIM_GENDERS: readonly string[] = Object.freeze(["male", "female", "other", "unknown"]);
+
+/** A non-empty trimmed bounded string, or null for anything else. */
+function readVictimText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  return trimmed.length > MAX_VICTIM_TEXT_LENGTH ? trimmed.slice(0, MAX_VICTIM_TEXT_LENGTH) : trimmed;
+}
+
+/** A valid victim age (finite integer within the backend [1, 120] bound), else null. */
+function readVictimAge(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (!Number.isInteger(value) || value < MIN_VICTIM_AGE || value > MAX_VICTIM_AGE) return null;
+  return value;
+}
+
+/** A closed gender token (case-insensitive), else null. */
+function readVictimGender(value: unknown): string | null {
+  const text = readVictimText(value);
+  if (text === null) return null;
+  const normalized = text.toLowerCase();
+  return VICTIM_GENDERS.includes(normalized) ? normalized : null;
+}
+
+/** The optional discovery reference; null when absent/malformed. */
+function parseVictimDiscovery(raw: unknown): VictimDiscoveryDTO | null {
+  if (!isRecord(raw)) return null;
+  const evidenceId = readVictimText(raw.evidenceId);
+  const locationId = readVictimText(raw.locationId);
+  const locationName = readVictimText(raw.locationName);
+  const observedAt = readVictimText(raw.observedAt);
+  if (evidenceId === null || locationId === null || locationName === null || observedAt === null) {
+    return null;
+  }
+  return { evidenceId, locationId, locationName, observedAt, title: readVictimText(raw.title) ?? "" };
+}
+
+/**
+ * Defensive parser for the OPTIONAL Phase 47 bootstrap `victim` block. NEVER
+ * throws: absent/malformed input returns null and every malformed sub-field
+ * degrades to null — the UI then omits that row instead of showing
+ * `undefined` / `null` / `NaN`.
+ */
+export function parseVictimProfile(raw: unknown): VictimProfileDTO | null {
+  if (!isRecord(raw)) return null;
+  const name = readVictimText(raw.name);
+  if (name === null) return null;
+  return {
+    personId: readVictimText(raw.personId) ?? "",
+    name,
+    age: readVictimAge(raw.age),
+    gender: readVictimGender(raw.gender),
+    occupation: readVictimText(raw.occupation),
+    background: readVictimText(raw.background),
+    sceneObjectId: readVictimText(raw.sceneObjectId),
+    discovery:
+      raw.discovery === undefined || raw.discovery === null ? null : parseVictimDiscovery(raw.discovery),
+  };
+}
+
 /** Validates the full 200 bootstrap payload of GET .../investigation. */
 export const parseInvestigationBootstrap: Validator<InvestigationBootstrapResponse> = {
   validate(raw: unknown): InvestigationBootstrapResponse {
@@ -465,6 +555,13 @@ export const parseInvestigationBootstrap: Validator<InvestigationBootstrapRespon
       }
       witnesses = raw.witnesses.map((entry) => validateWitnessListEntry.validate(entry));
     }
+    // Phase 47 — the OPTIONAL player-safe victim profile. Absent on pre-47
+    // servers (=> null). Parsed LENIENTLY: a malformed block is ignored
+    // entirely rather than failing the whole bootstrap (trust-boundary
+    // degradation — the scene stays playable, the profile simply does not
+    // render). Never carries hidden truth.
+    const victim =
+      raw.victim === undefined || raw.victim === null ? null : parseVictimProfile(raw.victim);
     return {
       playthroughId,
       caseId,
@@ -474,6 +571,7 @@ export const parseInvestigationBootstrap: Validator<InvestigationBootstrapRespon
       scene,
       candidates,
       witnesses,
+      victim,
     };
   },
 };

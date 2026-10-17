@@ -193,7 +193,19 @@ def test_3_undiscovered_titles_descriptions_absent(phase5_app):
     public_safe |= public_ids
 
     forbidden_elements: list[str] = []
+    # Phase 47: the PUBLIC body-discovery record is legitimately exposed by the
+    # bootstrap victim profile — exempt it from the undiscovered-evidence scan.
+    victim_discovery_fact_ids = {
+        str(fact.get("id"))
+        for fact in payload["draft"]["evidence"]
+        if any(
+            str((prop or {}).get("type")) == "BODY_FIRST_FOUND_AT"
+            for prop in fact.get("propositions") or ()
+        )
+    }
     for fact in payload["draft"]["evidence"]:
+        if str(fact.get("id")) in victim_discovery_fact_ids:
+            continue
         presentation = fact.get("presentation") or {}
         for value in presentation.values():
             if not isinstance(value, str) or not value:
@@ -216,10 +228,20 @@ def test_3_undiscovered_titles_descriptions_absent(phase5_app):
             assert needle not in text, (
                 f"undiscovered evidence content leaked in {scope_name}: {needle!r}"
             )
-        for marker in ("propositions", "sourceRef", "observedAt"):
+        for marker in ("propositions", "sourceRef"):
             assert marker not in text, (
                 f"structural evidence marker leaked in {scope_name}: {marker!r}"
             )
+        # Phase 47: ``observedAt`` is permitted ONLY inside the bootstrap's
+        # public victim-discovery block (absent from the public-case entirely).
+        if scope_name == "bootstrap":
+            bootstrap_body = json.loads(text)
+            assert "observedAt" not in json.dumps(
+                {k: v for k, v in bootstrap_body.items() if k != "victim"},
+                sort_keys=True,
+            )
+        else:
+            assert "observedAt" not in text
 
 
 # --------------------------------------------------------------------------- #

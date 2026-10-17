@@ -413,6 +413,11 @@ def _easy_partial_draft_doc() -> dict:
                 "name": "Laura Stein",
                 "role": "victim",
                 "affordances": ["VISIBLE_CHARACTER"],
+                "presentedData": {
+                    "age": 45,
+                    "gender": "female",
+                    "occupation": "Archivist",
+                },
             },
         ],
         "motives": [
@@ -595,7 +600,9 @@ def test_rendered_evidence_context_requires_witness_statement():
             {
                 "persons": [
                     {"personId": "laura_stein", "name": "Laura Stein",
-                     "role": "victim", "affordances": ["VISIBLE_CHARACTER"]},
+                     "role": "victim", "affordances": ["VISIBLE_CHARACTER"],
+                     "presentedData": {"age": 45, "gender": "female",
+                                       "occupation": "Archivist"}},
                     {"personId": "daniel_roth", "name": "Daniel Roth",
                      "role": "suspect",
                      "affordances": ["VISIBLE_CHARACTER", "SUSPECT_ELIGIBLE"]},

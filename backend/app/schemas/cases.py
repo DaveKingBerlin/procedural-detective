@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 
 class FrontierBlock(BaseModel):
@@ -167,10 +167,42 @@ class SceneDTO(BaseModel):
 
 
 class PersonDTO(BaseModel):
+    """One public person of the case (Phase 5 F.4 public-case allowlist).
+
+    Phase 47 additive identity: ``age`` / ``gender`` / ``occupation`` /
+    ``background`` are projected from the person's ``presented_data`` mapping
+    (the canonical identity presentation surface — the victim IS the public
+    ``role == "victim"`` person, never a separate object). Every added field is
+    OPTIONAL and its key is OMITTED when absent so existing golden public-case
+    responses stay byte-identical wherever no identity data exists (mirror of
+    ``WorldObjectDTO.generated``).
+    """
+
     personId: str
     name: str
     role: str
     affordances: list[str] = Field(default_factory=list)
+    age: int | None = None
+    gender: str | None = None
+    occupation: str | None = None
+    background: str | None = None
+
+    @model_serializer
+    def _serialize(self) -> dict[str, object]:
+        """Serialize the identity fields, OMITTING the optional ones when None.
+
+        The Phase 47 identity block is strictly ADDITIVE: a person with no
+        published ``presented_data`` identity serializes byte-identically to the
+        pre-Phase-47 DTO (no ``age`` / ``gender`` / ``occupation`` /
+        ``background`` keys).
+        """
+        result: dict[str, object] = {}
+        for field_name in type(self).model_fields:
+            value = getattr(self, field_name)
+            if field_name in ("age", "gender", "occupation", "background") and value is None:
+                continue
+            result[field_name] = value
+        return result
 
 
 class MotiveDTO(BaseModel):

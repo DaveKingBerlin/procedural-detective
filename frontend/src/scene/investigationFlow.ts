@@ -7,6 +7,7 @@ import type {
   InvestigationBootstrapResponse,
   PlaythroughLifecycleState,
   PlayerKnowledgeDTO,
+  VictimProfileDTO,
   WitnessInterviewResponse,
   WitnessListEntryDTO,
   WitnessQuestionType,
@@ -150,6 +151,13 @@ export class InvestigationSession {
    * presence ONLY; no statement content). Empty on pre-23 servers.
    */
   private witnessesValue: WitnessListEntryDTO[] = [];
+  /**
+   * Phase 47 — the validated, player-safe victim profile from the bootstrap
+   * (null when the case has no victim / on pre-47 servers). Server-derived
+   * and immutable: it carries no hidden truth, so the victim panel renders it
+   * directly. Never replaced by a client guess.
+   */
+  private victimValue: VictimProfileDTO | null = null;
   /**
    * Phase 23 — in-memory ASKED witness statements, keyed by
    * witnessQuestionKey(witnessId, questionType). This is cosmetic session
@@ -363,6 +371,8 @@ export class InvestigationSession {
     this.candidatesValue = parsedBootstrap.candidates;
     // Phase 23: the player-safe witness list ([] on pre-23 servers).
     this.witnessesValue = parsedBootstrap.witnesses ?? [];
+    // Phase 47: the player-safe victim profile (null when absent).
+    this.victimValue = parsedBootstrap.victim ?? null;
     this.model = model;
     // DEF-072 invariant: the scene-model flags ALWAYS mirror the knowledge
     // snapshot — the bootstrap DTO flags define the same sets at start.
@@ -471,6 +481,14 @@ export class InvestigationSession {
   /** Snapshot of the player-safe witness list (empty on pre-23 servers). */
   witnessesSnapshot(): WitnessListEntryDTO[] {
     return [...this.witnessesValue];
+  }
+
+  /**
+   * Phase 47 — the validated, player-safe victim profile (null when the case
+   * has no victim / on pre-47 servers). Carries no hidden truth.
+   */
+  victimSnapshot(): VictimProfileDTO | null {
+    return this.victimValue;
   }
 
   /** The witness whose ON_SCENE person object is `objectId`, or null. */

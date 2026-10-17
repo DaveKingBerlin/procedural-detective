@@ -71,12 +71,19 @@ _G = GOLDEN_STAGE_PAYLOADS
 
 
 def _person(pid, name, role, affordances):
+    # DEF-115: a victim person must carry a complete identity profile for the
+    # quality gate (name + age + gender + occupation).
+    presented = (
+        {"age": 40, "gender": "female", "occupation": "Victim Occupation"}
+        if role == "victim"
+        else {}
+    )
     return PublicPerson(
         person_id=pid,
         name=name,
         role=role,
         public_affordances=frozenset(affordances),
-        presented_data={},
+        presented_data=presented,
     )
 
 
@@ -353,7 +360,10 @@ def _gen_world_homicide(*, witness_eligible: bool = False) -> PublicWorldSpec:
     )
     return PublicWorldSpec(
         persons=(
-            PersonSpec("victim_01", "Victim One", "victim", ("VISIBLE_CHARACTER",)),
+            PersonSpec(
+                "victim_01", "Victim One", "victim", ("VISIBLE_CHARACTER",),
+                presented_data={"age": 40, "gender": "female", "occupation": "Victim Occupation"},
+            ),
             PersonSpec(
                 "murderer_01", "Murderer One", "suspect",
                 ("SUSPECT_ELIGIBLE", "VISIBLE_CHARACTER"),

@@ -152,6 +152,42 @@ export interface InvestigationSceneLocationDTO {
   name: string;
 }
 
+/* ======================================================================
+ * Phase 47 — victim profile & investigation record contract (frozen,
+ * implemented in parallel by the backend agent).
+ *
+ * The bootstrap OPTIONALLY gains a player-safe `victim` block. It is OMITTED
+ * ENTIRELY when the case has no victim (or on pre-47 servers) — the client
+ * then renders no victim profile. Every field is PUBLIC-SAFE: the profile
+ * never exposes hidden CaseTruth (no weapon/murderer/motive truth), and the
+ * `discovery` block only references evidence the player can legitimately
+ * reach through the normal discovery flow.
+ * ==================================================================== */
+
+/** Player-safe victim discovery record reference (Phase 47). */
+export interface VictimDiscoveryDTO {
+  evidenceId: string;
+  locationId: string;
+  locationName: string;
+  /** ISO-8601 discovery timestamp (display formatted like the timeline). */
+  observedAt: string;
+  title: string;
+}
+
+/** Player-safe victim identity + discovery profile (Phase 47, frozen). */
+export interface VictimProfileDTO {
+  personId: string;
+  name: string;
+  age: number | null;
+  /** One of "male" | "female" | "other" | "unknown", or null. */
+  gender: string | null;
+  occupation: string | null;
+  background: string | null;
+  /** The world-object id of the victim body representation, or null. */
+  sceneObjectId: string | null;
+  discovery: VictimDiscoveryDTO | null;
+}
+
 /**
  * 200 body of GET /api/v1/playthroughs/{playthrough_id}/investigation.
  *
@@ -192,6 +228,12 @@ export interface InvestigationBootstrapResponse {
    * pre-23 servers; never contains statements or hidden question availability.
    */
   witnesses?: WitnessListEntryDTO[] | null;
+  /**
+   * Phase 47 — OPTIONAL player-safe victim profile. OMITTED (or null) when the
+   * case has no victim / on pre-47 servers; the client then renders no victim
+   * profile. Never carries hidden CaseTruth.
+   */
+  victim?: VictimProfileDTO | null;
 }
 
 /* ======================================================================
@@ -577,6 +619,14 @@ export interface EvidenceActivityLogEntryDTO {
  */
 export interface EvidenceContentDTO {
   renderType?: EvidenceRenderType | null;
+  /**
+   * Phase 47 — ADDITIVE marker: present `true` ONLY for a discovered record
+   * the backend links to the victim. Absent for every other record, so a
+   * legacy payload stays byte-identical and consumers treat absence as
+   * "not victim-related". Used by the victim profile to progressively
+   * disclose Known facts / Forensic findings from READ records only.
+   */
+  victimRelated?: boolean;
   [key: string]: unknown;
 }
 

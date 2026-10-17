@@ -53,6 +53,19 @@ export const FORBIDDEN_KEY_PATHS = [
   "truth",
 ];
 
+/**
+ * Phase 47 — the ONLY public `observedAt` path: the victim body-discovery
+ * timestamp (`victim.discovery.observedAt`). Phase47.md §2A documents the
+ * DISCOVERY TIME as public body-found information, so this single path is a
+ * legitimate player-visible exception to the hidden-proposition `observedAt`
+ * ban below — it is NOT the hidden crime time, and no other `observedAt` path
+ * is exempted (a hidden proposition timing still fails the scan). The value
+ * check elsewhere still forbids the canonical crime time leaking anywhere.
+ */
+export const ALLOWED_OBSERVED_AT_PATHS: ReadonlySet<string> = new Set([
+  "$.victim.discovery.observedAt",
+]);
+
 function walk(node: unknown, path: string, hits: string[]): void {
   if (node === null || node === undefined) return;
   if (Array.isArray(node)) {
@@ -62,7 +75,9 @@ function walk(node: unknown, path: string, hits: string[]): void {
   if (typeof node === "object") {
     for (const [key, value] of Object.entries(node)) {
       const child = `${path}.${key}`;
-      if (FORBIDDEN_KEY_PATHS.includes(key)) hits.push(child);
+      if (FORBIDDEN_KEY_PATHS.includes(key) && !ALLOWED_OBSERVED_AT_PATHS.has(child)) {
+        hits.push(child);
+      }
       walk(value, child, hits);
     }
   }

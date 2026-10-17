@@ -6,6 +6,7 @@ import type {
   GeneratedPartDTO,
   InvestigationBootstrapResponse,
   RevealResponse,
+  VictimProfileDTO,
   WitnessInterviewResponse,
   WitnessListEntryDTO,
   WitnessQuestionType,
@@ -1339,5 +1340,124 @@ export function makeHostileWitnessInterviewResponse(): WitnessInterviewResponse 
       ],
     },
     discovery: null,
+  };
+}
+
+/* ======================================================================
+ * Phase 47 — victim profile and victim-related evidence fixtures.
+ *
+ * Generic + winner-free: they exercise the profile rendering/progressive
+ * disclosure mechanics only, never a real case's answer. The "hidden truth"
+ * record below carries markers so the no-leak tests can prove they never
+ * reach the victim surface.
+ * ==================================================================== */
+
+/** The victim body world-object id used by the golden fixture. */
+export const VICTIM_BODY_OBJECT_ID = "victim_body_placeholder";
+/** The body-discovery evidence id used by the canned victim profile. */
+export const VICTIM_DISCOVERY_EVIDENCE_ID = "body_found_01";
+
+/** One canned, public-safe victim profile. */
+export function makeVictimProfile(overrides: Partial<VictimProfileDTO> = {}): VictimProfileDTO {
+  const base: VictimProfileDTO = {
+    personId: "sarah_miller",
+    name: "Sarah Miller",
+    age: 41,
+    gender: "female",
+    occupation: "Architect",
+    background: "Respected local architect, recently returned from abroad.",
+    sceneObjectId: VICTIM_BODY_OBJECT_ID,
+    discovery: {
+      evidenceId: VICTIM_DISCOVERY_EVIDENCE_ID,
+      locationId: "miller_apartment_kitchen",
+      locationName: "Miller Apartment - Kitchen",
+      observedAt: "2026-09-11T22:18:31+02:00",
+      title: "Body found in the kitchen at 22:18",
+    },
+  };
+  return { ...base, ...overrides };
+}
+
+/** The golden bootstrap + the published victim profile (body object linked). */
+export function makeVictimBootstrap(
+  overrides: Partial<InvestigationBootstrapResponse> = {},
+): InvestigationBootstrapResponse {
+  const bootstrap = makeBootstrap();
+  bootstrap.scene.worldObjects = bootstrap.scene.worldObjects.map((obj) =>
+    obj.objectId === VICTIM_BODY_OBJECT_ID
+      ? { ...obj, interaction: "inspect", evidenceId: VICTIM_DISCOVERY_EVIDENCE_ID }
+      : obj,
+  );
+  bootstrap.victim = makeVictimProfile();
+  return { ...bootstrap, ...overrides };
+}
+
+/** The body-discovery READ record (TIMELINE content + victimRelated marker). */
+export function makeVictimBodyRecord(
+  overrides: Partial<EvidenceReadResultDTO> = {},
+): EvidenceReadResultDTO {
+  return {
+    evidenceId: VICTIM_DISCOVERY_EVIDENCE_ID,
+    kind: "witness_observation",
+    title: "Body found in the kitchen at 22:18",
+    description: "The victim was found in the kitchen.",
+    openedAt: "2026-09-11T22:20:00+02:00",
+    readByPlayer: true,
+    content: {
+      renderType: "TIMELINE",
+      victimRelated: true,
+      summary: "The victim was found in the kitchen at 22:18.",
+      entries: [{ time: "2026-09-11T22:18:31+02:00", text: "Body found in the kitchen at 22:18" }],
+    },
+    ...overrides,
+  };
+}
+
+/** A victim-related FORENSIC_COMPARISON READ record (progressive disclosure). */
+export function makeVictimForensicRecord(
+  overrides: Partial<EvidenceReadResultDTO> = {},
+): EvidenceReadResultDTO {
+  return {
+    evidenceId: "forensic_victim_01",
+    kind: "forensic",
+    title: "Forensic examination",
+    description: null,
+    openedAt: "2026-09-11T22:30:00+02:00",
+    readByPlayer: true,
+    content: {
+      renderType: "FORENSIC_COMPARISON",
+      victimRelated: true,
+      comparison: "Estimated time of death: 21:20–21:40; cause of death: blunt-force trauma.",
+    },
+    ...overrides,
+  };
+}
+
+/**
+ * A victim-related READ record whose raw content also carries HIDDEN truth
+ * keys. The victim surface must read ONLY the allowlisted public fields, so
+ * none of these marker values may ever appear in the rendered output.
+ */
+export function makeHostileVictimRecord(
+  overrides: Partial<EvidenceReadResultDTO> = {},
+): EvidenceReadResultDTO {
+  return {
+    evidenceId: "record_victim_noise",
+    kind: "witness_observation",
+    title: "A neighbour's account",
+    description: "A short account from the neighbour.",
+    openedAt: "2026-09-11T22:20:00+02:00",
+    readByPlayer: true,
+    content: {
+      renderType: "GENERIC_TEXT",
+      victimRelated: true,
+      summary: "The neighbour saw nothing unusual before the noise.",
+      murdererId: "HIDDEN_SUSPECT_MARKER",
+      weapon: "HIDDEN_WEAPON_MARKER",
+      motive: "HIDDEN_MOTIVE_MARKER",
+      caseTruth: "HIDDEN_TRUTH_MARKER",
+      solution: "HIDDEN_SOLUTION_MARKER",
+    },
+    ...overrides,
   };
 }

@@ -546,7 +546,12 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
                     # so the derived node stays OPTIONAL and open).
                     "presentedData": (
                         "real JSON object of player-facing presented data, or "
-                        "null when absent (never a JSON-encoded string)"
+                        "null when absent (never a JSON-encoded string). The "
+                        "VICTIM must carry a compact identity: age = integer "
+                        "1..120; gender = one of male, female, other, unknown; "
+                        "occupation = a short non-empty role/occupation string "
+                        "(<=120 chars); optional background = one short public "
+                        "sentence (<=300 chars)"
                     ),
                 }
             ],
@@ -1907,6 +1912,12 @@ _CASE_FIELD_RULES = (
     "accusationToleranceSeconds (a plain non-negative integer).\n"
     "- person role is one exact token from: victim, suspect, witness, family, "
     "other.\n"
+    "- the VICTIM must carry a plausible compact identity in its presentedData "
+    "object: age (integer 1..120), gender (one of male, female, other, "
+    "unknown), a non-empty occupation/role string (<=120 chars), and an "
+    "optional short public background sentence (<=300 chars) — consistent with "
+    "the victim's public role and the scene locations; never a long "
+    "biography.\n"
     "- affordances use ONLY the exact tokens SUSPECT_ELIGIBLE, MOTIVE_CANDIDATE, "
     "POTENTIAL_WEAPON, VISIBLE_CHARACTER, INSPECTABLE, POTENTIAL_SHARP_WEAPON, "
     "POTENTIAL_BLUNT_WEAPON, POTENTIAL_POISON.\n"
