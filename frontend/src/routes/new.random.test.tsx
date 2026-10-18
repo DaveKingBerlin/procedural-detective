@@ -12,6 +12,7 @@ vi.mock("../journey/context", async (importOriginal) => {
 });
 
 import { setJourneyParams } from "../journey/context";
+import { EXAMPLE_PROMPTS } from "../journey/examplePrompts";
 import {
   formatRandomCrimePrompt,
   generateRandomCrime,
@@ -278,5 +279,58 @@ describe("Phase 48 — Generate random case (real interaction)", () => {
     clickTestId(container(), "generate-random-case");
     expect(promptInput(container()).value).toBe(first);
     expect(queryOptional(container(), '[data-testid="random-confirm"]')).toBeNull();
+  });
+
+  it("F3 — the inline confirmation is announced to assistive tech (aria-live=polite)", async () => {
+    await settleEffects();
+    typeInto(container(), "Some user text that differs.");
+    clickTestId(container(), "generate-random-case");
+
+    const confirm = queryRequired<HTMLElement>(container(), '[data-testid="random-confirm"]');
+    expect(confirm.getAttribute("aria-live")).toBe("polite");
+    // The existing accessible name + grouping are preserved.
+    expect(confirm.getAttribute("role")).toBe("group");
+    expect(confirm.getAttribute("aria-label")).toBe("Replace the current description?");
+  });
+
+  it("F2a — editing the description dismisses a stale confirmation", async () => {
+    await settleEffects();
+    typeInto(container(), "Original user description.");
+    clickTestId(container(), "generate-random-case");
+    expect(queryOptional(container(), '[data-testid="random-confirm"]')).not.toBeNull();
+
+    typeInto(container(), "A newer edited description.");
+
+    expect(queryOptional(container(), '[data-testid="random-confirm"]')).toBeNull();
+    expect(promptInput(container()).value).toBe("A newer edited description.");
+    expect(setJourneyParams).not.toHaveBeenCalled();
+  });
+
+  it("F2b — clicking an example dismisses a stale confirmation", async () => {
+    await settleEffects();
+    typeInto(container(), "Original user description.");
+    clickTestId(container(), "generate-random-case");
+    expect(queryOptional(container(), '[data-testid="random-confirm"]')).not.toBeNull();
+
+    clickTestId(container(), "example-easy");
+
+    expect(queryOptional(container(), '[data-testid="random-confirm"]')).toBeNull();
+    expect(promptInput(container()).value).toBe(EXAMPLE_PROMPTS.easy.prompt);
+    expect(setJourneyParams).not.toHaveBeenCalled();
+  });
+
+  it("F2c — changing the difficulty dismisses a stale confirmation", async () => {
+    await settleEffects();
+    const userText = "Original user description.";
+    typeInto(container(), userText);
+    clickTestId(container(), "generate-random-case");
+    expect(queryOptional(container(), '[data-testid="random-confirm"]')).not.toBeNull();
+
+    selectDifficulty(container(), "hard");
+
+    expect(queryOptional(container(), '[data-testid="random-confirm"]')).toBeNull();
+    // Dismissing never touches the user's text.
+    expect(promptInput(container()).value).toBe(userText);
+    expect(setJourneyParams).not.toHaveBeenCalled();
   });
 });

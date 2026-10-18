@@ -275,6 +275,10 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     setPrompt(next.prompt);
     setActiveExampleId(next.activeExampleId);
     setError(null);
+    // Phase 48 F2 — a stale inline replace-confirmation must not survive a new
+    // choice: selecting an example is newer intent than the pending generated
+    // text, so the pending value is discarded.
+    setPendingRandomPrompt(null);
   };
 
   /** The textarea stays fully editable after any example fill: every change
@@ -285,6 +289,18 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     setPrompt(next.prompt);
     setActiveExampleId(next.activeExampleId);
     setError(null);
+    // Phase 48 F2 — editing the description is newer intent: any pending
+    // generated text awaiting confirmation is discarded so a stale "Replace"
+    // can never clobber the user's newer text.
+    setPendingRandomPrompt(null);
+  };
+
+  /** Phase 48 F2 — changing the difficulty is newer intent than a pending
+   *  generated prompt (which was built for the OLD difficulty); the pending
+   *  value is discarded so the stale confirmation cannot clobber the choice. */
+  const onDifficultyChange = (level: JourneyDifficulty) => {
+    setDifficulty(level);
+    setPendingRandomPrompt(null);
   };
 
   /** Fill the textarea with a generated random-crime prompt. A random prompt
@@ -502,7 +518,7 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
           id="difficulty-select"
           data-testid="difficulty-select"
           value={difficulty}
-          onChange={(event) => setDifficulty(event.target.value as JourneyDifficulty)}
+          onChange={(event) => onDifficultyChange(event.target.value as JourneyDifficulty)}
         >
           <option value="easy">Easy</option>
           <option value="medium">Medium</option>
@@ -535,6 +551,7 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
             className="new-case-random-confirm"
             data-testid="random-confirm"
             role="group"
+            aria-live="polite"
             aria-label="Replace the current description?"
           >
             <p className="new-case-random-confirm-text">

@@ -342,24 +342,34 @@ export const WEAPONS: readonly CuratedWeapon[] = Object.freeze([
  *   easy   -> tags include "easy"
  *   medium -> tags include "easy" or "medium"
  *   hard   -> all 16
+ *
+ * Phase 48 F1 — every name is aligned to one of the five supported environment
+ * kits (apartment / office / hotel_suite / warehouse / mansion) and resolves
+ * UNAMBIGUOUSLY via `backend/app/environments/resolver.py::resolve_environment`:
+ * each name carries exactly ONE kit token and never the standalone word
+ * `room` (the hotel_suite alias `room` collides otherwise). The unit tests
+ * lock both invariants.
  */
 export const LOCATIONS: readonly CuratedLocation[] = Object.freeze([
+  // --- easy (also available at medium) ---
   { name: "apartment", difficultyTags: ["easy", "medium"] },
+  { name: "apartment kitchen", difficultyTags: ["easy", "medium"] },
+  { name: "apartment lounge", difficultyTags: ["easy", "medium"] },
+  { name: "apartment bedroom", difficultyTags: ["easy", "medium"] },
   { name: "private office", difficultyTags: ["easy", "medium"] },
   { name: "hotel suite", difficultyTags: ["easy", "medium"] },
   { name: "warehouse", difficultyTags: ["easy", "medium"] },
-  { name: "office conference room", difficultyTags: ["easy", "medium"] },
-  { name: "apartment kitchen", difficultyTags: ["easy", "medium"] },
-  { name: "hotel corridor", difficultyTags: ["easy", "medium"] },
-  { name: "apartment living room", difficultyTags: ["easy", "medium"] },
-  { name: "office reception", difficultyTags: ["easy", "medium"] },
-  { name: "mansion study", difficultyTags: ["medium"] },
-  { name: "warehouse loading bay", difficultyTags: ["medium"] },
-  { name: "office archive room", difficultyTags: ["medium"] },
-  { name: "mansion library", difficultyTags: ["medium"] },
+  // --- medium ---
+  { name: "office boardroom", difficultyTags: ["medium"] },
+  { name: "office archive", difficultyTags: ["medium"] },
+  { name: "office reception", difficultyTags: ["medium"] },
+  { name: "hotel corridor", difficultyTags: ["medium"] },
   { name: "hotel restaurant kitchen", difficultyTags: ["medium"] },
-  { name: "mansion gallery", difficultyTags: ["hard"] },
-  { name: "warehouse office", difficultyTags: ["hard"] },
+  { name: "warehouse loading bay", difficultyTags: ["medium"] },
+  // --- hard ---
+  { name: "hotel ballroom", difficultyTags: ["hard"] },
+  { name: "mansion study", difficultyTags: ["hard"] },
+  { name: "mansion library", difficultyTags: ["hard"] },
 ]);
 
 /* ======================================================================

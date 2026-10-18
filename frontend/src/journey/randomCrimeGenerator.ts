@@ -105,12 +105,42 @@ function pickIndex(rng: () => number, length: number): number {
   return Math.floor(rng() * length) % length;
 }
 
-/** Draw a fresh person: gender first, then a name from the matching pool. */
+/**
+ * Bounded retry cap for drawing a last name that differs from the (already
+ * drawn) first name. "Frank"/"Martin"/"Simon"/"Heinrich" are valid in BOTH
+ * pools, so a collision is possible; the cap guarantees the draw can never
+ * loop forever. The pool has 72 last names, so a genuine collision beyond a
+ * handful of draws is astronomically unlikely.
+ */
+export const LAST_NAME_RETRY_CAP = 16;
+
+/**
+ * Draw a fresh person: gender first, then a name from the matching pool.
+ *
+ * Phase 48 F4 — a person whose first name equals their last name (e.g.
+ * "Frank Frank") reads as a bug, so the SAME seeded stream is used to redraw a
+ * different last name when it collides. The redraw is BOUNDED (then a
+ * deterministic pool scan is the last resort), so determinism and the
+ * distinct-persons logic are preserved and the loop can never be unbounded.
+ * The gender/name-pool consistency rule is untouched.
+ */
 function drawPerson(rng: () => number): CrimePerson {
   const gender = CRIME_GENDERS[pickIndex(rng, CRIME_GENDERS.length)];
   const firstPool = FIRST_NAMES_BY_GENDER[gender];
   const firstName = firstPool[pickIndex(rng, firstPool.length)];
-  const lastName = LAST_NAMES[pickIndex(rng, LAST_NAMES.length)];
+
+  let lastName = LAST_NAMES[pickIndex(rng, LAST_NAMES.length)];
+  let lastNameAttempts = 0;
+  while (lastName === firstName && lastNameAttempts < LAST_NAME_RETRY_CAP) {
+    lastNameAttempts += 1;
+    lastName = LAST_NAMES[pickIndex(rng, LAST_NAMES.length)];
+  }
+  // Defensive last resort (never expected): pick the first curated last name
+  // that differs from the first name, deterministically.
+  if (lastName === firstName) {
+    lastName = LAST_NAMES.find((candidate) => candidate !== firstName) ?? lastName;
+  }
+
   return { gender, firstName, lastName, fullName: `${firstName} ${lastName}` };
 }
 
@@ -147,6 +177,8 @@ function drawDistinctPersons(rng: () => number, count: number): CrimePerson[] {
       for (const firstName of firstPool) {
         for (const lastName of LAST_NAMES) {
           if (persons.length >= count) break;
+          // Phase 48 F4 — never emit an identical first/last name here either.
+          if (lastName === firstName) continue;
           const fullName = `${firstName} ${lastName}`;
           const identity = `${gender}:${firstName}:${lastName}`;
           if (identities.has(identity) || fullNames.has(fullName)) continue;

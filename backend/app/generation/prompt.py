@@ -10,7 +10,14 @@ Rules (deterministic):
   ``location``.
 - Values are trimmed and used VERBATIM otherwise — identity strings, never
   normalized through smarts (canonicalization to case ids is the fixture /
-  pipeline product decision, not the parsers job).
+  pipeline product decision, not the parsers job). The ONE exception (Phase 48,
+  ADV-48-01) is the ``victim`` field: a single TRAILING Phase-47 profile
+  parenthetical of the shape ``(<gender>, <age>, <occupation>)`` — profile
+  METADATA, not identity — is stripped from the locked victim so the canonical
+  victim id stays the NAME slug (e.g. ``charlotte_hayes``) and never the
+  polluted ``charlotte_hayes_female_42_art_curator``. Every other field
+  (murderer/witness/weapon/motive/time/location) and the RAW prompt string
+  passed to providers are untouched.
 - Locked values are later COMPARED through the generic, deterministic
   equivalence layer in ``app.generation.constraints`` (DEF-054): identity
   fields by normalized exact equality ("Sarah Miller" == ``sarah_miller``),
@@ -28,6 +35,9 @@ Rules (deterministic):
 
 from __future__ import annotations
 
+import re
+
+from app.domain.victim_profile import GENDER_VALUES, MAX_AGE, MIN_AGE
 from app.generation.constraints import LockedConstraints
 from app.generation.schemas import MAX_PROMPT_CHARS
 
@@ -54,6 +64,55 @@ class PromptError(ValueError):
 
 def _normalize_key(raw_key: str) -> str:
     return " ".join(raw_key.strip().lower().split())
+
+
+# Phase 48 (ADV-48-01) — the victim lock strips ONE trailing Phase-47 profile
+# parenthetical of the shape ``(<gender>, <age>, <occupation>)``. That
+# parenthetical is profile METADATA (``app.domain.victim_profile``), NOT part of
+# the victim identity: keeping it would slug the canonical id to the polluted
+# ``charlotte_hayes_female_42_art_curator`` and terminally FAIL a legitimately
+# name-only draft victim (``charlotte_hayes``). Only the ``victim`` field is
+# affected; every other locked field stays VERBATIM.
+_GENDER_ALTERNATION = "|".join(GENDER_VALUES)
+_VICTIM_PROFILE_PARENTHETICAL_RE = re.compile(
+    r"^(?P<name>\S.*?)\s*"
+    r"\(\s*(?P<gender>" + _GENDER_ALTERNATION + r")\s*,\s*"
+    r"(?P<age>\d{1,3})\s*,\s*"
+    r"(?P<occupation>.*?)\s*\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_victim_profile_parenthetical(value: str) -> str | None:
+    """Strip ONE trailing Phase-47 victim profile parenthetical, else verbatim.
+
+    The parenthetical must match the exact profile shape
+    ``(<gender>, <age>, <occupation>)`` where (all required):
+
+    - a non-empty name precedes the ``(`` (after trimming),
+    - ``<gender>`` case-insensitively is one of ``GENDER_VALUES``
+      (``male|female|other|unknown`` — the Phase 47 vocabulary),
+    - ``<age>`` is an integer of 1-3 digits within ``MIN_AGE..MAX_AGE``,
+    - ``<occupation>`` is non-empty.
+
+    Returns the trimmed NAME when every condition holds; otherwise returns the
+    input UNCHANGED (e.g. ``"John (the butler)"``, ``"Sarah Miller"``,
+    ``"(Female, 42, x)"`` with no name, ``"Jane (female, 39)"`` missing
+    occupation). If stripping would yield an empty name, returns ``None``
+    (absent), consistent with the existing empty-value rule.
+    """
+    match = _VICTIM_PROFILE_PARENTHETICAL_RE.match(value)
+    if match is None:
+        return value
+    name = match.group("name").strip()
+    if not name:
+        return None
+    age = int(match.group("age"))
+    if not (MIN_AGE <= age <= MAX_AGE):
+        return value
+    if not match.group("occupation").strip():
+        return value
+    return name
 
 
 def parse_prompt(
@@ -87,7 +146,13 @@ def parse_prompt(
             raise PromptError(f"duplicate prompt key {raw_key.strip()!r}")
         # DEF-067 (ADV-43-08): an empty/whitespace value is treated as ABSENT
         # (``None``) so it can never become an empty locked identity.
-        values[field] = raw_value.strip() or None
+        value: str | None = raw_value.strip() or None
+        if field == "victim" and value is not None:
+            # Phase 48 (ADV-48-01): strip ONE trailing Phase-47 profile
+            # parenthetical from the VICTIM lock ONLY — it is profile METADATA,
+            # not identity. An emptied name becomes absent (``None``).
+            value = _strip_victim_profile_parenthetical(value) or None
+        values[field] = value
         recognized.append(field)
 
     locked = LockedConstraints(

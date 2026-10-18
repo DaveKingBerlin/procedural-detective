@@ -96,6 +96,20 @@ describe("persons are pairwise distinct", () => {
   });
 });
 
+describe("no person shares a first and last name (Phase 48 F4)", () => {
+  it("every generated person's first name differs from their last name", () => {
+    for (const difficulty of DIFFICULTIES) {
+      for (let seed = 0; seed < 10000; seed += 1) {
+        const crime = generateRandomCrime(seed, difficulty);
+        for (const person of [crime.victim, crime.murderer, crime.witness]) {
+          expect(person.firstName).not.toBe(person.lastName);
+          expect(person.fullName).toBe(`${person.firstName} ${person.lastName}`);
+        }
+      }
+    }
+  });
+});
+
 describe("curated data counts and integrity", () => {
   it("has exactly 32 motives, each non-empty and unique", () => {
     expect(MOTIVES).toHaveLength(32);
@@ -135,6 +149,36 @@ describe("curated data counts and integrity", () => {
     }
     for (const location of LOCATIONS) {
       expect(location.name.trim().length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("curated locations are kit-aligned and unambiguous (Phase 48 F1)", () => {
+  /** The five supported environment-kit tokens. */
+  const KIT_TOKENS: readonly string[] = ["apartment", "office", "hotel", "warehouse", "mansion"];
+
+  it("has exactly 16 unique, non-empty, difficulty-tagged names", () => {
+    expect(LOCATIONS).toHaveLength(16);
+    expect(LOCATION_COUNT).toBe(16);
+    expect(new Set(LOCATIONS.map((location) => location.name)).size).toBe(16);
+    for (const location of LOCATIONS) {
+      expect(location.name.trim().length).toBeGreaterThan(0);
+      expect(location.difficultyTags.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("no location name contains the standalone word 'room'", () => {
+    for (const location of LOCATIONS) {
+      const tokens = location.name.toLowerCase().split(/\s+/);
+      expect(tokens).not.toContain("room");
+    }
+  });
+
+  it("each name carries EXACTLY ONE supported kit token (never two)", () => {
+    for (const location of LOCATIONS) {
+      const tokens = location.name.toLowerCase().split(/\s+/);
+      const kitTokens = tokens.filter((token) => KIT_TOKENS.includes(token));
+      expect(kitTokens).toHaveLength(1);
     }
   });
 });

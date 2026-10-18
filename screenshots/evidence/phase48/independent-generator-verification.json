@@ -1,0 +1,390 @@
+﻿{
+  "counts": {
+    "motives": 32,
+    "motivesUnique": 32,
+    "weapons": 32,
+    "weaponsUniqueAssetIds": 32,
+    "locations": 16,
+    "locationsUniqueNames": 16,
+    "firstNamesMale": 40,
+    "firstNamesFemale": 40,
+    "firstNamesTotal": 80,
+    "lastNames": 72,
+    "occupations": 40
+  },
+  "catalog": {
+    "weaponsResolved": 32,
+    "weaponsTotal": 32,
+    "unresolved": [],
+    "entries": [
+      {
+        "assetId": "PROP_KITCHEN_KNIFE_01",
+        "displayName": "kitchen knife",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Kitchen knife",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "sharp"
+      },
+      {
+        "assetId": "PROP_BREAD_KNIFE_01",
+        "displayName": "serrated bread knife",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Bread knife",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "sharp"
+      },
+      {
+        "assetId": "PROP_LETTER_OPENER_01",
+        "displayName": "antique letter opener",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Letter opener",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "sharp"
+      },
+      {
+        "assetId": "PROP_SCISSORS_01",
+        "displayName": "heavy scissors",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Scissors",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "sharp"
+      },
+      {
+        "assetId": "PROP_HAMMER_01",
+        "displayName": "claw hammer",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Claw hammer",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "tool"
+      },
+      {
+        "assetId": "PROP_CANDLESTICK_01",
+        "displayName": "brass candlestick",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Candlestick",
+        "catalogCategory": "decor",
+        "catalogSubtype": "candle"
+      },
+      {
+        "assetId": "PROP_VASE_01",
+        "displayName": "heavy ceramic vase",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Vase",
+        "catalogCategory": "decor",
+        "catalogSubtype": "vase"
+      },
+      {
+        "assetId": "PROP_GLASS_BOTTLE_01",
+        "displayName": "glass bottle",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Glass bottle",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "container"
+      },
+      {
+        "assetId": "PROP_SCREWDRIVER_01",
+        "displayName": "screwdriver",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Screwdriver",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "tool"
+      },
+      {
+        "assetId": "PROP_WRENCH_01",
+        "displayName": "adjustable wrench",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Adjustable wrench",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "tool"
+      },
+      {
+        "assetId": "PROP_BASEBALL_BAT_01",
+        "displayName": "baseball bat",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Baseball bat",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "impact"
+      },
+      {
+        "assetId": "PROP_LAMP_01",
+        "displayName": "heavy table lamp",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Lamp",
+        "catalogCategory": "furniture",
+        "catalogSubtype": "lamp"
+      },
+      {
+        "assetId": "PROP_DESK_LAMP_01",
+        "displayName": "metal desk lamp",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Desk lamp",
+        "catalogCategory": "decor",
+        "catalogSubtype": "lamp"
+      },
+      {
+        "assetId": "PROP_TABLE_LAMP_01",
+        "displayName": "table lamp",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Table lamp",
+        "catalogCategory": "decor",
+        "catalogSubtype": "lamp"
+      },
+      {
+        "assetId": "PROP_PLANT_POT_01",
+        "displayName": "ceramic plant pot",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Plant pot",
+        "catalogCategory": "decor",
+        "catalogSubtype": "plant"
+      },
+      {
+        "assetId": "PROP_CLOCK_01",
+        "displayName": "wall clock",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Wall clock",
+        "catalogCategory": "decor",
+        "catalogSubtype": "clock"
+      },
+      {
+        "assetId": "PROP_BOOK_01",
+        "displayName": "heavy hardcover book",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Book",
+        "catalogCategory": "decor",
+        "catalogSubtype": "book"
+      },
+      {
+        "assetId": "PROP_PLATE_01",
+        "displayName": "ceramic plate",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Plate",
+        "catalogCategory": "decor",
+        "catalogSubtype": "plate"
+      },
+      {
+        "assetId": "PROP_CUP_01",
+        "displayName": "ceramic cup",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Cup",
+        "catalogCategory": "decor",
+        "catalogSubtype": "cup"
+      },
+      {
+        "assetId": "PROP_PEN_01",
+        "displayName": "metal pen",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Pen",
+        "catalogCategory": "decor",
+        "catalogSubtype": "pen"
+      },
+      {
+        "assetId": "PROP_WATER_BOTTLE_01",
+        "displayName": "water bottle",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Water bottle",
+        "catalogCategory": "decor",
+        "catalogSubtype": "bottle"
+      },
+      {
+        "assetId": "PROP_ROPE_01",
+        "displayName": "length of cord",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Rope",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "restraint"
+      },
+      {
+        "assetId": "PROP_CRATE_01",
+        "displayName": "wooden crate",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Crate",
+        "catalogCategory": "furniture",
+        "catalogSubtype": "crate"
+      },
+      {
+        "assetId": "PROP_TRASH_BIN_01",
+        "displayName": "metal trash bin",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Trash bin",
+        "catalogCategory": "structural",
+        "catalogSubtype": "trash"
+      },
+      {
+        "assetId": "PROP_OFFICE_CHAIR_01",
+        "displayName": "office chair",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Office chair",
+        "catalogCategory": "furniture",
+        "catalogSubtype": "chair"
+      },
+      {
+        "assetId": "PROP_DESK_CHAIR_01",
+        "displayName": "desk chair",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Desk chair",
+        "catalogCategory": "furniture",
+        "catalogSubtype": "chair"
+      },
+      {
+        "assetId": "PROP_CHAIR_01",
+        "displayName": "wooden chair",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Chair",
+        "catalogCategory": "furniture",
+        "catalogSubtype": "chair"
+      },
+      {
+        "assetId": "PROP_ARMCHAIR_01",
+        "displayName": "armchair",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Armchair",
+        "catalogCategory": "furniture",
+        "catalogSubtype": "chair"
+      },
+      {
+        "assetId": "PROP_BEDSIDE_TABLE_01",
+        "displayName": "nightstand",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Nightstand",
+        "catalogCategory": "furniture",
+        "catalogSubtype": "nightstand"
+      },
+      {
+        "assetId": "PROP_COFFEE_TABLE_01",
+        "displayName": "coffee table",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Coffee table",
+        "catalogCategory": "furniture",
+        "catalogSubtype": "table"
+      },
+      {
+        "assetId": "PROP_STORAGE_BOX_01",
+        "displayName": "storage box",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Storage box",
+        "catalogCategory": "structural",
+        "catalogSubtype": "storage"
+      },
+      {
+        "assetId": "PROP_JEWELRY_BOX_01",
+        "displayName": "jewelry box",
+        "hasAsset": true,
+        "inRawCatalog": true,
+        "catalogLabel": "Jewelry box",
+        "catalogCategory": "evidence",
+        "catalogSubtype": "container"
+      }
+    ]
+  },
+  "policy": {
+    "easyPool": 10,
+    "mediumPool": 21,
+    "hardPool": 32,
+    "easyLocations": 9,
+    "mediumLocations": 14,
+    "hardLocations": 16,
+    "hardOnlyWeaponIds": [
+      "PROP_ROPE_01",
+      "PROP_CRATE_01",
+      "PROP_TRASH_BIN_01",
+      "PROP_OFFICE_CHAIR_01",
+      "PROP_DESK_CHAIR_01",
+      "PROP_CHAIR_01",
+      "PROP_ARMCHAIR_01",
+      "PROP_BEDSIDE_TABLE_01",
+      "PROP_COFFEE_TABLE_01",
+      "PROP_STORAGE_BOX_01",
+      "PROP_JEWELRY_BOX_01"
+    ]
+  },
+  "sweep": {
+    "seeds": 5000,
+    "generations": 15000,
+    "easyHardOnlyViolations": 0,
+    "easyViolationSample": [],
+    "hardOnlyUnusualWeaponsSelected": [
+      "PROP_COFFEE_TABLE_01",
+      "PROP_CHAIR_01",
+      "PROP_BEDSIDE_TABLE_01",
+      "PROP_JEWELRY_BOX_01",
+      "PROP_TRASH_BIN_01",
+      "PROP_CRATE_01",
+      "PROP_OFFICE_CHAIR_01",
+      "PROP_ROPE_01",
+      "PROP_DESK_CHAIR_01",
+      "PROP_ARMCHAIR_01",
+      "PROP_STORAGE_BOX_01"
+    ],
+    "ageMin": 18,
+    "ageMax": 85,
+    "timeViolations": 0,
+    "timeViolationSample": [],
+    "genderViolations": 0,
+    "occupationViolations": 0,
+    "nameGenderMismatch": 0,
+    "distinctPersonViolations": 0,
+    "lineViolations": 0,
+    "maxPromptLen": 213,
+    "promptSamples": {
+      "easy": [
+        "seed=1149302463\nVictim: Michael Roth (Male, 30, auctioneer)\nMurderer: Katharina Berger\nMotive: insurance fraud\nWeapon: glass bottle\nTime: 22:33\nWitness: Victor Werner\nLocation: office conference room",
+        "seed=136490058\nVictim: Victor Hofmann (Male, 28, novelist)\nMurderer: Leo Fischer\nMotive: concealing an affair\nWeapon: kitchen knife\nTime: 02:55\nWitness: Stefan Schulz\nLocation: apartment living room"
+      ],
+      "medium": [
+        "seed=1149302463\nVictim: Michael Roth (Male, 30, auctioneer)\nMurderer: Katharina Berger\nMotive: insurance fraud\nWeapon: wall clock\nTime: 22:33\nWitness: Victor Werner\nLocation: apartment living room",
+        "seed=136490058\nVictim: Victor Hofmann (Male, 28, novelist)\nMurderer: Leo Fischer\nMotive: concealing an affair\nWeapon: kitchen knife\nTime: 02:55\nWitness: Stefan Schulz\nLocation: mansion library"
+      ],
+      "hard": [
+        "seed=1149302463\nVictim: Michael Roth (Male, 30, auctioneer)\nMurderer: Katharina Berger\nMotive: insurance fraud\nWeapon: metal trash bin\nTime: 22:33\nWitness: Victor Werner\nLocation: office reception",
+        "seed=136490058\nVictim: Victor Hofmann (Male, 28, novelist)\nMurderer: Leo Fischer\nMotive: concealing an affair\nWeapon: kitchen knife\nTime: 02:55\nWitness: Stefan Schulz\nLocation: mansion gallery"
+      ]
+    }
+  },
+  "determinism": {
+    "seed12345_equalStructured": true,
+    "seed12345_equalPrompt": true,
+    "seed12345_sample": "Victim: Emma Lehmann (Female, 74, nurse)\nMurderer: Petra Braun\nMotive: fear of dismissal\nWeapon: nightstand\nTime: 02:43\nWitness: Hugo Dietrich\nLocation: warehouse loading bay",
+    "distinctOutputsFor8Seeds": 8,
+    "kindsOfPersonsDistinct": 3
+  },
+  "seedNormalization": {
+    "mulberry32Deterministic": true,
+    "makeRandomCrimeSeed_0": 0,
+    "makeRandomCrimeSeed_half": 2147483648,
+    "makeRandomCrimeSeed_one": 0,
+    "retryCap": 64
+  },
+  "failures": [],
+  "result": "PASS"
+}
