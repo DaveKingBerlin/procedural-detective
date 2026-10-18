@@ -1,0 +1,2 @@
+# Playwright's testDir is this directory; keep generated output out of discovery.
+/artifacts/

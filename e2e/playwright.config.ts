@@ -12,6 +12,13 @@ export default defineConfig({
   testDir: ".",
   timeout: 90_000,
   expect: { timeout: 30_000 },
+  // Keep Playwright discovery to browser specs. QA probes use Vitest/Python,
+  // and the QA-only wrapper imports the Phase 48 spec a second time.
+  testMatch: "**/*.spec.ts",
+  testIgnore: ["**/qa-p48-retest/**"],
+  // `testDir` is e2e/ itself, so opt into its nested ignore rules to skip
+  // generated artifacts (including ACL-restricted pytest basetemp trees).
+  respectGitIgnore: true,
   fullyParallel: false,
   workers: 1,
   retries: 0,
