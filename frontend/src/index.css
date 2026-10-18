@@ -1285,6 +1285,92 @@ button {
   outline-offset: 1px;
 }
 
+/* Phase 48 — "Generate random case" prompt helper (directly below the
+   difficulty control). Full-width/tappable with a clear visible focus state
+   and a deliberate gap from the difficulty select above. The inline
+   replace-confirmation is a bordered panel with two real, keyboard-accessible
+   buttons — no modal, no window.confirm. All tokens/radii reuse the existing
+   design system (--panel/--border/--accent/--warn/--muted). */
+.new-case-random {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: 46rem;
+  margin: 0.35rem 0 0.35rem;
+  border: 1px solid var(--accent);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.6rem 1.1rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.new-case-random:hover:not(:active) {
+  background: rgba(230, 180, 85, 0.12);
+}
+
+.new-case-random:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.new-case-random-icon {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.new-case-random-confirm {
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.6rem 0.9rem;
+  margin: 0 0 0.35rem;
+  max-width: 46rem;
+}
+
+.new-case-random-confirm-text {
+  margin: 0 0 0.5rem;
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
+.new-case-random-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.new-case-random-replace,
+.new-case-random-cancel {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.new-case-random-replace {
+  border-color: var(--accent);
+}
+
+.new-case-random-replace:hover:not(:active),
+.new-case-random-cancel:hover:not(:active) {
+  border-color: var(--accent);
+}
+
+.new-case-random-replace:focus-visible,
+.new-case-random-cancel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .new-case-demo {
   margin: 1.1rem 0 0;
 }
