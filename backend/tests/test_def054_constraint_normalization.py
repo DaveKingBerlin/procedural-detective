@@ -88,6 +88,7 @@ from app.generation.schemas import (  # noqa: E402
     MotiveSpec,
 )
 from app.generation.state_machine import ValidationOutcome  # noqa: E402
+from app.generation.trusted_context import identity_slug  # noqa: E402
 
 # The verbatim REQUIREMENTS 3.1 / 48 Case A example the browser ships
 # ("Try Demo Case" / "Use example prompt").
@@ -525,3 +526,106 @@ def test_def055_does_not_weaken_identity_or_time_controls():
     )
     assert any("motive" in issue for issue in timed)
     assert any("crime_time" in issue for issue in timed)
+
+
+# ---------------------------------------------------------------------------
+# Phase 48 (ADV-48-01) — the victim lock carries the NAME only; a trailing
+# Phase-47 profile parenthetical ``(<gender>, <age>, <occupation>)`` is profile
+# METADATA and MUST be stripped (only for the victim field). Without this the
+# lock slugged to the polluted canonical id
+# ``charlotte_hayes_female_42_art_curator`` and a legitimate name-only draft
+# victim (``charlotte_hayes``) terminally FAILED the victim lock.
+# ---------------------------------------------------------------------------
+
+
+def test_adv48_victim_profile_parenthetical_is_stripped_to_name():
+    locked, note = parse_prompt("Victim: Charlotte Hayes (Female, 42, Art curator)")
+    assert locked.victim == "Charlotte Hayes"
+    # The stripped name slugs to the NAME canonical id (never the polluted one).
+    assert identity_slug(locked.victim) == "charlotte_hayes"
+    assert locked == LockedConstraints(victim="Charlotte Hayes")
+    assert "victim" in note
+
+
+@pytest.mark.parametrize(
+    "parenthetical",
+    (
+        "(female, 39, Journalist)",
+        "(unknown, 30, Chef)",
+        "(other, 20, Artist)",
+        "(MALE, 42, Art curator)",
+        "(FEMALE, 42, Art curator)",
+    ),
+)
+def test_adv48_strips_every_gender_token_case_insensitively(parenthetical):
+    locked, _note = parse_prompt(f"Victim: Charlotte Hayes {parenthetical}")
+    assert locked.victim == "Charlotte Hayes"
+
+
+def test_adv48_plain_victim_name_unchanged():
+    locked, _note = parse_prompt("Victim: Sarah Miller")
+    assert locked.victim == "Sarah Miller"
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "John (the butler)",  # occupation missing / gender token invalid
+        "(Female, 42, x)",  # no name before the parenthetical
+        "Jane (female, 39)",  # missing occupation
+        "Jane (female, 999, Chef)",  # age out of 1..120
+        "Jane (female, 0, Chef)",  # age below range
+        "Jane (robot, 39, Chef)",  # gender outside the closed vocabulary
+        "Charlotte Hayes (Female, 42, )",  # empty occupation
+    ),
+)
+def test_adv48_non_profile_values_remain_verbatim(value):
+    locked, _note = parse_prompt(f"Victim: {value}")
+    assert locked.victim == value
+
+
+def test_adv48_stripped_victim_passes_lock_where_polluted_would_fail():
+    """The strip is EXACTLY what fixes the terminal victim-lock failure."""
+    draft = _golden_draft()
+    locked, _note = parse_prompt("Victim: Sarah Miller (Female, 42, Art curator)")
+    assert locked.victim == "Sarah Miller"
+    assert locked.violations_against(draft) == ()
+    # The OLD (verbatim, pre-fix) polluted lock still fails against the same
+    # name-only draft victim — proving the strip, not the comparison layer.
+    polluted = LockedConstraints(victim="Sarah Miller (Female, 42, Art curator)")
+    issues = polluted.violations_against(draft)
+    assert any("victim" in issue for issue in issues)
+    assert locked.victim != polluted.victim
+
+
+def test_adv48_other_fields_stay_verbatim_and_raw_prompt_note_unchanged():
+    prompt = (
+        "Victim: Charlotte Hayes (Female, 42, Art curator)\n"
+        "Murderer: John (the butler)\n"
+        "Witness: Jane (female, 39, Chef)\n"
+        "Weapon: Knife (large)\n"
+        "Motive: money (lots)\n"
+        "Location: apartment (2nd floor)"
+    )
+    locked, note = parse_prompt(prompt)
+    # ONLY the victim is stripped; every other field is used VERBATIM.
+    assert locked.victim == "Charlotte Hayes"
+    assert locked.murderer == "John (the butler)"
+    assert locked.witness == "Jane (female, 39, Chef)"
+    assert locked.weapon == "Knife (large)"
+    assert locked.motive == "money (lots)"
+    assert locked.location == "apartment (2nd floor)"
+    # parse_prompt returns only (constraints, note); the caller's raw string is
+    # untouched and the note still lists every recognized key.
+    assert prompt == (
+        "Victim: Charlotte Hayes (Female, 42, Art curator)\n"
+        "Murderer: John (the butler)\n"
+        "Witness: Jane (female, 39, Chef)\n"
+        "Weapon: Knife (large)\n"
+        "Motive: money (lots)\n"
+        "Location: apartment (2nd floor)"
+    )
+    assert note == (
+        "recognized structured keys: victim, murderer, witness, weapon, "
+        "motive, location"
+    )

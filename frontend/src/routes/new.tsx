@@ -4,6 +4,11 @@ import type { GenerationCapabilitiesResponse, GenerationModeId } from "../api/ty
 import { useGenerationCapabilities } from "../hooks/useGenerationCapabilities";
 import { setJourneyParams, type JourneyDifficulty, type JourneyParams } from "../journey/context";
 import { rollDemoCaseId } from "../journey/demoCaseSelection";
+import {
+  formatRandomCrimePrompt,
+  generateRandomCrime,
+  makeRandomCrimeSeed,
+} from "../journey/randomCrimeGenerator";
 import { PROMPT_MAX_CHARS } from "../journey/demoPrompt";
 import {
   EXAMPLE_PROMPTS,
@@ -111,6 +116,15 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
    * src/journey/examplePrompts.ts — never derived ad hoc, never special-cased.
    */
   const [activeExampleId, setActiveExampleId] = useState<ExamplePromptId | null>(null);
+
+  /**
+   * Phase 48 — the pending "Generate random case" text awaiting confirmation.
+   * Non-null ONLY while the inline replace-confirmation is shown (the textarea
+   * already holds differing user text); "Replace description" applies exactly
+   * this string, "Keep current description" discards it. Never sent anywhere
+   * until the user presses the normal Generate button.
+   */
+  const [pendingRandomPrompt, setPendingRandomPrompt] = useState<string | null>(null);
 
   /**
    * Phase 25 — the browser-selected generation provider. Resolved from the
@@ -261,6 +275,10 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     setPrompt(next.prompt);
     setActiveExampleId(next.activeExampleId);
     setError(null);
+    // Phase 48 F2 — a stale inline replace-confirmation must not survive a new
+    // choice: selecting an example is newer intent than the pending generated
+    // text, so the pending value is discarded.
+    setPendingRandomPrompt(null);
   };
 
   /** The textarea stays fully editable after any example fill: every change
@@ -271,6 +289,57 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
     setPrompt(next.prompt);
     setActiveExampleId(next.activeExampleId);
     setError(null);
+    // Phase 48 F2 — editing the description is newer intent: any pending
+    // generated text awaiting confirmation is discarded so a stale "Replace"
+    // can never clobber the user's newer text.
+    setPendingRandomPrompt(null);
+  };
+
+  /** Phase 48 F2 — changing the difficulty is newer intent than a pending
+   *  generated prompt (which was built for the OLD difficulty); the pending
+   *  value is discarded so the stale confirmation cannot clobber the choice. */
+  const onDifficultyChange = (level: JourneyDifficulty) => {
+    setDifficulty(level);
+    setPendingRandomPrompt(null);
+  };
+
+  /** Fill the textarea with a generated random-crime prompt. A random prompt
+   *  is NOT an example, so the active-example mark is cleared. Purely fills
+   *  the input — it never stages a journey or navigates. */
+  const applyRandomPrompt = (text: string) => {
+    setPrompt(text);
+    setActiveExampleId(null);
+    setError(null);
+    setPendingRandomPrompt(null);
+  };
+
+  /**
+   * Phase 48 — "Generate random case". Reads the CURRENT difficulty, makes a
+   * fresh random seed (the ONLY `Math.random` in this feature) and generates a
+   * structured crime + its 7-line prompt. It NEVER auto-starts generation: it
+   * only fills the textarea (empty/already-equal) or opens the inline
+   * replace-confirmation when the textarea holds differing user text. No
+   * submit, no `setJourneyParams`, no navigation, no fetch.
+   */
+  const handleGenerateRandom = () => {
+    const crime = generateRandomCrime(makeRandomCrimeSeed(), difficulty);
+    const text = formatRandomCrimePrompt(crime);
+    if (prompt.trim() === "" || prompt === text) {
+      applyRandomPrompt(text);
+      return;
+    }
+    setPendingRandomPrompt(text);
+  };
+
+  /** Apply the pending generated text (inline confirmation "Replace"). */
+  const handleRandomReplace = () => {
+    if (pendingRandomPrompt === null) return;
+    applyRandomPrompt(pendingRandomPrompt);
+  };
+
+  /** Dismiss the inline confirmation, leaving the textarea untouched. */
+  const handleRandomCancel = () => {
+    setPendingRandomPrompt(null);
   };
 
   /** Validate the prompt and stage the journey; false keeps the user on page. */
@@ -449,12 +518,65 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
           id="difficulty-select"
           data-testid="difficulty-select"
           value={difficulty}
-          onChange={(event) => setDifficulty(event.target.value as JourneyDifficulty)}
+          onChange={(event) => onDifficultyChange(event.target.value as JourneyDifficulty)}
         >
           <option value="easy">Easy</option>
           <option value="medium">Medium</option>
           <option value="hard">Hard</option>
         </select>
+
+        {/* Phase 48 — "Generate random case": a deterministic prompt HELPER.
+            It builds a structured crime from a fresh random seed + the CURRENT
+            difficulty and fills the "Describe the crime" textarea. It is
+            type="button" and never submits/stages/navigates/fetches: the user
+            can edit the text and start generation with the normal Generate
+            button. When the textarea already holds differing user text, an
+            INLINE confirmation (no modal, no window.confirm) offers to replace
+            it or keep it. */}
+        <button
+          type="button"
+          className="new-case-random"
+          data-testid="generate-random-case"
+          aria-label="Generate random case"
+          onClick={handleGenerateRandom}
+        >
+          <span className="new-case-random-icon" aria-hidden="true">
+            🎲
+          </span>
+          <span className="new-case-random-label">Generate random case</span>
+        </button>
+
+        {pendingRandomPrompt !== null && (
+          <div
+            className="new-case-random-confirm"
+            data-testid="random-confirm"
+            role="group"
+            aria-live="polite"
+            aria-label="Replace the current description?"
+          >
+            <p className="new-case-random-confirm-text">
+              The description already has text. Replace it with the generated case?
+            </p>
+            <div className="new-case-random-confirm-actions">
+              <button
+                type="button"
+                className="new-case-random-replace"
+                data-testid="random-replace"
+                onClick={handleRandomReplace}
+              >
+                Replace description
+              </button>
+              <button
+                type="button"
+                className="new-case-random-cancel"
+                data-testid="random-cancel"
+                onClick={handleRandomCancel}
+              >
+                Keep current description
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Phase 25 — the browser-selectable AI Provider selector (see
             src/journey/GenerationProviderSelector.tsx). Rendered ONLY when
