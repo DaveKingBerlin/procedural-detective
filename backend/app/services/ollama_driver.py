@@ -77,6 +77,7 @@ from app.world.requirements import (
     PlacementRelation,
     RELATION_KINDS,
     WorldRequirements,
+    normalize_relation_kind,
     semantic_object_id,
 )
 
@@ -1109,11 +1110,32 @@ def parse_world_requirements(
     for index, item in enumerate(data.get("relations") or ()):
         if not isinstance(item, dict):
             raise ValueError(f"world_requirements.relations[{index}] must be an object")
-        kind = item.get("kind")
-        if kind not in RELATION_KINDS:
+        raw_kind = item.get("kind")
+        # Phase 48.1 — deterministic, BOUNDED alias canonicalization at the
+        # provider-parse boundary. A recognized safe alias (e.g.
+        # ``on_kitchen_counter``) becomes its canonical kind BEFORE the strict
+        # ``PlacementRelation`` construction; an unrecognized label is left
+        # untouched and rejected by the SAME strict vocabulary below. The
+        # canonical enum is never expanded and the dataclass stays strict.
+        kind = normalize_relation_kind(raw_kind)
+        if kind is None:
             raise ValueError(
-                f"world_requirements.relations[{index}]: kind {kind!r} not in "
+                f"world_requirements.relations[{index}]: kind {raw_kind!r} not in "
                 f"{list(RELATION_KINDS)!r}"
+            )
+        if kind != raw_kind:
+            safe_raw_kind = "".join(
+                ch for ch in str(raw_kind) if ch.isprintable()
+            )[:64]
+            emit_event(
+                "world.relation_kind.canonicalized",
+                caseId=case_id,
+                generationAttemptId=attempt_id,
+                stage=GenerationStage.WORLD_GRAPH.value,
+                relationIndex=index,
+                rawRelationKind=safe_raw_kind,
+                canonicalRelationKind=kind,
+                reasonCode="RELATION_KIND_ALIAS",
             )
         try:
             relations.append(PlacementRelation(kind=kind, target=item.get("target") or ""))

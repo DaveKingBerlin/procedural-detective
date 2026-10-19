@@ -1,0 +1,24 @@
+﻿[report] placeholders: README.md:415: hosting/video placeholder 'lands here after' (allowed while hosting/video is pending)
+[report] placeholders: SUBMISSION.md:16: hosting/video placeholder 'TBD' (allowed while hosting/video is pending)
+[ok] placeholders: release docs scanned (hosting/video placeholders reported separately)
+[ok] third-party: THIRD_PARTY.md is present at the repo root
+[ok] tracked-secrets: no tracked .env / logs/ / *.db / *.sqlite / *.log
+[ok] private-endpoint: no private/LAN IP, private URL host or OLLAMA_BASE_URL-style literal in the tracked release surface
+[ok] credentials: no PEM private key / provider API-key / git-host PAT / AWS access-key / Vault token literal in the tracked release surface
+[ok] app-bearer-tokens: no application bearer-token field/localStorage key carries a live token value in the tracked release surface
+[ok] dockerignore: .dockerignore excludes .env / .env.* (keeps .env.example), logs, runtime DBs, tmp/temp, local Ollama config, QA evidence (screenshots/) and coverage output from the build context
+[ok] compose-logging-bounds: docker-compose.prod.yml: procedural-detective + caddy bound stdout via json-file (10m x 5 rotating files)
+[ok] caddy-access-logging: Caddy access logging enabled (JSON on stdout, HTTPS virtual host; Docker json-file rotation 10m x 5 remains the single retention bound, no unbounded log file inside the container)
+[ok] monitoring-safety: no monitoring host port published (only the Caddy edge exposes 80/443); no service mounts the Docker socket, declares network_mode: host or runs privileged
+[ok] prod-env-profile: .env.example is the DEV profile (ENVIRONMENT=development, TRUST_PROXY=false) and .env.production.example is the PRODUCTION profile (ENVIRONMENT=production, PD_DEV_TRACE=false, TRUST_PROXY=true behind the Caddy edge), with no dev-only value in the production example; both examples declare the canonical real-Ollama timeout profile
+[report] prod-effective-config: CADDY_DOMAIN is an explicit local-smoke hostname ù accepted only for local smoke; set a real public CADDY_DOMAIN before ANY public hosting (run python -m tools.prod_preflight for the strict ready-to-host verdict)
+[ok] prod-effective-config: effective production configuration validated (fail-closed): ENVIRONMENT=production, PD_DEV_TRACE=false, TRUST_PROXY=true (caddy ingress), canonical timeout envelope valid, log bounds present, backend private, no published Ollama port, persistent data volume present, same-origin production bundle
+[report] prod-merge-config: the base+prod merge inherits the base dev backend :8000 host mapping (Compose concatenates `ports`); this merged chain is NOT a supported production topology ù production MUST use standalone `docker compose -f docker-compose.prod.yml` (ADR-007). Edge/expose/11434 boundaries are intact.
+[ok] lan-overlay-config: LAN internal-TLS overlay is not in effect in the rendered chain ù no internal-CA/public-domain guard applies; the canonical public-ACME Caddyfile stays the deployment edge
+[ok] ci-compose-config: rendered CI deterministic configuration validated (fail-closed, º9/º38): GENERATION_PROVIDER=fake, ENABLE_BRIDGE=false, canonical timeout envelope valid, bounded logs, no published Ollama port, persistent /data volume
+[ok] base-compose-config: rendered base dev profile validated (fail-closed): renders cleanly with an empty env file (no required/hardcoded OLLAMA_BASE_URL / OLLAMA_MODEL), no empty-string provider settings (LLM_API_KEY / LLM_MODEL / LIVE_PROVIDER_URL), canonical timeout envelope valid
+[report] frontend-build: assets\index-DSdwEWgk.js:64: query-gated debug aid token 'pd-debug-pick' compiled into the build (gated behind its exact query; frontend track owns it)
+[report] frontend-build: assets\index-DSdwEWgk.js:64: query-gated debug aid token '__pdDebugScene' compiled into the build (gated behind its exact query; frontend track owns it)
+
+release check: ALL 21 checks OK
+  6 REPORT-only items (hosting/video / gated debug aids)

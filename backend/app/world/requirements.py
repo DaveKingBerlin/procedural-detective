@@ -25,7 +25,9 @@ Contract rules:
   of the six documented vocabulary values and maps 1:1 to semantic anchor
   TYPES (``RELATION_TO_ANCHOR_TYPES``). The composer turns each relation into
   a placement anchor-type preference for the bound object; there is NO free
-  text, NO transform and NO path in the relation model;
+  text, NO transform and NO path in the relation model. The provider-parse
+  boundary may apply the CLOSED ``normalize_relation_kind`` alias table BEFORE
+  constructing the relation; the dataclass stays strict;
 - ``unsafe_unsupported`` records sanitized notes for KNOWN-UNSAFE requests
   (e.g. "bomb"/"gun"/"explosive") — such requests are NEVER composed into an
   asset (safe fail); the note is diagnostic only and never serialized.
@@ -44,7 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from app.assets.catalog import VARIANT_PARAM_KINDS
-from app.assets.glyphs import format_glyph_issues
+from app.assets.glyphs import format_glyph_in, format_glyph_issues
 
 # --------------------------------------------------------------------------- #
 # documented bounds (deterministic, mirror the Asset Oracle request surface)
@@ -84,6 +86,186 @@ RELATION_KINDS: tuple[str, ...] = (
     "floor_area",
     "on_wall",
 )
+
+# Phase 48.1 — a CLOSED, bounded alias table for provider-produced relation
+# labels. Local models (e.g. hermes3:8b) can emit a semantically correct but
+# non-canonical surface ("on_kitchen_counter") that the strict vocabulary must
+# never accept verbatim. The table maps ONLY these documented alias families
+# onto the six canonical kinds; anything else returns ``None`` so the strict
+# ``PlacementRelation`` validation still rejects it. This table NEVER expands
+# ``RELATION_KINDS`` / ``RELATION_TO_ANCHOR_TYPES`` (§10).
+#
+# ADV-48.1-02: matching is a STRICT, explicit lookup — there is NO generic
+# preposition-prefix strip. A strip would invert surface semantics (e.g.
+# ``in_desk`` -> ``on_desk``, ``in_wall`` -> ``on_wall``, ``at_table`` ->
+# ``on_table``), placing an object on a surface it was never bound to. Every
+# accepted spelling (bare surface noun AND its documented ``on_``/``in_``/
+# ``inside_`` prefixed form) is enumerated here; a value that is not a key is
+# rejected. Semantic contrasts that the strip collapsed are therefore never
+# invented: ``in_desk`` / ``inside_desk`` / ``in_wall`` / ``at_table`` /
+# ``at_cabinet`` are NOT keys.
+#
+# Semantics:
+# - a counter/worktop/bench/island is a table-like surface -> ``on_table``
+#   (the composer's ``on_table`` preference order includes DESK_EVIDENCE as a
+#   fallback, so a kit's ``kitchen_counter`` anchor remains host-capable);
+# - desk/bureau/console stay distinct -> ``on_desk``;
+# - shelf/cabinet/drawer/cupboard -> ``inside_cabinet``;
+# - floor/ground/carpet/rug -> ``floor_area``;
+# - wall/hook/mounted -> ``on_wall``;
+# - beside/next-to (the victim/body) -> ``near_victim``.
+_RELATION_KIND_ALIASES: Mapping[str, str] = {
+    # canonical values are idempotent
+    "on_desk": "on_desk",
+    "on_table": "on_table",
+    "near_victim": "near_victim",
+    "inside_cabinet": "inside_cabinet",
+    "floor_area": "floor_area",
+    "on_wall": "on_wall",
+    # desk-like surfaces (KEEP distinct from on_table)
+    "desk": "on_desk",
+    "bureau": "on_desk",
+    "on_bureau": "on_desk",
+    "console": "on_desk",
+    "on_console": "on_desk",
+    "writing_desk": "on_desk",
+    "on_writing_desk": "on_desk",
+    # table-like surfaces (counters/worktops/benches/islands)
+    "table": "on_table",
+    "counter": "on_table",
+    "on_counter": "on_table",
+    "kitchen_counter": "on_table",
+    "on_kitchen_counter": "on_table",
+    "worktop": "on_table",
+    "on_worktop": "on_table",
+    "kitchen_worktop": "on_table",
+    "on_kitchen_worktop": "on_table",
+    "bench": "on_table",
+    "on_bench": "on_table",
+    "kitchen_bench": "on_table",
+    "on_kitchen_bench": "on_table",
+    "island": "on_table",
+    "on_island": "on_table",
+    "kitchen_island": "on_table",
+    "on_kitchen_island": "on_table",
+    "tabletop": "on_table",
+    "on_tabletop": "on_table",
+    "table_top": "on_table",
+    "on_table_top": "on_table",
+    "surface": "on_table",
+    "on_surface": "on_table",
+    "dining_table": "on_table",
+    "on_dining_table": "on_table",
+    "coffee_table": "on_table",
+    "on_coffee_table": "on_table",
+    "side_table": "on_table",
+    "on_side_table": "on_table",
+    # storage (a shelf/cabinet/drawer/cupboard is an inside-a-container surface)
+    "shelf": "inside_cabinet",
+    "on_shelf": "inside_cabinet",
+    "in_shelf": "inside_cabinet",
+    "inside_shelf": "inside_cabinet",
+    "cabinet": "inside_cabinet",
+    "on_cabinet": "inside_cabinet",
+    "in_cabinet": "inside_cabinet",
+    "inside_cabinet": "inside_cabinet",
+    "cupboard": "inside_cabinet",
+    "on_cupboard": "inside_cabinet",
+    "in_cupboard": "inside_cabinet",
+    "inside_cupboard": "inside_cabinet",
+    "drawer": "inside_cabinet",
+    "on_drawer": "inside_cabinet",
+    "in_drawer": "inside_cabinet",
+    "inside_drawer": "inside_cabinet",
+    # floor-like
+    "floor": "floor_area",
+    "on_floor": "floor_area",
+    "in_floor": "floor_area",
+    "ground": "floor_area",
+    "on_ground": "floor_area",
+    "carpet": "floor_area",
+    "on_carpet": "floor_area",
+    "rug": "floor_area",
+    "on_rug": "floor_area",
+    # wall-like
+    "wall": "on_wall",
+    "hook": "on_wall",
+    "on_hook": "on_wall",
+    "mounted": "on_wall",
+    "on_mounted": "on_wall",
+    "wall_mounted": "on_wall",
+    "on_wall_mounted": "on_wall",
+    "hanging": "on_wall",
+    "on_hanging": "on_wall",
+    # proximity
+    "beside": "near_victim",
+    "on_beside": "near_victim",
+    "next_to": "near_victim",
+    "on_next_to": "near_victim",
+    "beside_victim": "near_victim",
+    "next_to_victim": "near_victim",
+    "beside_body": "near_victim",
+    "next_to_body": "near_victim",
+    "near_body": "near_victim",
+}
+
+# Bounded normalization input (a relation label is never a document).
+_MAX_RELATION_KIND_INPUT = 120
+
+
+def _has_control_or_format_glyph(value: str) -> bool:
+    """True when ``value`` carries a C0/DEL control or the shared Unicode
+    format/zero-width/Bidi/line-separator glyph class (``app.assets.glyphs``).
+
+    ADV-48.1-05: such glyphs are invisible (or NFKC-folded) and were previously
+    folded into ``_`` by the normalizer, silently accepting a hostile label.
+    They are rejected BEFORE normalization so the value fails strict validation
+    instead of being coerced. Ordinary separators (space, ``-``, ``_``, ``.``)
+    are not in either class and keep working.
+    """
+    if format_glyph_in(value) is not None:
+        return True
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def normalize_relation_kind(raw: Any) -> str | None:
+    """Deterministically map a provider relation label onto a canonical kind.
+
+    Returns one of ``RELATION_KINDS`` for a recognized alias, else ``None``.
+    Matching is bounded and closed: the value must be free of control/format
+    glyphs, then NFKC + casefold, non-alphanumerics become ``_``, empty/``the``
+    tokens are dropped, and the result is looked up EXACTLY in the closed
+    ``_RELATION_KIND_ALIASES`` table (case/separator tolerant). Examples:
+
+        "on_kitchen_counter" / "On Kitchen Counter" / "on-kitchen-counter"
+            -> "on_table"
+        "on_desk" -> "on_desk"   (KEPT distinct)
+        "in_desk" / "in_wall" / "at_table" / "teleported_inside" -> None
+
+    ADV-48.1-02: there is NO generic preposition-prefix strip. The table
+    enumerates every accepted spelling explicitly, so a preposition can never
+    invert a surface's semantics (``in_desk`` is NOT ``on_desk``). The caller
+    (the provider-parse boundary) applies this BEFORE constructing a
+    ``PlacementRelation``; the dataclass itself stays STRICT and rejects any
+    non-canonical kind.
+    """
+    if not isinstance(raw, str):
+        return None
+    if not raw or len(raw) > _MAX_RELATION_KIND_INPUT:
+        return None
+    if _has_control_or_format_glyph(raw):
+        return None
+    normalized = unicodedata.normalize("NFKC", raw).casefold().strip()
+    chars: list[str] = []
+    for ch in normalized:
+        chars.append(ch if ch.isalnum() else "_")
+    parts = [
+        part for part in "".join(chars).split("_") if part and part != "the"
+    ]
+    if not parts:
+        return None
+    token = "_".join(parts)
+    return _RELATION_KIND_ALIASES.get(token)
 
 
 def semantic_object_id(requested_name: Any) -> str:
@@ -440,6 +622,7 @@ __all__ = [
     "RELATION_KINDS",
     "RELATION_TO_ANCHOR_TYPES",
     "WorldRequirements",
+    "normalize_relation_kind",
     "object_request_issues",
     "placement_relation_issues",
     "safe_string_issues",

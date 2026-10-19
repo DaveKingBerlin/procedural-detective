@@ -88,6 +88,7 @@ from app.generation.schemas import (
 )
 from app.generation.trusted_context import PHASE41A_QUALITY_RULES
 from app.world.environment import ENVIRONMENT_IDS
+from app.world.requirements import RELATION_KINDS
 
 # --- schema-contract builder (deterministic, authoritative) ----------------
 #
@@ -494,7 +495,12 @@ def _stage_contract(stage: str) -> Mapping[str, Any]:
             ],
             "relations": [
                 {
-                    "kind": "on_desk|on_table|near_victim|inside_cabinet|floor_area|on_wall",
+                    # Phase48.1 — the canonical six-kind vocabulary is the
+                    # SINGLE source (``app.world.requirements.RELATION_KINDS``):
+                    # the ``enum`` marker derives the closed transport JSON
+                    # Schema enum and the rendered prompt teaches the same
+                    # tokens. No Local-Ollama-only copy.
+                    "kind": "relation kind; enum " + ",".join(RELATION_KINDS),
                     "target": "the casefolded object name this relation binds",
                 }
             ],
@@ -2065,8 +2071,9 @@ _WORLD_FIELD_RULES = (
     "\"<weapon name>\"} or {\"kind\": \"on_table\", \"target\": \"<weapon "
     "name>\"}. Every relation target is an OBJECT name from your objects "
     "list — never a person.\n"
-    "- relations kind is one exact token from: on_desk, on_table, "
-    "near_victim, inside_cabinet, floor_area, on_wall.\n"
+    "- relations kind is one exact token from: "
+    + ", ".join(RELATION_KINDS)
+    + ".\n"
     "- SEMANTIC ANCHORS: the placer binds every placement to a REGISTERED "
     "anchor id; valid anchor ids are: "
     + ", ".join(sorted(ANCHOR_ALLOWLIST))
