@@ -1,0 +1,77 @@
+# syntax=docker/dockerfile:1
+#
+# Phase 49 §12/§13 — Linux x64 release image for the pd-ollama-bridge
+# standalone client. Build context is the REPOSITORY ROOT:
+#
+#   docker build --platform linux/amd64 \
+#     --file bridge/Dockerfile.release \
+#     --output type=local,dest=<dir> .
+#
+# The final `export` stage contains ONLY the built binary + the release docs;
+# `--output type=local` copies them to the host without needing a container
+# runtime or the build toolchain. Glibc target: Debian bookworm (glibc 2.36),
+# so the binary is glibc-dependent — it is NOT a static/musl binary and does
+# not "run on all Linux distributions". See docs/OLLAMA_BRIDGE_RELEASE.md.
+#
+# Layers are minimal. The repo `.dockerignore` already excludes `.git`,
+# `node_modules`, `.env*`, `dist`, caches and dev scratch trees; we additionally
+# COPY only the bridge package, the spec and the three release documents.
+
+# --------------------------------------------------------------------------- #
+# Build stage
+# --------------------------------------------------------------------------- #
+FROM --platform=linux/amd64 python:3.12-slim-bookworm AS build
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# binutils (objdump) is required by PyInstaller on Linux; the slim base omits it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bridge runtime deps + PyInstaller builder.
+# ADV-49-004: the runtime deps are pinned to the SAME exact versions as
+# build-bridge-windows.ps1 so both platform artifacts bundle one declared
+# dependency set. Residual limitation: versions are pinned but NOT hash-pinned
+# (no --require-hashes), and the base image is tag-pinned, not digest-pinned.
+RUN python -m pip install --no-cache-dir \
+        "pyinstaller>=6.10,<7" \
+        "websockets==17.1" \
+        "httpx==0.28.1" \
+        "httpcore==1.0.9" \
+        "certifi==2026.07.22"
+
+WORKDIR /build/bridge
+
+# Only the bridge package and the packaging spec enter the builder.
+COPY bridge/pd_ollama_bridge/ /build/bridge/pd_ollama_bridge/
+COPY bridge/pd-ollama-bridge.spec /build/bridge/pd-ollama-bridge.spec
+
+# Build the one-file binary and verify it runs inside the builder.
+RUN python -m PyInstaller --clean --noconfirm \
+        --distpath /build/dist \
+        --workpath /build/work \
+        /build/bridge/pd-ollama-bridge.spec \
+    && chmod 0755 /build/dist/pd-ollama-bridge \
+    && /build/dist/pd-ollama-bridge --version
+
+# Release documents, staged separately so a doc change does not rebuild the EXE.
+COPY bridge/QUICKSTART.md /build/pkg/QUICKSTART.md
+COPY LICENSE /build/pkg/LICENSE
+COPY bridge/THIRD_PARTY_NOTICES.txt /build/pkg/THIRD_PARTY_NOTICES.txt
+
+RUN test -f /build/pkg/QUICKSTART.md \
+    && test -f /build/pkg/LICENSE \
+    && test -f /build/pkg/THIRD_PARTY_NOTICES.txt
+
+# --------------------------------------------------------------------------- #
+# Export stage — only release payload, emitted via `--output type=local`
+# --------------------------------------------------------------------------- #
+FROM scratch AS export
+
+COPY --from=build /build/dist/pd-ollama-bridge /pd-ollama-bridge
+COPY --from=build /build/pkg/QUICKSTART.md /QUICKSTART.md
+COPY --from=build /build/pkg/LICENSE /LICENSE
+COPY --from=build /build/pkg/THIRD_PARTY_NOTICES.txt /THIRD_PARTY_NOTICES.txt

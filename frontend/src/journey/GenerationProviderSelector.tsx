@@ -4,6 +4,7 @@ import type {
   GenerationProviderId,
   OllamaTransportId,
 } from "../api/types";
+import OllamaBridgeHelpLink from "../release/OllamaBridgeHelpLink";
 import {
   FAKE_PROVIDER_SUBTITLE,
   FRONTIER_API_KEY_LABEL,
@@ -378,6 +379,10 @@ export function GenerationProviderSelector({
             disabled={disabled}
             onChange={(event) => onModelChange(event.target.value)}
           />
+          {/* Phase 49 §50 — where Local Ollama is chosen, a single muted line
+              links to the "Local AI with Ollama" download section further down
+              this page. It never adds a control to the provider selection. */}
+          <OllamaBridgeHelpLink className="generation-ollama-help" />
         </div>
       )}
 

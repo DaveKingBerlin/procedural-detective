@@ -24,9 +24,24 @@ Main dependencies include:
 
 - **Backend:** FastAPI, Pydantic, SQLAlchemy, Alembic, uvicorn, httpx
 - **Frontend:** React, React DOM, React Router, Babylon.js, Vite, TypeScript, Vitest, Playwright
-- **Optional bridge:** websockets, httpx, certifi
+- **Optional bridge:** websockets, httpx, httpcore, certifi
 
 The direct dependencies use permissive open-source licences such as **MIT, BSD-3-Clause and Apache-2.0**.
+
+The downloadable `pd-ollama-bridge` standalone client (Phase 49) is a packaged
+executable that bundles its Python dependencies plus their transitive and native
+components. Enumerated from the released artifacts, the bundled set comprises
+**websockets, httpx, httpcore, certifi, anyio, idna, h11 and typing_extensions**
+(both platforms) and **click, pygments and packaging** (Windows only), together
+with the **CPython 3.12 runtime** (PSF License), the **PyInstaller bootloader**
+(GPL-2.0-or-later with the PyInstaller bootloader exception), **OpenSSL 3.0.16**
+(Windows) / **3.0.22** (Linux) (Apache-2.0), **libffi** (MIT) and the
+**Microsoft Visual C++ runtime** (Windows only, proprietary redistributable).
+Licences span MIT,
+BSD-3-Clause, BSD-2-Clause, Apache-2.0, MPL-2.0, PSF-2.0 and the
+GPL-2.0-with-exception bootloader terms. Packaging a dependency does not remove
+its licence obligations; each release archive ships `THIRD_PARTY_NOTICES.txt`.
+See `THIRD_PARTY.md` §1.1 for the full bridge inventory with versions.
 
 For the complete dependency inventory, see `THIRD_PARTY.md` and the package manifests/lockfiles in the repository.
 

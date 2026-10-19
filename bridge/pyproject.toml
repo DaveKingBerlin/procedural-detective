@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pd-ollama-bridge"
-version = "0.1.0"
+# Phase 49 §4 — the version is resolved from the single authoritative source
+# ``pd_ollama_bridge.__version__`` so package metadata, the CLI and the release
+# manifest can never drift. Do NOT re-introduce a literal version here.
+dynamic = ["version"]
 description = "Phase 22 BYO-Ollama local bridge client for Procedural Detective"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,6 +16,9 @@ dependencies = [
     "httpx>=0.24",
     "certifi>=2023.7.22",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "pd_ollama_bridge.__version__"}
 
 [project.scripts]
 pd-ollama-bridge = "pd_ollama_bridge.cli:main"

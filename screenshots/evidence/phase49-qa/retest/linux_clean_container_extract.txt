@@ -1,0 +1,30 @@
+﻿--- extracted modes ---
+total 10068
+drwxr-xr-x 2 root root     4096 Oct 19 18:16 .
+drwxr-xr-x 1 root root     4096 Oct 19 18:16 ..
+-rw-r--r-- 1 root root     1083 Oct 19 18:13 LICENSE
+-rw-r--r-- 1 root root    11066 Oct 19 18:13 QUICKSTART.md
+-rw-r--r-- 1 root root     9412 Oct 19 18:13 THIRD_PARTY_NOTICES.txt
+-rwxr-xr-x 1 root root 10270464 Oct 19 18:13 pd-ollama-bridge
+--- no python/toolchain ---
+NO_PYTHON3
+NO_PIP
+--- version ---
+pd-ollama-bridge 1.0.0
+EXIT_VERSION=0
+--- help (stdout suppressed) ---
+EXIT_HELP=0
+--- list-models with no Ollama present (truthful failure expected) ---
+docker : INFO bridge: resolved Ollama endpoint http://127.0.0.1:11434 (list-models)
+In Zeile:1 Zeichen:228
++ ... retest.sh"; docker run --rm -v "${tar}:/pkg.tar.gz:ro" -v "${sh}:/smo ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (INFO bridge: re...4 (list-models):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Ô£ù Ollama not reachable at http://127.0.0.1:11434
+EXIT_LISTMODELS=1
+--- connect smoke to unreachable server (bounded, must not fake health) ---
+error: pairing code must have the form PD-XXXX-XXXX
+EXIT_CONNECT=1
+DONE

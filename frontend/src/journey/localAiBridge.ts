@@ -18,8 +18,10 @@ import type { RemoteLocalAiDTO } from "../api/types";
  *     session-scoped block); the panel only waits/polls, it never guesses;
  *   - the browser never talks to a local Ollama or a bridge WebSocket (Phase
  *     22 §26): the pairing code is displayed for the user to type into the
- *     LOCAL BRIDGE CLI (`pd-ollama-bridge connect <code>`), which opens the
- *     bridge<->server WS itself.
+ *     LOCAL BRIDGE CLI, which opens the bridge<->server WS itself. The
+ *     displayed command carries the ACTUAL server origin (ADV-49-005): the
+ *     website knows its own origin, so a freshly downloaded bridge can connect
+ *     out of the box instead of resolving to the shipped placeholder domain.
  *
  * States: idle (not connected) -> waiting (code displayed, polling) ->
  * connected -> disconnected (a poll after a real connection showed
@@ -42,6 +44,13 @@ export const BRIDGE_CODE_LABEL = "Pairing code:";
 
 /** Prefix of the CLI instruction shown with the code (the code is appended). */
 export const BRIDGE_CLI_COMMAND_PREFIX = "pd-ollama-bridge connect ";
+
+/**
+ * The CLI `--server` flag used to point the downloaded bridge at the exact
+ * server origin the website is served from (ADV-49-005), e.g.
+ * `pd-ollama-bridge connect --server wss://detective.example.com PD-XXXX-XXXX`.
+ */
+export const BRIDGE_CLI_SERVER_FLAG = "--server ";
 
 /** "Waiting for connection…" — the paired-but-not-yet-connected state. */
 export const BRIDGE_WAITING_LABEL = "Waiting for connection…";
@@ -152,12 +161,45 @@ export function nextBridgeView(
 }
 
 /**
- * The CLI instruction shown under the pairing code: the frozen prefix plus
- * the server-minted code. The code is a display-only human-readable secret
- * the user types into the local bridge — the browser NEVER sends it anywhere.
+ * The bridge server WebSocket origin the user's downloaded CLI should connect
+ * to: the SAME origin the website is served from, with the page scheme mapped
+ * to the WebSocket scheme (`https:` -> `wss:`, `http:` -> `ws:`). The browser
+ * is the one thing that always knows where the page (and therefore the server)
+ * actually lives, so a freshly downloaded bridge can connect out of the box
+ * instead of falling back to the shipped placeholder domain (ADV-49-005).
+ *
+ * Returns null when there is no usable browser location (SSR or a bare test
+ * runtime); the caller then keeps the server-less command form, which
+ * `configure` can still fill in.
  */
-export function bridgeCliCommand(code: string): string {
-  return BRIDGE_CLI_COMMAND_PREFIX + code;
+export function bridgeServerOrigin(): string | null {
+  if (typeof window === "undefined") return null;
+  const location = window.location;
+  if (!location) return null;
+  const host = location.host;
+  if (typeof host !== "string" || host === "") return null;
+  if (location.protocol === "https:") return `wss://${host}`;
+  if (location.protocol === "http:") return `ws://${host}`;
+  return null;
+}
+
+/**
+ * The CLI instruction shown under the pairing code: the frozen prefix, the
+ * explicit `--server <ws(s)://host>` origin derived from the current page (so
+ * the command works out of the box — ADV-49-005) and the server-minted code.
+ * The code is a display-only human-readable secret the user types into the
+ * local bridge — the browser NEVER sends it anywhere.
+ *
+ * `serverOrigin` is injectable for hermetic tests; production callers omit it
+ * and get the current browser origin (or the server-less form when unknown).
+ */
+export function bridgeCliCommand(
+  code: string,
+  serverOrigin: string | null = bridgeServerOrigin(),
+): string {
+  return serverOrigin === null
+    ? BRIDGE_CLI_COMMAND_PREFIX + code
+    : `${BRIDGE_CLI_COMMAND_PREFIX}${BRIDGE_CLI_SERVER_FLAG}${serverOrigin} ${code}`;
 }
 
 /** The connected-state model line: "Model: <label>" when a model is known. */

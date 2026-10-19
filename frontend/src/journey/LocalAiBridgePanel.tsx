@@ -8,6 +8,7 @@ import type {
 } from "../api/types";
 import { ApiError, createBridgePairing, getBridgeStatus } from "../api/client";
 import { createOrReuseAnonymousSession } from "../api/anonymousSession";
+import OllamaBridgeHelpLink from "../release/OllamaBridgeHelpLink";
 import { attachJourneySessionToken } from "./context";
 import { isRemoteLocalAiOffered, remoteLocalAiBlock } from "./generationMode";
 import {
@@ -54,8 +55,8 @@ import {
  *
  * The browser NEVER talks to a local Ollama and never opens a bridge
  * WebSocket (Phase 22 §26): the code the server mints is displayed for the
- * user to type into the LOCAL BRIDGE CLI (`pd-ollama-bridge connect <code>`),
- * which owns the bridge<->server WS.
+ * user to type into the LOCAL BRIDGE CLI (which carries this page's own server
+ * origin — ADV-49-005), and that CLI owns the bridge<->server WS.
  *
  * When the capability DTO does NOT offer remoteLocalAi (ENABLE_BRIDGE=false
  * or an older server) this component renders NOTHING — the /new page stays
@@ -267,6 +268,11 @@ export default function LocalAiBridgePanel({
           >
             {BRIDGE_CONNECT_BUTTON_LABEL}
           </button>
+          {/* Phase 49 §50 — discoverable download help: the user who needs a
+              local bridge can jump to the "Local AI with Ollama" section on
+              this same page. A single muted line; it never clutters the
+              provider selection. */}
+          <OllamaBridgeHelpLink className="local-ai-bridge-help" />
         </>
       )}
 
@@ -306,6 +312,11 @@ export default function LocalAiBridgePanel({
           >
             {BRIDGE_REQUEST_NEW_CODE_LABEL}
           </button>
+          {/* Phase 49 §50 — discoverable download help: the user who needs a
+              local bridge can jump to the "Local AI with Ollama" section on
+              this same page. A single muted line; it never clutters the
+              provider selection. */}
+          <OllamaBridgeHelpLink className="local-ai-bridge-help" />
         </>
       )}
 
@@ -339,6 +350,7 @@ export default function LocalAiBridgePanel({
           >
             {BRIDGE_CONNECT_BUTTON_LABEL}
           </button>
+          <OllamaBridgeHelpLink className="local-ai-bridge-help" />
         </>
       )}
 

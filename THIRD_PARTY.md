@@ -39,7 +39,49 @@ deployment. No lockfile is shipped; the declared requirement ranges are given.
 | --- | --- | --- | --- |
 | websockets | `>=13` | WebSocket transport to the deployment (bridge client) | BSD-3-Clause |
 | httpx | `>=0.24` | HTTP client to the local Ollama server and for model listing | BSD-3-Clause |
+| httpcore | transitive (via httpx) | Low-level HTTP transport used by httpx | BSD-3-Clause |
 | certifi | `>=2023.7.22` | CA bundle fallback for TLS trust when no usable system bundle exists (never a downgrade) | MPL-2.0 |
+
+#### Packaged standalone binary (Phase 49)
+
+The downloadable `pd-ollama-bridge` release is a **standalone executable** that
+**bundles** the Python runtime and the dependencies above (plus their transitive
+dependencies) rather than relying on a system Python. The components below were
+enumerated directly from the released artifacts — each bundled distribution's
+`*.dist-info` and embedded module bytecode in
+`dist/releases/1.0.0/pd-ollama-bridge-v1.0.0-windows-x64.zip` and
+`pd-ollama-bridge-v1.0.0-linux-x64.tar.gz` — not assumed. Where the binary does
+not record a package's version, the version is marked "not recorded in binary".
+
+| Component | Version bundled | Purpose | License |
+| --- | --- | --- | --- |
+| websockets | 17.1 (both platforms) | WebSocket transport to the deployment | BSD-3-Clause |
+| httpx | 0.28.1 | HTTP client to the local Ollama server and for model listing | BSD-3-Clause |
+| httpcore | 1.0.9 | Low-level HTTP transport used by httpx | BSD-3-Clause |
+| certifi | 2026.07.22 (both platforms) | Bundled CA trust store (also shipped as `certifi/cacert.pem`) | MPL-2.0 |
+| anyio | not recorded in binary | Async I/O primitives used by httpx/httpcore | MIT |
+| idna | 3.19 (Windows) / 3.20 (Linux) | Internationalized domain names for httpx | BSD-3-Clause |
+| h11 | 0.16.0 | HTTP/1.1 protocol implementation used by httpcore | MIT |
+| typing_extensions | 3.15 (both platforms) | Backports for the bundled interpreter | PSF-2.0 |
+| click | 8.5.0 (Windows only) | CLI helper pulled in by the PyInstaller toolchain | BSD-3-Clause |
+| pygments | 2.21.0 (Windows only) | Syntax highlighter pulled in by the PyInstaller toolchain | BSD-2-Clause |
+| packaging | 26.3 (Windows only) | Version/packaging utilities pulled in by the PyInstaller toolchain | Apache-2.0 OR BSD-2-Clause |
+| CPython runtime | 3.12 | Embedded interpreter (`python312.dll` / `python3.12`) | PSF License Agreement (see upstream) |
+| PyInstaller bootloader | PyInstaller 6.x | Standalone executable packaging | GPL-2.0-or-later **with the PyInstaller bootloader exception** (permits bundling non-GPL applications); see upstream |
+| OpenSSL | 3.0.16 (Windows) / 3.0.22 (Linux) | TLS for the bundled `ssl` module (`libcrypto-3.dll`/`libssl-3.dll` on Windows; `libcrypto.so.3`/`libssl.so.3` on Linux) | Apache-2.0 |
+| libffi | 8 (`libffi-8.dll` Windows / `libffi.so.8` Linux) | Foreign-function interface for the bundled `ctypes` module | MIT |
+| Microsoft Visual C++ runtime | VCRUNTIME140 (`VCRUNTIME140.dll`, Windows only) | Native C runtime required by the bundled CPython build | Microsoft VC++ Redistributable (proprietary; see upstream) |
+
+The Windows and Linux artifacts are built on different platforms and do not
+bundle an identical set: `click`, `pygments` and `packaging` appear only in the
+Windows `.exe`; the native libraries are platform-specific.
+
+Bundling a dependency does not remove its license obligations: the licenses
+above apply to the packaged binary as well. Each release archive ships a
+`THIRD_PARTY_NOTICES.txt` (source: `bridge/THIRD_PARTY_NOTICES.txt`) reproducing
+these notices. License identifiers were verified against the bundled
+distributions' metadata (`.dist-info`) and the installed package metadata, not
+assumed.
 
 ## 2. Frontend (JavaScript) dependencies
 
