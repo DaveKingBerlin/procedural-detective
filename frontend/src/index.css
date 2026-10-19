@@ -2490,3 +2490,173 @@ button {
 .evidence-generic-description {
   color: var(--muted);
 }
+
+/* ======================================================================
+ * Phase 49 — "Local AI with Ollama" download section (Phase49.md §22/§24)
+ * and the §50 Local-Ollama help link.
+ *
+ * Reuses the existing design system tokens (--panel/--border/--accent/--muted)
+ * and the landing-panel language; no new palette, no separate microsite.
+ * ==================================================================== */
+
+.release-download {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem 1.1rem;
+  margin: 1.1rem 0 0.4rem;
+  max-width: 46rem;
+}
+
+.release-download-heading {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.release-download-intro {
+  color: var(--muted);
+  margin: 0 0 0.8rem;
+  max-width: 40rem;
+}
+
+.release-download-loading,
+.release-download-unavailable {
+  margin: 0.2rem 0 0.8rem;
+}
+
+.release-download-unavailable {
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  padding: 0.6rem 0.85rem;
+  color: var(--text);
+}
+
+.release-download-options {
+  list-style: none;
+  margin: 0 0 0.6rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* One platform per row — both are always present (never hidden, §23). */
+.release-download-option {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.55rem 0.8rem;
+  min-width: 0;
+}
+
+.release-download-option--recommended {
+  border-color: var(--accent);
+  background: rgba(230, 180, 85, 0.08);
+}
+
+.release-download-option-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.release-download-link {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.35rem 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.release-download-link:hover,
+.release-download-link:focus-visible {
+  background: rgba(230, 180, 85, 0.12);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.release-download-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.release-download-missing {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.release-download-badge {
+  margin-left: auto;
+  border: 1px solid var(--accent);
+  background: rgba(230, 180, 85, 0.12);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.release-download-version {
+  font-weight: 600;
+  margin: 0 0 0.2rem;
+}
+
+.release-download-requires {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0 0 0.6rem;
+}
+
+.release-download-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0;
+}
+
+/* The links may be actual anchor rows, so the shared button rule above must
+   not stretch them into blocks here. */
+.release-download-links .release-download-link {
+  padding: 0.15rem 0.5rem;
+}
+
+.release-download-sep {
+  color: var(--muted);
+}
+
+/* Phase 49 §50 — the Local-Ollama help/download line. Muted, compact, never a
+   control in the provider selection. */
+.ollama-bridge-help {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.ollama-bridge-help-link {
+  color: var(--accent);
+}
+
+.ollama-bridge-help-link:hover,
+.ollama-bridge-help-link:focus-visible {
+  text-decoration: underline;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.local-ai-bridge-help {
+  margin-top: 0.6rem;
+}
+
+.generation-ollama-help {
+  margin-top: 0.45rem;
+}
+

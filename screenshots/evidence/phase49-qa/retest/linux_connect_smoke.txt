@@ -1,0 +1,9 @@
+﻿--- valid-code connect to unreachable server (bounded) ---
+docker : error: pairing code must have the form PD-XXXX-XXXX
+In Zeile:1 Zeichen:228
++ ... 64.tar.gz"; docker run --rm -v "${tar}:/pkg.tar.gz:ro" debian:stable- ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: pairing ...rm PD-XXXX-XXXX:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+EXIT_CONNECT=True

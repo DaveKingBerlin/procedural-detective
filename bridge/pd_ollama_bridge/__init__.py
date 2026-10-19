@@ -7,6 +7,10 @@ server: model inference. It can never be told to fetch URLs, read files or run
 commands.
 """
 
-__version__ = "0.1.0"
+# The SINGLE authoritative bridge version (Phase 49 §4). ``pyproject.toml``
+# consumes this attribute dynamically (``dynamic = ["version"]``) and the CLI
+# ``--version`` reads this same constant, so the source, the CLI, the package
+# metadata, the build tooling and the release manifest can never drift apart.
+__version__ = "1.0.0"
 
 __all__ = ["__version__"]

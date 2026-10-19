@@ -141,6 +141,7 @@ describe("Phase 22 — /new pairing panel (Not connected -> code -> connected)",
 
   afterEach(() => {
     clearJourneyParams();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -160,10 +161,13 @@ describe("Phase 22 — /new pairing panel (Not connected -> code -> connected)",
   });
 
   it("Not connected -> click -> PAIRING CODE + CLI command + waiting, then polls to Connected (fake timers + mocked status)", async () => {
+    // The website knows its own origin: a fresh download must get a command
+    // that can connect out of the box (ADV-49-005).
+    vi.stubGlobal("location", { protocol: "https:", host: "detective.example.com" });
     const services = makeServices();
     const getBridgeStatus = vi.mocked(services.getBridgeStatus);
     // First poll still unconnected (user has not run the bridge yet), second
-    // poll connected (the user ran `pd-ollama-bridge connect <code>`).
+    // poll connected (the user ran the displayed bridge command).
     getBridgeStatus
       .mockResolvedValueOnce({
         remoteLocalAi: { available: true, connected: false, model: null, ready: false },
@@ -179,7 +183,7 @@ describe("Phase 22 — /new pairing panel (Not connected -> code -> connected)",
     // Code + CLI instruction + waiting state appear prominently.
     expect(textOf(query(mounted, "bridge-pairing-code"))).toBe(CODE);
     expect(textOf(query(mounted, "bridge-cli-command"))).toBe(
-      "pd-ollama-bridge connect PD-X7K4-92QP",
+      "pd-ollama-bridge connect --server wss://detective.example.com PD-X7K4-92QP",
     );
     expect(textOf(query(mounted, "bridge-waiting"))).toBe(BRIDGE_WAITING_LABEL);
     // The pairing endpoints were called with the ANONYMOUS session token the
@@ -199,6 +203,28 @@ describe("Phase 22 — /new pairing panel (Not connected -> code -> connected)",
     expect(textOf(query(mounted, "bridge-model"))).toBe("Model: hermes3:8b");
     expect(textOf(query(mounted, "bridge-ready"))).toBe(BRIDGE_READY_LINE);
     expect(query(mounted, "bridge-waiting")).toBeNull();
+    unmount(mounted);
+  });
+
+  it("ADV-49-005 — the code display carries THIS page's wss:// server origin (copy-pasteable, out of the box)", async () => {
+    vi.stubGlobal("location", { protocol: "https:", host: "pd.example.com:8443" });
+    const mounted = mount(makeProps());
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    expect(textOf(query(mounted, "bridge-cli-command"))).toBe(
+      "pd-ollama-bridge connect --server wss://pd.example.com:8443 PD-X7K4-92QP",
+    );
+    unmount(mounted);
+  });
+
+  it("ADV-49-005 — an http page maps to a ws:// server origin (local dev)", async () => {
+    vi.stubGlobal("location", { protocol: "http:", host: "localhost:5173" });
+    const mounted = mount(makeProps());
+    click(query(mounted, "bridge-connect"));
+    await settle();
+    expect(textOf(query(mounted, "bridge-cli-command"))).toBe(
+      "pd-ollama-bridge connect --server ws://localhost:5173 PD-X7K4-92QP",
+    );
     unmount(mounted);
   });
 

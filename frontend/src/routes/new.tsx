@@ -38,6 +38,7 @@ import {
   providerQualifierFromCapabilities,
 } from "../journey/providerMode";
 import { examplePromptText, validatePrompt } from "../journey/promptValidation";
+import ReleaseDownloadSection from "../release/ReleaseDownloadSection";
 
 /**
  * "/new" — the prompt-to-case screen (Phase 8 B, REQUIREMENTS 3.1).
@@ -680,6 +681,15 @@ export default function NewCasePage(overrides: NewCasePageProps = {}) {
           {demoCtaNote(capabilities)}
         </p>
       </div>
+
+      {/* Phase 49 §22 — "Local AI with Ollama" download section. Rendered on
+          the generate screen (the screen that hosts the Local Ollama choice);
+          the §50 help link in the provider/bridge surface jumps here. It is
+          fully self-contained: it fetches ONLY the same-origin release
+          manifest, never auto-downloads, always shows BOTH platforms and
+          degrades to an honest unavailable state when the manifest is missing
+          — it can never break the rest of this page (§39/§40). */}
+      <ReleaseDownloadSection />
     </section>
   );
 }

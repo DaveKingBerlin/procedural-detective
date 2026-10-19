@@ -37,7 +37,7 @@ from typing import Any, Mapping, Optional, Sequence
 import httpx
 from websockets.exceptions import InvalidURI
 
-from . import protocol
+from . import __version__, protocol
 from .bridge_client import BridgeClient
 from .bridge_config import (
     BridgeConfigError,
@@ -64,6 +64,28 @@ from .urls import UrlValidationError, server_origin
 LOGGER = logging.getLogger("pd-ollama-bridge")
 
 BANNER = "Procedural Detective Local AI Bridge"
+
+
+def _startup_block_lines(
+    *, origin: str, ollama_url: str, mode: str, ollama_reachable: bool
+) -> tuple[str, ...]:
+    """Bounded, secret-free ``connect`` startup block (Phase 49 §26/§29).
+
+    Contains ONLY identity + reachability facts: the bridge version, the
+    resolved server ORIGIN (``ws(s)://host[:port]`` — never the pairing code or
+    a bearer token), the resolved local Ollama endpoint and the local Ollama
+    reachability. No token, pairing code, prompt or request body can ever
+    appear here. The Ollama status is truthful: an unreachable Ollama is
+    reported as ``unavailable`` (never faked).
+    """
+    return (
+        f"Bridge version: {__version__}",
+        f"Server: {origin}",
+        f"Ollama: {ollama_url}",
+        f"Connection mode: {mode}",
+        f"Ollama status: {'reachable' if ollama_reachable else 'unavailable'}",
+    )
+
 
 # Sentinel: an option that was NOT explicitly supplied on the command line
 # (argparse would otherwise fill in ``None``/the built-in default and hide the
@@ -102,6 +124,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "  Reconnect:    pd-ollama-bridge connect\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Phase 49 §4/§26 — a top-level ``--version`` (and ``-V``) that prints the
+    # SINGLE authoritative version and exits 0. argparse's version action fires
+    # during option parsing, BEFORE the ``required=True`` subparser check, so it
+    # works even though every other invocation needs a subcommand.
+    parser.add_argument(
+        "--version",
+        "-V",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="show the bridge version and exit",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -596,6 +629,18 @@ async def _connect(args: argparse.Namespace) -> int:
         allow_lan=config.lan,
     )
     ok, tags = await ollama.check_available()
+    # Phase 49 §26/§29 — a bounded, secret-free startup block on EVERY connect,
+    # including the truthful "unavailable" case (the bridge does not fake
+    # Ollama availability). Only version/origin/endpoint/mode/status appear.
+    print()
+    for line in _startup_block_lines(
+        origin=plan.origin,
+        ollama_url=config.normalized_ollama_url,
+        mode=plan.mode,
+        ollama_reachable=ok,
+    ):
+        print(line)
+    print()
     if not ok:
         print(f"✗ Ollama not reachable at {config.normalized_ollama_url}", file=sys.stderr)
         await ollama.aclose()

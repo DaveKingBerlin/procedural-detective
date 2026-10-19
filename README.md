@@ -79,6 +79,69 @@ validators and the deduction solver decide what is published. The browser never
 talks to a provider directly. See `docs/PRIVACY.md` for the hosted-vs-local
 data-flow disclosure.
 
+## Local AI with Ollama
+
+Procedural Detective can run generation against an **AI model on your own
+computer** through **Ollama**, using a small companion program called
+`pd-ollama-bridge`.
+
+The bridge is an **outbound-only client**: it opens an authenticated WebSocket
+(WSS) session to the Procedural Detective server and calls your local Ollama
+HTTP API on `http://127.0.0.1:11434`. It does **not** open a local port, run a
+local web server, or expose a health endpoint or CORS surface. The browser talks
+to the Procedural Detective server over normal HTTPS; the server relays the
+generation job to the bridge, which forwards it to Ollama on your machine.
+
+Because the server relays jobs, selecting Local Ollama is **not** a fully offline
+mode: the server still receives the prompts/jobs and the structured model result
+it needs to validate and publish the case. See `docs/PRIVACY.md` §6.
+
+### End users — download and run
+
+1. Download the versioned archive for your platform from the release page:
+   <https://github.com/DaveKingBerlin/procedural-detective/releases>
+2. Follow `bridge/QUICKSTART.md` (also shipped inside each archive).
+
+- Supported platforms: **Windows 10/11 x64** and **Linux x86_64 (amd64)**.
+- Requires **Ollama** installed and running locally, plus at least one pulled
+  model. Ollama and models are not bundled.
+- The shipped default server is a **placeholder** (`https://detective.example.com`).
+  Point the bridge at the Procedural Detective server you use, once, with
+  `pd-ollama-bridge configure --server wss://<your-pd-server>`, or per run with
+  `pd-ollama-bridge connect --server wss://<your-pd-server> <CODE>`. The website's
+  **Connect local Ollama** panel shows the exact command, including the origin it
+  is served from.
+- The published binary is **not code-signed**; verify the SHA-256 checksum
+  against `SHA256SUMS.txt` before running.
+- Version `1.0.0` artifacts:
+  `pd-ollama-bridge-v1.0.0-windows-x64.zip` /
+  `pd-ollama-bridge-v1.0.0-linux-x64.tar.gz`.
+
+> The download links resolve **after** the `v1.0.0` release is published. Until
+> then, use the developer/source workflow below.
+
+### Developers — build and run from source
+
+The bridge is a Python package under `bridge/`. Install and run it locally, or
+run the test suite:
+
+```bash
+cd bridge
+python -m pip install -e .
+python -m pd_ollama_bridge --help
+python -m pytest tests -q
+```
+
+Full CLI, configuration and security details are in `bridge/README.md`.
+
+### Release maintainers — build and publish the artifacts
+
+The Windows x64 binary is built natively on the Windows Dev-Box; the Linux x64
+binary is built in Docker (`linux/amd64`). The full procedure — clean-tree
+guard, native/Docker builds, release assembly, checksums, `release-manifest.json`,
+secret scan and the (currently unauthorized) publication step — is documented in
+`docs/OLLAMA_BRIDGE_RELEASE.md`.
+
 ## What to try first
 
 Shortest judge path, no install:

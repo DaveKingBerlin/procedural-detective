@@ -220,14 +220,37 @@ data-flow boundary differs by mode:
   own terms and privacy policy, which are outside this build's control.
 - **Local Ollama generation** (`GENERATION_PROVIDER=ollama`, or the visitor's
   own machine via the `remote_client` bridge). The model runtime is the
-  operator's / visitor's own Ollama server (`OLLAMA_BASE_URL`, or the bridge
-  client on the visitor's machine). Generation **stays within the configured
-  local infrastructure** unless the operator's or visitor's own network
-  configuration routes the traffic elsewhere; this build does not send it to
-  any project-operated hosted service.
+  operator's / visitor's own Ollama server. The data-flow boundary differs
+  between the two sub-modes:
+  - **Operator-configured Ollama** (`GENERATION_PROVIDER=ollama` with
+    `OLLAMA_BASE_URL`): the backend contacts that Ollama endpoint directly.
+    The generation request and the structured result stay between the
+    deployment's backend and the configured Ollama server; this build does not
+    send them to any *third-party* hosted provider. If the operator points
+    `OLLAMA_BASE_URL` at a non-loopback host, that operator chose where the
+    traffic goes.
+  - **Bring-your-own Ollama via the bridge** (`GENERATION_PROVIDER=remote_client`
+    and the `pd-ollama-bridge` client on the visitor's machine): model inference
+    runs on the **visitor's** machine, but it is **not** a fully offline mode.
+    The Procedural Detective server **relays** the generation job: it sends the
+    prompt/job over the authenticated bridge WebSocket to the visitor's bridge,
+    which forwards it to the visitor's local Ollama and returns the structured
+    model result back **through the server** for validation and publication.
+    The server therefore **does receive the prompts/jobs and the structured
+    result**; do not claim "your prompts never leave your machine".
 - **Deterministic / fake / demo generation** (`GENERATION_PROVIDER=fake`, the
   default). No provider is contacted at all — the shipped golden case is
   replayed offline with zero network and zero credentials.
+
+Truthful one-line summary for the Local Ollama (bridge) mode:
+
+```text
+When Local Ollama is selected, generation requests are relayed through the
+Procedural Detective server to the local Ollama Bridge and to the Ollama
+instance running on your machine. Model inference runs locally; the server
+still receives the prompts/jobs and the structured result it needs to
+validate and publish the case.
+```
 
 Regardless of provider mode, the **generated case data** (raw prompt, public
 case, hidden truth, generation metadata and player state) is stored in the

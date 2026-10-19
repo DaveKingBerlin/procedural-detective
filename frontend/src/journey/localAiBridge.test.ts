@@ -29,8 +29,18 @@ describe("Phase 22 — bridge copy constants are frozen and app-authored", () =>
     expect(BRIDGE_WAIT_MAX_MS).toBe(120000); // bounded ≈ 2 minutes
   });
 
-  it("composes the CLI instruction as the frozen prefix + the server code", () => {
-    expect(bridgeCliCommand("PD-X7K4-92QP")).toBe("pd-ollama-bridge connect PD-X7K4-92QP");
+  it("composes the CLI instruction with the explicit server origin + code (ADV-49-005)", () => {
+    expect(bridgeCliCommand("PD-X7K4-92QP", "wss://detective.example.com")).toBe(
+      "pd-ollama-bridge connect --server wss://detective.example.com PD-X7K4-92QP",
+    );
+    // A `ws://` origin (local HTTP dev) is emitted verbatim too.
+    expect(bridgeCliCommand("PD-X7K4-92QP", "ws://localhost:5173")).toBe(
+      "pd-ollama-bridge connect --server ws://localhost:5173 PD-X7K4-92QP",
+    );
+  });
+
+  it("falls back to the server-less command only when no browser origin is known", () => {
+    expect(bridgeCliCommand("PD-X7K4-92QP", null)).toBe("pd-ollama-bridge connect PD-X7K4-92QP");
   });
 
   it("builds the Model line only from a known non-empty model label", () => {

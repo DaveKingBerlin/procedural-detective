@@ -11,6 +11,10 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+# Phase 49: release binaries/archives (Windows ZIP, Linux tar.gz) are NEVER
+# committed. Only the small generated metadata under
+# frontend/public/releases/ is tracked.
+dist/releases/
 downloads/
 eggs/
 .eggs/
@@ -31,6 +35,9 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# Phase 49: the release packaging spec is a TRACKED, hand-authored deliverable
+# (the ignore above targets PyInstaller-generated specs).
+!bridge/pd-ollama-bridge.spec
 
 # Installer logs
 pip-log.txt

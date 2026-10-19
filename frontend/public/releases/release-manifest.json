@@ -1,0 +1,25 @@
+{
+  "version": "1.0.0",
+  "gitCommit": "d6ffd6b",
+  "releasedAt": "2026-10-19T18:13:56Z",
+  "artifacts": [
+    {
+      "platform": "windows",
+      "arch": "x64",
+      "filename": "pd-ollama-bridge-v1.0.0-windows-x64.zip",
+      "sha256": "11736f9a6880a61ae3c6f547d264bb882466d57b340bfef49accc68f6b30e6aa",
+      "size": 12034484
+    },
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "filename": "pd-ollama-bridge-v1.0.0-linux-x64.tar.gz",
+      "sha256": "2bc500d5aa41947e8c7183c70286be9af4d5a896e05f015f5a9dd8aa3468cefb",
+      "size": 10133042
+    }
+  ],
+  "gitCommitFull": "d6ffd6b1f7ee2bdcd4f686df88d5a631a96e3982",
+  "dirty": true,
+  "buildTimestamp": "2026-10-19T18:13:56Z",
+  "packager": "tools/build_release.py (Python 3.12.10)"
+}

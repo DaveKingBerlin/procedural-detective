@@ -1,0 +1,194 @@
+pd-ollama-bridge — THIRD-PARTY NOTICES
+=======================================
+
+Version: 1.0.0
+Project: Procedural Detective (https://github.com/DaveKingBerlin/procedural-detective)
+
+This file lists the third-party software that is bundled inside the packaged
+`pd-ollama-bridge` standalone binary, together with the applicable license. The
+bridge application code itself is licensed under the MIT License (see the
+`LICENSE` file in this archive). The inventory below was read from the released
+binaries themselves (each bundled distribution's `*.dist-info` and embedded
+module bytecode); where the binary does not record a package's version, the
+version is shown as "not recorded in binary" rather than guessed.
+
+The Windows and Linux artifacts are built on different platforms, so they do not
+bundle an identical set. Components marked "(Windows only)" are present in the
+Windows `.exe` and absent from the Linux binary.
+
+--------------------------------------------------------------------------------
+1. Procedural Detective (this program)
+--------------------------------------------------------------------------------
+License: MIT
+Full text: see the LICENSE file in this archive.
+
+--------------------------------------------------------------------------------
+2. Bundled Python distributions
+--------------------------------------------------------------------------------
+websockets
+  Version bundled: 17.1 (both platforms)
+  Project: https://github.com/python-websockets/websockets
+  License: BSD-3-Clause
+
+httpx
+  Version bundled: 0.28.1 (both platforms)
+  Project: https://github.com/encode/httpx
+  License: BSD-3-Clause
+  Full text: see upstream — https://github.com/encode/httpx/blob/master/LICENSE.md
+
+httpcore
+  Version bundled: 1.0.9 (both platforms)
+  Project: https://www.encode.io/httpcore/
+  License: BSD-3-Clause
+  Full text: see upstream — https://github.com/encode/httpcore/blob/master/LICENSE.md
+
+certifi
+  Version bundled: 2026.07.22 (both platforms)
+  Project: https://github.com/certifi/python-certifi
+  License: Mozilla Public License 2.0 (MPL-2.0).
+
+    certifi bundles a modified copy of Mozilla's CA root certificate bundle
+    (ca-bundle.crt), automatically extracted from Mozilla's certdata.txt. The
+    certifi code and the CA bundle are distributed under the Mozilla Public
+    License, v. 2.0. If a copy of the MPL was not distributed with this file,
+    you can obtain one at https://mozilla.org/MPL/2.0/.
+
+    This Source Code Form is subject to the terms of the Mozilla Public License,
+    v. 2.0.
+
+  Full text: see upstream — https://www.mozilla.org/en-US/MPL/2.0/
+
+anyio
+  Version bundled: not recorded in binary
+  Project: https://github.com/agronholm/anyio
+  License: MIT
+  Full text: see upstream — https://github.com/agronholm/anyio/blob/master/LICENSE
+
+idna
+  Version bundled: 3.19 (Windows) / 3.20 (Linux)
+  Project: https://github.com/kjd/idna
+  License: BSD-3-Clause
+  Full text: see upstream — https://github.com/kjd/idna/blob/master/LICENSE.md
+
+h11
+  Version bundled: 0.16.0 (both platforms)
+  Project: https://github.com/python-hyper/h11
+  License: MIT
+  Full text: see upstream — https://github.com/python-hyper/h11/blob/master/LICENSE.txt
+
+typing_extensions
+  Version bundled: 3.15 (both platforms)
+  Project: https://github.com/python/typing_extensions
+  License: Python Software Foundation (PSF-2.0)
+  Full text: see upstream — https://github.com/python/typing_extensions/blob/main/LICENSE
+
+click (Windows only)
+  Version bundled: 8.5.0
+  Project: https://github.com/pallets/click
+  License: BSD-3-Clause
+
+pygments (Windows only)
+  Version bundled: 2.21.0
+  Project: https://github.com/pygments/pygments
+  License: BSD-2-Clause
+  Full text: see upstream — https://github.com/pygments/pygments/blob/master/LICENSE
+
+packaging (Windows only)
+  Version bundled: 26.3
+  Project: https://github.com/pypa/packaging
+  License: Apache-2.0 OR BSD-2-Clause (dual-licensed; either may be used)
+  Full text: see upstream — https://github.com/pypa/packaging/blob/main/LICENSE
+             https://github.com/pypa/packaging/blob/main/LICENSE.APACHE
+             https://github.com/pypa/packaging/blob/main/LICENSE.BSD
+
+Short BSD-3-Clause text (applies to websockets, httpx, httpcore, idna, click):
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+        * Redistributions of source code must retain the above copyright
+          notice, this list of conditions and the following disclaimer.
+        * Redistributions in binary form must reproduce the above copyright
+          notice, this list of conditions and the following disclaimer in the
+          documentation and/or other materials provided with the distribution.
+        * Neither the name of the copyright holder nor the names of its
+          contributors may be used to endorse or promote products derived from
+          this software without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+    ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+    LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+    CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+    SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+    INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+    CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+    ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
+
+Short MIT text (applies to anyio, h11):
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to
+    deal in the Software without restriction, including without limitation the
+    rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+    sell copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+    IN THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+3. Python runtime (bundled interpreter)
+--------------------------------------------------------------------------------
+The standalone binary embeds the CPython 3.12 runtime.
+License: Python Software Foundation (PSF) License Agreement.
+Full text: see upstream — https://docs.python.org/3/license.html
+
+--------------------------------------------------------------------------------
+4. PyInstaller bootloader
+--------------------------------------------------------------------------------
+The standalone executable is produced with PyInstaller; the binary embeds the
+PyInstaller bootloader.
+Project: https://pyinstaller.org/
+License: GPL-2.0-or-later WITH a special exception that permits bundling
+non-GPL (including proprietary and differently-licensed) applications with the
+bootloader. The exception is the reason an MIT-licensed program can be packaged
+by PyInstaller without the packaged application becoming GPL.
+Full text: see upstream — https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt
+
+--------------------------------------------------------------------------------
+5. Native runtime libraries (bundled)
+--------------------------------------------------------------------------------
+OpenSSL 3.0.16 (Windows) / 3.0.22 (Linux)
+  Bundled on Windows as `libcrypto-3.dll` and `libssl-3.dll` (OpenSSL 3.0.16);
+  on Linux as `libcrypto.so.3` and `libssl.so.3` (OpenSSL 3.0.22).
+  Project: https://www.openssl.org/
+  License: Apache-2.0
+  Full text: see upstream — https://www.openssl.org/source/license.html
+
+libffi
+  Bundled as `libffi-8.dll` on Windows and `libffi.so.8` on Linux (used by the
+  bundled `_ctypes` extension module).
+  Project: https://github.com/libffi/libffi
+  License: MIT
+  Full text: see upstream — https://github.com/libffi/libffi/blob/master/LICENSE
+
+Microsoft Visual C++ runtime (Windows only)
+  Bundled as `VCRUNTIME140.dll` and `VCRUNTIME140_1.dll`; distributed under the
+  Microsoft Visual C++ Redistributable license, not an open-source license.
+  Full text: see upstream — https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+
+--------------------------------------------------------------------------------
+End of notices. "See upstream" items are governed by their own upstream license
+texts, which are not reproduced here in full.
+--------------------------------------------------------------------------------
