@@ -1,0 +1,498 @@
+{
+  "passed": 82,
+  "total": 82,
+  "results": [
+    {
+      "section": "02_semantic",
+      "name": "normalize_relation_kind('in_desk') is None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "02_semantic",
+      "name": "normalize_relation_kind('inside_desk') is None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "02_semantic",
+      "name": "normalize_relation_kind('in_wall') is None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "02_semantic",
+      "name": "normalize_relation_kind('at_table') is None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "02_semantic",
+      "name": "normalize_relation_kind('at_cabinet') is None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "02_semantic",
+      "name": "normalize_relation_kind('on_on_table') is None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "02_semantic",
+      "name": "normalize_relation_kind('inside_on_table') is None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "02_semantic",
+      "name": "documented aliases normalize to declared canonicals",
+      "ok": true,
+      "detail": "mismatches={}"
+    },
+    {
+      "section": "02_semantic",
+      "name": "on_desk stays on_desk",
+      "ok": true,
+      "detail": "got='on_desk'"
+    },
+    {
+      "section": "02_semantic",
+      "name": "on_table stays on_table",
+      "ok": true,
+      "detail": "got='on_table'"
+    },
+    {
+      "section": "02_semantic",
+      "name": "on_desk != on_table",
+      "ok": true,
+      "detail": "'on_desk' vs 'on_table'"
+    },
+    {
+      "section": "02_semantic",
+      "name": "alias table image == canonical six",
+      "ok": true,
+      "detail": "image=['floor_area', 'inside_cabinet', 'near_victim', 'on_desk', 'on_table', 'on_wall']"
+    },
+    {
+      "section": "02_semantic",
+      "name": "canonical vocabulary has exactly six",
+      "ok": true,
+      "detail": "['floor_area', 'inside_cabinet', 'near_victim', 'on_desk', 'on_table', 'on_wall']"
+    },
+    {
+      "section": "02_semantic",
+      "name": "RELATION_KINDS is exactly the documented six (order too)",
+      "ok": true,
+      "detail": "('on_desk', 'on_table', 'near_victim', 'inside_cabinet', 'floor_area', 'on_wall')"
+    },
+    {
+      "section": "02_semantic",
+      "name": "RELATION_TO_ANCHOR_TYPES keys == exactly the six",
+      "ok": true,
+      "detail": "['floor_area', 'inside_cabinet', 'near_victim', 'on_desk', 'on_table', 'on_wall']"
+    },
+    {
+      "section": "02_semantic",
+      "name": "PlacementRelation(kind='in_desk') raises",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "02_semantic",
+      "name": "PlacementRelation(kind='on_table') ok",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "05_glyphs",
+      "name": "reject glyph payload 'on\\x00table'",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "05_glyphs",
+      "name": "reject glyph payload 'on\\u200b_table'",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "05_glyphs",
+      "name": "reject glyph payload '\\u202e on_table \\u202c'",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "05_glyphs",
+      "name": "reject glyph payload 'on\\ufeff_table'",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "05_glyphs",
+      "name": "ordinary separator 'on table' -> on_table",
+      "ok": true,
+      "detail": "got='on_table'"
+    },
+    {
+      "section": "05_glyphs",
+      "name": "ordinary separator 'on-table' -> on_table",
+      "ok": true,
+      "detail": "got='on_table'"
+    },
+    {
+      "section": "05_glyphs",
+      "name": "ordinary separator 'on_table' -> on_table",
+      "ok": true,
+      "detail": "got='on_table'"
+    },
+    {
+      "section": "05_glyphs",
+      "name": "ordinary separator 'on.table' -> on_table",
+      "ok": true,
+      "detail": "got='on_table'"
+    },
+    {
+      "section": "05_glyphs",
+      "name": "parse_world_requirements rejects NUL kind",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "02b_parse",
+      "name": "observed alias canonicalizes to on_table",
+      "ok": true,
+      "detail": "kinds=('on_table',)"
+    },
+    {
+      "section": "02b_parse",
+      "name": "canonicalization event emitted once",
+      "ok": true,
+      "detail": "count=1"
+    },
+    {
+      "section": "02b_parse",
+      "name": "event fields bounded + correct",
+      "ok": true,
+      "detail": "{'caseId': 'C-QA', 'generationAttemptId': 'G-QA', 'stage': 'world_graph', 'relationIndex': 0, 'rawRelationKind': 'on_kitchen_counter', 'canonicalRelationKind': 'on_table', 'reasonCode': 'RELATION_KIND_ALIAS'}"
+    },
+    {
+      "section": "02b_parse",
+      "name": "unsupported alias still rejected",
+      "ok": true,
+      "detail": "world_requirements.relations[0]: kind 'teleported_inside' not in ['on_desk', 'on_table', 'near_victim', 'inside_cabinet', 'floor_area', 'on_wall']"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "'world_requirementsX' -> None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "'world_requirementsX' -> owner_for_report UNKNOWN",
+      "ok": true,
+      "detail": "(<RepairOwner.UNKNOWN: 'UNKNOWN'>,)"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "'world_requirements stage parse failedX' -> None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "'world_requirements stage parse failedX' -> owner_for_report UNKNOWN",
+      "ok": true,
+      "detail": "(<RepairOwner.UNKNOWN: 'UNKNOWN'>,)"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "'world_requirements stage parse failed and world_graph: bad' -> None",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "'world_requirements stage parse failed and world_graph: bad' -> owner_for_report UNKNOWN",
+      "ok": true,
+      "detail": "(<RepairOwner.UNKNOWN: 'UNKNOWN'>,)"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "attribute 'world_requirements stage parse failed: world_req' -> WORLD_GRAPH",
+      "ok": true,
+      "detail": "got=<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "attribute 'world_requirements stage parse failed' -> WORLD_GRAPH",
+      "ok": true,
+      "detail": "got=<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "attribute 'world_requirements stage parse failed: detail' -> WORLD_GRAPH",
+      "ok": true,
+      "detail": "got=<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "attribute \"world_requirements.relations[0]: kind 'x' not in\" -> WORLD_GRAPH",
+      "ok": true,
+      "detail": "got=<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "attribute 'world_requirements: bad' -> WORLD_GRAPH",
+      "ok": true,
+      "detail": "got=<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "attribute 'world_requirements stage: unsupported environmen' -> WORLD_GRAPH",
+      "ok": true,
+      "detail": "got=<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "attribute 'world_requirements stage produced no usable cont' -> WORLD_GRAPH",
+      "ok": true,
+      "detail": "got=<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "observed message owner == (WORLD_GRAPH,)",
+      "ok": true,
+      "detail": "(<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>,)"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "observed message label == ('world_requirements',)",
+      "ok": true,
+      "detail": "('world_requirements',)"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "observed plan targeted (not default full rerun)",
+      "ok": true,
+      "detail": "owners=(<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>,)"
+    },
+    {
+      "section": "06_09_routing",
+      "name": "observed plan reruns world+recompose only",
+      "ok": true,
+      "detail": "case=False ev=False log=False world=True recomp=True"
+    },
+    {
+      "section": "06_08_routing",
+      "name": "stays UNKNOWN \"public_world: unknown key 'bad'\"",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "06_08_routing",
+      "name": "stays UNKNOWN 'repair: bad'",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "06_08_routing",
+      "name": "stays UNKNOWN 'world composition failed for the requested world'",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "06_08_routing",
+      "name": "stays UNKNOWN 'world composition produced no usable result'",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "06_08_routing",
+      "name": "stays UNKNOWN 'world_graph produced no usable result'",
+      "ok": true,
+      "detail": "got=None"
+    },
+    {
+      "section": "08_routing",
+      "name": "'case_people: bad' -> CASE_PEOPLE",
+      "ok": true,
+      "detail": "got=<RepairOwner.CASE_PEOPLE: 'CASE_PEOPLE'>"
+    },
+    {
+      "section": "08_routing",
+      "name": "'case_people stage parse failed: bad' -> CASE_PEOPLE",
+      "ok": true,
+      "detail": "got=<RepairOwner.CASE_PEOPLE: 'CASE_PEOPLE'>"
+    },
+    {
+      "section": "08_routing",
+      "name": "'case_truth: bad' -> CASE_TRUTH",
+      "ok": true,
+      "detail": "got=<RepairOwner.CASE_TRUTH: 'CASE_TRUTH'>"
+    },
+    {
+      "section": "08_routing",
+      "name": "case_people plan reruns case",
+      "ok": true,
+      "detail": "owners=(<RepairOwner.CASE_PEOPLE: 'CASE_PEOPLE'>,)"
+    },
+    {
+      "section": "06_routing",
+      "name": "mixed prefixed+unprefixed -> {UNKNOWN, WORLD_GRAPH}",
+      "ok": true,
+      "detail": "(<RepairOwner.UNKNOWN: 'UNKNOWN'>, <RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>)"
+    },
+    {
+      "section": "06_routing",
+      "name": "mixed plan is_default_full_rerun",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "06_routing",
+      "name": "safety bucket -> UNKNOWN",
+      "ok": true,
+      "detail": "(<RepairOwner.UNKNOWN: 'UNKNOWN'>,)"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "A: executed plans [None, UNKNOWN, WORLD_GRAPH]",
+      "ok": true,
+      "detail": "executed=[None, ('UNKNOWN',), ('WORLD_GRAPH',)]"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "A: consumed 2 repair passes",
+      "ok": true,
+      "detail": "passes=2"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "A: ended FAILED/STRUCTURED_OUTPUT_INVALID",
+      "ok": true,
+      "detail": "state=GenerationState.FAILED code=STRUCTURED_OUTPUT_INVALID"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "A: precise no-progress reason",
+      "ok": true,
+      "detail": "reason='repair made no progress: failure fingerprint 44600fe1529cfd017cbc01f5918a747929a72b4df2c5cd00e3784ca848c5850d unchanged; owner=WORLD_GRAPH; failingStage=world_requirements'"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "B: all repairs UNKNOWN",
+      "ok": true,
+      "detail": "executed=[None, ('UNKNOWN',), ('UNKNOWN',), ('UNKNOWN',)]"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "B: legacy REPAIR_BUDGET_EXHAUSTED",
+      "ok": true,
+      "detail": "code=REPAIR_BUDGET_EXHAUSTED"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "B: consumed all 3 passes",
+      "ok": true,
+      "detail": "passes=3"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "C: first repair WORLD_GRAPH",
+      "ok": true,
+      "detail": "executed=[None, ('WORLD_GRAPH',)]"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "C: fail closed after 1 pass",
+      "ok": true,
+      "detail": "code=STRUCTURED_OUTPUT_INVALID passes=1"
+    },
+    {
+      "section": "01_failclosed",
+      "name": "D(old-behaviour): fails closed after 1 pass",
+      "ok": true,
+      "detail": "code=STRUCTURED_OUTPUT_INVALID passes=1 executed=[None, ('UNKNOWN',)]"
+    },
+    {
+      "section": "07_compose",
+      "name": "'brass_candlestick' is NOT a golden placement",
+      "ok": true,
+      "detail": "golden_has=['apartment_door', 'apartment_lamp', 'apartment_laptop', 'apartment_table', 'cctv_hall_monitor', 'kitchen_knife', 'letter_opener', 'motive_audit_file', 'scissors', 'vase_01', 'victim_body_placeholder']"
+    },
+    {
+      "section": "07_compose",
+      "name": "apartment: alias on_kitchen_counter -> TABLE_PROP",
+      "ok": true,
+      "detail": "hinted='TABLE_PROP'"
+    },
+    {
+      "section": "07_compose",
+      "name": "apartment: hint IGNORED (no relation) -> 'GENERIC_PROP' != TABLE_PROP",
+      "ok": true,
+      "detail": "natural='GENERIC_PROP'"
+    },
+    {
+      "section": "07_compose",
+      "name": "office: alias on_kitchen_counter -> TABLE_PROP",
+      "ok": true,
+      "detail": "hinted='TABLE_PROP'"
+    },
+    {
+      "section": "07_compose",
+      "name": "office: hint IGNORED (no relation) -> 'GENERIC_PROP' != TABLE_PROP",
+      "ok": true,
+      "detail": "natural='GENERIC_PROP'"
+    },
+    {
+      "section": "07_compose",
+      "name": "apartment: neutralized hint makes the test FAIL",
+      "ok": true,
+      "detail": "AssertionError=('apartment', 'hinted', 'GENERIC_PROP')"
+    },
+    {
+      "section": "07_compose",
+      "name": "office: neutralized hint makes the test FAIL",
+      "ok": true,
+      "detail": "AssertionError=('office', 'hinted', 'GENERIC_PROP')"
+    },
+    {
+      "section": "10_coverage",
+      "name": "state FAILED",
+      "ok": true,
+      "detail": "state=GenerationState.FAILED"
+    },
+    {
+      "section": "10_coverage",
+      "name": "narrow CORE code wins",
+      "ok": true,
+      "detail": "code=CORE_PROVIDER_CALL_BUDGET_EXHAUSTED"
+    },
+    {
+      "section": "10_coverage",
+      "name": "core_calls == 10 (past the 9-call clean pass)",
+      "ok": true,
+      "detail": "core=10"
+    },
+    {
+      "section": "10_coverage",
+      "name": "repair_passes == 1 (a repair WAS in flight)",
+      "ok": true,
+      "detail": "passes=1"
+    },
+    {
+      "section": "10_coverage",
+      "name": "world stage re-ran during the repair (>=3 calls)",
+      "ok": true,
+      "detail": "world_calls=3"
+    },
+    {
+      "section": "10_coverage",
+      "name": "generation.repair.started emitted",
+      "ok": true,
+      "detail": "events=['activity_log.generation.complete', 'activity_log.generation.started', 'asset.resolve.complete', 'asset.resolve.started', 'candidate_integrity.projection', 'evidence.structured_output.completed', 'generation.asset.failed', 'generation.failed', 'generation.repair.started', 'generation.stage.validation_failed', 'generation.started', 'generation.validation.complete', 'generation.validation.started', 'provider.budget.snapshot', 'provider.call.complete', 'provider.call.start', 'world.weapon.locked.injected']"
+    }
+  ]
+}

@@ -262,29 +262,108 @@ def test_failure_code_mapping_distinguishes_buckets():
 
 
 def test_driver_core_budget_exhaustion_narrows_code():
-    """A pathological endless-repair run whose CORE budget (12) is exhausted
-    BEFORE the global ceiling fails with the narrow CORE code."""
+    """A driver run whose CORE budget is exhausted BEFORE the global ceiling
+    fails with the narrow CORE code.
+
+    Phase48.1: the previous fixture relied on the world-requirements defect
+    triggering a BROAD replay (evidence + logs + world). That replay is now
+    intentionally gone (a stage-prefixed world failure is WORLD_GRAPH-owned),
+    so this test exercises the same narrowing with a CLEAN run whose CORE cap
+    is simply lower than the full pipeline's call count.
+    """
     from app.core.config import Settings
     from app.generation.ollama_provider import OllamaProvider
     from app.services.ollama_driver import OllamaStageDriver
     from test_ollama_driver import (
         OLLAMA_BASE,
         OLLAMA_MODEL,
+        PROMPT,
         _admission,
         _controller,
-        _alog_posts,
+        _staged,
     )
 
+    posts = _staged()  # a complete valid driver pass (case..world..asset)
+
+    class _Transport:
+        def __init__(self, posts):
+            self.posts = list(posts)
+            self._calls = []
+
+        def post_json(self, url, payload, timeout):
+            self._calls.append(url)
+            content = self.posts.pop(0) if self.posts else "<not-json>"
+            return 200, json.dumps(
+                {"model": OLLAMA_MODEL, "message": {"role": "assistant", "content": content}}
+            ).encode()
+
+        def get(self, url, timeout):
+            return 200, json.dumps({"models": [{"name": OLLAMA_MODEL}]}).encode()
+
+    transport = _Transport(list(posts))
+
+    def factory():
+        return OllamaProvider(
+            base_url=OLLAMA_BASE, model=OLLAMA_MODEL, timeout_seconds=5,
+            transport=transport,
+        )
+
+    driver = OllamaStageDriver(settings=Settings(), provider_factory=factory)
+    clock, ids = ManualClock(), IdSource()
+    admission = _admission(clock, ids)
+    session = admission.create_anonymous_quota_session()
+    controller = _controller(
+        driver, transport, admission, clock, ids,
+        max_llm_calls_per_generation=60,
+        max_core_llm_calls=4,
+        max_repair_passes=10,
+        max_full_regenerations=1,
+    )
+    handle = controller.start_generation(
+        PROMPT,
+        anonymous_quota_session_id=session.session_id,
+    )
+    attempt = controller.attempt(handle.attempt_id)
+    assert attempt.state is GenerationState.FAILED
+    assert attempt.failure_code == "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED"
+    assert attempt.budget.core_calls == 4
+    assert attempt.budget.calls <= 60
+    assert attempt.budget.calls == 4
+
+
+def test_driver_core_budget_exhaustion_during_repair_loop_narrows_code():
+    """Phase48.1 (ADV-48.1-10): CORE exhaustion WHILE a repair is in flight.
+
+    The previous fixture drove CORE exhaustion through a BROAD replay (the
+    world-requirements defect). That replay is now intentionally gone (a
+    stage-prefixed world failure is WORLD_GRAPH-owned, so only the world stage
+    re-runs). This test keeps the repair-loop context: pass 1 (case + evidence
+    + 5 logs + world + bounded retry = 9 calls) fails the world strict parse,
+    and the targeted repair's world re-run + bounded retry pushes the SAME
+    per-attempt CORE counter past a cap of 10. The narrow CORE code still wins
+    over the global ceiling.
+    """
+    from app.core.config import Settings
+    from app.generation.ollama_provider import OllamaProvider
+    from app.services.ollama_driver import OllamaStageDriver
+    from test_ollama_driver import (
+        OLLAMA_BASE,
+        OLLAMA_MODEL,
+        PROMPT,
+        _admission,
+        _controller,
+    )
+
+    # pass 1: case + evidence + 5 logs = 7; world + bounded retry = 9.
+    # targeted WORLD_GRAPH repair: world re-run = 10; bounded retry = 11 (cap).
     posts = [
         _j(_case_people(weapon="kitchen_knife")),
         _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
-        *_alog_posts("2026-09-11T23:42:00+02:00"),  # pass-1 activity logs
-        "<not-json>",  # pass-1 world (parse fails -> structural issue -> repair)
-        "<not-json>",  # pass-1 world retry (still fails)
-        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),  # pass-2 evidence
-        *_alog_posts("2026-09-11T23:42:00+02:00"),  # pass-2 activity logs
-        # pass-2 world never runs: the CORE budget (12) is exhausted by the
-        # fourth pass-2 activity-log call (case is cached across passes).
+        *_alog_posts("2026-09-11T23:42:00+02:00"),
+        "<not-json>",  # pass-1 world (strict-parse failure -> WORLD_GRAPH)
+        "<not-json>",  # pass-1 world bounded retry (still fails)
+        "<not-json>",  # repair pass world re-run (CORE call 10)
+        "<not-json>",  # repair pass bounded retry -> CORE cap (call 11)
     ]
 
     class _Transport:
@@ -317,20 +396,21 @@ def test_driver_core_budget_exhaustion_narrows_code():
     controller = _controller(
         driver, transport, admission, clock, ids,
         max_llm_calls_per_generation=60,
-        max_core_llm_calls=12,
+        max_core_llm_calls=10,
         max_repair_passes=10,
         max_full_regenerations=1,
     )
     handle = controller.start_generation(
-        "Victim: sarah_miller\nMurderer: thomas_reed\n",
+        PROMPT,
         anonymous_quota_session_id=session.session_id,
     )
     attempt = controller.attempt(handle.attempt_id)
     assert attempt.state is GenerationState.FAILED
     assert attempt.failure_code == "CORE_PROVIDER_CALL_BUDGET_EXHAUSTED"
-    assert attempt.budget.core_calls >= 12
+    assert attempt.budget.core_calls == 10
     assert attempt.budget.calls <= 60
-    assert attempt.budget.calls == 12
+    # the exhaustion happened WHILE a repair pass was in flight.
+    assert attempt.budget.repair_passes == 1
 
 
 # --------------------------------------------------------------------------- #

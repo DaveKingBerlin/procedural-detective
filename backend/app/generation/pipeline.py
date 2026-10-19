@@ -160,6 +160,11 @@ class AttemptRecord:
     # ``generation.repair.outcome`` delta). Diagnostics only — never read by
     # validators/solvers/budgets and never leaves the attempt.
     _repair_before_codes: tuple[str, ...] | None = None
+    # Phase48.1 — the deterministic plan ACTUALLY used by the most recent
+    # driver repair plus the closed stage labels that triggered it. Diagnostics
+    # only: never read by validators/solvers/budgets and never serialized.
+    _last_repair_plan: Any = None
+    _last_repair_stages: tuple[str, ...] = ()
     # Phase41 — hidden driver-owned witness-truthfulness stamp (statement-
     # level, trusted). Set by the driver chokepoint from ``(crime, public)``;
     # lifted into ``CaseTruth.witness_truthfulness`` by ``_draft_to_phase3``.

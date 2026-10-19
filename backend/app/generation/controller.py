@@ -62,7 +62,7 @@ from app.generation.validation_codes import (
     repair_effectiveness,
     validation_failure_codes,
 )
-from app.generation.repair_routing import RepairPlan
+from app.generation.repair_routing import RepairPlan, stage_labels_for_report
 from app.core.observability import emit_event
 
 _PD_DEV_TRACE = os.environ.get("PD_DEV_TRACE") == "true"
@@ -622,11 +622,12 @@ class GenerationController:
                 # derived from the report buckets (closed tokens only, never
                 # free-text issues/raw generated content).
                 validator_codes = validation_failure_codes(report)
+                repair_effectiveness_value: str | None = None
                 if attempt._repair_before_codes is not None:
                     # The most recent repair just completed: emit the bounded
                     # repair-delta diagnosis (before = the code set that
                     # TRIGGERED the repair, after = this re-validation's set).
-                    self._emit_repair_outcome(
+                    repair_effectiveness_value = self._emit_repair_outcome(
                         attempt,
                         before_codes=attempt._repair_before_codes,
                         after_codes=validator_codes,
@@ -655,6 +656,48 @@ class GenerationController:
                             attempt.budget.calls if attempt.budget is not None else None
                         ),
                     )
+                if (
+                    repair_effectiveness_value == "UNCHANGED"
+                    and outcome is ValidationOutcome.RECOVERABLE_REPAIR
+                ):
+                    # Phase48.1 §8/§D — a TARGETED repair that reproduced the
+                    # EXACT same failure fingerprint cannot make progress by
+                    # replaying itself (the owner/stage data did not change).
+                    # Fail closed EARLY with a precise structured diagnostic
+                    # instead of burning the remaining repair/deadline budget.
+                    # UNKNOWN plans (the pre-Phase38 safe full rerun) keep the
+                    # legacy budget-exhaustion behavior: their other stages may
+                    # legitimately change on a retry.
+                    #
+                    # ADV-48.1-01 — decide on the plan that ACTUALLY EXECUTED
+                    # (``attempt._last_repair_plan``, recorded at repair start),
+                    # NOT the plan derived from this re-validation report. The
+                    # two differ whenever a full-rerun repair changes the
+                    # report's owner from UNKNOWN to a targeted one; keying off
+                    # the current report would fail closed a repair the legacy
+                    # path would have retried. A missing plan (legacy REPAIR
+                    # stage, no driver) is not targeted -> keep legacy behavior.
+                    repair_plan_executed = getattr(attempt, "_last_repair_plan", None)
+                    if (
+                        repair_plan_executed is not None
+                        and not repair_plan_executed.is_default_full_rerun
+                    ):
+                        owners = ",".join(
+                            owner.value
+                            for owner in repair_plan_executed.repair_owners
+                        )
+                        stages = ",".join(
+                            getattr(attempt, "_last_repair_stages", ()) or ()
+                        ) or ",".join(stage_labels_for_report(report))
+                        fingerprint = failure_set_fingerprint(validator_codes)
+                        self._fail(
+                            attempt,
+                            "repair made no progress: failure fingerprint "
+                            f"{fingerprint} unchanged; owner={owners}; "
+                            f"failingStage={stages or 'unknown'}",
+                            code=GenerationFailureCode.STRUCTURED_OUTPUT_INVALID,
+                        )
+                        return
                 if outcome is ValidationOutcome.VALID:
                     if self._hold_before_publish:
                         return  # validated + stored; the caller publishes later
@@ -683,6 +726,7 @@ class GenerationController:
                         providerCallCount=attempt.budget.calls,
                         regenerationCount=attempt.budget.regenerations,
                         deadlineRemainingMs=_remaining_ms(attempt),
+                        failingStages=stage_labels_for_report(report) or None,
                     )
                     if self._driver is not None:
                         # Phase38 driver repair: compute the deterministic
@@ -691,6 +735,8 @@ class GenerationController:
                         # the stages that can change the defect (state stays
                         # VALIDATING; we re-validate on the next loop pass).
                         repair_plan = RepairPlan.from_report(report)
+                        attempt._last_repair_plan = repair_plan
+                        attempt._last_repair_stages = stage_labels_for_report(report)
                         try:
                             self._driver.run_into(
                                 attempt,
@@ -719,6 +765,12 @@ class GenerationController:
                             repairOwners=tuple(
                                 owner.value for owner in repair_plan.repair_owners
                             ),
+                            failingStages=stage_labels_for_report(report) or None,
+                            rerunCase=repair_plan.rerun_case,
+                            rerunEvidence=repair_plan.rerun_evidence,
+                            rerunActivityLog=repair_plan.rerun_activity_log,
+                            rerunWorld=repair_plan.rerun_world,
+                            recompose=repair_plan.recompose,
                         )
                         continue
                     self._set_state(attempt, GenerationState.REPAIRING)
@@ -1366,16 +1418,28 @@ class GenerationController:
         *,
         before_codes: tuple[str, ...],
         after_codes: tuple[str, ...],
-    ) -> None:
+    ) -> str:
         """Phase31A (Track B) — bounded repair-delta observability.
 
         Emits ``generation.repair.outcome`` once per completed repair with the
         CLOSED validator-code sets before/after the repair, the deterministic
-        fixed/introduced/unchanged set algebra and the §14 repair-effectiveness
-        classification. Safe fields only: never drafts, prompts, truth,
-        provider output or free-text issues.
+        fixed/introduced/unchanged set algebra, the §14 repair-effectiveness
+        classification and the Phase48.1 owner/stage/fingerprint diagnostics.
+        Returns the effectiveness token so the controller can fail closed on a
+        genuinely unchanged TARGETED repair. Safe fields only: never drafts,
+        prompts, truth, provider output or free-text issues.
         """
         delta = failure_set_delta(before_codes, after_codes)
+        effectiveness = repair_effectiveness(before_codes, after_codes)
+        # Report the plan ACTUALLY used for this repair (set when the repair
+        # started). Fall back to a current-report plan for callers/tests that
+        # never stored one.
+        plan = getattr(attempt, "_last_repair_plan", None)
+        if plan is None and attempt.last_validation is not None:
+            plan = RepairPlan.from_report(attempt.last_validation)
+        failing_stages = tuple(getattr(attempt, "_last_repair_stages", ()) or ())
+        if not failing_stages and attempt.last_validation is not None:
+            failing_stages = stage_labels_for_report(attempt.last_validation)
         emit_event(
             "generation.repair.outcome",
             caseId=attempt.case_id,
@@ -1392,9 +1456,17 @@ class GenerationController:
             codesFixed=delta["codes_fixed"],
             codesIntroduced=delta["codes_introduced"],
             codesUnchanged=delta["codes_unchanged"],
-            repairEffectiveness=repair_effectiveness(before_codes, after_codes),
+            repairEffectiveness=effectiveness,
             failureCodeSetFingerprint=failure_set_fingerprint(after_codes),
+            failureCodeSetFingerprintBefore=failure_set_fingerprint(before_codes),
+            repairOwners=(
+                tuple(owner.value for owner in plan.repair_owners)
+                if plan is not None
+                else None
+            ),
+            failingStages=failing_stages or None,
         )
+        return effectiveness
 
     def _reset_for_regeneration(self, attempt: AttemptRecord) -> None:
         """Reset staged outputs for a full regeneration (§32.2/§32.5).
@@ -1417,6 +1489,10 @@ class GenerationController:
         # constraints (and thus the canonical locked ids) are preserved.
         attempt._repair_pre_ids = None
         attempt._repair_authorized_sections = None
+        # Phase48.1 — the previous repair's plan/stage diagnostics belong to
+        # the discarded pass, never to a regenerated attempt.
+        attempt._last_repair_plan = None
+        attempt._last_repair_stages = ()
         # Phase43A — a regenerated attempt gets a FRESH deterministic evidence
         # completion (the stage outputs were discarded).
         attempt._evidence_completed = False

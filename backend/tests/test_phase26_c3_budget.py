@@ -537,12 +537,16 @@ def test_f1a_old_fixed_32_would_have_blocked_the_raw_fallback_path():
 # --------------------------------------------------------------------------- #
 
 
-def test_f1b_repair_pass_reruns_logs_inside_derived_budget():
-    """F1b (end-to-end): a second controller pass (RECOVERABLE_REPAIR — the
+def test_f1b_repair_pass_reruns_world_only_inside_derived_budget():
+    """F1b (end-to-end): a second controller pass (RECOVERABLE_REPAIR - the
     world stage failed the FIRST strict parse) re-invokes ``run_into`` and
-    re-burns evidence + the 6 activity-log round-trips + world against the SAME
-    per-attempt CORE counter; the case output is CACHED (0 extra case calls).
-    The whole 2-pass chain fits the derived budget and publishes."""
+    re-burns ONLY the world stage against the SAME per-attempt CORE counter.
+
+    Phase48.1 §7/§C: an explicit ``world_requirements stage parse failed``
+    structural issue is WORLD_GRAPH-owned, so the targeted repair reuses the
+    validated evidence + activity logs (and the cached case); it never replays
+    the expensive unaffected stages. The whole 2-pass chain fits the derived
+    budget and publishes."""
     when_obs, opp, presence = _six_log_anchors()
     posts = [
         _j(_case_people_five_eligible()),
@@ -556,15 +560,7 @@ def test_f1b_repair_pass_reruns_logs_inside_derived_budget():
         _j(_alog(presence)),
         "<not-json>",  # pass-1 world (strict-parse failure -> repair)
         "<not-json>",  # pass-1 world bounded retry (still fails)
-        # ---- repair pass (case cached; evidence + logs + world re-burn) ----
-        _j(_evidence(weapon_obj="kitchen_knife", murderer="paul_becker")),
-        _j(_alog(when_obs)),
-        _j(_alog(opp)),
-        _j(_alog(opp)),
-        _j(_alog(opp)),
-        _j(_alog(opp)),
-        _j(_alog(opp)),
-        _j(_alog(presence)),
+        # ---- repair pass (case + evidence + logs reused; world only) ----
         _j(_known_world()),
     ]
     record, transport = _run_live(
@@ -573,11 +569,16 @@ def test_f1b_repair_pass_reruns_logs_inside_derived_budget():
     assert record.state is GenerationState.PUBLISHED
     assert record.budget.repair_passes == 1
     # pass 1: case + evidence + 7 logs (Phase41A witness exclusion) + world×2
-    # = 11; pass 2: evidence + 7 logs + world = 9 (the case was CACHED) →
-    # 20 CORE calls in one attempt.
-    assert transport.call_count == 20
-    assert record.budget.core_calls == 20
+    # = 11; pass 2: world only = 1 (case/evidence/logs reused) => 12 CORE calls.
+    assert transport.call_count == 12
+    assert record.budget.core_calls == 12
     assert record.budget.core_calls <= derive_core_call_budget_default()
+    # stage-level proof: evidence and every activity log were called exactly
+    # once; only the world stage re-ran.
+    prompt_calls = transport.post_calls
+    assert sum("evidence_v1" in p for p in prompt_calls) == 1
+    assert sum("Canonical evidence time:" in p for p in prompt_calls) == 7
+    assert sum("world_requirements_v1" in p for p in prompt_calls) == 3
 
 
 def test_f1b_derived_budget_accounts_every_controller_pass():

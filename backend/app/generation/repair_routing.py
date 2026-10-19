@@ -7,6 +7,30 @@ ACTUAL validator ownership — never from parsing issue-message strings:
 
 - structural/parse  -> UNKNOWN      (the safe full-rerun fallback — the stage
                                      is not attributable from a closed token)
+- Phase48.1: a structural issue carrying an EXPLICIT closed stage prefix is
+  attributed to that stage's closed owner instead of UNKNOWN. Exactly these
+  CLOSED forms are attributed (see ``_stage_label_for_structural_issue``):
+
+      "<label>"                                   (bare closed label)
+      "<label>: ..."                              (generic pipeline form)
+      "<label>.<path>..."                         (prefixed parser path)
+      "<label>[<index>]..."                       (prefixed parser index)
+      "<label> stage parse failed"                (exact stage-driver deferral)
+      "<label> stage parse failed: <detail>"      (deferral + detail)
+      "<label> stage: <detail>"                   (world-stage deferral, e.g.
+                                                   unsupported environment)
+      "<label> stage produced no usable content"  (no-content deferral)
+
+  where ``<label>`` is one of the closed ``_STRUCTURAL_STAGE_LABELS``. A
+  ``"<label> stage parse failed"`` prefix with NO separator (``"...failedX"``)
+  or followed by other text (``"...failed and ..."``) does NOT attribute
+  (ADV-48.1-09). Unknown/unprefixed structural issues keep the safe full-rerun
+  fallback. Genuinely cross-stage messages are NOT attributed: the composition-
+  only deferrals (``"world composition failed ..."`` / ``"world composition
+  produced no usable result"``) and the ``public_world`` / ``repair`` labels
+  stay UNKNOWN.
+- Phase48.1 (ADV-48.1-08): a ``case_people``-prefixed structural failure is
+  owned by ``CASE_PEOPLE`` (public persons/roles), not ``CASE_TRUTH``.
 - safety/generic    -> UNKNOWN      (cross-stage bucket; safe fallback)
 - universe issues   -> never reach REPAIR (they classify REGENERATE)
 - world             -> WORLD_GRAPH
@@ -212,6 +236,116 @@ _ACTIVITY_LOG_CODES: frozenset[str] = frozenset(
 )
 
 
+# Phase48.1 — closed, bounded stage-prefix attribution for structural/parse
+# failures. The installed stage driver prefixes a strict-parse failure with a
+# known stage label (``"world_requirements stage parse failed: ..."``) and the
+# generic pipeline uses closed ``"<stage>: ..."`` / ``"<stage>.<path>..."``
+# forms. ONLY these exact closed labels are recognized; arbitrary free text
+# never attributes an owner. ``public_world`` and ``repair`` are deliberately
+# absent: their structural failures are genuinely cross-section/cross-stage, so
+# they keep the safe UNKNOWN full-rerun fallback.
+#
+# ADV-48.1-08: a ``case_people`` structural failure is owned by the public
+# persons/roles stage (``CASE_PEOPLE``), NOT by the trusted-truth-shape owner
+# (``CASE_TRUTH``).
+_STRUCTURAL_STAGE_LABELS: tuple[tuple[str, RepairOwner], ...] = (
+    ("case_truth", RepairOwner.CASE_TRUTH),
+    ("case_people", RepairOwner.CASE_PEOPLE),
+    ("evidence", RepairOwner.EVIDENCE),
+    ("activity_log_repair", RepairOwner.ACTIVITY_LOG),
+    ("activity_log", RepairOwner.ACTIVITY_LOG),
+    ("world_requirements", RepairOwner.WORLD_GRAPH),
+    ("world_graph", RepairOwner.WORLD_GRAPH),
+    ("asset_spec_repair", RepairOwner.ASSET_SPEC),
+    ("asset_spec", RepairOwner.ASSET_SPEC),
+)
+
+
+def _stage_label_for_structural_issue(issue: object) -> str | None:
+    """The closed stage label explicitly prefixed on a structural issue, or None.
+
+    Recognized shapes (case-insensitive, leading whitespace ignored) — each
+    requires an EXACT, closed token boundary so a foreign/prefixed token can
+    never spoof an owner (ADV-48.1-09):
+
+        "<label>"                                   (the bare closed label)
+        "<label>: ..."                              (generic pipeline form)
+        "<label>.<path>..."                         (prefixed parser path)
+        "<label>[<index>]..."                       (prefixed parser index)
+        "<label> stage parse failed"                (exact stage-driver deferral)
+        "<label> stage parse failed: <detail>"      (stage-driver deferral + detail)
+        "<label> stage: <detail>"                   (ADV-48.1-06 stage deferral,
+                                                     e.g. unsupported environment)
+        "<label> stage produced no usable content"  (stage-driver no-content deferral)
+
+    ``<label>`` must be one of the CLOSED ``_STRUCTURAL_STAGE_LABELS``. The
+    ``"<label> stage parse failed"`` form is accepted ONLY when it is the whole
+    string or is immediately followed by ``":"`` — ``"...failedX"`` (no
+    separator) and ``"...failed and ..."`` do NOT attribute. No regex over
+    generated content, no arbitrary free-text parsing.
+    """
+    if not isinstance(issue, str):
+        return None
+    text = issue.strip().casefold()
+    if not text:
+        return None
+    for label, _owner in _STRUCTURAL_STAGE_LABELS:
+        if _matches_stage_form(text, label):
+            return label
+    return None
+
+
+def _matches_stage_form(text: str, label: str) -> bool:
+    """True when ``text`` is exactly one of the closed ``<label>`` prefix forms."""
+    if text == label:
+        return True
+    for delimiter in (":", ".", "["):
+        if text.startswith(label + delimiter):
+            return True
+    # The stage driver's own closed deferral phrases (ADV-48.1-06/-09): the
+    # label must be a WHOLE token (a single space separator) and the deferral
+    # phrase must be exact / followed by the documented separator.
+    if text == label + " stage parse failed":
+        return True
+    if text.startswith(label + " stage parse failed:"):
+        return True
+    if text.startswith(label + " stage:"):
+        return True
+    if text == label + " stage produced no usable content":
+        return True
+    return False
+
+
+def owner_for_stage_prefixed_issue(issue: object) -> RepairOwner | None:
+    """The closed repair owner for a stage-prefixed structural issue, or None.
+
+    This is the ONLY place a structural issue string is interpreted: a label
+    from ``_STRUCTURAL_STAGE_LABELS`` must be explicitly prefixed. Everything
+    else returns None, so unknown/unprefixed structural issues keep the safe
+    UNKNOWN full-rerun fallback.
+    """
+    label = _stage_label_for_structural_issue(issue)
+    if label is None:
+        return None
+    for candidate, owner in _STRUCTURAL_STAGE_LABELS:
+        if candidate == label:
+            return owner
+    return None
+
+
+def stage_labels_for_report(report: object) -> tuple[str, ...]:
+    """Sorted, de-duplicated closed stage labels prefixed on structural issues."""
+    labels = {
+        label
+        for label in (
+            _stage_label_for_structural_issue(issue)
+            for issue in getattr(report, "structural_issues", ()) or ()
+        )
+        if label is not None
+    }
+    return tuple(sorted(labels))
+
+
 def _owner_for_code(code: str) -> RepairOwner:
     """The closed repair-owner for one validator-code token.
 
@@ -266,6 +400,10 @@ def owner_for_report(report: object) -> tuple[RepairOwner, ...]:
     the validators fill — never free-text issue-string parsing):
 
     - structural / safety buckets   -> UNKNOWN (cross-stage; safe full rerun)
+      EXCEPT a structural issue carrying an explicit closed stage prefix
+      (Phase48.1) -> that stage's owner (e.g. ``world_requirements`` ->
+      WORLD_GRAPH). Any remaining unattributed structural issue still forces
+      the UNKNOWN fallback.
     - world bucket                  -> WORLD_GRAPH
     - quality bucket                -> the per-code owner (CASE_PEOPLE for
                                        role/candidate codes; EVIDENCE for
@@ -283,9 +421,23 @@ def owner_for_report(report: object) -> tuple[RepairOwner, ...]:
     """
     owners: set[RepairOwner] = set()
 
-    # Cross-stage buckets: safe full-rerun fallback (never attributed to ONE
-    # stage from a closed token — that would rerun the wrong stage).
-    if getattr(report, "structural_issues", ()) or getattr(report, "safety_issues", ()):
+    # Cross-stage safety bucket: always the safe full-rerun fallback (a safety
+    # defect is not attributable to ONE stage from a closed token).
+    if getattr(report, "safety_issues", ()):
+        owners.add(RepairOwner.UNKNOWN)
+
+    # Structural/parse bucket (Phase48.1): an EXPLICIT closed stage prefix is
+    # attributed to its owning stage; any unattributed structural issue keeps
+    # the safe UNKNOWN full-rerun fallback.
+    structural = tuple(getattr(report, "structural_issues", ()) or ())
+    unattributed_structural = False
+    for issue in structural:
+        issue_owner = owner_for_stage_prefixed_issue(issue)
+        if issue_owner is None:
+            unattributed_structural = True
+        else:
+            owners.add(issue_owner)
+    if structural and unattributed_structural:
         owners.add(RepairOwner.UNKNOWN)
 
     # The Phase14 WORld bucket (unresolved required objects / invalid
@@ -504,7 +656,9 @@ __all__ = [
     "RepairOwner",
     "RepairPlan",
     "owner_for_report",
+    "owner_for_stage_prefixed_issue",
     "repair_owner_for_code",
+    "stage_labels_for_report",
 ]
 
 

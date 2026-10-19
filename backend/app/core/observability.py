@@ -125,6 +125,7 @@ _SAFE_FIELDS = frozenset(
         # prompts, generated values or CaseTruth.
         "validatorCodes",
         "failureCodeSetFingerprint",
+        "failureCodeSetFingerprintBefore",
         "repairEffectiveness",
         "codesFixed",
         "codesIntroduced",
@@ -165,6 +166,20 @@ _SAFE_FIELDS = frozenset(
         # stage(s) a controller repair invalidated/reran — §31). Closed owner
         # tokens only; never diagnostics/free text.
         "repairOwners",
+        # Phase48.1 — bounded repair-scope + canonicalization diagnostics.
+        # ``failingStages`` is a tuple of CLOSED stage labels; the rerun flags
+        # are booleans; ``rawRelationKind`` is a length-bounded printable alias
+        # (never a prompt/free-form document) and the canonical token is one of
+        # the six RELATION_KINDS. NEVER prompts, raw provider output or truth.
+        "failingStages",
+        "rerunCase",
+        "rerunEvidence",
+        "rerunActivityLog",
+        "rerunWorld",
+        "recompose",
+        "relationIndex",
+        "rawRelationKind",
+        "canonicalRelationKind",
         # Phase40 — bounded candidate-integrity projection telemetry
         # (``candidate_integrity.projection``, §43). Booleans and bounded
         # integers only + a closed outcome token. NEVER the hidden murderer id,

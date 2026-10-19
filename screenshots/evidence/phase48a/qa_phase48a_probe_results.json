@@ -1,0 +1,187 @@
+{
+  "total": 36,
+  "pass": 36,
+  "fail": 0,
+  "results": [
+    {
+      "name": "BEFORE-equivalent: strict parser rejects on_kitchen_counter",
+      "passed": true,
+      "detail": "world_requirements.relations[0]: kind 'on_kitchen_counter' not in ['on_desk', 'on_table', 'near_victim', 'inside_cabinet', 'floor_area', 'on_wall']"
+    },
+    {
+      "name": "AFTER: parse boundary canonicalizes on_kitchen_counter -> on_table",
+      "passed": true,
+      "detail": "kinds=('on_table',)"
+    },
+    {
+      "name": "contract: every mapped alias -> correct canonical",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "contract: on_desk vs on_table distinction preserved",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "contract: UNSUPPORTED/arbitrary/oversized/non-string NOT normalized",
+      "passed": true,
+      "detail": "13 rejected"
+    },
+    {
+      "name": "contract: PlacementRelation stays strict (raw alias raises)",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "contract: RELATION_KINDS is EXACTLY the canonical six",
+      "passed": true,
+      "detail": "('on_desk', 'on_table', 'near_victim', 'inside_cabinet', 'floor_area', 'on_wall')"
+    },
+    {
+      "name": "contract: RELATION_TO_ANCHOR_TYPES keys == RELATION_KINDS (6, not expanded)",
+      "passed": true,
+      "detail": "('on_desk', 'on_table', 'near_victim', 'inside_cabinet', 'floor_area', 'on_wall')"
+    },
+    {
+      "name": "contract: no alias token leaked into the canonical vocabulary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "composer: normalized on_kitchen_counter places weapon in 'apartment'",
+      "passed": true,
+      "detail": "issues=() placed=True"
+    },
+    {
+      "name": "composer: normalized on_kitchen_counter places weapon in 'office'",
+      "passed": true,
+      "detail": "issues=() placed=True"
+    },
+    {
+      "name": "e2e: alias on first attempt PUBLISHES",
+      "passed": true,
+      "detail": "state=GenerationState.PUBLISHED deferred=()"
+    },
+    {
+      "name": "e2e: solver uniqueness intact (who/why/weapon)",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "e2e: unrelated stage output stable (case=1 ev=1 logs=5 world=1 asset=1)",
+      "passed": true,
+      "detail": "case=1 ev=1 logs=5 world=1 asset=1 calls=9"
+    },
+    {
+      "name": "e2e: canonicalization event emitted, no repair started",
+      "passed": true,
+      "detail": "events=['world.relation_kind.canonicalized']"
+    },
+    {
+      "name": "e2e: repeated unsupported alias FAILS CLOSED with STRUCTURED_OUTPUT_INVALID",
+      "passed": true,
+      "detail": "state=GenerationState.FAILED code=STRUCTURED_OUTPUT_INVALID"
+    },
+    {
+      "name": "e2e: precise reason names WORLD_GRAPH + failingStage, no deadline mention",
+      "passed": true,
+      "detail": "repair made no progress: failure fingerprint 44600fe1529cfd017cbc01f5918a747929a72b4df2c5cd00e3784ca848c5850d unchanged; owner=WORLD_GRAPH; failingStage=world_requirements"
+    },
+    {
+      "name": "e2e: deadline NOT passed and repair_passes bounded (==1)",
+      "passed": true,
+      "detail": "deadline_passed=False repair_passes=1"
+    },
+    {
+      "name": "e2e: evidence/logs NOT replayed; world only (ev=1 logs=5 world=4 asset=0)",
+      "passed": true,
+      "detail": "ev=1 logs=5 world=4 asset=0 calls=11"
+    },
+    {
+      "name": "scope: world-only repair PUBLISHES",
+      "passed": true,
+      "detail": "state=GenerationState.PUBLISHED reason=None"
+    },
+    {
+      "name": "scope: evidence + activity_log NOT re-called (stage-level)",
+      "passed": true,
+      "detail": "ev=1 logs=5"
+    },
+    {
+      "name": "scope: case cached; world re-run only (case=1 world=3)",
+      "passed": true,
+      "detail": "case=1 world=3 calls=12"
+    },
+    {
+      "name": "routing: exact observed message -> WORLD_GRAPH (not UNKNOWN)",
+      "passed": true,
+      "detail": "owners=(<RepairOwner.WORLD_GRAPH: 'WORLD_GRAPH'>,)"
+    },
+    {
+      "name": "routing: stage label reported as world_requirements",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "routing: plan reruns world+recompose only",
+      "passed": true,
+      "detail": "case=False ev=False log=False world=True recompose=True"
+    },
+    {
+      "name": "routing: unprefixed structural -> UNKNOWN (legacy fallback)",
+      "passed": true,
+      "detail": "owners=(<RepairOwner.UNKNOWN: 'UNKNOWN'>,)"
+    },
+    {
+      "name": "routing: bounded/closed \u2014 hostile free text never attributes an owner",
+      "passed": true,
+      "detail": "all None"
+    },
+    {
+      "name": "routing: closed label 'world_graph'",
+      "passed": true,
+      "detail": "got=RepairOwner.WORLD_GRAPH"
+    },
+    {
+      "name": "routing: closed label 'evidence'",
+      "passed": true,
+      "detail": "got=RepairOwner.EVIDENCE"
+    },
+    {
+      "name": "routing: closed label 'case_truth'",
+      "passed": true,
+      "detail": "got=RepairOwner.CASE_TRUTH"
+    },
+    {
+      "name": "routing: closed label 'asset_spec'",
+      "passed": true,
+      "detail": "got=RepairOwner.ASSET_SPEC"
+    },
+    {
+      "name": "routing: closed label 'activity_log'",
+      "passed": true,
+      "detail": "got=RepairOwner.ACTIVITY_LOG"
+    },
+    {
+      "name": "routing: public_world deliberately UNKNOWN",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "prompt: world prompt exposes all six canonical kinds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "schema: transport enum == sorted(RELATION_KINDS)",
+      "passed": true,
+      "detail": "{'type': 'string', 'enum': ['floor_area', 'inside_cabinet', 'near_victim', 'on_desk', 'on_table', 'on_wall']}"
+    },
+    {
+      "name": "schema: world_graph mapping derives the same canonical schema",
+      "passed": true,
+      "detail": ""
+    }
+  ]
+}
