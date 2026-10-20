@@ -6,10 +6,11 @@ This document describes how the maintainers produce and publish the
 It is **not** the end-user guide — that is `bridge/QUICKSTART.md`. It is also not
 the developer/source workflow — that is `bridge/README.md`.
 
-> **Publication is not authorized yet.** Everything up to and including local
-> release assembly can be prepared and verified. Do not push, publish a GitHub
-> Release, upload binaries, or update production without explicit authorization
-> (Phase 49 §53).
+> **v1.0.0 has been published.** The release at
+> <https://github.com/DaveKingBerlin/procedural-detective/releases/tag/v1.0.0>
+> contains the Windows and Linux archives, `SHA256SUMS.txt` and
+> `release-manifest.json`. Future releases still require explicit
+> authorization before publication or production updates (Phase 49 §53).
 
 ---
 
@@ -289,31 +290,20 @@ normal Git history (Phase 49 §55).
 
 ---
 
-## 8. Publication (NOT AUTHORIZED YET)
+## 8. Publication status and future release policy
 
-When — and only when — publication is explicitly authorized:
+The v1.0.0 release is published at
+<https://github.com/DaveKingBerlin/procedural-detective/releases/tag/v1.0.0>.
+Its platform archives, `SHA256SUMS.txt` and `release-manifest.json` are
+versioned release assets. The website must use immutable `v<VERSION>` download
+URLs, never a mutable `latest` URL.
 
-1. Create a GitHub Release tagged `v1.0.0` at
-   `https://github.com/DaveKingBerlin/procedural-detective/releases` and upload
-   the two archives, `SHA256SUMS.txt` and `release-manifest.json`.
-2. Point the website's Local Ollama download section at the immutable, versioned
-   asset URLs (not a single mutable "latest" URL):
-
-   ```text
-   https://github.com/DaveKingBerlin/procedural-detective/releases/download/v1.0.0/pd-ollama-bridge-v1.0.0-windows-x64.zip
-   https://github.com/DaveKingBerlin/procedural-detective/releases/download/v1.0.0/pd-ollama-bridge-v1.0.0-linux-x64.tar.gz
-   ```
-
-   These URLs do **not** work until the release is published.
-3. Run the production download smoke test (§54): click each download from the
-   website, confirm the correct versioned archive downloads and its checksum
-   matches. Also verify the Quick Start, Checksums and Source links.
-
-If publication is not performed, report:
-
-```text
-NOT RUN — publication not authorized
-```
+For any future release, publish only after explicit authorization and only
+from a clean tree. Generate the final checksums and manifest from the final
+artifact bytes; do not overwrite assets for an already-published version.
+After publication, verify the downloads and checksums from the website, and
+check the Quick Start, Checksums and Source links. Record any publication
+smoke that was not run rather than implying it passed.
 
 ---
 

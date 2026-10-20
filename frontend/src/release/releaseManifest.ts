@@ -91,8 +91,8 @@ export const RELEASE_REPOSITORY_URL = "https://github.com/DaveKingBerlin/procedu
 /**
  * The canonical GitHub Releases download base (Phase49.md §21). Immutable,
  * versioned artifacts are addressed as `${RELEASE_BASE_URL}/v<VERSION>/<file>`.
- * Publication is not authorized yet, so these URLs are placeholders until the
- * release host actually carries the assets — the UI degrades gracefully.
+ * Versioned artifact URLs are immutable; the UI degrades gracefully when a
+ * manifest or release asset is unavailable.
  */
 export const RELEASE_BASE_URL = `${RELEASE_REPOSITORY_URL}/releases/download`;
 
@@ -106,7 +106,7 @@ export const RELEASE_MANIFEST_URL = "/releases/release-manifest.json";
 /** The checksums asset filename inside a release (Phase49.md §5/§20). */
 export const RELEASE_CHECKSUMS_FILENAME = "SHA256SUMS.txt";
 
-/** The quick-start document inside a release (Phase49.md §5/§25). */
+/** The quick-start document in the tagged source tree (Phase49.md §5/§25). */
 export const RELEASE_QUICKSTART_FILENAME = "QUICKSTART.md";
 
 /** Anchor id of the download section, shared with the §50 help link. */
@@ -192,13 +192,13 @@ export function checksumsUrl(version: string, baseUrl: string = RELEASE_BASE_URL
 }
 
 /**
- * The Quick Start link. Inside a published release it points at the archive's
- * QUICKSTART.md; without a known version (manifest unavailable) it falls back
- * to the repository so the link is still useful (§40).
+ * The Quick Start source file at the same immutable tag as the release. The
+ * markdown is included inside archives, not uploaded as a standalone release
+ * asset. Without a known version, fall back to the repository (§40).
  */
-export function quickStartUrl(version: string | null, baseUrl: string = RELEASE_BASE_URL): string {
+export function quickStartUrl(version: string | null): string {
   return version !== null
-    ? `${baseUrl}/v${version}/${RELEASE_QUICKSTART_FILENAME}`
+    ? `${RELEASE_REPOSITORY_URL}/blob/v${version}/bridge/${RELEASE_QUICKSTART_FILENAME}`
     : RELEASE_REPOSITORY_URL;
 }
 

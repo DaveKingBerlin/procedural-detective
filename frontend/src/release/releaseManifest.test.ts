@@ -69,7 +69,7 @@ describe("Phase 49 — canonical release configuration (§21/§39)", () => {
     expect(RELEASE_MANIFEST_URL).toBe("/releases/release-manifest.json");
   });
 
-  it("builds the versioned artifact/checksum/quick-start URLs from config + manifest version", () => {
+  it("builds artifact/checksum URLs and a version-tagged Quick Start source URL", () => {
     // The download URL comes from the canonical config + the manifest version
     // + the manifest filename — never a scattered literal.
     expect(
@@ -84,7 +84,10 @@ describe("Phase 49 — canonical release configuration (§21/§39)", () => {
       `${RELEASE_BASE_URL}/v1.0.0/${RELEASE_CHECKSUMS_FILENAME}`,
     );
     expect(quickStartUrl("1.0.0")).toBe(
-      `${RELEASE_BASE_URL}/v1.0.0/${RELEASE_QUICKSTART_FILENAME}`,
+      `${RELEASE_REPOSITORY_URL}/blob/v1.0.0/bridge/${RELEASE_QUICKSTART_FILENAME}`,
+    );
+    expect(quickStartUrl("2.3.4")).toBe(
+      `${RELEASE_REPOSITORY_URL}/blob/v2.3.4/bridge/QUICKSTART.md`,
     );
     // Without a manifest version the quick-start link degrades to the repo.
     expect(quickStartUrl(null)).toBe(RELEASE_REPOSITORY_URL);

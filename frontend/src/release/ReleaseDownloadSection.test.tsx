@@ -108,6 +108,9 @@ describe("Phase 49 — download section: canonical manifest ready state (§22/§
     expect(hrefOf(mounted, "release-download-windows")).toBe(
       releaseArtifactUrl(MANIFEST.version, MANIFEST.artifacts[0].filename),
     );
+    expect(hrefOf(mounted, "release-download-windows")).toBe(
+      `${RELEASE_BASE_URL}/v1.0.0/pd-ollama-bridge-v1.0.0-windows-x64.zip`,
+    );
     unmount(mounted);
   });
 
@@ -142,10 +145,13 @@ describe("Phase 49 — download section: canonical manifest ready state (§22/§
     const mounted = await renderReady();
     expect(textOf(q(mounted, "release-quick-start"))).toBe("Quick Start");
     expect(hrefOf(mounted, "release-quick-start")).toBe(
-      `${RELEASE_BASE_URL}/v1.0.0/QUICKSTART.md`,
+      "https://github.com/DaveKingBerlin/procedural-detective/blob/v1.0.0/bridge/QUICKSTART.md",
     );
     expect(textOf(q(mounted, "release-checksums"))).toBe("SHA-256 checksums");
     expect(hrefOf(mounted, "release-checksums")).toBe(`${RELEASE_BASE_URL}/v1.0.0/SHA256SUMS.txt`);
+    expect(hrefOf(mounted, "release-download-linux")).toBe(
+      `${RELEASE_BASE_URL}/v1.0.0/pd-ollama-bridge-v1.0.0-linux-x64.tar.gz`,
+    );
     expect(textOf(q(mounted, "release-source"))).toBe("Source code");
     expect(hrefOf(mounted, "release-source")).toBe(
       "https://github.com/DaveKingBerlin/procedural-detective",
