@@ -27,6 +27,7 @@ from app.main import create_app
 
 INDEX_BODY = "<html><body>procedural-detective root</body></html>"
 ASSET_BODY = "console.log('built asset');"
+RELEASE_MANIFEST_BODY = '{"version":"1.0.0","dirty":false}\n'
 _SPA_ROUTES = ("/scene", "/accuse", "/reveal")
 
 
@@ -34,8 +35,12 @@ _SPA_ROUTES = ("/scene", "/accuse", "/reveal")
 def static_dir(tmp_path):
     root = tmp_path / "static"
     (root / "assets").mkdir(parents=True)
+    (root / "releases").mkdir(parents=True)
     (root / "index.html").write_text(INDEX_BODY, encoding="utf-8")
     (root / "assets" / "index-abc123.js").write_text(ASSET_BODY, encoding="utf-8")
+    (root / "releases" / "release-manifest.json").write_bytes(
+        RELEASE_MANIFEST_BODY.encode("utf-8")
+    )
     # A secret placed OUTSIDE the static root must never be reachable.
     (tmp_path / "secret-outside.txt").write_text("TOP SECRET", encoding="utf-8")
     return root
@@ -87,6 +92,31 @@ def test_assets_served_with_immutable_cache(static_client):
     assert res.headers["cache-control"] == "public, max-age=31536000, immutable"
 
 
+def test_release_manifest_served_as_json_not_spa(static_client):
+    res = static_client.get("/releases/release-manifest.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert res.headers["cache-control"] == "no-store"
+    assert res.text == RELEASE_MANIFEST_BODY
+    assert res.text != INDEX_BODY
+
+
+def test_missing_release_file_is_not_spa(static_client):
+    res = static_client.get("/releases/does-not-exist.json")
+    assert res.status_code == 404
+    assert res.json() == {
+        "error": {"code": "NOT_FOUND", "message": "Not found", "details": None}
+    }
+    assert INDEX_BODY not in res.text
+
+
+def test_releases_prefix_does_not_fall_back_to_spa(static_client):
+    for path in ("/releases", "/releases/"):
+        res = static_client.get(path)
+        assert res.status_code == 404, path
+        assert INDEX_BODY not in res.text
+
+
 def test_api_health_still_works_with_static_enabled(static_client):
     res = static_client.get("/api/v1/health")
     assert res.status_code == 200
@@ -116,9 +146,41 @@ def test_path_traversal_never_leaks_outside_static_root(static_client):
         "/assets/%2e%2e/secret-outside.txt",
         "/assets/../../secret-outside.txt",
         "/assets/..%2F..%2Fsecret-outside.txt",
+        "/releases/..%2Fsecret-outside.txt",
+        "/releases/%2e%2e/secret-outside.txt",
+        "/releases/foo/..%2F..%2Fsecret-outside.txt",
+        "/releases/%5C..%5Csecret-outside.txt",
     ):
         res = static_client.get(attempt)
         assert "TOP SECRET" not in res.text, attempt
+
+
+def test_encoded_release_traversal_fails_closed(static_client):
+    for attempt in (
+        "/releases/..%2Fsecret-outside.txt",
+        "/releases/%2e%2e%2Fsecret-outside.txt",
+        "/releases/foo/..%2F..%2Fsecret-outside.txt",
+        "/releases/%5C..%5Csecret-outside.txt",
+    ):
+        res = static_client.get(attempt)
+        assert res.status_code == 404, attempt
+        assert INDEX_BODY not in res.text, attempt
+        assert "TOP SECRET" not in res.text, attempt
+
+
+def test_release_path_guard_rejects_raw_traversal_and_bounded_long_paths(static_dir):
+    from app.main import _safe_static_path
+
+    releases = static_dir.resolve() / "releases"
+    for relative in (
+        "../secret-outside.txt",
+        "foo/../../secret-outside.txt",
+        "..%2Fsecret-outside.txt",
+        r"..\secret-outside.txt",
+        "C:/secret-outside.txt",
+        "a" * 4096,
+    ):
+        assert _safe_static_path(releases, relative) is None, relative[:80]
 
 
 def test_raw_traversal_is_rejected_server_side(static_dir):

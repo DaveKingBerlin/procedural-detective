@@ -451,8 +451,8 @@ class SecurityHeadersFastAPI(FastAPI):
 # Phase 8 J2 — static/SPA serving (only when STATIC_DIR is configured)
 # --------------------------------------------------------------------------- #
 
-_SPA_FALLBACK_EXCLUDED_PREFIXES = ("/api/",)
-_SPA_FALLBACK_EXCLUDED_PATHS = frozenset({"/openapi.json", "/docs", "/redoc"})
+_SPA_FALLBACK_EXCLUDED_PREFIXES = ("/api/", "/releases/")
+_SPA_FALLBACK_EXCLUDED_PATHS = frozenset({"/openapi.json", "/docs", "/redoc", "/releases"})
 
 
 def _safe_static_path(root: Path, relative: str) -> Path | None:
@@ -507,6 +507,28 @@ def _asset_response(root: Path, relative: str) -> Response:
     )
 
 
+def _release_response(root: Path, relative: str) -> Response:
+    """Serve conservative-cache files below ``/releases``.
+
+    Release metadata is copied into the production static directory at build
+    time. In particular, the manifest must be revalidated after deployment,
+    unlike Vite's content-hashed assets.
+    """
+    path = _safe_static_path(root / "releases", relative)
+    if path is None:
+        return JSONResponse(
+            status_code=404,
+            content=_error_body("NOT_FOUND", "Not found", None),
+            headers={"cache-control": "no-store"},
+        )
+    content_type, _ = mimetypes.guess_type(path.name)
+    return FileResponse(
+        path,
+        media_type=content_type or "application/octet-stream",
+        headers={"cache-control": "no-store"},
+    )
+
+
 def _configure_static_serving(app: FastAPI, settings: Settings) -> None:
     """Register the production SPA routes when a build directory is configured.
 
@@ -531,6 +553,10 @@ def _configure_static_serving(app: FastAPI, settings: Settings) -> None:
     @app.get("/assets/{asset_path:path}", include_in_schema=False)
     def serve_asset(asset_path: str) -> Response:  # noqa: ANN201
         return _asset_response(root, asset_path)
+
+    @app.get("/releases/{release_path:path}", include_in_schema=False)
+    def serve_release_file(release_path: str) -> Response:  # noqa: ANN201
+        return _release_response(root, release_path)
 
     @app.get("/{path:path}", include_in_schema=False)
     def spa_fallback(path: str) -> Response:  # noqa: ANN201

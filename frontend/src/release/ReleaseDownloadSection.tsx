@@ -207,7 +207,7 @@ function ReleaseLinks({
 }) {
   return (
     <p className="release-download-links" data-testid="release-download-links">
-      <a className="release-download-link" data-testid="release-quick-start" href={quickStartUrl(version, baseUrl)}>
+      <a className="release-download-link" data-testid="release-quick-start" href={quickStartUrl(version)}>
         {RELEASE_QUICK_START_LABEL}
       </a>
       {version !== null && (
