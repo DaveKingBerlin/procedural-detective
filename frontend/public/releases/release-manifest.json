@@ -1,25 +1,25 @@
 {
   "version": "1.0.0",
-  "gitCommit": "d6ffd6b",
-  "releasedAt": "2026-10-19T18:13:56Z",
+  "gitCommit": "2403993",
+  "releasedAt": "2026-10-20T17:27:55Z",
   "artifacts": [
     {
       "platform": "windows",
       "arch": "x64",
       "filename": "pd-ollama-bridge-v1.0.0-windows-x64.zip",
-      "sha256": "11736f9a6880a61ae3c6f547d264bb882466d57b340bfef49accc68f6b30e6aa",
-      "size": 12034484
+      "sha256": "7f7e279ed2ddfc948cc6fa29c10f4de28428f187ab477150725a67b93f2198ea",
+      "size": 12034646
     },
     {
       "platform": "linux",
       "arch": "x64",
       "filename": "pd-ollama-bridge-v1.0.0-linux-x64.tar.gz",
-      "sha256": "2bc500d5aa41947e8c7183c70286be9af4d5a896e05f015f5a9dd8aa3468cefb",
-      "size": 10133042
+      "sha256": "257a80e06db71dab21ae47bca995b6cb7785306240728b7c9b65271efb8eb84e",
+      "size": 10133040
     }
   ],
-  "gitCommitFull": "d6ffd6b1f7ee2bdcd4f686df88d5a631a96e3982",
-  "dirty": true,
-  "buildTimestamp": "2026-10-19T18:13:56Z",
+  "gitCommitFull": "2403993e9830fd7fa156514421331c8cd2a1691f",
+  "dirty": false,
+  "buildTimestamp": "2026-10-20T17:27:55Z",
   "packager": "tools/build_release.py (Python 3.12.10)"
 }
