@@ -6,12 +6,7 @@ import type { GenerationCapabilitiesResponse } from "../api/types";
 import { setJourneyParams, type JourneyParams } from "../journey/context";
 import { rollDemoCaseId } from "../journey/demoCaseSelection";
 import { EXAMPLE_PROMPT } from "../journey/demoPrompt";
-import { demoCtaLabel, demoCtaNote, demoCtaState } from "../journey/generationMode";
-import { GenerationModeDisplay } from "../journey/generationModeSelector";
-import {
-  providerPathNoteFromCapabilities,
-  providerQualifierFromCapabilities,
-} from "../journey/providerMode";
+import { demoCtaLabel, demoCtaState } from "../journey/generationMode";
 import { loadSavegameFile } from "../savegame/loadCase";
 import type { LoadCaseFile } from "../savegame/loadCase";
 import { startReplay } from "../savegame/replaySession";
@@ -20,36 +15,13 @@ import { startReplay } from "../savegame/replaySession";
  * "/" — the public landing page (Phase 8 D, REQUIREMENTS 3.1).
  *
  * A first-time visitor needs ZERO developer knowledge. The landing clearly
- * presents the TWO Phase 15 paths (Phase15.md "Demo mode"):
+ * presents the three primary actions: start a new investigation, try the
+ * example case, or load a saved case.
  *
- *   1. "Try Demo Case" — the deterministic, zero-cost demo journey: it runs
- *      immediately (through /generating) inside a real 3D investigation and
- *      is labelled as such ("Deterministic demo — no API keys, no cost").
- *   2. "Generate a New Mystery" — the SAME generation journey started from
- *      the /new prompt screen, emphasising a custom prompt. Mechanics are
- *      identical to the demo path; the note beside it is CAPABILITY-DRIVEN
- *      (Phase 18A): it reflects whatever the backend actually reports via the
- *      public generation-capabilities DTO — the deterministic generator, the
- *      local AI pipeline or the configured live provider. A build-time env
- *      value can no longer contradict the backend's report, so the page never
- *      claims a provider that is not really running.
- *
- * Phase 21B Finding 3 — the example/demo CTA is TRUTHFUL per the backend
- * capability DTO (src/journey/generationMode.ts demoCtaLabel/demoCtaNote):
- * the "Try Demo Case" + deterministic/no-cost promise appears ONLY when the
- * backend actually server-enforces the deterministic path
- * (`configuredProvider == "fake"` or, on older servers, the availability-
- * derived demo-only shape). When the backend reports the local or live
- * provider (including a configured ollama/live backend whose probe FAILED —
- * DEF-096), the SAME action (startDemo -> rollDemoCaseId() +
- * setJourneyParams({prompt: EXAMPLE_PROMPT, difficulty: "medium",
- * demoCaseId}) -> /generating -> runDemo POST /cases) is renamed to "Try an
- * example case" with the truthful per-mode note and an explicit "not the free
- * deterministic demo" warning; a
- * null/unreachable capability report downgrades the CTA to the neutral
- * label and a provider-neutral note — the frontend cannot know the provider
- * when the DTO is unavailable. No request field, mode switching or provider
- * selection ever changes.
+ * The example/demo CTA label and request remain capability-aware. A confirmed
+ * demo backend pins a demoCaseId; local, live, and unknown backends keep the
+ * existing example-case request without one. No provider selection or backend
+ * behavior is changed here.
  *
  * The legacy "New Investigation" entry stays as-is (it reaches the same
  * /new screen). The backend status indicator stays visible (data-testid
@@ -176,49 +148,6 @@ export default function Home(overrides: HomeProps = {}) {
           Loading the saved case…
         </p>
       )}
-      {/* ADV-152 — honest app-level provider qualifier right below the primary
-          CTA: the REQUIREMENTS §62 tagline stays verbatim, and this note makes
-          the provider story unambiguous (Phase 18A: derived from the backend
-          capability report — never a build-time env claim, never server text). */}
-      <p className="provider-qualifier" data-testid="provider-qualifier">
-        {providerQualifierFromCapabilities(capabilities)}
-      </p>
-      {/* Phase 21B Finding 3 — the example-case note is capability-validated
-          (demoCtaNote in src/journey/generationMode.ts): an explicit
-          deterministic/no-cost promise ONLY for a KNOWN demo-only backend;
-          a renamed + "not the free deterministic demo" per-mode note for a
-          local/live backend; a provider-neutral note when the DTO is
-          unavailable. The action itself never changes (same runDemo path). */}
-      <p className="landing-path-note landing-path-note--demo" data-testid="try-demo-note">
-        {demoCtaNote(capabilities)}
-      </p>
-
-      <div className="landing-actions landing-actions--generate">
-        <Link
-          className="landing-button landing-button--primary generate-path"
-          to="/new"
-          data-testid="generate-new-mystery"
-        >
-          Generate a New Mystery
-        </Link>
-      </div>
-      <p className="landing-path-note landing-path-note--generate" data-testid="generate-provider-note">
-        {providerPathNoteFromCapabilities(capabilities)}
-      </p>
-
-      {/* Phase 21 F-03 — generation-mode READ-ONLY display (the interactive
-          selector was removed: the selected mode was never sent to the
-          backend, whose provider is process-global). The line is driven
-          solely by the backend-generation-capabilities DTO: a demo-only
-          backend shows "Demo mode active" + "Generation mode: Deterministic
-          demo"; a configured local/live provider shows its truthful line
-          (with an "Unavailable" tag while its probe is down — DEF-096); a
-          DTO-unavailable state shows the neutral reachability line, never a
-          provider claim (DEF-097). No host/IP, credentials, prompts or
-          diagnostics are ever rendered — only frozen public labels — and no
-          click changes the provider. */}
-      <GenerationModeDisplay capabilities={capabilities} />
-
       <div className="landing-panel">
         <h3>How it works</h3>
         <ul className="landing-bullets">
