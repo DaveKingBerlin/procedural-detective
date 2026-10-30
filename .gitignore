@@ -279,3 +279,5 @@ logs/
 .qa_ri2_bridge_full/
 
 *.crt
+
+.agents/
