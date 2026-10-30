@@ -1,0 +1,177 @@
+<!-- Claims and application examples come from the supplied pitch brief. They describe architectural potential, not shipped Procedural Detective features. -->
+<div id="viewport">
+  <div id="stage" data-duration="26.4" data-w="1920" data-h="1080">
+    <div class="ambient" aria-hidden="true">
+      <i style="--px: 8%; --py: 18%; --drift: 74px"></i><i style="--px: 22%; --py: 82%; --drift: -52px"></i>
+      <i style="--px: 47%; --py: 12%; --drift: 40px"></i><i style="--px: 68%; --py: 76%; --drift: -66px"></i>
+      <i style="--px: 88%; --py: 24%; --drift: 58px"></i><i style="--px: 94%; --py: 88%; --drift: -38px"></i>
+    </div>
+    <div class="brandline"><span>{{brand}}</span><span>{{series}}</span></div>
+
+    <section class="beat opening" data-in="0" data-out="1.9" data-enter="0.65" data-exit="0.35">
+      <div class="sheet">
+        <div class="opening-copy">
+          <p class="kicker ln" style="--d: 0"><span>{{opening.kicker}}</span></p>
+          <h1 class="hero" data-fit>
+            <span class="ln" style="--d: 0.06"><span>{{opening.title.1}}</span></span>
+            <span class="ln gold" style="--d: 0.16"><span>{{opening.title.2}}</span></span>
+          </h1>
+          <p class="support ln" data-fit style="--d: 0.34; --win: 0.36"><span>{{opening.sub}}</span></p>
+        </div>
+        <div class="origin-mark" aria-hidden="true"><i></i><i></i><b></b></div>
+        <div class="handoff handoff--opening" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <section class="beat training" data-in="1.55" data-out="5.5" data-enter="0.72" data-exit="0.32">
+      <div class="sheet">
+        <header class="scene-copy">
+          <p class="kicker ln"><span>{{training.kicker}}</span></p>
+          <h2 data-fit><span class="ln" style="--d: 0.06"><span>{{training.title}}</span></span></h2>
+          <p class="support ln" data-fit style="--d: 0.18"><span>{{training.sub}}</span></p>
+        </header>
+        <div class="training-system visual" aria-hidden="true">
+          <svg class="connections" viewBox="0 0 760 620">
+            <path class="ghost" d="M380 310 L150 135 M380 310 L610 135 M380 310 L150 485 M380 310 L610 485" />
+            <path class="draw signal" pathLength="1" d="M150 135 L380 310 L610 135 M380 310 L610 485 M380 310 L150 485" />
+          </svg>
+          <div class="core-node"><span>{{training.scenario}}</span><b class="check">✓</b></div>
+          <div class="node-card n1"><i class="person-icon"></i><span>{{training.people}}</span></div>
+          <div class="node-card n2"><i class="land-icon"></i><span>{{training.environment}}</span></div>
+          <div class="node-card n3"><i class="target-icon"></i><span>{{training.objectives}}</span></div>
+          <div class="node-card n4"><i class="event-icon"></i><span>{{training.events}}</span></div>
+        </div>
+        <div class="mini-pipeline" aria-hidden="true">
+          <span>{{training.prompt}}</span><i></i><span>{{training.scenario}}</span><i></i><span>{{training.decisions}}</span><i></i><span class="validated">{{training.outcome}}</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="beat education" data-in="5.1" data-out="9.05" data-enter="0.72" data-exit="0.32">
+      <div class="sheet">
+        <header class="scene-copy">
+          <p class="kicker ln"><span>{{education.kicker}}</span></p>
+          <h2 data-fit><span class="ln" style="--d: 0.06"><span>{{education.title}}</span></span></h2>
+          <p class="support ln" data-fit style="--d: 0.18"><span>{{education.sub}}</span></p>
+        </header>
+        <div class="learning-world visual" aria-hidden="true">
+          <div class="prompt-card"><b>›</b><span>{{education.prompt}}</span></div>
+          <svg class="connections" viewBox="0 0 820 640">
+            <path class="ghost" d="M100 320 C250 320 240 100 430 100 M100 320 H430 M100 320 C250 320 240 540 430 540 M430 100 C650 100 600 320 760 320 M430 320 H760 M430 540 C650 540 600 320 760 320" />
+            <path class="draw signal" pathLength="1" d="M100 320 C250 320 240 100 430 100 M100 320 H430 M100 320 C250 320 240 540 430 540 M430 100 C650 100 600 320 760 320 M430 320 H760 M430 540 C650 540 600 320 760 320" />
+          </svg>
+          <div class="learning-node l1"><i class="book-icon"></i><span>{{education.history}}</span></div>
+          <div class="learning-node l2"><i class="flask-icon"></i><span>{{education.science}}</span></div>
+          <div class="learning-node l3"><i class="map-icon"></i><span>{{education.map}}</span></div>
+          <div class="learning-node l4"><i class="choice-icon"></i><span>{{education.choices}}</span></div>
+        </div>
+        <div class="verb-rail" aria-hidden="true"><span>{{education.explore}}</span><i></i><span>{{education.decide}}</span><i></i><span>{{education.learn}}</span></div>
+      </div>
+    </section>
+
+    <section class="beat escape" data-in="8.65" data-out="12.6" data-enter="0.72" data-exit="0.32">
+      <div class="sheet">
+        <header class="scene-copy">
+          <p class="kicker ln"><span>{{escape.kicker}}</span></p>
+          <h2 data-fit><span class="ln" style="--d: 0.06"><span>{{escape.title}}</span></span></h2>
+          <p class="support ln" data-fit style="--d: 0.18"><span>{{escape.sub}}</span></p>
+        </header>
+        <div class="escape-system visual" aria-hidden="true">
+          <svg class="room-plan" viewBox="0 0 760 610">
+            <path class="room draw" pathLength="1" d="M80 60 H680 V245 H530 V550 H250 V410 H80 Z M250 60 V245 H530 M250 245 V410 M530 245 V430" />
+            <path class="solution draw" pathLength="1" d="M150 150 L380 330 L600 150 L600 470" />
+          </svg>
+          <div class="clue c1"><b>01</b><span>{{escape.clue.1}}</span></div>
+          <div class="clue c2"><b>02</b><span>{{escape.clue.2}}</span></div>
+          <div class="clue c3"><b>03</b><span>{{escape.clue.3}}</span></div>
+          <div class="lock"><i></i><b></b><span>{{escape.valid}}</span></div>
+        </div>
+        <p class="validation-caption"><span class="check">✓</span>{{escape.path}}</p>
+      </div>
+    </section>
+
+    <section class="beat story" data-in="12.2" data-out="16.15" data-enter="0.72" data-exit="0.32">
+      <div class="sheet">
+        <header class="scene-copy">
+          <p class="kicker ln"><span>{{story.kicker}}</span></p>
+          <h2 data-fit><span class="ln" style="--d: 0.06"><span>{{story.title}}</span></span></h2>
+          <p class="support ln" data-fit style="--d: 0.18"><span>{{story.sub}}</span></p>
+        </header>
+        <div class="story-system visual" aria-hidden="true">
+          <svg class="connections" viewBox="0 0 820 620">
+            <path class="ghost" d="M120 310 C300 310 270 110 470 110 M120 310 H470 M120 310 C300 310 270 510 470 510 M470 110 L720 175 M470 310 L720 310 M470 510 L720 445" />
+            <path class="draw chosen" pathLength="1" d="M120 310 H470 L720 310" />
+          </svg>
+          <div class="character-node"><i class="person-icon"></i><span>{{story.character}}</span></div>
+          <div class="choice ch1">{{story.choice.1}}</div><div class="choice ch2">{{story.choice.2}}</div><div class="choice ch3">{{story.choice.3}}</div>
+          <div class="world-cluster"><span>{{story.world.1}}</span><span>{{story.world.2}}</span><span>{{story.world.3}}</span><span>{{story.world.4}}</span></div>
+        </div>
+        <p class="agency-line"><i></i>{{story.agency}}</p>
+      </div>
+    </section>
+
+    <section class="beat emergency" data-in="15.75" data-out="19.7" data-enter="0.72" data-exit="0.32">
+      <div class="sheet">
+        <header class="scene-copy">
+          <p class="kicker ln"><span>{{emergency.kicker}}</span></p>
+          <h2 data-fit><span class="ln" style="--d: 0.06"><span>{{emergency.title}}</span></span></h2>
+          <p class="support ln" data-fit style="--d: 0.18"><span>{{emergency.sub}}</span></p>
+        </header>
+        <div class="response-map visual" aria-hidden="true">
+          <div class="map-grid"></div>
+          <svg class="response-routes" viewBox="0 0 820 610">
+            <path class="ghost" d="M130 135 L380 305 L675 125 M380 305 L665 500 M130 490 L380 305" />
+            <path class="draw chosen" pathLength="1" d="M130 135 L380 305 L665 500" />
+          </svg>
+          <div class="incident"><i></i><span>{{emergency.incident}}</span></div>
+          <div class="resource r1"><b>R1</b><span>{{emergency.resources}}</span></div>
+          <div class="resource r2"><b>C</b><span>{{emergency.constraints}}</span></div>
+          <div class="resource r3"><b>R2</b><span>{{emergency.response}}</span></div>
+          <div class="response-result"><b class="check">✓</b><span>{{emergency.valid}}</span></div>
+        </div>
+        <div class="verb-rail" aria-hidden="true"><span>{{emergency.route.1}}</span><i></i><span>{{emergency.route.2}}</span><i></i><span>{{emergency.route.3}}</span></div>
+      </div>
+    </section>
+
+    <section class="beat roleplay" data-in="19.3" data-out="23.25" data-enter="0.72" data-exit="0.32">
+      <div class="sheet">
+        <header class="scene-copy">
+          <p class="kicker ln"><span>{{roleplay.kicker}}</span></p>
+          <h2 data-fit>
+            <span class="ln" style="--d: 0.06"><span>{{roleplay.title.1}}</span></span>
+            <span class="ln" style="--d: 0.13"><span>{{roleplay.title.2}}</span></span>
+          </h2>
+          <p class="support ln" data-fit style="--d: 0.18"><span>{{roleplay.sub}}</span></p>
+        </header>
+        <div class="roleplay-system visual" aria-hidden="true">
+          <div class="role-prompt"><b>›</b><span>{{roleplay.prompt}}</span></div>
+          <div class="role-card role-a"><i class="person-icon"></i><b>{{roleplay.role.a}}</b></div>
+          <div class="role-card role-b"><i class="person-icon"></i><b>{{roleplay.role.b}}</b></div>
+          <svg class="dialogue-lines" viewBox="0 0 820 620"><path class="ghost" d="M230 310 C350 160 470 160 590 310 M230 310 C350 470 470 470 590 310" /><path class="draw signal" pathLength="1" d="M230 310 C350 160 470 160 590 310 M590 310 C470 470 350 470 230 310" /></svg>
+          <div class="context-tags"><span>{{roleplay.context}}</span><span>{{roleplay.objectives}}</span><span>{{roleplay.state}}</span></div>
+          <div class="bubble b1"></div><div class="bubble b2"></div><div class="bubble b3"></div>
+        </div>
+        <p class="examples-line">{{roleplay.examples}}</p>
+      </div>
+    </section>
+
+    <section class="beat final" data-in="22.85" data-out="26.4" data-enter="0.72" data-hold="1">
+      <div class="sheet">
+        <div class="final-ring" aria-hidden="true"></div>
+        <div class="final-copy">
+          <p class="kicker ln"><span>{{final.kicker}}</span></p>
+          <h2 data-fit>
+            <span class="ln" style="--d: 0.08"><span>{{final.title.1}}</span></span>
+            <span class="ln gold" style="--d: 0.16"><span>{{final.title.2}}</span></span>
+          </h2>
+          <p class="final-support ln" data-fit style="--d: 0.48; --win: 0.28"><span>{{final.support}}</span></p>
+        </div>
+        <div class="architecture-rail" aria-hidden="true">
+          <span>{{final.prompt}}</span><i></i><span>{{final.world}}</span><i></i><span class="validation-step">{{final.validation}}</span><i></i><span>{{final.experience}}</span>
+        </div>
+        <div class="final-brand">{{brand}}</div>
+      </div>
+    </section>
+  </div>
+</div>
+<p class="sr-only">{{sr}}</p>
