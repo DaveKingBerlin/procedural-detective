@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Procedural Detective — From Prompt to Playable World</title>
+<style>
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--letterbox, #111111);
+  color: var(--ink, #111111);
+  font-family: Inter, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+#viewport {
+  position: relative;
+  overflow: hidden;
+  background: var(--paper, #ffffff);
+}
+#stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  overflow: hidden;
+  background: var(--paper, #ffffff);
+  color: var(--ink, #111111);
+  user-select: none;
+}
+.beat {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+}
+.beat.on { visibility: visible; }
+.beat .sheet {
+  position: absolute;
+  inset: 0;
+  opacity: calc(1 - var(--x, 0));
+  transform: translateY(calc(var(--x, 0) * -24px));
+}
+.stagger > * {
+  --c: clamp(0, (var(--e, 0) - var(--d, 0)) / var(--w, 0.5), 1);
+  opacity: var(--c);
+  transform: translateY(calc((1 - var(--m, 0)) * var(--rise, 28px)));
+}
+.ln {
+  --c: clamp(0, (var(--e, 0) - var(--d, 0)) / var(--win, 0.5), 1);
+  display: block;
+  overflow: visible;
+  white-space: nowrap;
+  /* Mask stays tight while the line rises; once landed (--c = 1) it opens
+     past the em-box so umlauts and descenders are not cut off. */
+  clip-path: inset(
+    calc(var(--c) * -0.35em)
+    -0.12em
+    calc(var(--c) * -0.45em)
+    -0.12em
+  );
+}
+.ln > * {
+  display: inline-block;
+  transform: translateY(calc((1 - var(--c)) * 120%));
+}
+.draw {
+  fill: none;
+  stroke-dasharray: 1 2;
+  stroke-dashoffset: calc(1 - var(--k, 0));
+}
+#stage a { user-select: text; }
+#bar {
+  width: min(920px, 100%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px 14px;
+  color: #ffffff;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+#bar[hidden] { display: none !important; }
+#bar button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+#bar button:focus-visible,
+#stage a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+#scrub { flex: 1; min-width: 120px; }
+#readout { min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+body { --letterbox:#070a12; background:#070a12; }
+#stage {
+  --bg:#0b1020; --deep:#080d1a; --panel:#151c30; --panel-2:#11182a; --line:#344464;
+  --text:#f2f4fb; --muted:#aeb9d0; --accent:#e6b455; --blue:#6da8ff; --violet:#9a88ff;
+  --cyan:#58d2cf; --orange:#ffb951; --green:#82d982;
+  background:var(--bg); color:var(--text); font-family:Inter,"Segoe UI",Arial,sans-serif; font-weight:600;
+}
+.beat .sheet {
+  --build:clamp(0,(var(--p,0) - .15)/.5,1); --resolve:clamp(0,(var(--p,0) - .62)/.2,1);
+  position:absolute; inset:0; overflow:hidden; background:var(--bg);
+  opacity:clamp(0,calc(1 - var(--x,0)*3),1); transform:none;
+}
+.focus .sheet { --wipe:clamp(0,var(--e,0)*1.55,1); clip-path:circle(calc(var(--wipe)*150%) at 77% 54%); }
+.intro{z-index:1}.prompt{z-index:2}.generation{z-index:3}.world{z-index:4}.validator{z-index:5}.playable{z-index:6}.overview{z-index:7}
+.prompt .sheet,.world .sheet,.playable .sheet{background:#0b1020}.generation .sheet,.validator .sheet{background:#0d1222}
+.brandline { position:absolute;z-index:40;left:72px;right:72px;top:38px;display:flex;justify-content:space-between;padding-bottom:16px;border-bottom:1px solid rgba(174,185,208,.28);color:var(--muted);font-size:16px;font-weight:750;letter-spacing:.16em;text-transform:uppercase; }
+.brandline span:first-child{color:var(--text)}
+.atmosphere{position:absolute;inset:0;z-index:30;pointer-events:none}.atmosphere i{position:absolute;left:var(--ax);top:var(--ay);width:3px;height:3px;border-radius:50%;background:var(--accent);opacity:.22;transform:translateY(calc(var(--t,0)*var(--drift)))}
+.kicker,h1,h2,h3,p{margin:0}.accent{color:var(--accent)}.kicker{font-size:18px;font-weight:800;letter-spacing:.2em;text-transform:uppercase;color:var(--accent)}
+.intro-copy{position:absolute;left:92px;top:205px;width:1160px;z-index:3}.intro-copy h1{width:1140px;margin:30px 0 34px;font-size:148px;line-height:.9;font-weight:780;letter-spacing:-.06em;overflow:hidden}.intro-copy h1 .ln{width:1120px}.support{width:1040px;color:var(--muted);font-size:31px;line-height:1.35}
+.intro-system{--reveal:clamp(0,(var(--e,0)-.22)*1.6,1);position:absolute;right:118px;top:250px;width:520px;height:520px;opacity:var(--reveal);transform:scale(calc(.72 + var(--reveal)*.28)) rotate(calc(var(--p,0)*15deg))}.orbit,.core,.spark{position:absolute;border-radius:50%}.orbit{border:1px solid var(--line)}.o1{inset:0}.o2{inset:82px;border-color:rgba(230,180,85,.55)}.core{inset:205px;background:var(--accent)}
+.intro-system::before,.intro-system::after{content:"";position:absolute;left:260px;top:0;width:1px;height:520px;background:var(--line);transform:rotate(45deg)}.intro-system::after{transform:rotate(-45deg)}.spark{width:14px;height:14px;background:var(--accent)}.s1{left:20px;top:250px}.s2{right:58px;top:76px;background:var(--muted)}.s3{right:32px;bottom:124px;background:var(--cyan)}
+.scene-copy{position:absolute;z-index:3;left:88px;top:176px;width:850px;opacity:clamp(0,calc((var(--e,0)-.86)*7.15),1)}
+.number,.badge{display:grid;place-items:center;width:62px;height:45px;border-radius:8px;background:var(--blue);color:#07101d;font-size:17px;font-weight:850;letter-spacing:.04em}.scene-copy .kicker{margin-top:28px;color:var(--blue)}.scene-copy h2{width:820px;margin-top:28px;overflow:hidden;font-size:88px;line-height:.96;font-weight:760;letter-spacing:-.05em}.scene-copy h2 .ln{width:810px}
+.violet,.violet-bg{background:var(--violet)!important}.cyan,.cyan-bg{background:var(--cyan)!important}.orange,.orange-bg{background:var(--orange)!important}.green,.green-bg{background:var(--green)!important}.blue{background:var(--blue)!important}.violet-text{color:var(--violet)!important}.cyan-text{color:var(--cyan)!important}.orange-text{color:var(--orange)!important}.green-text{color:var(--green)!important}
+.focus-visual{position:absolute;left:1040px;top:250px;width:760px;height:540px}.signal-map,.network,.floorplan,.validation-rings,.action-lines{position:absolute;inset:0;width:100%;height:100%;overflow:visible}.ghost{fill:none;stroke:var(--line);stroke-width:2}.signal{--k:var(--build);fill:none;stroke:var(--accent);stroke-width:4;stroke-linecap:round}.packet{fill:none;stroke:var(--text);stroke-width:14;stroke-linecap:round;stroke-dasharray:.025 2;stroke-dashoffset:calc(var(--build)*-.97);opacity:calc(clamp(0,var(--build)*16,1)*(1 - clamp(0,(var(--build)-.98)*50,1)))}
+.mini-rail{position:absolute;left:88px;bottom:80px;display:flex;gap:14px;align-items:center}.mini-rail span{display:grid;place-items:center;width:48px;height:36px;border:1px solid var(--line);border-radius:7px;color:var(--muted);font-size:14px;font-weight:800;opacity:.7}.mini-rail .active{width:68px;background:var(--blue);border-color:transparent;color:#07101d;opacity:1}
+/* Prompt */
+.prompt-card{position:absolute;left:82px;top:90px;width:500px;height:360px;padding:70px 54px;border:2px solid var(--line);border-radius:24px;background:var(--panel);opacity:clamp(0,var(--build)*4,1);transform:translateY(calc((1 - var(--build))*70px))}.prompt-card i{display:block;width:calc(260px + var(--n)*120px);height:14px;margin-bottom:34px;border-radius:7px;background:rgba(174,185,208,.35);transform:scaleX(clamp(0,(var(--build)-var(--n))*5,1));transform-origin:left}.prompt-card i:nth-child(2){background:rgba(109,168,255,.6)}.prompt-card i:nth-child(4){width:210px}.cursor{position:absolute;left:54px;bottom:54px;width:4px;height:32px;background:var(--accent);opacity:var(--resolve)}.seed-dot{position:absolute;right:60px;top:254px;width:28px;height:28px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 12px rgba(230,180,85,.15);opacity:var(--resolve);transform:scale(calc(.5 + var(--resolve)*.5))}
+/* Generation */
+.gen-core{position:absolute;left:320px;top:210px;width:120px;height:120px;display:grid;place-items:center;border:2px solid var(--violet);border-radius:50%;background:var(--panel);font-size:42px;color:var(--violet);opacity:clamp(0,var(--build)*4,1);transform:scale(calc(.7 + var(--build)*.3))}.gen-node{--show:clamp(0,(var(--build)-var(--nd))*4,1);position:absolute;width:190px;height:110px;display:flex;align-items:center;gap:16px;padding:20px;border:1px solid var(--line);border-radius:14px;background:var(--panel);font-size:19px;opacity:var(--show);transform:translateY(calc((1 - var(--show))*38px))}.gn1{left:74px;top:52px}.gn2{right:74px;top:52px}.gn3{left:74px;bottom:52px}.gn4{right:74px;bottom:52px}.gen-node i{position:relative;width:42px;height:42px;flex:none;border:2px solid var(--violet);border-radius:10px}
+.person-icon::before{content:"";position:absolute;left:13px;top:6px;width:12px;height:12px;border-radius:50%;background:var(--violet)}.person-icon::after{content:"";position:absolute;left:9px;bottom:5px;width:20px;height:13px;border-radius:10px 10px 3px 3px;background:var(--violet)}.evidence-icon::before{content:"";position:absolute;inset:9px;border:2px solid var(--violet);transform:rotate(45deg)}.timeline-icon::before{content:"";position:absolute;left:7px;right:7px;top:19px;height:2px;background:var(--violet);box-shadow:8px -8px 0 -1px var(--violet),16px 8px 0 -1px var(--violet)}.world-icon{border-radius:50%!important}.world-icon::before,.world-icon::after{content:"";position:absolute;inset:8px;border:1px solid var(--violet);border-radius:50%}.world-icon::after{inset:18px 5px;border-radius:0;border-left:0;border-right:0}
+/* World */
+.room-line{--k:clamp(0,var(--build)*1.15,1);fill:none;stroke:var(--line);stroke-width:4}.clue-line{--k:var(--resolve);fill:none;stroke:var(--cyan);stroke-width:4;stroke-dasharray:.03 .025}.world-node{--show:clamp(0,(var(--build)-var(--wd))*5,1);position:absolute;display:flex;align-items:center;gap:12px;padding:14px 18px;border:1px solid var(--line);border-radius:999px;background:var(--panel);font-size:17px;opacity:var(--show);transform:translateY(calc((1 - var(--show))*30px))}.world-node i{width:15px;height:15px;border-radius:50%;background:var(--cyan);box-shadow:0 0 0 7px rgba(88,210,207,.12)}.wn1{left:118px;top:138px}.wn2{right:98px;top:190px}.wn3{left:300px;bottom:86px}
+/* Validator */
+.validation-rings{transform:rotate(calc(var(--p,0)*12deg))}.validation-rings .signal{stroke:var(--orange)}.check-row{--show:clamp(0,(var(--build)-var(--cd))*5,1);position:absolute;left:90px;width:260px;height:70px;display:flex;align-items:center;gap:15px;padding:0 20px;border:1px solid var(--line);border-radius:12px;background:var(--panel);font-size:18px;opacity:var(--show);transform:translateX(calc((1 - var(--show))*-48px))}.check-row b{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:var(--orange);color:#09101c}.cr1{top:110px}.cr2{top:235px}.cr3{top:360px}.validation-seal{position:absolute;right:112px;top:165px;width:210px;height:210px;display:grid;place-items:center;border:4px solid var(--orange);border-radius:50%;font-size:105px;color:var(--orange);opacity:var(--resolve);transform:scale(calc(.6 + var(--resolve)*.4)) rotate(calc((1 - var(--resolve))*-12deg))}
+/* Playable */
+.case-core{position:absolute;left:190px;top:165px;width:220px;height:220px;border:2px solid var(--green);border-radius:28px;background:var(--panel);opacity:clamp(0,var(--build)*4,1);transform:scale(calc(.75 + var(--build)*.25)) rotate(calc((1 - var(--build))*-6deg))}.case-core i{position:absolute;left:54px;right:54px;top:54px;height:72px;border:3px solid var(--green);border-bottom:0;border-radius:50px 50px 0 0}.case-core b{position:absolute;right:-24px;bottom:-24px;width:74px;height:74px;display:grid;place-items:center;border-radius:50%;background:var(--green);color:#07101d;font-size:38px;opacity:var(--resolve)}.action-lines .signal{stroke:var(--green)}.action{--show:clamp(0,(var(--build)-var(--ad))*5,1);position:absolute;right:30px;width:200px;height:70px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;border:1px solid var(--line);border-radius:12px;background:var(--panel);font-size:18px;opacity:var(--show);transform:translateX(calc((1 - var(--show))*55px))}.action i{width:12px;height:12px;border-radius:50%;background:var(--green)}.a1{top:84px}.a2{top:235px}.a3{top:386px}
+/* Overview */
+.overview .sheet{--open:clamp(0,var(--e,0)*1.45,1);background:var(--deep);clip-path:circle(calc(var(--open)*150%) at 78% 76%)}.overview-head{position:absolute;left:78px;right:78px;top:120px}.overview-head h2{width:1760px;margin-top:18px;overflow:hidden;font-size:53px;line-height:1.1;font-weight:760;letter-spacing:-.035em}.overview-head h2 i{color:var(--line);font-style:normal;margin:0 16px}.overview-head h2 b{color:var(--accent)}
+.pipeline{position:absolute;left:78px;right:78px;top:315px;display:grid;grid-template-columns:repeat(5,1fr);gap:40px}.pipe-card{--show:clamp(0,(var(--p,0)-var(--pd))*5,1);position:relative;height:270px;padding:25px 22px;border:2px solid var(--line);border-radius:16px;background:var(--panel-2);opacity:var(--show);transform:translateY(calc((1 - var(--show))*55px))}.pipe-card:not(:last-child)::after{content:"";position:absolute;right:-29px;top:128px;width:18px;height:18px;border-top:5px solid var(--muted);border-right:5px solid var(--muted);transform:rotate(45deg)}.badge{width:52px;height:38px;font-size:15px}.pipe-card h3{margin-top:26px;font-size:24px;line-height:1.05;text-transform:uppercase;letter-spacing:.015em}.pipe-card p{margin-top:22px;color:var(--muted);font-size:18px;line-height:1.35}
+.overview-foot{position:absolute;left:126px;right:126px;bottom:80px;padding:28px 34px;border:1px solid var(--line);border-radius:18px;display:flex;align-items:center;justify-content:space-between;gap:48px;opacity:clamp(0,(var(--p,0)-.46)*3.7,1)}.overview-foot>p{width:1020px;color:var(--muted);font-size:22px;line-height:1.35}.provider{display:flex;align-items:center;gap:20px;font-size:17px;white-space:nowrap}.provider b{width:170px;text-align:right;color:#91a6d4}.provider span{color:var(--text)}
+@media (prefers-reduced-motion:reduce){.atmosphere{display:none}}
+
+</style>
+</head>
+<body>
+<!-- Animated reconstruction of docs/png/ProceduralDetectiveArchitecture.png. Copy is limited to the source diagram. -->
+<div id="viewport">
+  <div id="stage" data-duration="18.8" data-w="1920" data-h="1080">
+    <div class="atmosphere" aria-hidden="true">
+      <i style="--ax:8%;--ay:18%;--drift:44px"></i><i style="--ax:22%;--ay:84%;--drift:-36px"></i>
+      <i style="--ax:47%;--ay:12%;--drift:30px"></i><i style="--ax:69%;--ay:78%;--drift:-42px"></i>
+      <i style="--ax:88%;--ay:24%;--drift:38px"></i><i style="--ax:95%;--ay:88%;--drift:-24px"></i>
+    </div>
+    <div class="brandline"><span>Procedural Detective</span><span>Architecture · Prompt to World</span></div>
+
+    <section class="beat intro" data-in="0" data-out="2.6" data-enter="0.72" data-exit="0.36">
+      <div class="sheet">
+        <div class="intro-copy">
+          <p class="kicker ln"><span>System Architecture</span></p>
+          <h1 data-fit><span class="ln" style="--d:.05"><span>From Prompt to</span></span><span class="ln accent" style="--d:.14"><span>Playable World</span></span></h1>
+          <p class="support ln" data-fit style="--d:.32;--win:.32"><span>AI creates the mystery. Deterministic code makes sure it works.</span></p>
+        </div>
+        <div class="intro-system" aria-hidden="true"><i class="orbit o1"></i><i class="orbit o2"></i><i class="core"></i><span class="spark s1"></span><span class="spark s2"></span><span class="spark s3"></span></div>
+      </div>
+    </section>
+
+    <section class="beat focus prompt" data-in="2.2" data-out="5.2" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number">01</span><p class="kicker ln"><span>Crime Prompt</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>A few lines</span></span><span class="ln accent" style="--d:.15"><span>describing the crime</span></span></h2></header>
+        <div class="focus-visual prompt-visual" aria-hidden="true">
+          <div class="prompt-card"><i style="--n:.12"></i><i style="--n:.34"></i><i style="--n:.56"></i><i style="--n:.78"></i><span class="cursor"></span></div>
+          <svg class="signal-map" viewBox="0 0 760 540"><path class="ghost" d="M90 270 H670"/><path class="draw signal" pathLength="1" d="M90 270 H670"/><path class="packet" pathLength="1" d="M90 270 H670"/></svg><b class="seed-dot"></b>
+        </div>
+        <div class="mini-rail" aria-hidden="true"><span class="active">01</span><span>02</span><span>03</span><span>04</span><span>05</span></div>
+      </div>
+    </section>
+
+    <section class="beat focus generation" data-in="4.8" data-out="7.9" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number violet">02</span><p class="kicker violet-text ln"><span>AI Generation</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>People · Evidence</span></span><span class="ln accent" style="--d:.15"><span>Timeline · World</span></span></h2></header>
+        <div class="focus-visual generation-visual" aria-hidden="true">
+          <svg class="network" viewBox="0 0 760 540"><path class="ghost" d="M380 270 L170 120 M380 270 L590 120 M380 270 L170 420 M380 270 L590 420"/><path class="draw signal" pathLength="1" d="M380 270 L170 120 M380 270 L590 120 M380 270 L170 420 M380 270 L590 420"/></svg>
+          <div class="gen-core">AI</div><div class="gen-node gn1" style="--nd:.05"><i class="person-icon"></i><span>People</span></div><div class="gen-node gn2" style="--nd:.18"><i class="evidence-icon"></i><span>Evidence</span></div><div class="gen-node gn3" style="--nd:.31"><i class="timeline-icon"></i><span>Timeline</span></div><div class="gen-node gn4" style="--nd:.44"><i class="world-icon"></i><span>World</span></div>
+        </div>
+        <div class="mini-rail" aria-hidden="true"><span>01</span><span class="active violet-bg">02</span><span>03</span><span>04</span><span>05</span></div>
+      </div>
+    </section>
+
+    <section class="beat focus world" data-in="7.5" data-out="10.6" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number cyan">03</span><p class="kicker cyan-text ln"><span>Interactive World</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>3D scene, objects,</span></span><span class="ln accent" style="--d:.15"><span>clues and suspects</span></span></h2></header>
+        <div class="focus-visual world-visual" aria-hidden="true"><svg class="floorplan" viewBox="0 0 760 540"><path class="draw room-line" pathLength="1" d="M90 90 H670 V450 H90 Z M350 90 V270 H670 M90 300 H350 M220 300 V450"/><path class="draw clue-line" pathLength="1" d="M170 190 C300 130 470 150 580 230 S430 380 260 380"/></svg><div class="world-node wn1" style="--wd:.08"><i></i><span>Objects</span></div><div class="world-node wn2" style="--wd:.25"><i></i><span>Clues</span></div><div class="world-node wn3" style="--wd:.42"><i></i><span>Suspects</span></div></div>
+        <div class="mini-rail" aria-hidden="true"><span>01</span><span>02</span><span class="active cyan-bg">03</span><span>04</span><span>05</span></div>
+      </div>
+    </section>
+
+    <section class="beat focus validator" data-in="10.2" data-out="13.5" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number orange">04</span><p class="kicker orange-text ln"><span>Validator + Solver</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>Consistency</span></span><span class="ln" style="--d:.14"><span>Reachable clues</span></span><span class="ln accent" style="--d:.20"><span>Valid solution</span></span></h2></header>
+        <div class="focus-visual validator-visual" aria-hidden="true"><svg class="validation-rings" viewBox="0 0 760 540"><circle class="ghost" cx="380" cy="270" r="205"/><circle class="ghost" cx="380" cy="270" r="142"/><path class="draw signal" pathLength="1" d="M380 65 A205 205 0 1 1 379.9 65 M380 128 A142 142 0 1 0 380.1 128"/></svg><div class="check-row cr1" style="--cd:.08"><b>✓</b><span>Consistency</span></div><div class="check-row cr2" style="--cd:.26"><b>✓</b><span>Reachable clues</span></div><div class="check-row cr3" style="--cd:.44"><b>✓</b><span>Valid solution</span></div><div class="validation-seal">✓</div></div>
+        <div class="mini-rail" aria-hidden="true"><span>01</span><span>02</span><span>03</span><span class="active orange-bg">04</span><span>05</span></div>
+      </div>
+    </section>
+
+    <section class="beat focus playable" data-in="13.1" data-out="16.2" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number green">05</span><p class="kicker green-text ln"><span>Playable Mystery</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>Investigate</span></span><span class="ln" style="--d:.14"><span>Accuse</span></span><span class="ln accent" style="--d:.20"><span>Solve</span></span></h2></header>
+        <div class="focus-visual playable-visual" aria-hidden="true"><div class="case-core"><i></i><b data-bleed>✓</b></div><svg class="action-lines" viewBox="0 0 760 540"><path class="ghost" d="M380 270 L600 120 M380 270 L640 270 M380 270 L600 420"/><path class="draw signal" pathLength="1" d="M380 270 L600 120 M380 270 L640 270 M380 270 L600 420"/></svg><div class="action a1" style="--ad:.08"><b>Investigate</b><i></i></div><div class="action a2" style="--ad:.26"><b>Accuse</b><i></i></div><div class="action a3" style="--ad:.44"><b>Solve</b><i></i></div></div>
+        <div class="mini-rail" aria-hidden="true"><span>01</span><span>02</span><span>03</span><span>04</span><span class="active green-bg">05</span></div>
+      </div>
+    </section>
+
+    <section class="beat overview" data-in="15.8" data-out="18.8" data-enter="0.78" data-hold="1">
+      <div class="sheet">
+        <div class="overview-head"><p class="kicker ln"><span>Why it matters</span></p><h2 class="ln" data-fit style="--d:.08"><span>Prompt-to-world <i>→</i> Validated world <i>→</i> <b>Playable experience</b></span></h2></div>
+        <div class="pipeline">
+          <article class="pipe-card" style="--pd:.08"><span class="badge blue">01</span><h3>Crime Prompt</h3><p>A few lines<br>describing the crime</p></article>
+          <article class="pipe-card" style="--pd:.17"><span class="badge violet">02</span><h3>AI Generation</h3><p>People · Evidence<br>Timeline · World</p></article>
+          <article class="pipe-card" style="--pd:.26"><span class="badge cyan">03</span><h3>Interactive World</h3><p>3D scene, objects,<br>clues and suspects</p></article>
+          <article class="pipe-card" style="--pd:.35"><span class="badge orange">04</span><h3>Validator + Solver</h3><p>Consistency<br>Reachable clues · Valid solution</p></article>
+          <article class="pipe-card" style="--pd:.44"><span class="badge green">05</span><h3>Playable Mystery</h3><p>Investigate · Accuse · Solve</p></article>
+        </div>
+        <div class="overview-foot"><p data-fit>Same architecture can power other procedural worlds, simulations and interactive storytelling.</p><div class="provider"><b>Provider-independent</b><span>Hosted AI · Local Ollama</span></div></div>
+      </div>
+    </section>
+  </div>
+</div>
+<p class="sr-only">Procedural Detective architecture. A crime prompt moves through AI generation into an interactive world. A deterministic validator and solver check consistency, reachable clues, and a valid solution before the mystery becomes playable. The provider-independent architecture can use hosted AI or local Ollama.</p>
+<div id="bar">
+  <button type="button" id="toggle">Play</button>
+  <button type="button" id="replay">Replay</button>
+  <input id="scrub" type="range" min="0" max="15" value="0" aria-label="Time">
+  <span id="readout">0.0s</span>
+</div>
+<script>
+/* Seekable stage clock. Story motion reads --e, --m, --x, --p, and --t. */
+(function () {
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function easeOutCubic(t) {
+    return 1 - Math.pow(1 - t, 3);
+  }
+
+  function easeOutBack(t) {
+    const c1 = 1;
+    const c3 = c1 + 1;
+    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+  }
+
+  function mount() {
+    const stage = document.querySelector("#stage");
+    if (!stage) throw new Error("motion-ad: #stage missing");
+
+    const duration = Number(stage.dataset.duration);
+    const width = Number(stage.dataset.w || 1920);
+    const height = Number(stage.dataset.h || 1080);
+    const beats = [...stage.querySelectorAll(".beat")].map((el) => ({
+      el,
+      start: Number(el.dataset.in),
+      end: Number(el.dataset.out),
+      enter: Number(el.dataset.enter || 0.7),
+      exit: Number(el.dataset.exit || 0.35),
+      hold: el.dataset.hold === "1",
+    }));
+
+    stage.querySelectorAll(".stagger").forEach((group) => {
+      const step = Number(group.dataset.step || 0.12);
+      [...group.children].forEach((child, index) => {
+        if (!child.style.getPropertyValue("--d")) {
+          child.style.setProperty("--d", String(index * step));
+        }
+      });
+    });
+
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const viewport = document.getElementById("viewport");
+    const bar = document.getElementById("bar");
+    const scrub = document.getElementById("scrub");
+    const readout = document.getElementById("readout");
+    const toggle = document.getElementById("toggle");
+    const present = new URLSearchParams(location.search).has("present");
+    if (present && bar) bar.hidden = true;
+
+    let time = 0;
+    let playing = false;
+    let last = 0;
+
+    function fit() {
+      const chrome = bar && !bar.hidden ? bar.offsetHeight : 0;
+      const scale = Math.min(window.innerWidth / width, Math.max(1, window.innerHeight - chrome) / height);
+      if (viewport) {
+        viewport.style.width = width * scale + "px";
+        viewport.style.height = height * scale + "px";
+      }
+      stage.style.width = width + "px";
+      stage.style.height = height + "px";
+      stage.style.transform = "scale(" + scale + ")";
+    }
+
+    function overflows(el) {
+      if (el.scrollWidth > el.clientWidth + 1) return true;
+      return [...el.querySelectorAll(".ln")].some((line) => line.scrollWidth > line.clientWidth + 1);
+    }
+
+    function fitText() {
+      stage.querySelectorAll("[data-fit]").forEach((el) => {
+        el.style.fontSize = "";
+        const base = parseFloat(getComputedStyle(el).fontSize);
+        const min = base * (Number(el.dataset.fit) || 0.6);
+        let size = base;
+        while (size > min && overflows(el)) {
+          size -= 1;
+          el.style.fontSize = size + "px";
+        }
+        el.toggleAttribute("data-fit-overflow", overflows(el));
+      });
+    }
+
+    function setToggle() {
+      if (!toggle) return;
+      toggle.textContent = playing ? "Pause" : "Play";
+    }
+
+    function apply(next) {
+      time = clamp(next, 0, duration);
+      stage.style.setProperty("--t", (duration ? time / duration : 0).toFixed(4));
+      for (const beat of beats) {
+        const holds = beat.hold || beat.end >= duration - 0.001;
+        const visible = holds
+          ? time >= beat.start && time <= duration
+          : time >= beat.start && time < beat.end;
+        const enterRaw = clamp((time - beat.start) / beat.enter, 0, 1);
+        const exitRaw = holds ? 0 : clamp((time - (beat.end - beat.exit)) / beat.exit, 0, 1);
+        const span = Math.max(0.001, beat.end - beat.start);
+        beat.el.classList.toggle("on", visible);
+        beat.el.style.setProperty("--e", easeOutCubic(enterRaw).toFixed(4));
+        beat.el.style.setProperty("--m", easeOutBack(enterRaw).toFixed(4));
+        beat.el.style.setProperty("--x", easeOutCubic(exitRaw).toFixed(4));
+        beat.el.style.setProperty("--p", clamp((time - beat.start) / span, 0, 1).toFixed(4));
+      }
+      if (scrub && document.activeElement !== scrub) scrub.value = String(time);
+      if (readout) readout.textContent = time.toFixed(1) + "s";
+    }
+
+    function frame(now) {
+      if (!playing) return;
+      if (!last) last = now;
+      const delta = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      if (time + delta >= duration) {
+        apply(duration);
+        playing = false;
+        setToggle();
+        return;
+      }
+      apply(time + delta);
+      requestAnimationFrame(frame);
+    }
+
+    function play() {
+      if (time >= duration - 0.001) time = 0;
+      playing = true;
+      last = 0;
+      setToggle();
+      requestAnimationFrame(frame);
+    }
+
+    function pause() {
+      playing = false;
+      setToggle();
+    }
+
+    function seek(value) {
+      pause();
+      apply(Number(value) || 0);
+    }
+
+    window.addEventListener("resize", fit);
+    if (scrub) {
+      scrub.max = String(duration);
+      scrub.step = "0.01";
+      scrub.addEventListener("input", () => seek(scrub.value));
+    }
+    document.getElementById("replay")?.addEventListener("click", () => {
+      seek(0);
+      play();
+    });
+    toggle?.addEventListener("click", () => {
+      if (playing) pause();
+      else play();
+    });
+    window.addEventListener("keydown", (event) => {
+      if (event.target && event.target.matches("input, textarea")) return;
+      if (event.code === "Space") {
+        event.preventDefault();
+        if (playing) pause();
+        else play();
+      } else if (event.key === "r" || event.key === "R") {
+        seek(0);
+        play();
+      }
+    });
+
+    fit();
+    fitText();
+    const fonts = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
+    const fitted = fonts.then(() => {
+      fit();
+      fitText();
+      apply(time);
+    });
+    if (reduce) {
+      document.documentElement.classList.add("reduce-motion");
+      apply(Math.max(0, duration - 0.05));
+      pause();
+    } else {
+      apply(0);
+      play();
+    }
+
+    window.ad = {
+      duration,
+      seek,
+      play,
+      pause,
+      getTime: () => time,
+      fitted,
+      ready: true,
+    };
+    return window.ad;
+  }
+
+  window.MotionAd = { mount };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mount);
+  } else {
+    mount();
+  }
+})();
+
+</script>
+</body>
+</html>

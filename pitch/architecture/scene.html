@@ -1,0 +1,83 @@
+<!-- Animated reconstruction of docs/png/ProceduralDetectiveArchitecture.png. Copy is limited to the source diagram. -->
+<div id="viewport">
+  <div id="stage" data-duration="18.8" data-w="1920" data-h="1080">
+    <div class="atmosphere" aria-hidden="true">
+      <i style="--ax:8%;--ay:18%;--drift:44px"></i><i style="--ax:22%;--ay:84%;--drift:-36px"></i>
+      <i style="--ax:47%;--ay:12%;--drift:30px"></i><i style="--ax:69%;--ay:78%;--drift:-42px"></i>
+      <i style="--ax:88%;--ay:24%;--drift:38px"></i><i style="--ax:95%;--ay:88%;--drift:-24px"></i>
+    </div>
+    <div class="brandline"><span>{{brand}}</span><span>{{series}}</span></div>
+
+    <section class="beat intro" data-in="0" data-out="2.6" data-enter="0.72" data-exit="0.36">
+      <div class="sheet">
+        <div class="intro-copy">
+          <p class="kicker ln"><span>{{intro.kicker}}</span></p>
+          <h1 data-fit><span class="ln" style="--d:.05"><span>{{intro.title.1}}</span></span><span class="ln accent" style="--d:.14"><span>{{intro.title.2}}</span></span></h1>
+          <p class="support ln" data-fit style="--d:.32;--win:.32"><span>{{intro.sub}}</span></p>
+        </div>
+        <div class="intro-system" aria-hidden="true"><i class="orbit o1"></i><i class="orbit o2"></i><i class="core"></i><span class="spark s1"></span><span class="spark s2"></span><span class="spark s3"></span></div>
+      </div>
+    </section>
+
+    <section class="beat focus prompt" data-in="2.2" data-out="5.2" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number">{{stage1.number}}</span><p class="kicker ln"><span>{{stage1.title}}</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>{{stage1.body.1}}</span></span><span class="ln accent" style="--d:.15"><span>{{stage1.body.2}}</span></span></h2></header>
+        <div class="focus-visual prompt-visual" aria-hidden="true">
+          <div class="prompt-card"><i style="--n:.12"></i><i style="--n:.34"></i><i style="--n:.56"></i><i style="--n:.78"></i><span class="cursor"></span></div>
+          <svg class="signal-map" viewBox="0 0 760 540"><path class="ghost" d="M90 270 H670"/><path class="draw signal" pathLength="1" d="M90 270 H670"/><path class="packet" pathLength="1" d="M90 270 H670"/></svg><b class="seed-dot"></b>
+        </div>
+        <div class="mini-rail" aria-hidden="true"><span class="active">{{stage1.number}}</span><span>{{stage2.number}}</span><span>{{stage3.number}}</span><span>{{stage4.number}}</span><span>{{stage5.number}}</span></div>
+      </div>
+    </section>
+
+    <section class="beat focus generation" data-in="4.8" data-out="7.9" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number violet">{{stage2.number}}</span><p class="kicker violet-text ln"><span>{{stage2.title}}</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>{{stage2.people}} · {{stage2.evidence}}</span></span><span class="ln accent" style="--d:.15"><span>{{stage2.timeline}} · {{stage2.world}}</span></span></h2></header>
+        <div class="focus-visual generation-visual" aria-hidden="true">
+          <svg class="network" viewBox="0 0 760 540"><path class="ghost" d="M380 270 L170 120 M380 270 L590 120 M380 270 L170 420 M380 270 L590 420"/><path class="draw signal" pathLength="1" d="M380 270 L170 120 M380 270 L590 120 M380 270 L170 420 M380 270 L590 420"/></svg>
+          <div class="gen-core">AI</div><div class="gen-node gn1" style="--nd:.05"><i class="person-icon"></i><span>{{stage2.people}}</span></div><div class="gen-node gn2" style="--nd:.18"><i class="evidence-icon"></i><span>{{stage2.evidence}}</span></div><div class="gen-node gn3" style="--nd:.31"><i class="timeline-icon"></i><span>{{stage2.timeline}}</span></div><div class="gen-node gn4" style="--nd:.44"><i class="world-icon"></i><span>{{stage2.world}}</span></div>
+        </div>
+        <div class="mini-rail" aria-hidden="true"><span>{{stage1.number}}</span><span class="active violet-bg">{{stage2.number}}</span><span>{{stage3.number}}</span><span>{{stage4.number}}</span><span>{{stage5.number}}</span></div>
+      </div>
+    </section>
+
+    <section class="beat focus world" data-in="7.5" data-out="10.6" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number cyan">{{stage3.number}}</span><p class="kicker cyan-text ln"><span>{{stage3.title}}</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>{{stage3.body.1}}</span></span><span class="ln accent" style="--d:.15"><span>{{stage3.body.2}}</span></span></h2></header>
+        <div class="focus-visual world-visual" aria-hidden="true"><svg class="floorplan" viewBox="0 0 760 540"><path class="draw room-line" pathLength="1" d="M90 90 H670 V450 H90 Z M350 90 V270 H670 M90 300 H350 M220 300 V450"/><path class="draw clue-line" pathLength="1" d="M170 190 C300 130 470 150 580 230 S430 380 260 380"/></svg><div class="world-node wn1" style="--wd:.08"><i></i><span>{{stage3.objects}}</span></div><div class="world-node wn2" style="--wd:.25"><i></i><span>{{stage3.clues}}</span></div><div class="world-node wn3" style="--wd:.42"><i></i><span>{{stage3.suspects}}</span></div></div>
+        <div class="mini-rail" aria-hidden="true"><span>{{stage1.number}}</span><span>{{stage2.number}}</span><span class="active cyan-bg">{{stage3.number}}</span><span>{{stage4.number}}</span><span>{{stage5.number}}</span></div>
+      </div>
+    </section>
+
+    <section class="beat focus validator" data-in="10.2" data-out="13.5" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number orange">{{stage4.number}}</span><p class="kicker orange-text ln"><span>{{stage4.title}}</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>{{stage4.consistency}}</span></span><span class="ln" style="--d:.14"><span>{{stage4.clues}}</span></span><span class="ln accent" style="--d:.20"><span>{{stage4.solution}}</span></span></h2></header>
+        <div class="focus-visual validator-visual" aria-hidden="true"><svg class="validation-rings" viewBox="0 0 760 540"><circle class="ghost" cx="380" cy="270" r="205"/><circle class="ghost" cx="380" cy="270" r="142"/><path class="draw signal" pathLength="1" d="M380 65 A205 205 0 1 1 379.9 65 M380 128 A142 142 0 1 0 380.1 128"/></svg><div class="check-row cr1" style="--cd:.08"><b>✓</b><span>{{stage4.consistency}}</span></div><div class="check-row cr2" style="--cd:.26"><b>✓</b><span>{{stage4.clues}}</span></div><div class="check-row cr3" style="--cd:.44"><b>✓</b><span>{{stage4.solution}}</span></div><div class="validation-seal">✓</div></div>
+        <div class="mini-rail" aria-hidden="true"><span>{{stage1.number}}</span><span>{{stage2.number}}</span><span>{{stage3.number}}</span><span class="active orange-bg">{{stage4.number}}</span><span>{{stage5.number}}</span></div>
+      </div>
+    </section>
+
+    <section class="beat focus playable" data-in="13.1" data-out="16.2" data-enter="0.72" data-exit="0.34">
+      <div class="sheet">
+        <header class="scene-copy"><span class="number green">{{stage5.number}}</span><p class="kicker green-text ln"><span>{{stage5.title}}</span></p><h2 data-fit><span class="ln" style="--d:.08"><span>{{stage5.investigate}}</span></span><span class="ln" style="--d:.14"><span>{{stage5.accuse}}</span></span><span class="ln accent" style="--d:.20"><span>{{stage5.solve}}</span></span></h2></header>
+        <div class="focus-visual playable-visual" aria-hidden="true"><div class="case-core"><i></i><b data-bleed>✓</b></div><svg class="action-lines" viewBox="0 0 760 540"><path class="ghost" d="M380 270 L600 120 M380 270 L640 270 M380 270 L600 420"/><path class="draw signal" pathLength="1" d="M380 270 L600 120 M380 270 L640 270 M380 270 L600 420"/></svg><div class="action a1" style="--ad:.08"><b>{{stage5.investigate}}</b><i></i></div><div class="action a2" style="--ad:.26"><b>{{stage5.accuse}}</b><i></i></div><div class="action a3" style="--ad:.44"><b>{{stage5.solve}}</b><i></i></div></div>
+        <div class="mini-rail" aria-hidden="true"><span>{{stage1.number}}</span><span>{{stage2.number}}</span><span>{{stage3.number}}</span><span>{{stage4.number}}</span><span class="active green-bg">{{stage5.number}}</span></div>
+      </div>
+    </section>
+
+    <section class="beat overview" data-in="15.8" data-out="18.8" data-enter="0.78" data-hold="1">
+      <div class="sheet">
+        <div class="overview-head"><p class="kicker ln"><span>{{overview.kicker}}</span></p><h2 class="ln" data-fit style="--d:.08"><span>{{overview.from}} <i>→</i> {{overview.validated}} <i>→</i> <b>{{overview.playable}}</b></span></h2></div>
+        <div class="pipeline">
+          <article class="pipe-card" style="--pd:.08"><span class="badge blue">{{stage1.number}}</span><h3>{{stage1.title}}</h3><p>{{stage1.body.1}}<br>{{stage1.body.2}}</p></article>
+          <article class="pipe-card" style="--pd:.17"><span class="badge violet">{{stage2.number}}</span><h3>{{stage2.title}}</h3><p>{{stage2.people}} · {{stage2.evidence}}<br>{{stage2.timeline}} · {{stage2.world}}</p></article>
+          <article class="pipe-card" style="--pd:.26"><span class="badge cyan">{{stage3.number}}</span><h3>{{stage3.title}}</h3><p>{{stage3.body.1}}<br>{{stage3.body.2}}</p></article>
+          <article class="pipe-card" style="--pd:.35"><span class="badge orange">{{stage4.number}}</span><h3>{{stage4.title}}</h3><p>{{stage4.consistency}}<br>{{stage4.clues}} · {{stage4.solution}}</p></article>
+          <article class="pipe-card" style="--pd:.44"><span class="badge green">{{stage5.number}}</span><h3>{{stage5.title}}</h3><p>{{stage5.investigate}} · {{stage5.accuse}} · {{stage5.solve}}</p></article>
+        </div>
+        <div class="overview-foot"><p data-fit>{{overview.support}}</p><div class="provider"><b>{{provider.label}}</b><span>{{provider.value}}</span></div></div>
+      </div>
+    </section>
+  </div>
+</div>
+<p class="sr-only">{{sr}}</p>
