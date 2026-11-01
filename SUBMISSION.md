@@ -3,20 +3,28 @@
 **Project:** Procedural Detective
 
 **Short description:**
-AI-native browser-based 3D detective game that turns natural-language crime
-prompts into logically consistent, interactive investigations. Type a crime in
-plain English; the game generates a world, then *proves the case is solvable*
-before you investigate, accuse and reveal the truth in 3D.
+Procedural Detective is a prompt-to-world system. A user describes a crime in
+just a few lines, and AI generates a complete interactive mystery around it.
+Deterministic validation and solver logic ensure that the world is internally
+consistent, important clues are reachable, and the case can actually be solved.
+The result is investigated as a browser-based 3D game: accuse, then reveal the
+truth.
 
 **Repository:** <https://github.com/DaveKingBerlin/procedural-detective>
 
 **Hosted demo URL:** <https://detective.daves-web.de/> (single-container
 deployment — see `docs/DEPLOYMENT.md`)
 
-**Demo video URL:** `TBD after recording` (storyboard reference:
-`docs/demo-storyboard.md`)
+**Demo video URL:**
+<https://github.com/DaveKingBerlin/procedural-detective/blob/main/pitch/video/ProceduralDetective.mp4>
+(repository path: `pitch/video/ProceduralDetective.mp4`; `docs/demo-storyboard.md`
+is the historical planning document)
 
 **Focus / category:** AI Gaming / AI-powered game creation
+
+**Primary problem statement:** Prompt-to-world systems
+
+**Secondary alignment:** Procedural worlds and storytelling systems
 
 ## Core innovation
 
@@ -29,9 +37,9 @@ truth is never published.
 ## How AI is used (honest)
 
 - **Default: deterministic demo — no AI.** `GENERATION_PROVIDER=fake` replays
-  a shipped, fully validated golden case offline with zero credentials, zero
-  network, zero cost. The UI is honest about it ("uses the built-in
-  deterministic generator in this demo build").
+  one of the shipped, fully validated demo fixtures offline with zero
+  credentials, zero network, zero cost. The UI is honest about it ("uses the
+  built-in deterministic generator in this demo build").
 - **Opt-in local AI generation with validation.** `GENERATION_PROVIDER=ollama`
   runs a local LLM (Ollama) that *proposes* structured case/evidence/world
   data; deterministic validators, the deduction solver, the Asset Oracle and
@@ -56,8 +64,9 @@ guarantee the result.
 
 ## Best case to try
 
-- *Deterministic demo:* click **Try Demo Case** (the shipped golden apartment
-  case) — instant, no credentials.
+- *Deterministic demo:* click **Try Demo Case** — it rolls one of three shipped
+  deterministic fixtures at random (apartment / gallery / laboratory), each
+  validated by the same solver. Instant, no credentials.
 - *Local-AI mode:* generate the **Hard** example prompt — the bronze
   ceremonial ice pick office case (`Victim: Dr. Anna Weiss / Murderer: Paul
   Becker / Motive: stolen research data / Weapon: bronze ceremonial ice pick /
@@ -71,7 +80,7 @@ guarantee the result.
 
 ## Expected generation time
 
-- Deterministic demo: **instant** (shipped golden case).
+- Deterministic demo: **instant** (shipped deterministic fixtures).
 - Local AI (Ollama, e.g. hermes3:8b on a capable machine): roughly **1-2
   minutes** for a full Prompt-to-World generation including validation,
   repair and rendering — varies with machine, model and prompt. The documented

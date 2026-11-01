@@ -2,10 +2,10 @@
 
 **AI-native browser-based 3D detective game that turns natural-language crime prompts into logically consistent, interactive investigations.**
 
-Describe a crime in plain language. Procedural Detective parses it into a hidden
-ground truth, generates a coherent world of suspects, evidence and red herrings,
-*makes sure the case is provably solvable* — then drops you into a 3D apartment
-to investigate, accuse and reveal the truth.
+Describe a crime in plain language. AI parses it into a hidden ground truth and
+builds a coherent, interactive world of suspects, evidence and red herrings;
+*deterministic validation and a solver prove the case is solvable* — then you
+drop into a 3D scene to investigate, accuse and reveal the truth.
 
 ---
 
@@ -39,29 +39,36 @@ More evidence:
 
 ## Try it
 
-Two obvious paths (`GENERATION_PROVIDER=fake` is the default — deterministic,
+Three ways in (`GENERATION_PROVIDER=fake` is the default — deterministic,
 zero credentials, zero cost):
 
-- **Try Demo Case** — one click, runs the shipped showcase case immediately
-  (`Victim: Sarah Miller / Murderer: Thomas Reed / Motive: €240,000
-  embezzlement / Weapon: Kitchen knife / Time: 22:17 / Witness: Emily Reed`)
-  and is labelled *"Deterministic demo — no API keys, no cost"*.
-- **Generate a New Mystery** — the same generation journey from your own
-  custom prompt (any text, difficulty optional). Watch the generation
-  progress, then enter the 3D scene, inspect evidence, make an accusation
-  (WHO / WHY / WEAPON / WHEN) and reveal the truth.
+- **New Investigation** — the generation journey from your own custom prompt
+  (any text, difficulty optional). Watch the generation progress, then enter
+  the 3D scene, inspect evidence, make an accusation (WHO / WHY / WEAPON /
+  WHEN) and reveal the truth.
+- **Try Demo Case** — one click, runs one of the three shipped deterministic
+  demo cases, chosen at random: the original golden apartment case, a gallery
+  case and a laboratory case. Each is fully validated; the generation form
+  carries the honest note *"Deterministic demo — no API keys, no cost"*.
+- **Load Case** — import a previously exported `.pdcase` file through a native
+  file picker and replay that investigation.
 
-Both paths hit the exact same `POST /cases → progress → playthrough` journey.
-The deterministic offline demo provider answers every prompt with the shipped,
-fully validated golden case — zero credentials, zero cost (`LLM_API_KEY` etc.
-are placeholders in `.env.example`, never real values). The frontend keeps the
-UI honest about this: the generate path shows *"uses the built-in deterministic
-generator in this demo build"* unless the SPA was built with
-`VITE_APP_PROVIDER=live`, in which case it shows *"Live AI provider"* instead.
-Plain prompts therefore produce the same deterministic case by default — to see
-genuinely different worlds, enable local-AI mode (`GENERATION_PROVIDER=ollama`)
-or live mode (`GENERATION_PROVIDER=live`), or use the documented showcase
-prompts in `backend/tests/fixtures/world_showcase.py`.
+`New Investigation` and `Try Demo Case` hit the same
+`POST /cases → progress → playthrough` journey; `Load Case` replays a
+previously exported case file locally, with no provider calls. The
+deterministic offline demo provider replays a shipped, fully validated fixture
+— zero credentials, zero cost (`LLM_API_KEY` etc. are placeholders in
+`.env.example`, never real values). The frontend keeps the UI honest about
+this: the generation path shows *"uses the built-in deterministic generator in
+this demo build"* whenever the backend reports the deterministic demo mode, and
+*"Live AI provider"* when the backend reports live mode — the note comes from
+the backend capability report, not from a build-time flag. Plain prompts replay
+the default deterministic truth and evidence, while the composed world can
+still follow the prompt (the documented showcase prompts yield office, hotel
+suite, warehouse and mansion environments) — to see genuinely different worlds
+from AI generation, enable local-AI mode (`GENERATION_PROVIDER=ollama`) or live
+mode (`GENERATION_PROVIDER=live`), or use the documented showcase prompts in
+`backend/tests/fixtures/world_showcase.py`.
 
 ## Generation modes
 
@@ -70,7 +77,7 @@ Generation runs through three distinct, explicitly selected modes
 
 | Mode | `GENERATION_PROVIDER` | Where generation runs | Credentials |
 | --- | --- | --- | --- |
-| **Deterministic / fake / demo** (default) | `fake` | In-process, offline — replays the shipped, validation-locked golden case | none (zero network, zero cost) |
+| **Deterministic / fake / demo** (default) | `fake` | In-process, offline — replays the shipped, validation-locked deterministic demo fixtures | none (zero network, zero cost) |
 | **Local Ollama** | `ollama` (or `remote_client` via the BYO-Ollama bridge) | A local/operator Ollama server (`OLLAMA_BASE_URL`, or the visitor's own machine via the bridge); generation stays on the configured local infrastructure | none beyond the local server |
 | **Cloud / hosted provider** | `live` (or browser BYOK Frontier) | A remote hosted provider reached over HTTPS — **by the backend only** | provider API key (used per request, not stored) |
 
@@ -117,8 +124,9 @@ it needs to validate and publish the case. See `docs/PRIVACY.md` §6.
   `pd-ollama-bridge-v1.0.0-windows-x64.zip` /
   `pd-ollama-bridge-v1.0.0-linux-x64.tar.gz`.
 
-> The download links resolve **after** the `v1.0.0` release is published. Until
-> then, use the developer/source workflow below.
+> The `v1.0.0` release **is published**, so the release page and the named
+> assets above are available now. Any future release requires explicit
+> authorization; to build and run from source, use the developer workflow below.
 
 ### Developers — build and run from source
 
@@ -139,7 +147,8 @@ Full CLI, configuration and security details are in `bridge/README.md`.
 The Windows x64 binary is built natively on the Windows Dev-Box; the Linux x64
 binary is built in Docker (`linux/amd64`). The full procedure — clean-tree
 guard, native/Docker builds, release assembly, checksums, `release-manifest.json`,
-secret scan and the (currently unauthorized) publication step — is documented in
+secret scan and the publication step (`v1.0.0` is published; any future release
+requires explicit authorization) — is documented in
 `docs/OLLAMA_BRIDGE_RELEASE.md`.
 
 ## What to try first
@@ -151,7 +160,7 @@ Shortest judge path, no install:
 ```
 
 1. Click **Try Demo Case** on the landing screen.
-2. Inspect the 3D apartment, then **accuse** (WHO / WHY / WEAPON / WHEN).
+2. Inspect the generated 3D scene, then **accuse** (WHO / WHY / WEAPON / WHEN).
 3. Reveal — the case was provably solvable all along.
 
 The whole thing takes under a minute. See "One-shot demo launcher" below for
@@ -465,6 +474,11 @@ Built for the **Victoria VR AI Builder Hackathon 2026** as Milestone 1: a
 complete, reliable prompt-to-truth player journey with deployment and demo
 assets — no VR required to play.
 
+Problem-statement alignment:
+
+- **Primary:** `Prompt-to-world systems`
+- **Secondary:** `Procedural worlds and storytelling systems`
+
 Repository: <https://github.com/DaveKingBerlin/procedural-detective>
 
 ## Hosted demo
@@ -475,5 +489,7 @@ The deployment is a single container — see `docs/DEPLOYMENT.md` for the guide.
 
 ## Demo video
 
-*Under-3-minute demo video lands here after recording (hosting-dependent).*
-Storyboard: `docs/demo-storyboard.md`.
+Final submission pitch video (1920x1080, 16:9, under 3 minutes):
+[`pitch/video/ProceduralDetective.mp4`](pitch/video/ProceduralDetective.mp4)
+
+Historical storyboard/planning document: `docs/demo-storyboard.md`.

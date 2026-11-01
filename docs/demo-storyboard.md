@@ -1,5 +1,8 @@
 # Procedural Detective — Demo Video Storyboard (< 3 minutes)
 
+> Historical planning document. The final submitted pitch is
+> `pitch/video/ProceduralDetective.mp4`.
+
 Target total: **~2:35**, comfortably below the 3-minute submission limit.
 Phase 15 structure: concept → six-line prompt → Asset Oracle → 3D
 investigation → accusation → reveal → environment montage → differentiator.
