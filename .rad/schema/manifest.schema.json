@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RAD manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "rad_version",
+    "product_contract",
+    "core_protocol",
+    "orchestrator_role",
+    "roles",
+    "workflows",
+    "policies",
+    "command_policy"
+  ],
+  "properties": {
+    "command_policy": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "rad_version": {
+      "type": "string"
+    },
+    "product_contract": {
+      "type": "string"
+    },
+    "core_protocol": {
+      "type": "string"
+    },
+    "orchestrator_role": {
+      "type": "string"
+    },
+    "roles": {
+      "type": "object"
+    },
+    "workflows": {
+      "type": "object"
+    },
+    "policies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_adapters": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
