@@ -16,8 +16,8 @@ truth.
 deployment — see `docs/DEPLOYMENT.md`)
 
 **Demo video URL:**
-<https://github.com/DaveKingBerlin/procedural-detective/blob/main/pitch/video/ProceduralDetective.mp4>
-(repository path: `pitch/video/ProceduralDetective.mp4`; `docs/demo-storyboard.md`
+Public pitch video: https://www.youtube.com/watch?v=vaCRZh2m6qU
+(repository copy path: `pitch/video/ProceduralDetective.mp4`; `docs/demo-storyboard.md`
 is the historical planning document)
 
 **Focus / category:** AI Gaming / AI-powered game creation
